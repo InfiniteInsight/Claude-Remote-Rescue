@@ -120,9 +120,16 @@ reboot-recycled pid gets an unrelated process killed.
   actually lands, cleared at wrapper start; a stale flag silently resumes
   a session the user closed on purpose.
 - Known open problem inherited from ccresume: bare `--resume` (picker)
-  sessions get a *guessed* session id journaled. The wrapper should
-  re-verify the sid after launch (newest transcript mtime match) —
-  design-level fix TBD in Phase 1.
+  sessions get a *guessed* session id journaled. Fix (Phase 1): the
+  wrapper marks the journaled sid `"verified": false` when it was
+  guessed. After the claude child has been alive ~10s (past the picker),
+  the wrapper resolves the project transcript dir for the journaled cwd
+  (`~/.claude/projects/<cwd-slug>/`), takes the `*.jsonl` file most
+  recently modified *after* the child's start time, and journals its
+  basename as the authoritative sid (`verified: true`). If no transcript
+  is newer than the launch (picker still open, or resume aborted) the
+  guess is kept unverified and revival for that entry falls back to bare
+  `--resume` rather than resuming a possibly-wrong sid.
 
 ### Reviver
 
