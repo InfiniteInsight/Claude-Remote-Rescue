@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-remote-rescue"
+version = "0.1.0"
+description = "Keep Claude Code sessions alive and remotely rescuable when terminals, shells, or whole hosts die."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+# Runtime is stdlib-only by design (see DESIGN.md): shims and services must
+# work on machines with nothing installed but Python.
+dependencies = []
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+crr = "crr.cli:main"
+
+[tool.setuptools]
+packages = ["crr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
