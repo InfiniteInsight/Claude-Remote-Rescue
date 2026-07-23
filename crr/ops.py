@@ -153,7 +153,14 @@ def _refused(op: str, pid: int, state: str, why: str) -> OpResult:
 
 def kick(pid: int) -> OpResult:
     """Kill the claude child of the journaled shell (by ancestry) so the
-    shim's repair loop restarts the same conversation in place."""
+    shim's repair loop restarts the same conversation in place.
+
+    [lesson: flag files] The relaunch flag is written only once the kill
+    has actually landed (a signalled child group) -- never speculatively
+    -- so the shim's repair loop only fires for kicks that really
+    happened. The shim clears any stale flag itself at the claude()
+    wrapper's own start.
+    """
     entry, state, err = _load_and_classify("kick", pid)
     if err:
         return err
@@ -176,6 +183,7 @@ def kick(pid: int) -> OpResult:
             detail="shell has no child processes to kick",
             exit_code=EXIT_FAILED,
         )
+    journal.write_relaunch_flag(pid)
     return OpResult(
         op="kick",
         pid=pid,

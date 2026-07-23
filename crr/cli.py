@@ -15,9 +15,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from typing import List, Optional
 
-from . import bootid, journal, ops, revive
+from . import bootid, install_shims, journal, ops, revive, service_linux, sidverify
 from .result import EXIT_ERROR, EXIT_NOT_FOUND, EXIT_OK, OpResult, summarize
 
 
@@ -109,6 +110,77 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_install_shims(args: argparse.Namespace) -> int:
+    shells = args.shells or install_shims.detected_shells()
+    if not shells:
+        print(
+            "crr install-shims: no supported shell (zsh/bash/fish) found on"
+            " PATH",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    report = install_shims.install(shells)
+    ok = True
+    for shell, info in report.items():
+        if info["error"]:
+            ok = False
+            print("%s: FAILED (%s)" % (shell, info["error"]), file=sys.stderr)
+            continue
+        bits = ["shim installed at %s" % info["shim_path"]]
+        if info["rc_updated"]:
+            bits.append("added source line to %s" % info["rc_path"])
+        else:
+            bits.append("%s already wired" % info["rc_path"])
+        print("%s: %s" % (shell, "; ".join(bits)))
+    return EXIT_OK if ok else EXIT_ERROR
+
+
+def cmd_uninstall_shims(args: argparse.Namespace) -> int:
+    shells = args.shells or list(install_shims.SHELLS)
+    report = install_shims.uninstall(shells)
+    ok = True
+    for shell, info in report.items():
+        if info["error"]:
+            ok = False
+            print("%s: FAILED (%s)" % (shell, info["error"]), file=sys.stderr)
+        elif info.get("rc_cleaned"):
+            print("%s: removed source line from %s" % (shell, info["rc_path"]))
+        else:
+            print("%s: nothing to remove in %s" % (shell, info["rc_path"]))
+    return EXIT_OK if ok else EXIT_ERROR
+
+
+def cmd_service_install(args: argparse.Namespace) -> int:
+    crr_bin = install_shims.crr_bin_path()
+    steps = service_linux.install(crr_bin)
+    ok = True
+    for step in steps:
+        marker = "ok" if step["ok"] else "FAILED"
+        detail = " (%s)" % step["detail"] if step["detail"] else ""
+        print("%s: %s%s" % (step["step"], marker, detail))
+        if not step["ok"]:
+            ok = False
+    return EXIT_OK if ok else EXIT_ERROR
+
+
+def cmd_service_uninstall(args: argparse.Namespace) -> int:
+    steps = service_linux.uninstall()
+    ok = True
+    for step in steps:
+        marker = "ok" if step["ok"] else "FAILED"
+        detail = " (%s)" % step["detail"] if step["detail"] else ""
+        print("%s: %s%s" % (step["step"], marker, detail))
+        if not step["ok"]:
+            ok = False
+    return EXIT_OK if ok else EXIT_ERROR
+
+
+def cmd_service_status(args: argparse.Namespace) -> int:
+    for item in service_linux.status():
+        print("%s: %s" % (item["unit"], item["active"]))
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Shim-facing plumbing (silent on success, no stderr noise)
 
@@ -153,7 +225,83 @@ def cmd_deregister(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-_PLUMBING = {"register", "update", "deregister"}
+def cmd_new_uuid(args: argparse.Namespace) -> int:
+    """(plumbing) Print a fresh uuid4 -- used by the claude() wrapper to
+    inject --session-id on fresh launches. Centralized here so shims stay
+    dependency-free (no uuidgen / /proc assumptions)."""
+    print(uuid.uuid4())
+    return EXIT_OK
+
+
+def cmd_now(args: argparse.Namespace) -> int:
+    """(plumbing) Print the current time as a high-precision unix epoch.
+    Used by the claude() wrapper to timestamp a launch before spawning the
+    sid re-verification background check. `date +%s` (whole-second
+    resolution, and %N for sub-second is a GNU-only date extension) is
+    not precise enough: a picker-guess transcript written in the same
+    wall-clock second as the launch can look "newer" than a
+    whole-second-truncated launch time and get spuriously verified."""
+    import time
+
+    print("%.6f" % time.time())
+    return EXIT_OK
+
+
+def cmd_guess_sid(args: argparse.Namespace) -> int:
+    """(plumbing) Print the newest transcript's sid for a cwd, or nothing
+    when there isn't one yet. Used by the claude() wrapper to guess a sid
+    for a bare `claude --resume` (picker) launch."""
+    sid = sidverify.guess_sid(args.cwd)
+    if sid:
+        print(sid)
+    return EXIT_OK
+
+
+def cmd_verify_sid(args: argparse.Namespace) -> int:
+    """(plumbing) Re-verify a guessed sid after the picker window has
+    passed. Invoked in the background right after a bare `claude --resume`
+    launch; sleeps out the wait itself so the shim doesn't have to."""
+    sidverify.verify_sid(args.pid, args.started, wait_seconds=args.wait)
+    return EXIT_OK
+
+
+def cmd_resume_argv(args: argparse.Namespace) -> int:
+    """(plumbing) Print the claude resume argv words (one per line, tail
+    only -- no leading "claude") for a journaled pid's sid. Used by the
+    shim's kick repair loop to relaunch with the right (possibly
+    since-verified) sid without duplicating revive.build_claude_argv's
+    verified/unverified fallback logic in shell."""
+    entry = journal.read_entry(args.pid)
+    if entry is None:
+        return EXIT_NOT_FOUND
+    argv = revive.build_claude_argv(entry)
+    if argv is None:
+        return EXIT_NOT_FOUND
+    for word in argv[1:]:  # skip the leading "claude"
+        print(word)
+    return EXIT_OK
+
+
+def cmd_take_relaunch_flag(args: argparse.Namespace) -> int:
+    """(plumbing) Atomically check-and-clear the kick relaunch flag for a
+    pid. Exit 0 when a flag was present (and is now cleared), EXIT_NOT_FOUND
+    otherwise -- used both to clear stale flags and to decide whether the
+    shim's repair loop should relaunch."""
+    had = journal.take_relaunch_flag(args.pid)
+    return EXIT_OK if had else EXIT_NOT_FOUND
+
+
+_PLUMBING = {
+    "register",
+    "update",
+    "deregister",
+    "new-uuid",
+    "now",
+    "guess-sid",
+    "verify-sid",
+    "resume-argv",
+    "take-relaunch-flag",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +357,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_web)
 
+    p = sub.add_parser(
+        "install-shims", help="install shell shims + rc-file wiring"
+    )
+    p.add_argument(
+        "--shell",
+        dest="shells",
+        action="append",
+        choices=list(install_shims.SHELLS),
+        help="restrict to a specific shell (repeatable); default: autodetect"
+        " shells present on this host",
+    )
+    p.set_defaults(func=cmd_install_shims)
+
+    p = sub.add_parser(
+        "uninstall-shims", help="remove the rc-file source lines crr added"
+    )
+    p.add_argument(
+        "--shell",
+        dest="shells",
+        action="append",
+        choices=list(install_shims.SHELLS),
+        help="restrict to a specific shell (repeatable); default: all",
+    )
+    p.set_defaults(func=cmd_uninstall_shims)
+
+    p = sub.add_parser(
+        "service", help="systemd user units (Linux): web dashboard + watchdog"
+    )
+    service_sub = p.add_subparsers(dest="service_command", required=True)
+
+    sp = service_sub.add_parser(
+        "install", help="write units, daemon-reload, enable+start, enable-linger"
+    )
+    sp.set_defaults(func=cmd_service_install)
+
+    sp = service_sub.add_parser("uninstall", help="disable and remove the units")
+    sp.set_defaults(func=cmd_service_uninstall)
+
+    sp = service_sub.add_parser("status", help="show each unit's active state")
+    sp.set_defaults(func=cmd_service_status)
+
     p = sub.add_parser("register", help="(plumbing) create/overwrite an entry")
     p.add_argument("--pid", type=int, required=True)
     p.add_argument("--cwd", required=True)
@@ -228,6 +417,54 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("deregister", help="(plumbing) delete an entry")
     p.add_argument("pid", type=int)
     p.set_defaults(func=cmd_deregister)
+
+    p = sub.add_parser("new-uuid", help="(plumbing) print a fresh uuid4")
+    p.set_defaults(func=cmd_new_uuid)
+
+    p = sub.add_parser(
+        "now", help="(plumbing) print the current time (high-precision unix epoch)"
+    )
+    p.set_defaults(func=cmd_now)
+
+    p = sub.add_parser(
+        "guess-sid", help="(plumbing) print the newest transcript sid for a cwd"
+    )
+    p.add_argument("cwd")
+    p.set_defaults(func=cmd_guess_sid)
+
+    p = sub.add_parser(
+        "verify-sid",
+        help="(plumbing) re-verify a guessed sid after the picker window",
+    )
+    p.add_argument("pid", type=int)
+    p.add_argument(
+        "--started",
+        type=float,
+        required=True,
+        help="claude launch time (unix epoch seconds)",
+    )
+    p.add_argument(
+        "--wait",
+        type=float,
+        default=sidverify.DEFAULT_WAIT_SECONDS,
+        help="seconds to wait before checking (default %.0f)"
+        % sidverify.DEFAULT_WAIT_SECONDS,
+    )
+    p.set_defaults(func=cmd_verify_sid)
+
+    p = sub.add_parser(
+        "resume-argv",
+        help="(plumbing) print resume argv words (one per line) for a pid",
+    )
+    p.add_argument("pid", type=int)
+    p.set_defaults(func=cmd_resume_argv)
+
+    p = sub.add_parser(
+        "take-relaunch-flag",
+        help="(plumbing) atomically check-and-clear a kick relaunch flag",
+    )
+    p.add_argument("pid", type=int)
+    p.set_defaults(func=cmd_take_relaunch_flag)
 
     return parser
 

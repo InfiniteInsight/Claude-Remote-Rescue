@@ -205,6 +205,38 @@ def archive_entry(pid: int, reason: str = "") -> Optional[Path]:
     return dest
 
 
+def relaunch_flag_path(pid: int) -> Path:
+    """Path of the kick relaunch flag for *pid*.
+
+    [lesson: flag files] Written by ``ops.kick`` only when a kill actually
+    lands; consumed atomically (check-and-clear) by the shim's repair
+    loop, and cleared unread at the claude() wrapper's own start so a
+    stale flag never silently resumes a session the user closed on
+    purpose.
+    """
+    return state_dir() / "relaunch" / ("%d.flag" % int(pid))
+
+
+def write_relaunch_flag(pid: int) -> Path:
+    path = relaunch_flag_path(pid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
+
+
+def take_relaunch_flag(pid: int) -> bool:
+    """Atomically check-and-clear the relaunch flag for *pid*.
+
+    Returns True when a flag was present (and has now been removed),
+    False when there was nothing to clear.
+    """
+    try:
+        os.unlink(relaunch_flag_path(pid))
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def list_archived() -> List[Dict]:
     entries = []
     directory = archive_dir()

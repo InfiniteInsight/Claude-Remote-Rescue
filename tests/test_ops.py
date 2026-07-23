@@ -133,6 +133,48 @@ def test_kick_no_children_is_a_distinct_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# kick: relaunch flag [lesson: flag files]
+
+
+def test_kick_writes_relaunch_flag_only_when_signalled(monkeypatch):
+    rec = KillRecorder(monkeypatch)
+    force_state(monkeypatch, classify.LIVE)
+    shell_pid = os.getpid()
+    write_entry(shell_pid, boot_id="b")
+    monkeypatch.setattr(ops, "_children_of", lambda pid, table=None: [11111])
+    monkeypatch.setattr(ops.os, "getpgid", lambda pid: 11111)
+
+    assert journal.take_relaunch_flag(shell_pid) is False  # nothing yet
+
+    res = ops.kick(shell_pid)
+    assert res.ok is True
+    # The flag is now present -- and take_relaunch_flag consumes it.
+    assert journal.take_relaunch_flag(shell_pid) is True
+    # Consuming is atomic: a second check finds nothing left.
+    assert journal.take_relaunch_flag(shell_pid) is False
+
+
+def test_kick_does_not_write_flag_when_no_child_to_signal(monkeypatch):
+    rec = KillRecorder(monkeypatch)
+    force_state(monkeypatch, classify.LIVE)
+    shell_pid = os.getpid()
+    write_entry(shell_pid, boot_id="b")
+    monkeypatch.setattr(ops, "_children_of", lambda pid, table=None: [])
+
+    res = ops.kick(shell_pid)
+    assert res.ok is False
+    assert journal.take_relaunch_flag(shell_pid) is False
+
+
+def test_kick_refused_crashed_never_writes_flag(monkeypatch):
+    rec = KillRecorder(monkeypatch)
+    write_entry(os.getpid(), boot_id="boot-from-before-the-reboot")
+    res = ops.kick(os.getpid())
+    assert res.status == "refused-crashed"
+    assert journal.take_relaunch_flag(os.getpid()) is False
+
+
+# ---------------------------------------------------------------------------
 # close / dismiss / reopen / remove semantics
 
 

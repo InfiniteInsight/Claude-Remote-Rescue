@@ -128,3 +128,30 @@ def test_state_dir_darwin(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     expected = journal.Path.home() / "Library" / "Application Support" / "crr"
     assert journal.state_dir() == expected
+
+
+# ---------------------------------------------------------------------------
+# relaunch flag [lesson: flag files]
+
+
+def test_relaunch_flag_path_under_state_dir(crr_state):
+    assert journal.relaunch_flag_path(123) == crr_state / "relaunch" / "123.flag"
+
+
+def test_take_relaunch_flag_when_absent(crr_state):
+    assert journal.take_relaunch_flag(123) is False
+
+
+def test_write_then_take_relaunch_flag_is_atomic_consume(crr_state):
+    path = journal.write_relaunch_flag(123)
+    assert path.exists()
+    assert journal.take_relaunch_flag(123) is True
+    assert not path.exists()
+    # A stale/previously-consumed flag never re-fires.
+    assert journal.take_relaunch_flag(123) is False
+
+
+def test_relaunch_flag_is_per_pid(crr_state):
+    journal.write_relaunch_flag(1)
+    assert journal.take_relaunch_flag(2) is False
+    assert journal.take_relaunch_flag(1) is True
