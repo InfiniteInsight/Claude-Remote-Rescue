@@ -85,12 +85,20 @@ def cmd_revive(args: argparse.Namespace) -> int:
 
 
 def cmd_gc(args: argparse.Namespace) -> int:
-    stats = ops.gc()
+    from . import config
+
+    stats = ops.gc(config.load_config()["archive_retention_days"])
     print(
         "gc: archived %(archived)d, pruned %(pruned)d archive file(s),"
         " removed %(tmp_removed)d tmp file(s)" % stats
     )
     return EXIT_OK
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    from . import web  # local import: keep plumbing startup light
+
+    return web.run(port=args.port)
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
@@ -188,6 +196,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("diagnose", help="why did my session die (stub)")
     p.set_defaults(func=cmd_diagnose)
+
+    p = sub.add_parser(
+        "web",
+        help="serve the dashboard on loopback (expose via tailscale serve)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="listen port (default: config web_port, else 8377)",
+    )
+    p.set_defaults(func=cmd_web)
 
     p = sub.add_parser("register", help="(plumbing) create/overwrite an entry")
     p.add_argument("--pid", type=int, required=True)
