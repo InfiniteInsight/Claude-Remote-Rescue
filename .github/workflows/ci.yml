@@ -27,6 +27,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Shim contract tests are Linux-gated (register needs the Linux
+      # boot adapter until the macOS adapter lands in Phase 2). Install
+      # zsh + fish on the Linux runner so all three shims are actually
+      # exercised there, not silently skipped.
+      - name: Install shells for shim tests (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+
       - name: Install (dev extras)
         run: |
           python -m pip install --upgrade pip
