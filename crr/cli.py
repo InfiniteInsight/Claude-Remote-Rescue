@@ -34,12 +34,26 @@ from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
 from crr.core import diagnostics as diag_core
-from crr.core.archive import ArchiveStore
+from crr.core.archive import ArchiveStore, is_expired
 from crr.core.journal import JournalStore, new_entry
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _load_config() -> cfg.Config:
+    """Load config.toml (co-located in the crr state dir) over the defaults.
+
+    A malformed config warns on stderr and falls back to defaults rather
+    than breaking every command (including the shim hot path).
+    """
+    toml_path = state_dir.state_dir() / "config.toml"
+    try:
+        return cfg.Config(cfg.load_toml_overrides(toml_path))
+    except (cfg.ConfigError, ValueError, OSError) as exc:
+        print(f"crr: ignoring bad config {toml_path}: {exc}", file=sys.stderr)
+        return cfg.Config()
 
 
 def _last_prompt_extractor(config: cfg.Config):
@@ -89,6 +103,9 @@ def _build_parser() -> argparse.ArgumentParser:
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
     diag.set_defaults(func=_cmd_diagnose)
+
+    gc = sub.add_parser("gc", help="drop archive records past the retention window")
+    gc.set_defaults(func=_cmd_gc)
 
     w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
     w.add_argument("--port", type=int, default=8377)
@@ -205,7 +222,7 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    config = cfg.Config()
+    config = _load_config()
     store = JournalStore(state_dir.state_dir())
     try:
         boot = boot_identity.detect()
@@ -365,7 +382,7 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
 
 
 def _cmd_revive(_args: argparse.Namespace) -> int:
-    config = cfg.Config()
+    config = _load_config()
     try:
         boot = boot_identity.detect()
     except NotImplementedError as exc:
@@ -411,7 +428,7 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr dismiss: {exc}", file=sys.stderr)
         return 2
-    config = cfg.Config()
+    config = _load_config()
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     with mutation_lock(sd):
@@ -426,7 +443,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr reopen: {exc}", file=sys.stderr)
         return 2
-    config = cfg.Config()
+    config = _load_config()
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     if not tmux_spawner.available():
         print("crr reopen: tmux is required for revival but was not found", file=sys.stderr)
@@ -524,7 +541,7 @@ def gather_diagnostics(config: cfg.Config) -> dict:
 
 
 def _cmd_diagnose(args: argparse.Namespace) -> int:
-    payload = gather_diagnostics(cfg.Config())
+    payload = gather_diagnostics(_load_config())
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -542,8 +559,28 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_gc(_args: argparse.Namespace) -> int:
+    config = _load_config()
+    retention = config.get("archive_retention_days")
+    sd = state_dir.state_dir()
+    archive = ArchiveStore(sd)
+    now = _now()
+    removed = 0
+    with mutation_lock(sd):
+        scan = archive.scan()
+        for record in scan.records:
+            if is_expired(record, now, retention):
+                archive.remove(record["entry"]["claude"]["session_id"])
+                removed += 1
+    for name, reason in scan.problems:
+        print(f"crr gc: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
+    print(f"gc: removed {removed} archive record(s) older than {retention} days, "
+          f"kept {len(scan.records) - removed}")
+    return 0
+
+
 def _cmd_web(args: argparse.Namespace) -> int:
-    config = cfg.Config()
+    config = _load_config()
     try:
         boot = boot_identity.detect()
     except NotImplementedError as exc:
@@ -578,9 +615,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     def diagnostics_provider() -> dict:
         return gather_diagnostics(config)  # lazy: only on panel open, never on poll
 
-    # Host allowlist: loopback + this host's name + tailnet suffix. (config
-    # extras arrive with the TOML config loader.)
+    # Host allowlist: loopback + this host's name + tailnet suffix + any
+    # config.toml extras.
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
+    allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
     handler = make_web_handler(
         provider, allowed, (".ts.net",), action_provider, diagnostics_provider
     )
@@ -598,7 +636,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
 
 def _cmd_systemd(args: argparse.Namespace) -> int:
-    config = cfg.Config()
+    config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     path, missing = systemd.resolve_service_path(crr_bin)
     # XDG_STATE_HOME baked so the service watches the SAME state dir the shims
@@ -641,7 +679,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
     if not args.effective:
         print("usage: crr config --effective", file=sys.stderr)
         return 2
-    config = cfg.Config()
+    config = _load_config()
     for key, (value, origin) in sorted(config.effective().items()):
         print(f"{key} = {value!r}  ({origin})")
     return 0
