@@ -1,0 +1,221 @@
+"""Contract-validator tests (audit P7 — Contracted outputs).
+
+These are the scaffold's first test fixtures per ROADMAP Phase 0. They
+prove the versioned contracts *bite*: the same validators the server can
+run in debug mode reject malformed journal entries and API payloads, so a
+stored/served shape from an old version is distinguishable from a current
+one.
+"""
+
+import copy
+
+import pytest
+
+from crr.core import contracts
+
+
+# --------------------------------------------------------------------------
+# Canonical valid fixtures (the v1 shapes, exactly)
+# --------------------------------------------------------------------------
+
+def _journal_entry():
+    return {
+        "v": 1,
+        "pid": 12345,
+        "boot_id": "b8f3c0de-0000-4000-8000-000000000000",
+        "cwd": "/home/u/project",
+        "host": "tmux",
+        "shell": "zsh",
+        "claude": {
+            "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            "sid_source": "injected",
+            "started": "2026-07-23T00:00:00Z",
+        },
+        "last_cmd": "claude",
+        "tmux_session": None,
+        "updated": "2026-07-23T00:00:00Z",
+    }
+
+
+def _session_card():
+    return {
+        "pid": 12345,
+        "state": "ghost",
+        "cwd": "/home/u/project",
+        "shell": "zsh",
+        "host": "tmux",
+        "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        "sid_source": "guessed",
+        "sid8": "8a1b2c3d",
+        "last_prompt": "fix the reviver give-up guard",
+        "duplicate_group": None,
+        "updated": "2026-07-23T00:00:00Z",
+    }
+
+
+def _sessions_payload():
+    return {"contract": contracts.SESSIONS_CONTRACT_VERSION, "sessions": [_session_card()]}
+
+
+def _diagnostics_payload():
+    return {
+        "contract": contracts.DIAGNOSTICS_CONTRACT_VERSION,
+        "source": "journald",
+        "boots": [{"index": -1, "boot_id": "…", "start": "…", "stop": "…"}],
+        "prev_boot_errors": ["oom-killer: killed process 4242"],
+        "host_events": ["reboot at 03:14"],
+        "degraded": [],
+    }
+
+
+# --------------------------------------------------------------------------
+# Version constants exist and are integers
+# --------------------------------------------------------------------------
+
+def test_version_constants_are_ints():
+    assert isinstance(contracts.JOURNAL_SCHEMA_VERSION, int)
+    assert isinstance(contracts.SESSIONS_CONTRACT_VERSION, int)
+    assert isinstance(contracts.DIAGNOSTICS_CONTRACT_VERSION, int)
+
+
+# --------------------------------------------------------------------------
+# Journal schema v1
+# --------------------------------------------------------------------------
+
+def test_valid_journal_entry_passes():
+    contracts.validate_journal_entry(_journal_entry())  # must not raise
+
+
+def test_journal_wrong_version_rejected():
+    e = _journal_entry()
+    e["v"] = 2
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_missing_required_key_rejected():
+    e = _journal_entry()
+    del e["boot_id"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_unknown_key_rejected():
+    e = _journal_entry()
+    e["surprise"] = "extra"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_bad_host_enum_rejected():
+    e = _journal_entry()
+    e["host"] = "carrier-pigeon"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_bad_sid_source_rejected():
+    e = _journal_entry()
+    e["claude"]["sid_source"] = "vibes"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_claude_missing_key_rejected():
+    e = _journal_entry()
+    del e["claude"]["session_id"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_pid_must_be_int():
+    e = _journal_entry()
+    e["pid"] = "12345"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_pid_true_bool_rejected():
+    # bool is a subclass of int, so isinstance(True, int) is True. A pid of
+    # True/False is nonsense and must be rejected, not silently accepted.
+    e = _journal_entry()
+    e["pid"] = True
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+# --------------------------------------------------------------------------
+# /api/sessions
+# --------------------------------------------------------------------------
+
+def test_valid_sessions_payload_passes():
+    contracts.validate_sessions_payload(_sessions_payload())
+
+
+def test_sessions_wrong_contract_version_rejected():
+    p = _sessions_payload()
+    p["contract"] = 999
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_bad_state_enum_rejected():
+    p = _sessions_payload()
+    p["sessions"][0]["state"] = "healthy"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_missing_sid_source_rejected():
+    # sid_source is the audit P3 provenance field; it must be contracted.
+    p = _sessions_payload()
+    del p["sessions"][0]["sid_source"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_unknown_key_rejected():
+    p = _sessions_payload()
+    p["sessions"][0]["extra"] = 1
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+# --------------------------------------------------------------------------
+# /api/diagnostics
+# --------------------------------------------------------------------------
+
+def test_valid_diagnostics_payload_passes():
+    contracts.validate_diagnostics_payload(_diagnostics_payload())
+
+
+def test_diagnostics_wrong_contract_version_rejected():
+    p = _diagnostics_payload()
+    p["contract"] = 999
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_missing_key_rejected():
+    p = _diagnostics_payload()
+    del p["degraded"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_degraded_must_be_list():
+    p = _diagnostics_payload()
+    p["degraded"] = "journald"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+# --------------------------------------------------------------------------
+# Validators must not mutate their input
+# --------------------------------------------------------------------------
+
+def test_validators_do_not_mutate_input():
+    e = _journal_entry()
+    before = copy.deepcopy(e)
+    contracts.validate_journal_entry(e)
+    assert e == before
