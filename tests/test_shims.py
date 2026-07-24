@@ -153,6 +153,26 @@ def test_wrapper_injects_session_id_on_fresh_launch(shell, tmp_path, capsys):
 
 
 @pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_ignores_flaglike_text_in_prompt(shell, tmp_path, capsys):
+    # A prompt that merely CONTAINS "-r"/"--resume" as text is a fresh
+    # launch and must still get an injected --session-id. (Regression: a
+    # $*-flattening match treated prompt content as flags.)
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_bindir(tmp_path)
+    record = tmp_path / "argv"
+    script = f'source "{shim}"\nclaude "tell me about -r and --resume"\n'
+    result = _run_with_fake_claude(shell, script, state, bindir, record)
+    assert result.returncode == 0, result.stderr
+
+    argv = record.read_text().split("\n")
+    assert "--session-id" in argv, f"{shell}: flag-like prompt text suppressed sid injection"
+    assert "tell me about -r and --resume" in argv  # prompt passed as one arg
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
 def test_wrapper_passes_resume_through_untouched(shell, tmp_path, capsys):
     if not _installed(shell):
         pytest.skip(f"{shell} not installed")

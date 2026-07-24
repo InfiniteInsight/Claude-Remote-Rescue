@@ -44,9 +44,17 @@ end
 # untouched; clear the claude field on clean exit (a crash leaves it set
 # for the reviver).
 function claude
-    if contains -- --resume $argv; or contains -- -r $argv; \
-        or contains -- --continue $argv; or contains -- -c $argv; \
-        or contains -- --session-id $argv
+    # Element-wise flag detection: whole arguments only, never a substring
+    # of prompt text (a prompt like "explain -r" is a fresh launch).
+    set -l _resuming 0
+    for _arg in $argv
+        switch $_arg
+            case -r --resume '--resume=*' -c --continue --session-id '--session-id=*'
+                set _resuming 1
+                break
+        end
+    end
+    if test $_resuming -eq 1
         command claude $argv
     else
         set -l _crr_sid (_crr claude-launch --pid $fish_pid)

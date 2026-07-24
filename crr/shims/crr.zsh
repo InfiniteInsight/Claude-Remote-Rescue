@@ -44,17 +44,25 @@ fi
 # untouched; clear the claude field on clean exit (a crash leaves it set
 # for the reviver).
 claude() {
-  case " $* " in
-    *" --resume "*|*" -r "*|*" --continue "*|*" -c "*|*" --session-id "*)
-      command claude "$@" ;;
-    *)
-      local _crr_sid
-      _crr_sid="$(_crr claude-launch --pid "$$")"
-      if [ -n "$_crr_sid" ]; then
-        command claude --session-id "$_crr_sid" "$@"
-      else
-        command claude "$@"
-      fi ;;
-  esac
+  # Element-wise flag detection: match whole arguments, never a substring
+  # of prompt text (a prompt like "explain -r" is a fresh launch).
+  local _arg _resuming=
+  for _arg in "$@"; do
+    case "$_arg" in
+      -r|--resume|--resume=*|-c|--continue|--session-id|--session-id=*)
+        _resuming=1; break ;;
+    esac
+  done
+  if [ -n "$_resuming" ]; then
+    command claude "$@"
+  else
+    local _crr_sid
+    _crr_sid="$(_crr claude-launch --pid "$$")"
+    if [ -n "$_crr_sid" ]; then
+      command claude --session-id "$_crr_sid" "$@"
+    else
+      command claude "$@"
+    fi
+  fi
   _crr claude-exit --pid "$$"
 }
