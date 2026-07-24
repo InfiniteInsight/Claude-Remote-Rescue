@@ -342,6 +342,20 @@ def test_claude_exit_missing_entry_is_noop(tmp_path, monkeypatch):
 
 # --- session ops: remove / dismiss / reopen -----------------------------
 
+def test_gc_removes_expired_archive_records_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive = ArchiveStore(tmp_path)
+    old = _live_entry(pid=1, boot_id="b")
+    old["claude"] = _claude_field("11111111-1111-4111-8111-111111111111")
+    fresh = _live_entry(pid=2, boot_id="b")
+    fresh["claude"] = _claude_field("22222222-2222-4222-8222-222222222222")
+    archive.archive(old, "gave-up", "2026-01-01T00:00:00+00:00")     # long ago
+    archive.archive(fresh, "dismissed", "2099-01-01T00:00:00+00:00")  # future => kept
+    assert cli.main(["gc"]) == 0
+    sids = {r["entry"]["claude"]["session_id"] for r in archive.scan().records}
+    assert sids == {"22222222-2222-4222-8222-222222222222"}  # only the fresh one remains
+
+
 def test_remove_delists_without_archiving(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)

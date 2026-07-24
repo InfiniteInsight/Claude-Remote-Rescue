@@ -9,7 +9,7 @@ contract-validated; corrupt files are surfaced by scan(), never dropped.
 import pytest
 
 from crr.core import contracts
-from crr.core.archive import ArchiveStore
+from crr.core.archive import ArchiveStore, is_expired
 
 _SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
@@ -83,6 +83,17 @@ def test_scan_surfaces_corrupt_without_dropping_valid(tmp_path):
     scan = store.scan()
     assert [r["entry"]["claude"]["session_id"] for r in scan.records] == [_SID]
     assert len(scan.problems) == 1
+
+
+def test_is_expired_respects_retention_window():
+    rec = {"archived_at": "2026-07-01T00:00:00+00:00"}
+    assert is_expired(rec, "2026-07-20T00:00:00+00:00", retention_days=14) is True   # 19d old
+    assert is_expired(rec, "2026-07-10T00:00:00+00:00", retention_days=14) is False  # 9d old
+
+
+def test_is_expired_keeps_undatable_records():
+    assert is_expired({"archived_at": "not-a-date"}, "2026-07-20T00:00:00+00:00", 14) is False
+    assert is_expired({}, "2026-07-20T00:00:00+00:00", 14) is False
 
 
 def test_write_updates_existing_record(tmp_path):

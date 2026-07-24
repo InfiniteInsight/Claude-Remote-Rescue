@@ -35,6 +35,8 @@ def test_audit_floor_priors_are_present():
         "watcher_backoff_count",
         "watcher_cooldown_seconds",
         "watchdog_interval_seconds",
+        "archive_retention_days",
+        "host_allowlist_extras",
     }
     assert floor <= set(cfg.DEFAULTS)
 
@@ -72,3 +74,29 @@ def test_get_unknown_key_raises():
     c = cfg.Config()
     with pytest.raises(KeyError):
         c.get("no_such_key")
+
+
+def test_override_type_mismatch_rejected():
+    # A config.toml with the wrong type for a key must fail loudly, not
+    # silently inject a string where logic expects an int.
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config(overrides={"zombie_strikes": "three"})
+
+
+def test_list_valued_prior_round_trips():
+    c = cfg.Config(overrides={"host_allowlist_extras": ["box.example.com"]})
+    assert c.get("host_allowlist_extras") == ["box.example.com"]
+
+
+def test_load_toml_overrides_reads_a_file(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('zombie_strikes = 7\nhost_allowlist_extras = ["a.example"]\n', encoding="utf-8")
+    overrides = cfg.load_toml_overrides(p)
+    assert overrides == {"zombie_strikes": 7, "host_allowlist_extras": ["a.example"]}
+    c = cfg.Config(overrides=overrides)
+    assert c.get("zombie_strikes") == 7
+    assert c.effective()["zombie_strikes"] == (7, "configured")
+
+
+def test_load_toml_overrides_missing_file_is_empty(tmp_path):
+    assert cfg.load_toml_overrides(tmp_path / "nope.toml") == {}

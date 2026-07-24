@@ -11,6 +11,7 @@ reads and writes, corrupt files surfaced by ``scan()`` rather than dropped.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -21,6 +22,21 @@ from crr.core.journal import read_json_file, write_json_atomic
 class ArchiveScan(NamedTuple):
     records: list[dict[str, Any]]
     problems: list[tuple[str, str]]  # (filename, human-readable reason)
+
+
+def is_expired(record: Mapping[str, Any], now_iso: str, retention_days: int) -> bool:
+    """True if ``record`` is older than the retention window.
+
+    Unparseable timestamps return False — gc keeps a record it can't date
+    rather than deleting on ambiguity (lineage is not thrown away on a
+    doubt).
+    """
+    try:
+        archived = datetime.fromisoformat(record["archived_at"])
+        now = datetime.fromisoformat(now_iso)
+    except (ValueError, TypeError, KeyError):
+        return False
+    return (now - archived) > timedelta(days=retention_days)
 
 
 class ArchiveStore:

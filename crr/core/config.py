@@ -19,6 +19,8 @@ this contract.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
 from typing import Any, Mapping
 
 # Bump when a default value changes meaning, so a consumer pinning
@@ -45,11 +47,23 @@ DEFAULTS: dict[str, Any] = {
     "dashboard_poll_seconds": 5,   # session-list poll cadence
     "version_check_seconds": 30,   # page self-heal version poll cadence
     "last_prompt_display_cap": 280,  # chars of last prompt shown on a card
+    "host_allowlist_extras": [],   # extra Host values the dashboard accepts
+    # retention
+    "archive_retention_days": 14,  # gc drops archive records older than this
 }
 
 
 class ConfigError(ValueError):
-    """A config override is invalid (e.g. an unknown key)."""
+    """A config override is invalid (unknown key or wrong value type)."""
+
+
+def load_toml_overrides(path: Path | str) -> dict[str, Any]:
+    """Read a config.toml into an overrides dict ({} if the file is absent)."""
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    with open(path, "rb") as fh:
+        return tomllib.load(fh)
 
 
 class Config:
@@ -58,6 +72,15 @@ class Config:
         unknown = set(overrides) - set(DEFAULTS)
         if unknown:
             raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
+        # Type-check each override against its default so a mistyped config.toml
+        # fails loudly rather than injecting e.g. a str where logic wants an int.
+        for key, value in overrides.items():
+            default = DEFAULTS[key]
+            # bool is an int subclass; keep them from cross-matching.
+            if isinstance(value, bool) != isinstance(default, bool) or not isinstance(value, type(default)):
+                raise ConfigError(
+                    f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
+                )
         self._overrides = overrides
 
     def get(self, key: str) -> Any:

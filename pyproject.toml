@@ -7,7 +7,7 @@ name = "claude-remote-rescue"
 version = "0.0.0"
 description = "Keep Claude Code sessions alive and remotely rescuable when terminals, shells, or whole hosts die."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Evan Nevermore" }]
 keywords = ["claude", "tmux", "session", "recovery", "tailscale"]
