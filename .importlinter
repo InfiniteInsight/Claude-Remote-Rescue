@@ -1,0 +1,28 @@
+# Machine-enforced layering (audit P2 — One-way layering).
+#
+# ccresume's boundary held by review discipline alone; the audit could only
+# verify it by reading. Here the direction is enforced from day one: CI runs
+# `lint-imports` and fails the build on an upward import.
+#
+# Layers are listed HIGH -> LOW. A higher layer may import a lower one; a
+# lower layer importing a higher one is the violation this catches:
+#
+#   crr.cli       composition root — the sole module that imports both
+#                 adapters and core (top layer => allowed to import down).
+#   crr.adapters  platform adapters — may import core, never cli.
+#   crr.core      pure core — imports neither adapters nor cli.
+#
+# NOTE: the DESIGN diagram's arrows (core -> adapters) are runtime CALL flow,
+# the inverse of the IMPORT direction enforced here. Do not "correct" this
+# file to match the diagram or you enforce the boundary backwards.
+
+[importlinter]
+root_package = crr
+
+[importlinter:contract:layers]
+name = crr one-way layering (cli -> adapters -> core)
+type = layers
+layers =
+    crr.cli
+    crr.adapters
+    crr.core

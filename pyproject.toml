@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-remote-rescue"
+version = "0.0.0"
+description = "Keep Claude Code sessions alive and remotely rescuable when terminals, shells, or whole hosts die."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Evan Nevermore" }]
+keywords = ["claude", "tmux", "session", "recovery", "tailscale"]
+
+# Runtime dependencies are DELIBERATELY empty. DESIGN.md commits to a
+# stdlib-only web server and dependency-free shell shims; adding a runtime
+# dep here is a design regression, not a convenience.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "import-linter>=2",
+]
+
+[project.scripts]
+crr = "crr.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/InfiniteInsight/Claude-Remote-Rescue"
+
+[tool.setuptools.packages.find]
+include = ["crr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
