@@ -44,8 +44,20 @@
   .prompt { margin-top: 6px; color: #cdd3dd; font-size: 13px; }
   .prompt:empty { display: none; }
   .src { font-size: 11px; color: #6b7280; margin-left: 6px; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px;
+    border: 1px solid #2f3745; background: #1c222c; color: #cdd3dd; cursor: pointer;
+  }
+  button:hover { background: #232b37; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.danger { color: #e0857f; }
   #empty, #stale { color: #8a93a2; padding: 20px 16px; }
   #stale { color: #e0a53b; display: none; }
+  #notice {
+    position: sticky; top: 49px; margin: 0 16px; padding: 8px 12px; border-radius: 8px;
+    background: #3a2f12; color: #e0a53b; font-size: 13px; display: none;
+  }
 </style>
 </head>
 <body>
@@ -59,6 +71,7 @@
   <span class="k-crashed">crashed</span>
 </div>
 <div id="stale">A newer version is available — reloading…</div>
+<div id="notice"></div>
 <div id="sessions"></div>
 <div id="empty" style="display:none">No journaled sessions.</div>
 
@@ -91,7 +104,44 @@ function renderCard(s) {
   var prompt = el("div", "prompt");
   prompt.textContent = s.last_prompt || "";
   card.appendChild(prompt);
+
+  var actions = el("div", "actions");
+  function addBtn(label, op, danger) {
+    var b = el("button", danger ? "danger" : "");
+    b.textContent = label;
+    b.addEventListener("click", function () { action(op, s.pid, b); });
+    actions.appendChild(b);
+  }
+  if (s.state === "crashed") {
+    addBtn("Reopen", "reopen", false);
+    addBtn("Dismiss", "dismiss", false);
+  }
+  addBtn("Remove", "remove", true);
+  card.appendChild(actions);
   return card;
+}
+
+function showNotice(text) {
+  var n = document.getElementById("notice");
+  n.textContent = text;
+  n.style.display = "block";
+  setTimeout(function () { n.style.display = "none"; }, 3000);
+}
+
+function action(op, pid, btn) {
+  btn.disabled = true;
+  fetch("/api/action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ op: op, pid: pid })
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { showNotice(j.message || "action failed"); }
+      pollSessions();
+    })
+    .catch(function () { showNotice("request failed"); })
+    .finally(function () { btn.disabled = false; });
 }
 
 function render(payload) {

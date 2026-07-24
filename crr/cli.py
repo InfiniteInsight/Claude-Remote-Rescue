@@ -30,9 +30,8 @@ from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import process_probe, state_dir, systemd, tmux
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, reviver, status, web
+from crr.core import contracts, ops, reviver, status, web
 from crr.core.archive import ArchiveStore
-from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -369,10 +368,9 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
-    # Pure delist: forget the session, touch nothing else. Not classifier-
-    # gated because it acts on no process — it only deletes the record.
-    JournalStore(state_dir.state_dir()).remove(args.pid)
-    return 0
+    res = ops.remove(JournalStore(state_dir.state_dir()), args.pid)
+    print(res.message)
+    return 0 if res.ok else 1
 
 
 def _cmd_dismiss(args: argparse.Namespace) -> int:
@@ -384,24 +382,9 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     config = cfg.Config()
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
-    store = JournalStore(sd)
-    try:
-        entry = store.read(args.pid)
-    except (KeyError, contracts.ContractError):
-        print(f"crr dismiss: no session {args.pid}", file=sys.stderr)
-        return 1
-    # Classifier-gated: only crashed sessions are dismissable. Dismissing a
-    # live/ghost session (whose process still exists) would delist something
-    # that is still running.
-    state = classify(entry, boot, probe)
-    if state != CRASHED:
-        print(f"crr dismiss: session {args.pid} is {state}, not crashed — refusing", file=sys.stderr)
-        return 2
-    if entry.get("claude") is not None:
-        ArchiveStore(sd).archive(entry, "dismissed", _now())
-    store.remove(args.pid)
-    print(f"dismissed {args.pid}")
-    return 0
+    res = ops.dismiss(JournalStore(sd), ArchiveStore(sd), boot, probe, args.pid, _now())
+    print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if res.ok else 2
 
 
 def _cmd_reopen(args: argparse.Namespace) -> int:
@@ -417,35 +400,16 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     store = JournalStore(state_dir.state_dir())
-    try:
-        entry = store.read(args.pid)
-    except (KeyError, contracts.ContractError):
-        print(f"crr reopen: no session {args.pid}", file=sys.stderr)
-        return 1
-    if entry.get("claude") is None:
-        print(f"crr reopen: session {args.pid} has no claude session to resume", file=sys.stderr)
-        return 2
-    state = classify(entry, boot, probe)
-    if state != CRASHED:
-        print(f"crr reopen: session {args.pid} is {state}, not crashed — refusing", file=sys.stderr)
-        return 2
-
-    name = reviver.session_name(entry)
-    if name in tmux_spawner.list_sessions():
-        print(f"already running as {name}")
-        return 0
-    tmux_spawner.new_detached_session(name, entry["cwd"], reviver.revival_argv(entry))
-    entry["tmux_session"] = name
-    entry["updated"] = _now()
-    store.write(entry)
-    print(f"reopened {args.pid} as {name}")
-    return 0
+    res = ops.reopen(store, tmux_spawner, boot, probe, args.pid, _now())
+    print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if res.ok else 2
 
 
 def make_web_handler(
     sessions_provider: Callable[[], dict],
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
+    action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -456,11 +420,12 @@ def make_web_handler(
     class _Handler(BaseHTTPRequestHandler):
         def _dispatch(self, method: str) -> None:
             length = int(self.headers.get("Content-Length") or 0)
-            _ = self.rfile.read(length) if length else b""  # body used by POST slice
+            body = self.rfile.read(length) if length else b""
             path = self.path.split("?", 1)[0]
             resp = web.handle_request(
-                method, path, self.headers,
+                method, path, self.headers, body,
                 sessions_provider=sessions_provider,
+                action_provider=action_provider,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
             )
@@ -491,15 +456,30 @@ def _cmd_web(args: argparse.Namespace) -> int:
         print(f"crr web: {exc}", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
-    store = JournalStore(state_dir.state_dir())
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
 
     def provider() -> dict:
         return status.assemble_sessions(store.scan().entries, boot, probe)
 
+    def action_provider(op: str, pid: int) -> tuple[bool, str]:
+        # Same classifier-gated ops the CLI uses — one implementation.
+        if op == "remove":
+            res = ops.remove(store, pid)
+        elif op == "dismiss":
+            res = ops.dismiss(store, archive, boot, probe, pid, _now())
+        elif op == "reopen":
+            res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now())
+        else:
+            return False, f"unknown op {op}"
+        return res.ok, res.message
+
     # Host allowlist: loopback + this host's name + tailnet suffix. (config
     # extras arrive with the TOML config loader.)
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
-    handler = make_web_handler(provider, allowed, (".ts.net",))
+    handler = make_web_handler(provider, allowed, (".ts.net",), action_provider)
 
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)

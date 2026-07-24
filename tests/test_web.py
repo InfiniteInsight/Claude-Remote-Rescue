@@ -54,10 +54,15 @@ def _payload():
     return {"contract": 1, "sessions": []}
 
 
-def _handle(method="GET", path="/", host="localhost", provider=None):
+def _handle(method="GET", path="/", host="localhost", provider=None,
+            body=b"", headers=None, action_provider=None):
+    h = {"Host": host}
+    if headers:
+        h.update(headers)
     return web.handle_request(
-        method, path, {"Host": host},
+        method, path, h, body,
         sessions_provider=provider or _payload,
+        action_provider=action_provider,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
     )
@@ -100,8 +105,75 @@ def test_unknown_path_is_404():
     assert _handle(path="/nope").status == 404
 
 
-def test_non_get_method_is_405_for_now():
-    assert _handle(method="POST", path="/").status == 405
+def test_unsupported_method_is_405():
+    assert _handle(method="DELETE", path="/").status == 405
+
+
+# --------------------------------------------------------------------------
+# POST /api/action — session ops with the CSRF/validation gate
+# --------------------------------------------------------------------------
+
+_JSON = {"Content-Type": "application/json"}
+
+
+def _post(payload=None, host="localhost", headers=None, action_provider=None, raw=None):
+    body = raw if raw is not None else json.dumps(payload or {}).encode()
+    return _handle(method="POST", path="/api/action", host=host,
+                   body=body, headers=headers if headers is not None else _JSON,
+                   action_provider=action_provider)
+
+
+def test_post_action_dispatches_and_returns_result():
+    seen = {}
+    def act(op, pid):
+        seen["call"] = (op, pid)
+        return True, f"reopened {pid}"
+    resp = _post({"op": "reopen", "pid": 42}, action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("reopen", 42)
+    assert json.loads(resp.body) == {"ok": True, "message": "reopened 42"}
+
+
+def test_post_action_gate_refusal_is_409():
+    resp = _post({"op": "dismiss", "pid": 42}, action_provider=lambda o, p: (False, "is live"))
+    assert resp.status == 409
+    assert json.loads(resp.body)["ok"] is False
+
+
+def test_post_without_json_content_type_is_415():
+    resp = _post({"op": "remove", "pid": 42}, headers={}, action_provider=lambda o, p: (True, "ok"))
+    assert resp.status == 415
+
+
+def test_post_bad_json_is_400():
+    resp = _post(raw=b"{not json", action_provider=lambda o, p: (True, "ok"))
+    assert resp.status == 400
+
+
+@pytest.mark.parametrize("payload", [
+    {"op": "nuke", "pid": 42},       # unknown op
+    {"op": "reopen", "pid": "42"},   # pid not an int
+    {"op": "reopen", "pid": -1},     # non-positive
+    {"op": "reopen", "pid": True},   # bool is not a real pid
+    {"op": "reopen"},                # missing pid
+    {"pid": 42},                     # missing op
+])
+def test_post_invalid_op_or_pid_is_400(payload):
+    resp = _post(payload, action_provider=lambda o, p: (True, "should-not-run"))
+    assert resp.status == 400
+
+
+def test_post_disallowed_host_is_403_before_dispatch():
+    called = []
+    resp = _post({"op": "remove", "pid": 42}, host="evil.com",
+                 action_provider=lambda o, p: called.append(1) or (True, "ok"))
+    assert resp.status == 403
+    assert called == []  # never dispatched
+
+
+def test_post_to_non_action_path_is_404():
+    resp = _handle(method="POST", path="/api/other", body=b"{}", headers=_JSON)
+    assert resp.status == 404
 
 
 # --------------------------------------------------------------------------

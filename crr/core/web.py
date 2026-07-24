@@ -88,32 +88,64 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
+ACTIONS = ("reopen", "dismiss", "remove")
+
+
+def _plain(status: int, text: str) -> Response:
+    return _resp(status, "text/plain; charset=utf-8", text.encode("utf-8"))
+
+
+def _json(status: int, obj: Any) -> Response:
+    return _resp(status, "application/json", json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+
 def handle_request(
     method: str,
     path: str,
     headers: Mapping[str, str],
+    body: bytes = b"",
     *,
     sessions_provider: Callable[[], dict[str, Any]],
+    action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     page_version: int = PAGE_VERSION,
 ) -> Response:
-    # Host allowlist first — before any routing or work.
+    # Host allowlist first — before any routing or work (DNS-rebinding defense).
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
-        return _resp(403, "text/plain; charset=utf-8", b"forbidden")
+        return _plain(403, "forbidden")
 
-    if method != "GET":
-        # POST action endpoints land with the session-op wiring; until then
-        # nothing accepts a body.
-        return _resp(405, "text/plain; charset=utf-8", b"method not allowed")
+    if method == "GET":
+        if path == "/":
+            return _resp(200, "text/html; charset=utf-8", render_page(page_version).encode("utf-8"))
+        if path == "/api/sessions":
+            return _json(200, sessions_provider())
+        if path == "/api/version":
+            return _json(200, {"version": page_version})
+        return _plain(404, "not found")
 
-    if path == "/":
-        return _resp(200, "text/html; charset=utf-8", render_page(page_version).encode("utf-8"))
-    if path == "/api/sessions":
-        body = json.dumps(sessions_provider(), ensure_ascii=False).encode("utf-8")
-        return _resp(200, "application/json", body)
-    if path == "/api/version":
-        body = json.dumps({"version": page_version}).encode("utf-8")
-        return _resp(200, "application/json", body)
+    if method == "POST":
+        if path != "/api/action":
+            return _plain(404, "not found")
+        # Require a JSON body: the forced CORS preflight (plus zero CORS
+        # headers) is what kills simple-request CSRF. Match the media type
+        # tolerantly (clients append "; charset=utf-8").
+        ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            return _plain(415, "content-type must be application/json")
+        try:
+            data = json.loads(body or b"")
+        except (ValueError, TypeError):
+            return _plain(400, "invalid JSON")
+        op = data.get("op") if isinstance(data, dict) else None
+        pid = data.get("pid") if isinstance(data, dict) else None
+        # Strict validation: known op, and a real positive int pid (bool is
+        # an int subclass — reject it).
+        if op not in ACTIONS or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return _plain(400, "invalid op or pid")
+        if action_provider is None:
+            return _plain(503, "actions unavailable")
+        ok, message = action_provider(op, pid)
+        return _json(200 if ok else 409, {"ok": ok, "message": message})
 
-    return _resp(404, "text/plain; charset=utf-8", b"not found")
+    return _plain(405, "method not allowed")
