@@ -79,7 +79,12 @@ DIAGNOSTICS_PAYLOAD_KEYS = (
 # Archive record (audit P8 — State-first lineage): why/when a revival-bearing
 # entry left the active set, with the entry preserved verbatim.
 ARCHIVE_RECORD_KEYS = ("v", "reason", "archived_at", "entry")
-ARCHIVE_REASONS = ("superseded-on-register", "superseded-on-launch", "gave-up")
+ARCHIVE_REASONS = (
+    "superseded-on-register",
+    "superseded-on-launch",
+    "gave-up",
+    "dismissed",
+)
 
 
 class ContractError(ValueError):

@@ -266,6 +266,92 @@ def test_claude_exit_missing_entry_is_noop(tmp_path, monkeypatch):
 
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
 
+# --- session ops: remove / dismiss / reopen -----------------------------
+
+def test_remove_delists_without_archiving(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="b",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    assert cli.main(["remove", "--pid", "42"]) == 0
+    assert not store.tabs_dir.joinpath("42.json").exists()
+    assert archive.scan().records == []  # pure delist: nothing archived
+    assert cli.main(["remove", "--pid", "42"]) == 0  # idempotent
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="dismiss classifies (Linux boot adapter)")
+def test_dismiss_archives_crashed_claude_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    store.write(new_entry(  # different boot => crashed
+        pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    assert cli.main(["dismiss", "--pid", "42"]) == 0
+    assert not store.tabs_dir.joinpath("42.json").exists()
+    assert archive.read(sid)["reason"] == "dismissed"
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="dismiss classifies (Linux boot adapter)")
+def test_dismiss_refuses_a_live_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    boot = boot_identity.LinuxBootIdentity().current()
+    store.write(new_entry(  # same boot + our live pid => not crashed
+        pid=os.getpid(), cwd="/p", host="tmux", shell="zsh", boot_id=boot,
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    rc = cli.main(["dismiss", "--pid", str(os.getpid())])
+    assert rc != 0  # refuse to dismiss a live session
+    assert store.tabs_dir.joinpath(f"{os.getpid()}.json").exists()  # untouched
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("tmux") is None,
+    reason="reopen needs Linux boot adapter + tmux",
+)
+def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "claude").write_text("#!/usr/bin/env bash\nexec sleep 300\n", encoding="utf-8")
+    (bindir / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    store = JournalStore(tmp_path)
+    sid = "dddddddd-4444-4444-8444-444444444444"
+    store.write(new_entry(  # crashed (old boot) + claude
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    try:
+        assert cli.main(["reopen", "--pid", "42"]) == 0
+        assert store.read(42)["tmux_session"] == f"crr-{sid[:8]}"
+        sessions = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        ).stdout
+        assert f"crr-{sid[:8]}" in sessions
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="reopen classifies (Linux boot adapter)")
+def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=None,
+    ))
+    assert cli.main(["reopen", "--pid", "42"]) != 0  # nothing to resume
+
+
 @pytest.mark.skipif(
     platform.system() != "Linux" or shutil.which("tmux") is None,
     reason="needs Linux boot adapter + tmux",
