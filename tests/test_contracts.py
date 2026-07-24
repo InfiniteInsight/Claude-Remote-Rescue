@@ -33,6 +33,7 @@ def _journal_entry():
         },
         "last_cmd": "claude",
         "tmux_session": None,
+        "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
     }
 
@@ -50,6 +51,15 @@ def _session_card():
         "last_prompt": "fix the reviver give-up guard",
         "duplicate_group": None,
         "updated": "2026-07-23T00:00:00Z",
+    }
+
+
+def _archive_record():
+    return {
+        "v": 1,
+        "reason": "superseded-on-register",
+        "archived_at": "2026-07-24T00:00:00Z",
+        "entry": _journal_entry(),
     }
 
 
@@ -152,6 +162,20 @@ def test_journal_pid_must_be_int():
         contracts.validate_journal_entry(e)
 
 
+def test_journal_revive_strikes_required_and_int():
+    e = _journal_entry()
+    del e["revive_strikes"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_revive_strikes_rejects_non_int():
+    e = _journal_entry()
+    e["revive_strikes"] = "3"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
 def test_journal_pid_true_bool_rejected():
     # bool is a subclass of int, so isinstance(True, int) is True. A pid of
     # True/False is nonsense and must be rejected, not silently accepted.
@@ -225,6 +249,64 @@ def test_diagnostics_degraded_must_be_list():
     p["degraded"] = "journald"
     with pytest.raises(contracts.ContractError):
         contracts.validate_diagnostics_payload(p)
+
+
+# --------------------------------------------------------------------------
+# Archive record (audit P8 — State-first lineage)
+# --------------------------------------------------------------------------
+
+def test_valid_archive_record_passes():
+    contracts.validate_archive_record(_archive_record())
+
+
+def test_archive_wrong_version_rejected():
+    r = _archive_record()
+    r["v"] = 2
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
+
+
+def test_archive_bad_reason_rejected():
+    r = _archive_record()
+    r["reason"] = "because"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
+
+
+def test_archive_superseded_on_launch_reason_accepted():
+    r = _archive_record()
+    r["reason"] = "superseded-on-launch"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_archive_dismissed_reason_accepted():
+    r = _archive_record()
+    r["reason"] = "dismissed"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_archive_missing_key_rejected():
+    r = _archive_record()
+    del r["archived_at"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
+
+
+def test_archive_nested_entry_is_validated():
+    # The preserved entry must itself be a valid journal entry.
+    r = _archive_record()
+    r["entry"]["host"] = "carrier-pigeon"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
+
+
+def test_archive_requires_claude_bearing_entry():
+    # Archiving exists to preserve revival data; a claude-less entry has
+    # none, so it must not be archivable.
+    r = _archive_record()
+    r["entry"]["claude"] = None
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
 
 
 # --------------------------------------------------------------------------

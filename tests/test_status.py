@@ -28,6 +28,7 @@ def _entry(pid, session_id, sid_source="injected"):
         },
         "last_cmd": "claude",
         "tmux_session": None,
+        "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
     }
 

@@ -24,9 +24,11 @@ from typing import Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
-from crr.adapters import process_probe, state_dir
+from crr.adapters import process_probe, state_dir, tmux
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, status
+from crr.core import contracts, reviver, status
+from crr.core.archive import ArchiveStore
+from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -48,6 +50,25 @@ def _build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="list journaled sessions and their state")
     st.add_argument("--json", action="store_true", help="emit the /api/sessions payload")
     st.set_defaults(func=_cmd_status)
+
+    rev = sub.add_parser(
+        "revive",
+        help="revive crashed claude sessions into detached tmux (watchdog action)",
+    )
+    rev.set_defaults(func=_cmd_revive)
+
+    # Session operations (classifier-gated, pid-keyed).
+    rm = sub.add_parser("remove", help="delist a session (touches nothing else)")
+    rm.add_argument("--pid", type=int, required=True)
+    rm.set_defaults(func=_cmd_remove)
+
+    dis = sub.add_parser("dismiss", help="clean up a crashed session without reviving")
+    dis.add_argument("--pid", type=int, required=True)
+    dis.set_defaults(func=_cmd_dismiss)
+
+    reo = sub.add_parser("reopen", help="revive one specific crashed session now")
+    reo.add_argument("--pid", type=int, required=True)
+    reo.set_defaults(func=_cmd_reopen)
 
     conf = sub.add_parser("config", help="inspect configuration")
     conf.add_argument(
@@ -190,16 +211,45 @@ def _cmd_register(args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr register: {exc}", file=sys.stderr)
         return 2
-    store = JournalStore(state_dir.state_dir())
-    entry = new_entry(
+    current_boot = boot.current()
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+
+    # Register-safety (recycled-pid guard for revival data): if an entry
+    # already exists for this pid and carries a claude session, do not blindly
+    # clobber it.
+    claude = None
+    tmux_session = None
+    revive_strikes = 0
+    try:
+        existing = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        existing = None
+    if existing is not None and existing.get("claude") is not None:
+        if existing["boot_id"] != current_boot:
+            # Different boot => the old process is unambiguously gone (reboot
+            # or stale). Preserve its session in the archive so the reviver
+            # can bring it back, then register fresh.
+            ArchiveStore(sd).archive(existing, "superseded-on-register", _now())
+        else:
+            # Same boot => can't distinguish an rc re-source (this same live
+            # shell) from pid reuse. Keep the claude field in place: never
+            # wipe a possibly-live session, never risk a duplicate revival.
+            claude = existing["claude"]
+            tmux_session = existing["tmux_session"]
+            revive_strikes = existing["revive_strikes"]
+
+    store.write(new_entry(
         pid=args.pid,
         cwd=args.cwd,
         host=args.host,
         shell=args.shell,
-        boot_id=boot.current(),
+        boot_id=current_boot,
         now=_now(),
-    )
-    store.write(entry)
+        claude=claude,
+        tmux_session=tmux_session,
+        revive_strikes=revive_strikes,
+    ))
     return 0
 
 
@@ -229,12 +279,20 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
     # never `guessed`. Print it (for the shim to pass to claude) even if the
     # shell was never registered, so claude still launches identifiably.
     sid = args.session_id or str(uuid.uuid4())
-    store = JournalStore(state_dir.state_dir())
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
     try:
         entry = store.read(args.pid)
     except (KeyError, contracts.ContractError):
         entry = None
     if entry is not None:
+        # If the entry already carries a claude session, it is a dead one
+        # (the wrapper blocks while claude runs, and claude-exit clears the
+        # field on any exit) — most often a reused pid. Preserve it in the
+        # archive before overwriting, or its revival data is lost (the
+        # symmetric hole to register-safety).
+        if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
+            ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
         entry["claude"] = {
             "session_id": sid,
             "sid_source": "injected",
@@ -257,6 +315,112 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
     entry["claude"] = None
     entry["updated"] = _now()
     store.write(entry)
+    return 0
+
+
+def _cmd_revive(_args: argparse.Namespace) -> int:
+    config = cfg.Config()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr revive: {exc}", file=sys.stderr)
+        return 2
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr revive: tmux is required for revival but was not found", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+
+    scan = store.scan()
+    outcome = reviver.revive_crashed(
+        scan.entries, boot, probe, tmux_spawner, store, archive,
+        max_strikes=config.get("zombie_strikes"),
+        now=_now(),
+    )
+    for name, reason in scan.problems:
+        print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    print(
+        f"revived {len(outcome.revived)}, "
+        f"gave up {len(outcome.gave_up)}, "
+        f"already running {len(outcome.reset)}"
+    )
+    return 0
+
+
+def _cmd_remove(args: argparse.Namespace) -> int:
+    # Pure delist: forget the session, touch nothing else. Not classifier-
+    # gated because it acts on no process — it only deletes the record.
+    JournalStore(state_dir.state_dir()).remove(args.pid)
+    return 0
+
+
+def _cmd_dismiss(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr dismiss: {exc}", file=sys.stderr)
+        return 2
+    config = cfg.Config()
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    try:
+        entry = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        print(f"crr dismiss: no session {args.pid}", file=sys.stderr)
+        return 1
+    # Classifier-gated: only crashed sessions are dismissable. Dismissing a
+    # live/ghost session (whose process still exists) would delist something
+    # that is still running.
+    state = classify(entry, boot, probe)
+    if state != CRASHED:
+        print(f"crr dismiss: session {args.pid} is {state}, not crashed — refusing", file=sys.stderr)
+        return 2
+    if entry.get("claude") is not None:
+        ArchiveStore(sd).archive(entry, "dismissed", _now())
+    store.remove(args.pid)
+    print(f"dismissed {args.pid}")
+    return 0
+
+
+def _cmd_reopen(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr reopen: {exc}", file=sys.stderr)
+        return 2
+    config = cfg.Config()
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr reopen: tmux is required for revival but was not found", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    store = JournalStore(state_dir.state_dir())
+    try:
+        entry = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        print(f"crr reopen: no session {args.pid}", file=sys.stderr)
+        return 1
+    if entry.get("claude") is None:
+        print(f"crr reopen: session {args.pid} has no claude session to resume", file=sys.stderr)
+        return 2
+    state = classify(entry, boot, probe)
+    if state != CRASHED:
+        print(f"crr reopen: session {args.pid} is {state}, not crashed — refusing", file=sys.stderr)
+        return 2
+
+    name = reviver.session_name(entry)
+    if name in tmux_spawner.list_sessions():
+        print(f"already running as {name}")
+        return 0
+    tmux_spawner.new_detached_session(name, entry["cwd"], reviver.revival_argv(entry))
+    entry["tmux_session"] = name
+    entry["updated"] = _now()
+    store.write(entry)
+    print(f"reopened {args.pid} as {name}")
     return 0
 
 

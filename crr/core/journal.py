@@ -22,6 +22,42 @@ from typing import Any, Mapping, NamedTuple
 from crr.core import contracts
 
 
+def write_json_atomic(target: Path, obj: Any) -> None:
+    """Write ``obj`` as JSON to ``target`` via tmp-file + fsync + rename.
+
+    A reader never sees a half-written file, and a crash mid-write leaves
+    the previous good file intact. Shared by the journal and archive stores.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp")
+    data = json.dumps(obj, ensure_ascii=False, indent=2)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)  # atomic on POSIX and Windows
+    finally:
+        # If the rename succeeded, tmp is gone; if it failed, clean up.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def read_json_file(target: Path) -> Any:
+    """Parse JSON from ``target``.
+
+    Propagates ``FileNotFoundError`` if the file is missing; raises
+    ``contracts.ContractError`` if it exists but is not valid JSON.
+    """
+    raw = target.read_text(encoding="utf-8")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise contracts.ContractError(f"file {target} is not valid JSON: {exc}") from exc
+
+
 def new_entry(
     *,
     pid: int,
@@ -32,6 +68,7 @@ def new_entry(
     now: str,
     last_cmd: str = "",
     tmux_session: str | None = None,
+    revive_strikes: int = 0,
     claude: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a schema-v1 journal entry, validated before it is returned.
@@ -51,6 +88,7 @@ def new_entry(
         "claude": dict(claude) if claude is not None else None,
         "last_cmd": last_cmd,
         "tmux_session": tmux_session,
+        "revive_strikes": revive_strikes,
         "updated": now,
     }
     contracts.validate_journal_entry(entry)
@@ -87,23 +125,7 @@ class JournalStore:
         entry never creates, clobbers, or leaves a temp file behind.
         """
         contracts.validate_journal_entry(entry)
-        pid = entry["pid"]
-        self.tabs_dir.mkdir(parents=True, exist_ok=True)
-        target = self.path_for(pid)
-        tmp = target.with_name(f".{pid}.json.tmp")
-        data = json.dumps(entry, ensure_ascii=False, indent=2)
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, target)  # atomic on POSIX and Windows
-        finally:
-            # If the rename succeeded, tmp is gone; if it failed, clean up.
-            try:
-                tmp.unlink()
-            except FileNotFoundError:
-                pass
+        write_json_atomic(self.path_for(entry["pid"]), entry)
 
     def read(self, pid: int) -> dict[str, Any]:
         """Return the validated entry for ``pid``.
@@ -111,17 +133,10 @@ class JournalStore:
         Raises ``KeyError`` if no file exists, ``contracts.ContractError``
         if the file is unparseable or fails the schema.
         """
-        target = self.path_for(pid)
         try:
-            raw = target.read_text(encoding="utf-8")
+            entry = read_json_file(self.path_for(pid))
         except FileNotFoundError:
             raise KeyError(pid) from None
-        try:
-            entry = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise contracts.ContractError(
-                f"journal file {target} is not valid JSON: {exc}"
-            ) from exc
         contracts.validate_journal_entry(entry)
         return entry
 

@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping
 JOURNAL_SCHEMA_VERSION = 1
 SESSIONS_CONTRACT_VERSION = 1
 DIAGNOSTICS_CONTRACT_VERSION = 1
+ARCHIVE_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # Enumerations shared across contracts (single source of truth).
@@ -46,6 +47,7 @@ JOURNAL_KEYS = (
     "claude",
     "last_cmd",
     "tmux_session",
+    "revive_strikes",
     "updated",
 )
 JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started")
@@ -72,6 +74,16 @@ DIAGNOSTICS_PAYLOAD_KEYS = (
     "prev_boot_errors",
     "host_events",
     "degraded",
+)
+
+# Archive record (audit P8 — State-first lineage): why/when a revival-bearing
+# entry left the active set, with the entry preserved verbatim.
+ARCHIVE_RECORD_KEYS = ("v", "reason", "archived_at", "entry")
+ARCHIVE_REASONS = (
+    "superseded-on-register",
+    "superseded-on-launch",
+    "gave-up",
+    "dismissed",
 )
 
 
@@ -137,6 +149,7 @@ def validate_journal_entry(entry: Any) -> None:
     _require_enum(entry["shell"], SHELLS, "journal 'shell'")
     _require_type(entry["last_cmd"], str, "journal 'last_cmd'")
     _require_type(entry["updated"], str, "journal 'updated'")
+    _require_type(entry["revive_strikes"], int, "journal 'revive_strikes'")
     # tmux_session is nullable string.
     if entry["tmux_session"] is not None:
         _require_type(entry["tmux_session"], str, "journal 'tmux_session'")
@@ -213,3 +226,31 @@ def validate_diagnostics_payload(payload: Any) -> None:
     _require_type(payload["prev_boot_errors"], list, "/api/diagnostics 'prev_boot_errors'")
     _require_type(payload["host_events"], list, "/api/diagnostics 'host_events'")
     _require_type(payload["degraded"], list, "/api/diagnostics 'degraded'")
+
+
+# --------------------------------------------------------------------------
+# Archive record (audit P8 — State-first lineage).
+# --------------------------------------------------------------------------
+
+def validate_archive_record(record: Any) -> None:
+    """Raise ContractError unless ``record`` is a valid archive record.
+
+    An archive record preserves a revival-bearing journal entry with the
+    lineage of why and when it left the active set. The nested entry must
+    itself be a valid journal entry and must carry a claude session —
+    archiving a claude-less entry would preserve nothing worth reviving.
+    """
+    record = _require_mapping(record, "archive record")
+    _require_exact_keys(record, ARCHIVE_RECORD_KEYS, "archive record")
+
+    _require_type(record["v"], int, "archive 'v'")
+    if record["v"] != ARCHIVE_CONTRACT_VERSION:
+        raise ContractError(
+            f"archive 'v' is {record['v']}, this build understands {ARCHIVE_CONTRACT_VERSION}"
+        )
+    _require_enum(record["reason"], ARCHIVE_REASONS, "archive 'reason'")
+    _require_type(record["archived_at"], str, "archive 'archived_at'")
+
+    validate_journal_entry(record["entry"])
+    if record["entry"]["claude"] is None:
+        raise ContractError("archive 'entry' must carry a claude session (nothing to revive otherwise)")

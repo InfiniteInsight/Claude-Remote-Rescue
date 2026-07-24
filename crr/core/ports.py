@@ -12,7 +12,7 @@ way: adapters import core to implement these, never the reverse.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Sequence, runtime_checkable
 
 
 @runtime_checkable
@@ -45,4 +45,24 @@ class ProcessProbe(Protocol):
 
     def has_controlling_tty(self, pid: int) -> bool:
         """Return True if ``pid`` owns a controlling terminal."""
+        ...
+
+
+@runtime_checkable
+class TmuxSpawner(Protocol):
+    """The revival substrate: detached tmux sessions.
+
+    ``list_sessions`` is a single batched read (one subprocess for all
+    names) so the reviver can gate on live sessions without N spawns.
+    ``new_detached_session`` takes argv **word-form**, never a shell
+    string: a string is wrapped in the login shell, which re-sources the
+    shim and double-registers the session ([lesson: word-form exec]).
+    """
+
+    def list_sessions(self) -> set[str]:
+        """Return the set of currently-live tmux session names."""
+        ...
+
+    def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:
+        """Create a detached session ``name`` in ``cwd`` running ``argv``."""
         ...

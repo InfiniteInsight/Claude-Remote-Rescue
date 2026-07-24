@@ -9,6 +9,8 @@ this way.
 import json
 import os
 import platform
+import shutil
+import subprocess
 
 import pytest
 
@@ -16,6 +18,7 @@ from crr import cli
 from crr.adapters import boot_identity, state_dir
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -43,6 +46,7 @@ def _live_entry(pid, boot_id):
         },
         "last_cmd": "claude",
         "tmux_session": None,
+        "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
     }
 
@@ -101,6 +105,66 @@ def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
     assert entry["boot_id"] == boot_identity.LinuxBootIdentity().current()
 
 
+def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
+    return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"}
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_after_reboot_archives_old_claude_session(tmp_path, monkeypatch):
+    # A stale entry from before a reboot (different boot_id) carries revival
+    # data. Register must preserve it in the archive, not clobber it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "aaaaaaaa-1111-4111-8111-111111111111"
+    store.write(new_entry(
+        pid=1000, cwd="/old", host="tmux", shell="zsh",
+        boot_id="pre-reboot-boot", now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    rc = cli.main(["register", "--pid", "1000", "--cwd", "/new", "--shell", "bash", "--host", "tab"])
+    assert rc == 0
+    # New active entry is fresh + claude-less; the old session is archived.
+    assert store.read(1000)["claude"] is None
+    assert store.read(1000)["cwd"] == "/new"
+    rec = archive.read(sid)
+    assert rec["reason"] == "superseded-on-register"
+    assert rec["entry"]["claude"]["session_id"] == sid
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_same_boot_preserves_claude_in_place(tmp_path, monkeypatch):
+    # Same boot => can't tell an rc re-source from pid reuse. Preserve the
+    # claude field (never wipe a possibly-live session, never risk a
+    # duplicate revival); do NOT archive.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot = boot_identity.LinuxBootIdentity().current()
+    sid = "bbbbbbbb-2222-4222-8222-222222222222"
+    store.write(new_entry(
+        pid=2000, cwd="/p", host="tmux", shell="zsh",
+        boot_id=boot, now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+        tmux_session="crr-bbbbbbbb", revive_strikes=1,
+    ))
+    rc = cli.main(["register", "--pid", "2000", "--cwd", "/p", "--shell", "zsh", "--host", "tmux"])
+    assert rc == 0
+    entry = store.read(2000)
+    assert entry["claude"]["session_id"] == sid  # preserved, not wiped
+    assert entry["tmux_session"] == "crr-bbbbbbbb"
+    assert entry["revive_strikes"] == 1
+    assert archive.scan().records == []  # nothing archived on same boot
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_over_claude_less_entry_does_not_archive(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    store.write(new_entry(
+        pid=3000, cwd="/p", host="tmux", shell="zsh",
+        boot_id="whatever", now="2026-07-24T00:00:00Z", claude=None,
+    ))
+    assert cli.main(["register", "--pid", "3000", "--cwd", "/p2", "--shell", "zsh", "--host", "tmux"]) == 0
+    assert archive.scan().records == []  # no revival data => nothing to preserve
+
+
 def test_last_cmd_updates_existing_entry(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
@@ -145,6 +209,25 @@ def test_claude_launch_injects_sid_and_journals_it(tmp_path, monkeypatch, capsys
     assert claude["started"]
 
 
+def test_claude_launch_archives_a_superseded_session(tmp_path, monkeypatch, capsys):
+    # Same-boot pid reuse: entry already carries a (now-dead) claude session
+    # X; launching Y must preserve X in the archive, not silently drop it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    x = "aaaaaaaa-1111-4111-8111-111111111111"
+    store.write(new_entry(
+        pid=4242, cwd="/p", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-24T00:00:00Z", claude=_claude_field(x),
+    ))
+    cli.main(["claude-launch", "--pid", "4242"])
+    y = capsys.readouterr().out.strip()
+
+    assert y != x
+    assert store.read(4242)["claude"]["session_id"] == y  # new session active
+    rec = archive.read(x)  # old session preserved
+    assert rec["reason"] == "superseded-on-launch"
+
+
 def test_claude_launch_honors_explicit_session_id(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
@@ -179,3 +262,130 @@ def test_claude_exit_clears_claude_field(tmp_path, monkeypatch, capsys):
 def test_claude_exit_missing_entry_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     assert cli.main(["claude-exit", "--pid", "999"]) == 0
+
+
+# --- revive: crashed claude session -> detached tmux (end to end) ---------
+
+# --- session ops: remove / dismiss / reopen -----------------------------
+
+def test_remove_delists_without_archiving(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="b",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    assert cli.main(["remove", "--pid", "42"]) == 0
+    assert not store.tabs_dir.joinpath("42.json").exists()
+    assert archive.scan().records == []  # pure delist: nothing archived
+    assert cli.main(["remove", "--pid", "42"]) == 0  # idempotent
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="dismiss classifies (Linux boot adapter)")
+def test_dismiss_archives_crashed_claude_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    store.write(new_entry(  # different boot => crashed
+        pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    assert cli.main(["dismiss", "--pid", "42"]) == 0
+    assert not store.tabs_dir.joinpath("42.json").exists()
+    assert archive.read(sid)["reason"] == "dismissed"
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="dismiss classifies (Linux boot adapter)")
+def test_dismiss_refuses_a_live_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    boot = boot_identity.LinuxBootIdentity().current()
+    store.write(new_entry(  # same boot + our live pid => not crashed
+        pid=os.getpid(), cwd="/p", host="tmux", shell="zsh", boot_id=boot,
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    rc = cli.main(["dismiss", "--pid", str(os.getpid())])
+    assert rc != 0  # refuse to dismiss a live session
+    assert store.tabs_dir.joinpath(f"{os.getpid()}.json").exists()  # untouched
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("tmux") is None,
+    reason="reopen needs Linux boot adapter + tmux",
+)
+def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "claude").write_text("#!/usr/bin/env bash\nexec sleep 300\n", encoding="utf-8")
+    (bindir / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    store = JournalStore(tmp_path)
+    sid = "dddddddd-4444-4444-8444-444444444444"
+    store.write(new_entry(  # crashed (old boot) + claude
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    try:
+        assert cli.main(["reopen", "--pid", "42"]) == 0
+        assert store.read(42)["tmux_session"] == f"crr-{sid[:8]}"
+        sessions = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        ).stdout
+        assert f"crr-{sid[:8]}" in sessions
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="reopen classifies (Linux boot adapter)")
+def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=None,
+    ))
+    assert cli.main(["reopen", "--pid", "42"]) != 0  # nothing to resume
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("tmux") is None,
+    reason="needs Linux boot adapter + tmux",
+)
+def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
+    # Fake claude that stays alive, so the revived session persists.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "claude"
+    fake.write_text("#!/usr/bin/env bash\nexec sleep 300\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    # A different boot_id => classifier crashed; claude set => resumable.
+    store.write(new_entry(
+        pid=4242, cwd=str(tmp_path), host="tmux", shell="zsh",
+        boot_id="00000000-0000-4000-8000-000000000000", now="2026-07-24T00:00:00Z",
+        claude={"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"},
+    ))
+    try:
+        rc = cli.main(["revive"])
+        assert rc == 0
+        entry = store.read(4242)
+        assert entry["tmux_session"] == f"crr-{sid[:8]}"
+        assert entry["revive_strikes"] == 1
+        sessions = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        ).stdout
+        assert f"crr-{sid[:8]}" in sessions
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
