@@ -107,6 +107,7 @@ def handle_request(
     *,
     sessions_provider: Callable[[], dict[str, Any]],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
+    diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     page_version: int = PAGE_VERSION,
@@ -122,6 +123,11 @@ def handle_request(
             return _json(200, sessions_provider())
         if path == "/api/version":
             return _json(200, {"version": page_version})
+        if path == "/api/diagnostics":
+            # Lazy: computed only when the panel is opened, never on the poll.
+            if diagnostics_provider is None:
+                return _plain(404, "not found")
+            return _json(200, diagnostics_provider())
         return _plain(404, "not found")
 
     if method == "POST":

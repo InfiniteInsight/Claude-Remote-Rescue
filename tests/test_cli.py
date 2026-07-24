@@ -22,6 +22,31 @@ from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
+def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
+    # No journald => a valid payload with every source marked degraded,
+    # never a crash or a silently-empty result.
+    from crr.adapters import diagnostics as diag_source
+    monkeypatch.setattr(diag_source, "available", lambda: False)
+    rc = cli.main(["diagnose", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    contracts.validate_diagnostics_payload(payload)
+    assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("journalctl") is None,
+    reason="needs Linux journald",
+)
+def test_diagnose_emits_contract_valid_payload_from_journald(capsys):
+    rc = cli.main(["diagnose", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    contracts.validate_diagnostics_payload(payload)
+    assert payload["source"] == "journald"
+    assert isinstance(payload["boots"], list)
+
+
 def test_web_server_serves_sessions_and_enforces_host(tmp_path):
     # Real socket + real HTTP, fake provider (no platform coupling). Proves
     # the http.server adapter wires to the pure handler end to end.
