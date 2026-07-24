@@ -17,9 +17,21 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 from crr.core import contracts
+
+
+class JournalScan(NamedTuple):
+    """Result of scanning the tabs dir.
+
+    ``problems`` exists so corrupt/stale files are surfaced rather than
+    silently dropped — a blank dashboard hiding a broken file is exactly
+    the kind of laundering the plumb-line principles forbid.
+    """
+
+    entries: list[dict[str, Any]]
+    problems: list[tuple[str, str]]  # (filename, human-readable reason)
 
 
 class JournalStore:
@@ -84,3 +96,25 @@ class JournalStore:
             self.path_for(pid).unlink()
         except FileNotFoundError:
             pass
+
+    def scan(self) -> JournalScan:
+        """List every ``<pid>.json`` entry, surfacing corrupt files.
+
+        Only files named exactly ``<int>.json`` are considered (temp files
+        like ``.<pid>.json.tmp`` and unrelated files are ignored). A file
+        that fails to parse or validate becomes a ``problems`` entry rather
+        than crashing the scan or vanishing from the result.
+        """
+        entries: list[dict[str, Any]] = []
+        problems: list[tuple[str, str]] = []
+        if not self.tabs_dir.is_dir():
+            return JournalScan(entries, problems)
+
+        for path in sorted(self.tabs_dir.glob("*.json")):
+            if not path.stem.isdigit():
+                continue
+            try:
+                entries.append(self.read(int(path.stem)))
+            except (KeyError, contracts.ContractError, OSError) as exc:
+                problems.append((path.name, str(exc)))
+        return JournalScan(entries, problems)

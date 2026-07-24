@@ -113,3 +113,43 @@ def test_overwrite_replaces_entry(tmp_path):
     updated["cwd"] = "/home/u/elsewhere"
     store.write(updated)
     assert store.read(42)["cwd"] == "/home/u/elsewhere"
+
+
+# --- scan(): list all entries, surfacing (never hiding) corrupt files ----
+
+def test_scan_empty_when_no_tabs_dir(tmp_path):
+    store = JournalStore(tmp_path)
+    scan = store.scan()
+    assert scan.entries == []
+    assert scan.problems == []
+
+
+def test_scan_returns_all_valid_entries(tmp_path):
+    store = JournalStore(tmp_path)
+    store.write(_entry(pid=1))
+    store.write(_entry(pid=2))
+    scan = store.scan()
+    assert sorted(e["pid"] for e in scan.entries) == [1, 2]
+    assert scan.problems == []
+
+
+def test_scan_reports_corrupt_file_without_dropping_valid_ones(tmp_path):
+    store = JournalStore(tmp_path)
+    store.write(_entry(pid=1))
+    (store.tabs_dir / "2.json").write_text("{ not json", encoding="utf-8")
+    scan = store.scan()
+    assert [e["pid"] for e in scan.entries] == [1]
+    assert len(scan.problems) == 1
+    problem_name, problem_msg = scan.problems[0]
+    assert "2.json" in problem_name
+    assert problem_msg  # a non-empty explanation, not a silent drop
+
+
+def test_scan_ignores_non_json_and_temp_files(tmp_path):
+    store = JournalStore(tmp_path)
+    store.write(_entry(pid=1))
+    (store.tabs_dir / "notes.txt").write_text("ignore me", encoding="utf-8")
+    (store.tabs_dir / ".3.json.tmp").write_text("{}", encoding="utf-8")
+    scan = store.scan()
+    assert [e["pid"] for e in scan.entries] == [1]
+    assert scan.problems == []
