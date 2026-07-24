@@ -89,9 +89,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Shells that have a shim template today. bash first (Phase 1 headless);
-# zsh + fish follow. Keep in sync with the crr/shims/crr.<shell> files.
-SHIM_SHELLS = ("bash",)
+# Shells that have a shim template. Keep in sync with the
+# crr/shims/crr.<shell> files.
+SHIM_SHELLS = ("bash", "zsh", "fish")
 
 
 def _resolve_crr_bin(explicit: str | None) -> str:
