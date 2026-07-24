@@ -1,31 +1,34 @@
 """Reviver — bring crashed claude sessions back as detached tmux sessions.
 
-A revival candidate is a journal entry that classifies ``crashed``, still
-carries a claude session id (the shell died mid-session — claude-exit
-never ran), and has **no live tmux session** of its deterministic name.
+Two sources of revival candidates:
 
-Gating on a live-session check (not on the persisted ``tmux_session``
-field) is what makes reboot recovery work: after a reboot the tmux server
-and its sessions are gone but the field still points at the old name, so a
-field-based gate would refuse to revive the very sessions the reviver
-exists for.
+- **Active journal entries** that classify ``crashed`` and still carry a
+  claude session id (the shell died mid-session — claude-exit never ran).
+- **Archived records** (reason ``superseded-on-register``): sessions
+  preserved when a reboot/pid-reuse would otherwise have clobbered their
+  revival data. Reviving from the archive is what makes reboot recovery
+  survive pid reuse — the data lives under the session id, not the pid.
 
-The give-up guard is the safety valve for that gate. Without it, a claude
-that dies immediately on ``--resume`` would be re-revived every watchdog
-cycle forever ([lesson: give-up guard]). So each revival increments a
-strike; past ``max_strikes`` the session is abandoned. Observing the
-session alive resets strikes to zero, so only *persistent* failures
-accumulate — a session that revives fine never creeps toward give-up.
+For every candidate the same rule applies, gated on a LIVE session check
+(``tmux.list_sessions()``), not the persisted ``tmux_session`` field: a
+reboot leaves a fresh tmux server with no sessions, so a field-based gate
+would refuse to revive the very sessions the reviver exists for.
 
-Pure core: takes the TmuxSpawner/BootIdentity/ProcessProbe ports and the
-JournalStore, so it is fully testable with fakes and touches no OS
-directly.
+The give-up guard is the safety valve for that gate. Each revival
+increments a strike; past ``max_strikes`` the session is abandoned to the
+archive with reason ``gave-up`` (its terminal home — it stops being a
+candidate and stops re-reporting). Observing the session alive resets
+strikes to zero, so only *persistent* failures accumulate.
+
+Pure core: takes the ports + the journal and archive stores, so it is
+fully testable with fakes and touches no OS directly.
 """
 
 from __future__ import annotations
 
 from typing import Any, Mapping, NamedTuple, Sequence
 
+from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TmuxSpawner
@@ -33,7 +36,7 @@ from crr.core.ports import BootIdentity, ProcessProbe, TmuxSpawner
 
 class RevivalOutcome(NamedTuple):
     revived: list[int]   # pids (re)spawned into tmux this pass
-    gave_up: list[int]   # pids past the strike limit — abandoned, not respawned
+    gave_up: list[int]   # pids abandoned to the archive past the strike limit
     reset: list[int]     # pids whose live session cleared their strikes
 
 
@@ -47,12 +50,36 @@ def revival_argv(entry: Mapping[str, Any]) -> list[str]:
     return ["claude", "--resume", entry["claude"]["session_id"]]
 
 
+def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str):
+    """Return (action, updated_entry, name) for one candidate.
+
+    action is one of: 'reset-nochange', 'reset', 'revive', 'give_up'.
+    """
+    name = session_name(entry)
+    if name in live:
+        if entry["revive_strikes"] == 0 and entry["tmux_session"] == name:
+            return "reset-nochange", entry, name
+        updated = dict(entry)
+        updated["tmux_session"] = name
+        updated["revive_strikes"] = 0
+        updated["updated"] = now
+        return "reset", updated, name
+    if entry["revive_strikes"] >= max_strikes:
+        return "give_up", entry, name
+    updated = dict(entry)
+    updated["tmux_session"] = name
+    updated["revive_strikes"] = entry["revive_strikes"] + 1
+    updated["updated"] = now
+    return "revive", updated, name
+
+
 def revive_crashed(
     entries: Sequence[Mapping[str, Any]],
     boot_identity: BootIdentity,
     process_probe: ProcessProbe,
     tmux: TmuxSpawner,
     store: JournalStore,
+    archive: ArchiveStore,
     *,
     max_strikes: int,
     now: str,
@@ -62,37 +89,50 @@ def revive_crashed(
     gave_up: list[int] = []
     reset: list[int] = []
 
+    # 1. Active crashed-with-claude entries.
     for entry in entries:
         if entry.get("claude") is None:
             continue
         if classify(entry, boot_identity, process_probe) != CRASHED:
             continue
-
-        name = session_name(entry)
+        action, updated, name = _decide(entry, live, max_strikes, now)
         pid = entry["pid"]
-
-        if name in live:
-            # Revived and running — clear strikes so only persistent
-            # failures accumulate. Write only if something actually changed.
-            if entry["revive_strikes"] != 0 or entry["tmux_session"] != name:
-                entry = dict(entry)
-                entry["revive_strikes"] = 0
-                entry["tmux_session"] = name
-                entry["updated"] = now
-                store.write(entry)
+        if action == "reset-nochange":
             reset.append(pid)
-            continue
-
-        if entry["revive_strikes"] >= max_strikes:
+        elif action == "reset":
+            store.write(updated)
+            reset.append(pid)
+        elif action == "give_up":
+            # Terminal home: preserve in the archive, drop from active.
+            archive.archive(entry, "gave-up", now)
+            store.remove(pid)
             gave_up.append(pid)
-            continue
+        else:  # revive
+            tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+            store.write(updated)
+            revived.append(pid)
 
-        tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
-        entry = dict(entry)
-        entry["tmux_session"] = name
-        entry["revive_strikes"] += 1
-        entry["updated"] = now
-        store.write(entry)
-        revived.append(pid)
+    # 2. Archived records awaiting revival (skip the terminal 'gave-up' ones).
+    for record in archive.scan().records:
+        if record["reason"] == "gave-up":
+            continue
+        entry = record["entry"]
+        action, updated, name = _decide(entry, live, max_strikes, now)
+        pid = entry["pid"]
+        if action == "reset-nochange":
+            reset.append(pid)
+        elif action == "reset":
+            record["entry"] = updated
+            archive.write(record)
+            reset.append(pid)
+        elif action == "give_up":
+            record["reason"] = "gave-up"
+            archive.write(record)
+            gave_up.append(pid)
+        else:  # revive
+            tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+            record["entry"] = updated
+            archive.write(record)
+            revived.append(pid)
 
     return RevivalOutcome(revived, gave_up, reset)

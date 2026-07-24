@@ -18,6 +18,7 @@ from crr import cli
 from crr.adapters import boot_identity, state_dir
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -102,6 +103,66 @@ def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
     assert entry["claude"] is None
     assert entry["cwd"] == "/home/u/proj"
     assert entry["boot_id"] == boot_identity.LinuxBootIdentity().current()
+
+
+def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
+    return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"}
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_after_reboot_archives_old_claude_session(tmp_path, monkeypatch):
+    # A stale entry from before a reboot (different boot_id) carries revival
+    # data. Register must preserve it in the archive, not clobber it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "aaaaaaaa-1111-4111-8111-111111111111"
+    store.write(new_entry(
+        pid=1000, cwd="/old", host="tmux", shell="zsh",
+        boot_id="pre-reboot-boot", now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    rc = cli.main(["register", "--pid", "1000", "--cwd", "/new", "--shell", "bash", "--host", "tab"])
+    assert rc == 0
+    # New active entry is fresh + claude-less; the old session is archived.
+    assert store.read(1000)["claude"] is None
+    assert store.read(1000)["cwd"] == "/new"
+    rec = archive.read(sid)
+    assert rec["reason"] == "superseded-on-register"
+    assert rec["entry"]["claude"]["session_id"] == sid
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_same_boot_preserves_claude_in_place(tmp_path, monkeypatch):
+    # Same boot => can't tell an rc re-source from pid reuse. Preserve the
+    # claude field (never wipe a possibly-live session, never risk a
+    # duplicate revival); do NOT archive.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot = boot_identity.LinuxBootIdentity().current()
+    sid = "bbbbbbbb-2222-4222-8222-222222222222"
+    store.write(new_entry(
+        pid=2000, cwd="/p", host="tmux", shell="zsh",
+        boot_id=boot, now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+        tmux_session="crr-bbbbbbbb", revive_strikes=1,
+    ))
+    rc = cli.main(["register", "--pid", "2000", "--cwd", "/p", "--shell", "zsh", "--host", "tmux"])
+    assert rc == 0
+    entry = store.read(2000)
+    assert entry["claude"]["session_id"] == sid  # preserved, not wiped
+    assert entry["tmux_session"] == "crr-bbbbbbbb"
+    assert entry["revive_strikes"] == 1
+    assert archive.scan().records == []  # nothing archived on same boot
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_over_claude_less_entry_does_not_archive(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    store.write(new_entry(
+        pid=3000, cwd="/p", host="tmux", shell="zsh",
+        boot_id="whatever", now="2026-07-24T00:00:00Z", claude=None,
+    ))
+    assert cli.main(["register", "--pid", "3000", "--cwd", "/p2", "--shell", "zsh", "--host", "tmux"]) == 0
+    assert archive.scan().records == []  # no revival data => nothing to preserve
 
 
 def test_last_cmd_updates_existing_entry(tmp_path, monkeypatch):

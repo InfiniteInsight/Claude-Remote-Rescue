@@ -27,6 +27,7 @@ from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import process_probe, state_dir, tmux
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, reviver, status
+from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -196,16 +197,45 @@ def _cmd_register(args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr register: {exc}", file=sys.stderr)
         return 2
-    store = JournalStore(state_dir.state_dir())
-    entry = new_entry(
+    current_boot = boot.current()
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+
+    # Register-safety (recycled-pid guard for revival data): if an entry
+    # already exists for this pid and carries a claude session, do not blindly
+    # clobber it.
+    claude = None
+    tmux_session = None
+    revive_strikes = 0
+    try:
+        existing = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        existing = None
+    if existing is not None and existing.get("claude") is not None:
+        if existing["boot_id"] != current_boot:
+            # Different boot => the old process is unambiguously gone (reboot
+            # or stale). Preserve its session in the archive so the reviver
+            # can bring it back, then register fresh.
+            ArchiveStore(sd).archive(existing, "superseded-on-register", _now())
+        else:
+            # Same boot => can't distinguish an rc re-source (this same live
+            # shell) from pid reuse. Keep the claude field in place: never
+            # wipe a possibly-live session, never risk a duplicate revival.
+            claude = existing["claude"]
+            tmux_session = existing["tmux_session"]
+            revive_strikes = existing["revive_strikes"]
+
+    store.write(new_entry(
         pid=args.pid,
         cwd=args.cwd,
         host=args.host,
         shell=args.shell,
-        boot_id=boot.current(),
+        boot_id=current_boot,
         now=_now(),
-    )
-    store.write(entry)
+        claude=claude,
+        tmux_session=tmux_session,
+        revive_strikes=revive_strikes,
+    ))
     return 0
 
 
@@ -278,11 +308,13 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
         print("crr revive: tmux is required for revival but was not found", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
-    store = JournalStore(state_dir.state_dir())
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
 
     scan = store.scan()
     outcome = reviver.revive_crashed(
-        scan.entries, boot, probe, tmux_spawner, store,
+        scan.entries, boot, probe, tmux_spawner, store, archive,
         max_strikes=config.get("zombie_strikes"),
         now=_now(),
     )

@@ -12,6 +12,9 @@ JournalStore on a tmpdir). The behaviors that matter:
 - The revival command is word-form argv ([lesson: word-form exec]).
 """
 
+import pytest
+
+from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 from crr.core.reviver import revive_crashed, session_name
 
@@ -58,10 +61,11 @@ class FakeTmux:
         self._live.add(name)
 
 
-def _run(entries_store, tmux, max_strikes=3):
+def _run(entries_store, tmux, max_strikes=3, archive=None):
     scan = entries_store.scan()
     return revive_crashed(
         scan.entries, FakeBoot(), FakeProbe(), tmux, entries_store,
+        archive if archive is not None else ArchiveStore(entries_store._state_dir),
         max_strikes=max_strikes, now=_NOW,
     )
 
@@ -127,16 +131,22 @@ def test_reboot_gone_session_is_re_revived_despite_persisted_field(tmp_path):
     assert store.read(42)["revive_strikes"] == 1
 
 
-def test_persistent_failure_gives_up_past_the_strike_limit(tmp_path):
+def test_persistent_failure_gives_up_to_the_archive(tmp_path):
     store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
     _seed(store, 42, claude=_claude(), strikes=3)  # already at max
     tmux = FakeTmux(live=set())
-    outcome = _run(store, tmux, max_strikes=3)
+    outcome = _run(store, tmux, max_strikes=3, archive=archive)
 
     assert outcome.revived == []
     assert outcome.gave_up == [42]
     assert tmux.created == []
-    assert store.read(42)["revive_strikes"] == 3  # not incremented past give-up
+    # Give-up is terminal: dropped from active, preserved in the archive so
+    # it stops re-reporting but isn't lost.
+    with pytest.raises(KeyError):
+        store.read(42)
+    rec = archive.read(_claude()["session_id"])
+    assert rec["reason"] == "gave-up"
 
 
 def test_one_below_limit_still_revives(tmp_path):
@@ -146,3 +156,54 @@ def test_one_below_limit_still_revives(tmp_path):
     outcome = _run(store, tmux, max_strikes=3)
     assert outcome.revived == [42]
     assert store.read(42)["revive_strikes"] == 3
+
+
+# --- reviving from the archive (reboot-recovery after pid reuse) ----------
+
+def _archived_entry(store_dir, pid=99, strikes=0):
+    # An entry preserved in the archive (as register-safety would do).
+    entry = new_entry(
+        pid=pid, cwd=f"/home/u/p{pid}", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(), revive_strikes=strikes,
+    )
+    archive = ArchiveStore(store_dir)
+    archive.archive(entry, "superseded-on-register", _NOW)
+    return archive
+
+
+def test_archived_session_with_no_live_tmux_is_revived(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+
+    assert outcome.revived == [99]
+    name = session_name({"claude": _claude()})
+    assert tmux.created and tmux.created[0][0] == name
+    rec = archive.read(_claude()["session_id"])
+    assert rec["entry"]["revive_strikes"] == 1  # strike tracked in the archive
+
+
+def test_archived_session_gives_up_in_place_past_limit(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path, strikes=3)
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, max_strikes=3, archive=archive)
+
+    assert outcome.gave_up == [99]
+    assert tmux.created == []
+    assert archive.read(_claude()["session_id"])["reason"] == "gave-up"  # terminal
+
+
+def test_gave_up_archive_record_is_not_re_revived(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "gave-up", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []
