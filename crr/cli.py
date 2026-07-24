@@ -16,19 +16,21 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import process_probe, state_dir, systemd, tmux
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, reviver, status
+from crr.core import contracts, reviver, status, web
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore, new_entry
@@ -71,6 +73,10 @@ def _build_parser() -> argparse.ArgumentParser:
     reo = sub.add_parser("reopen", help="revive one specific crashed session now")
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
+
+    w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
+    w.add_argument("--port", type=int, default=8377)
+    w.set_defaults(func=_cmd_web)
 
     sysd = sub.add_parser(
         "systemd",
@@ -433,6 +439,77 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     entry["updated"] = _now()
     store.write(entry)
     print(f"reopened {args.pid} as {name}")
+    return 0
+
+
+def make_web_handler(
+    sessions_provider: Callable[[], dict],
+    allowed_hosts: set[str],
+    allowed_suffixes: tuple[str, ...],
+) -> type[BaseHTTPRequestHandler]:
+    """Build an http.server handler bound to the given dependencies.
+
+    Thin adapter: it only marshals bytes to/from ``web.handle_request``
+    (the pure core handler that owns routing + the security gate).
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        def _dispatch(self, method: str) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            _ = self.rfile.read(length) if length else b""  # body used by POST slice
+            path = self.path.split("?", 1)[0]
+            resp = web.handle_request(
+                method, path, self.headers,
+                sessions_provider=sessions_provider,
+                allowed_hosts=allowed_hosts,
+                allowed_suffixes=allowed_suffixes,
+            )
+            self.send_response(resp.status)
+            for key, value in resp.headers.items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(resp.body)))
+            self.end_headers()
+            self.wfile.write(resp.body)
+
+        def do_GET(self) -> None:
+            self._dispatch("GET")
+
+        def do_POST(self) -> None:
+            self._dispatch("POST")
+
+        def log_message(self, *_args) -> None:  # keep the poll path quiet
+            pass
+
+    return _Handler
+
+
+def _cmd_web(args: argparse.Namespace) -> int:
+    config = cfg.Config()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr web: {exc}", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    store = JournalStore(state_dir.state_dir())
+
+    def provider() -> dict:
+        return status.assemble_sessions(store.scan().entries, boot, probe)
+
+    # Host allowlist: loopback + this host's name + tailnet suffix. (config
+    # extras arrive with the TOML config loader.)
+    allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
+    handler = make_web_handler(provider, allowed, (".ts.net",))
+
+    # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    print(f"crr web: serving on http://127.0.0.1:{args.port}/ (loopback only)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 

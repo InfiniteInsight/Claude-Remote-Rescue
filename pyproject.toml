@@ -34,6 +34,7 @@ include = ["crr*"]
 
 [tool.setuptools.package-data]
 "crr.shims" = ["crr.bash", "crr.zsh", "crr.fish"]
+"crr.core" = ["page.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
