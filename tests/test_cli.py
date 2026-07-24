@@ -96,6 +96,17 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert not (tmp_path / ".config" / "systemd").exists()
 
 
+def test_doctor_reports_install_health(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "boot-identity adapter" in out
+    assert "tmux" in out
+    assert "state dir" in out
+    assert "crr-revive.timer" in out  # names the watchdog unit to install
+
+
 def test_config_effective_lists_every_key_with_origin(capsys):
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out

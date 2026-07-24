@@ -1,6 +1,9 @@
 # Claude-Remote-Rescue — Design
 
-Status: founding design (2026-07-22). No code yet; see ROADMAP.md.
+Status: Phase 1 implemented for headless Linux (see README.md and
+ROADMAP.md). This document remains the design of record; the maturity of
+each piece — built/tested vs. hardware-verified vs. deferred — is
+calibrated in the README's Status section, not here.
 
 ## Mission
 
