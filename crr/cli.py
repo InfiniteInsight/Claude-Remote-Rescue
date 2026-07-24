@@ -28,10 +28,12 @@ from typing import Callable, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
+from crr.adapters import diagnostics as diag_source
 from crr.adapters import process_probe, state_dir, systemd, tmux, transcript_source
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
+from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
@@ -83,6 +85,10 @@ def _build_parser() -> argparse.ArgumentParser:
     reo = sub.add_parser("reopen", help="revive one specific crashed session now")
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
+
+    diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
+    diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
+    diag.set_defaults(func=_cmd_diagnose)
 
     w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
     w.add_argument("--port", type=int, default=8377)
@@ -438,6 +444,7 @@ def make_web_handler(
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
+    diagnostics_provider: Callable[[], dict] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -454,6 +461,7 @@ def make_web_handler(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
                 action_provider=action_provider,
+                diagnostics_provider=diagnostics_provider,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
             )
@@ -474,6 +482,64 @@ def make_web_handler(
             pass
 
     return _Handler
+
+
+def gather_diagnostics(config: cfg.Config) -> dict:
+    """Query journald per-source, degrading (never aborting) on failure.
+
+    Timeout-guarded and lazy (never on the poll path). Returns the
+    contract-valid /api/diagnostics payload; failed sources are listed in
+    ``degraded`` rather than silently emitting empty results.
+    """
+    timeout = config.get("interop_timeout_seconds")
+    lookback = config.get("diagnose_lookback_boots")
+    event_cap = config.get("diagnose_event_cap")
+    line_cap = config.get("diagnose_line_cap")
+    boots: list = []
+    prev: list = []
+    events: list = []
+    degraded: list = []
+
+    if not diag_source.available():
+        degraded = ["boots", "prev_boot_errors", "host_events"]
+    else:
+        _errs = (subprocess.SubprocessError, OSError, RuntimeError, ValueError)
+        try:
+            boots = diag_source.list_boots(event_cap, timeout)
+        except _errs:
+            degraded.append("boots")
+        try:
+            prev = diag_source.prev_boot_errors(lookback, line_cap, timeout)
+        except _errs:
+            degraded.append("prev_boot_errors")
+        try:
+            events = diag_source.host_events(lookback, event_cap, timeout)
+        except _errs:
+            degraded.append("host_events")
+
+    return diag_core.build_payload(
+        source="journald", boots=boots, prev_boot_errors=prev,
+        host_events=events, degraded=degraded,
+    )
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    payload = gather_diagnostics(cfg.Config())
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if payload["degraded"]:
+        print(f"(degraded sources: {', '.join(payload['degraded'])})", file=sys.stderr)
+    print(f"boots on record: {len(payload['boots'])}")
+    events = payload["host_events"]
+    if events:
+        print("host death / shutdown / OOM events in the previous boot:")
+        for line in events:
+            print(f"  {line}")
+    else:
+        print("no OOM / shutdown / watchdog events found in the previous boot")
+    print(f"previous-boot errors: {len(payload['prev_boot_errors'])} (use --json to see them)")
+    return 0
 
 
 def _cmd_web(args: argparse.Namespace) -> int:
@@ -509,10 +575,15 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 return False, f"unknown op {op}"
         return res.ok, res.message
 
+    def diagnostics_provider() -> dict:
+        return gather_diagnostics(config)  # lazy: only on panel open, never on poll
+
     # Host allowlist: loopback + this host's name + tailnet suffix. (config
     # extras arrive with the TOML config loader.)
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
-    handler = make_web_handler(provider, allowed, (".ts.net",), action_provider)
+    handler = make_web_handler(
+        provider, allowed, (".ts.net",), action_provider, diagnostics_provider
+    )
 
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)

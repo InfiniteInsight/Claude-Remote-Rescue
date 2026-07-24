@@ -101,6 +101,25 @@ def test_get_version_matches_page_version():
     assert json.loads(resp.body) == {"version": web.PAGE_VERSION}
 
 
+def test_diagnostics_endpoint_uses_provider_lazily():
+    calls = []
+    def diag():
+        calls.append(1)
+        return {"contract": 1, "source": "journald", "degraded": []}
+    resp = web.handle_request(
+        "GET", "/api/diagnostics", {"Host": "localhost"},
+        sessions_provider=_payload, diagnostics_provider=diag,
+        allowed_hosts=ALLOWED, allowed_suffixes=SUFFIXES,
+    )
+    assert resp.status == 200
+    assert json.loads(resp.body)["source"] == "journald"
+    assert calls == [1]  # only called when the endpoint is hit
+
+
+def test_diagnostics_endpoint_404_without_provider():
+    assert _handle(path="/api/diagnostics").status == 404
+
+
 def test_unknown_path_is_404():
     assert _handle(path="/nope").status == 404
 
