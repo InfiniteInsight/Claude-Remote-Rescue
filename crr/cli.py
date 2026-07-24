@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from datetime import datetime, timezone
+from importlib import resources
 from typing import Sequence
 
 from crr import __version__
@@ -71,7 +74,45 @@ def _build_parser() -> argparse.ArgumentParser:
     dereg.add_argument("--pid", type=int, required=True)
     dereg.set_defaults(func=_cmd_deregister)
 
+    shim = sub.add_parser(
+        "shim",
+        help="print the shell shim to source from your rc file",
+    )
+    shim.add_argument("shell", choices=SHIM_SHELLS)
+    shim.add_argument(
+        "--crr-bin",
+        default=None,
+        help="absolute path to bake into the shim (default: this crr binary)",
+    )
+    shim.set_defaults(func=_cmd_shim)
+
     return parser
+
+
+# Shells that have a shim template today. bash first (Phase 1 headless);
+# zsh + fish follow. Keep in sync with the crr/shims/crr.<shell> files.
+SHIM_SHELLS = ("bash",)
+
+
+def _resolve_crr_bin(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    # Prefer the absolute path of the crr that is generating the shim, so
+    # the baked path points at exactly this install ([lesson: PATH
+    # poisoning] — never a bare PATH lookup at shim runtime).
+    argv0 = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.basename(argv0).startswith("crr") and os.path.exists(argv0):
+        return argv0
+    found = shutil.which("crr")
+    return found or argv0 or "crr"
+
+
+def _cmd_shim(args: argparse.Namespace) -> int:
+    template = resources.files("crr.shims").joinpath(f"crr.{args.shell}").read_text(
+        encoding="utf-8"
+    )
+    print(template.replace("@CRR_BIN@", _resolve_crr_bin(args.crr_bin)), end="")
+    return 0
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

@@ -32,6 +32,9 @@ Homepage = "https://github.com/InfiniteInsight/Claude-Remote-Rescue"
 [tool.setuptools.packages.find]
 include = ["crr*"]
 
+[tool.setuptools.package-data]
+"crr.shims" = ["crr.bash", "crr.zsh", "crr.fish"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
