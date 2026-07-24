@@ -39,3 +39,24 @@ trap '_crr_preexec' DEBUG
 # Deregister on shell exit.
 _crr_deregister() { _crr deregister --pid "$$" >/dev/null; }
 trap '_crr_deregister' EXIT
+
+# claude() wrapper: on a fresh launch, inject a --session-id so the session
+# is identifiable and journal it (sid_source=injected). On resume/continue
+# or an explicit --session-id, pass through untouched (guessed-sid
+# re-verification is a later increment). On clean exit, clear the claude
+# field; a crash skips that, leaving the sid for the reviver.
+claude() {
+  case " $* " in
+    *" --resume "*|*" -r "*|*" --continue "*|*" -c "*|*" --session-id "*)
+      command claude "$@" ;;
+    *)
+      local _crr_sid
+      _crr_sid="$(_crr claude-launch --pid "$$")"
+      if [ -n "$_crr_sid" ]; then
+        command claude --session-id "$_crr_sid" "$@"
+      else
+        command claude "$@"
+      fi ;;
+  esac
+  _crr claude-exit --pid "$$"
+}

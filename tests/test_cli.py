@@ -127,3 +127,55 @@ def test_deregister_removes_and_is_idempotent(tmp_path, monkeypatch):
     assert cli.main(["deregister", "--pid", "4242"]) == 0
     assert not store.tabs_dir.joinpath("4242.json").exists()
     assert cli.main(["deregister", "--pid", "4242"]) == 0  # second call: no error
+
+
+# --- claude() wrapper support: claude-launch / claude-exit ---------------
+
+def test_claude_launch_injects_sid_and_journals_it(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    rc = cli.main(["claude-launch", "--pid", "4242"])
+    sid = capsys.readouterr().out.strip()
+    assert rc == 0
+    assert len(sid) == 36 and sid.count("-") == 4  # a uuid was printed
+    claude = store.read(4242)["claude"]
+    assert claude["session_id"] == sid
+    assert claude["sid_source"] == "injected"  # wrapper-generated => certain
+    assert claude["started"]
+
+
+def test_claude_launch_honors_explicit_session_id(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    given = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    cli.main(["claude-launch", "--pid", "4242", "--session-id", given])
+    assert capsys.readouterr().out.strip() == given
+    assert store.read(4242)["claude"]["session_id"] == given
+
+
+def test_claude_launch_missing_entry_still_prints_a_sid(tmp_path, monkeypatch, capsys):
+    # Shell wasn't registered: best-effort, claude must still get a sid.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["claude-launch", "--pid", "999"])
+    sid = capsys.readouterr().out.strip()
+    assert rc == 0 and len(sid) == 36
+
+
+def test_claude_exit_clears_claude_field(tmp_path, monkeypatch, capsys):
+    # Clean exit clears claude -> a live shell with no active session. A
+    # crash would skip this, leaving claude set for the reviver.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    cli.main(["claude-launch", "--pid", "4242"])
+    capsys.readouterr()
+    assert store.read(4242)["claude"] is not None
+    assert cli.main(["claude-exit", "--pid", "4242"]) == 0
+    assert store.read(4242)["claude"] is None
+
+
+def test_claude_exit_missing_entry_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    assert cli.main(["claude-exit", "--pid", "999"]) == 0

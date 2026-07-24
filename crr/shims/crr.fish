@@ -38,3 +38,23 @@ end
 function _crr_deregister --on-event fish_exit
     _crr deregister --pid $fish_pid >/dev/null
 end
+
+# claude() wrapper: inject + journal a --session-id on fresh launches
+# (sid_source=injected); pass resume/continue/explicit-sid through
+# untouched; clear the claude field on clean exit (a crash leaves it set
+# for the reviver).
+function claude
+    if contains -- --resume $argv; or contains -- -r $argv; \
+        or contains -- --continue $argv; or contains -- -c $argv; \
+        or contains -- --session-id $argv
+        command claude $argv
+    else
+        set -l _crr_sid (_crr claude-launch --pid $fish_pid)
+        if test -n "$_crr_sid"
+            command claude --session-id $_crr_sid $argv
+        else
+            command claude $argv
+        end
+    end
+    _crr claude-exit --pid $fish_pid
+end

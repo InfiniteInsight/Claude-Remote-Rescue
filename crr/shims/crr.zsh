@@ -38,3 +38,23 @@ else
   preexec_functions+=(_crr_preexec)
   zshexit_functions+=(_crr_deregister)
 fi
+
+# claude() wrapper: inject + journal a --session-id on fresh launches
+# (sid_source=injected); pass resume/continue/explicit-sid through
+# untouched; clear the claude field on clean exit (a crash leaves it set
+# for the reviver).
+claude() {
+  case " $* " in
+    *" --resume "*|*" -r "*|*" --continue "*|*" -c "*|*" --session-id "*)
+      command claude "$@" ;;
+    *)
+      local _crr_sid
+      _crr_sid="$(_crr claude-launch --pid "$$")"
+      if [ -n "$_crr_sid" ]; then
+        command claude --session-id "$_crr_sid" "$@"
+      else
+        command claude "$@"
+      fi ;;
+  esac
+  _crr claude-exit --pid "$$"
+}

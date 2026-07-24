@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import sys
+import uuid
 from datetime import datetime, timezone
 from importlib import resources
 from typing import Sequence
@@ -73,6 +74,21 @@ def _build_parser() -> argparse.ArgumentParser:
     dereg = sub.add_parser("deregister", help="[shim] remove a shell's journal entry")
     dereg.add_argument("--pid", type=int, required=True)
     dereg.set_defaults(func=_cmd_deregister)
+
+    cl = sub.add_parser(
+        "claude-launch",
+        help="[shim] journal a fresh claude session and print its session-id",
+    )
+    cl.add_argument("--pid", type=int, required=True)
+    cl.add_argument("--session-id", default=None, help="use this sid instead of generating one")
+    cl.set_defaults(func=_cmd_claude_launch)
+
+    ce = sub.add_parser(
+        "claude-exit",
+        help="[shim] mark a shell's claude session ended (clean exit)",
+    )
+    ce.add_argument("--pid", type=int, required=True)
+    ce.set_defaults(func=_cmd_claude_exit)
 
     shim = sub.add_parser(
         "shim",
@@ -205,6 +221,42 @@ def _cmd_last_cmd(args: argparse.Namespace) -> int:
 
 def _cmd_deregister(args: argparse.Namespace) -> int:
     JournalStore(state_dir.state_dir()).remove(args.pid)
+    return 0
+
+
+def _cmd_claude_launch(args: argparse.Namespace) -> int:
+    # A wrapper-supplied or freshly generated sid is `injected` — certain,
+    # never `guessed`. Print it (for the shim to pass to claude) even if the
+    # shell was never registered, so claude still launches identifiably.
+    sid = args.session_id or str(uuid.uuid4())
+    store = JournalStore(state_dir.state_dir())
+    try:
+        entry = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        entry = None
+    if entry is not None:
+        entry["claude"] = {
+            "session_id": sid,
+            "sid_source": "injected",
+            "started": _now(),
+        }
+        entry["updated"] = _now()
+        store.write(entry)
+    print(sid)
+    return 0
+
+
+def _cmd_claude_exit(args: argparse.Namespace) -> int:
+    # Clean exit: clear the claude field. A crash skips this call, leaving
+    # claude set so the reviver knows the shell died mid-session.
+    store = JournalStore(state_dir.state_dir())
+    try:
+        entry = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        return 0
+    entry["claude"] = None
+    entry["updated"] = _now()
+    store.write(entry)
     return 0
 
 

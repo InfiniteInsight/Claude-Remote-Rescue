@@ -103,6 +103,72 @@ def test_shim_deregisters_on_exit(shell, tmp_path, capsys):
     assert not (state / "crr" / "tabs" / f"{recorded}.json").exists()
 
 
+def _fake_claude_bindir(tmp_path) -> Path:
+    """A fake `claude` on PATH that records its argv and exits 0.
+
+    The DESIGN fake-tab pattern: exercise the wrapper without a real
+    claude. `command claude` in the wrapper resolves to this.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "claude"
+    fake.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$CRR_TEST_RECORD\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return bindir
+
+
+def _run_with_fake_claude(shell, script, state_dir, bindir, record) -> subprocess.CompletedProcess:
+    env = {
+        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "HOME": str(state_dir),
+        "XDG_STATE_HOME": str(state_dir),
+        "CRR_TEST_RECORD": str(record),
+    }
+    return subprocess.run(
+        _SHELLS[shell]["argv"] + [script],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_injects_session_id_on_fresh_launch(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_bindir(tmp_path)
+    record = tmp_path / "argv"
+    script = f'source "{shim}"\nclaude my-prompt\n'
+    result = _run_with_fake_claude(shell, script, state, bindir, record)
+    assert result.returncode == 0, result.stderr
+
+    argv = record.read_text().split("\n")
+    assert "--session-id" in argv
+    sid = argv[argv.index("--session-id") + 1]
+    assert len(sid) == 36 and sid.count("-") == 4  # a real uuid was injected
+    assert "my-prompt" in argv  # user args passed through
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_passes_resume_through_untouched(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_bindir(tmp_path)
+    record = tmp_path / "argv"
+    script = f'source "{shim}"\nclaude --resume abc123\n'
+    result = _run_with_fake_claude(shell, script, state, bindir, record)
+    assert result.returncode == 0, result.stderr
+
+    argv = record.read_text().split("\n")
+    assert "--session-id" not in argv  # resume must not get a fresh sid
+    assert "--resume" in argv and "abc123" in argv
+
+
 def test_bash_shim_records_last_cmd(tmp_path, capsys):
     if not _installed("bash"):
         pytest.skip("bash not installed")
