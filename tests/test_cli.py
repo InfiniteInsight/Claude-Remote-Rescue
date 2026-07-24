@@ -138,7 +138,7 @@ def _live_entry(pid, boot_id):
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
 def test_status_json_reports_live_process(tmp_path, monkeypatch, capsys):
-    boot_id = boot_identity.LinuxBootIdentity().current()
+    boot_id = boot_identity.detect().current()
     store = JournalStore(tmp_path)
     store.write(_live_entry(pid=os.getpid(), boot_id=boot_id))
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
@@ -187,7 +187,7 @@ def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
     entry = JournalStore(tmp_path).read(4242)
     assert entry["claude"] is None
     assert entry["cwd"] == "/home/u/proj"
-    assert entry["boot_id"] == boot_identity.LinuxBootIdentity().current()
+    assert entry["boot_id"] == boot_identity.detect().current()
 
 
 def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
@@ -222,7 +222,7 @@ def test_register_same_boot_preserves_claude_in_place(tmp_path, monkeypatch):
     # duplicate revival); do NOT archive.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
-    boot = boot_identity.LinuxBootIdentity().current()
+    boot = boot_identity.detect().current()
     sid = "bbbbbbbb-2222-4222-8222-222222222222"
     store.write(new_entry(
         pid=2000, cwd="/p", host="tmux", shell="zsh",
@@ -398,7 +398,7 @@ def test_dismiss_archives_crashed_claude_session(tmp_path, monkeypatch):
 def test_dismiss_refuses_a_live_session(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
-    boot = boot_identity.LinuxBootIdentity().current()
+    boot = boot_identity.detect().current()
     store.write(new_entry(  # same boot + our live pid => not crashed
         pid=os.getpid(), cwd="/p", host="tmux", shell="zsh", boot_id=boot,
         now="2026-07-24T00:00:00Z", claude=_claude_field(),
