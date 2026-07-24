@@ -34,6 +34,7 @@ def test_audit_floor_priors_are_present():
         "last_prompt_display_cap",
         "watcher_backoff_count",
         "watcher_cooldown_seconds",
+        "watchdog_interval_seconds",
     }
     assert floor <= set(cfg.DEFAULTS)
 

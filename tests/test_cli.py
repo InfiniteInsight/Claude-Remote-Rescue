@@ -22,6 +22,55 @@ from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
+def test_web_server_serves_sessions_and_enforces_host(tmp_path):
+    # Real socket + real HTTP, fake provider (no platform coupling). Proves
+    # the http.server adapter wires to the pure handler end to end.
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    payload = {"contract": 1, "sessions": [{"pid": 7, "state": "ghost"}]}
+    handler = cli.make_web_handler(lambda: payload, {"localhost", "127.0.0.1"}, (".ts.net",))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        # Allowed host -> 200 + payload + no-store.
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "localhost"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200
+            assert r.headers["Cache-Control"] == "no-store"
+            assert json.loads(r.read())["sessions"][0]["pid"] == 7
+
+        # Disallowed Host header -> 403 (DNS-rebinding defense).
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "evil.com"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected 403"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd"])  # default: print, no --install
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "crr-revive.service" in out and "crr-revive.timer" in out
+    assert "ExecStart=/opt/crr/bin/crr revive" in out
+    # XDG_STATE_HOME baked as the parent of the resolved state dir.
+    assert f"Environment=XDG_STATE_HOME={tmp_path / 'state'}" in out
+    # Print mode must not touch the user's systemd dir.
+    assert not (tmp_path / ".config" / "systemd").exists()
+
+
 def test_config_effective_lists_every_key_with_origin(capsys):
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out

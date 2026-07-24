@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude-Remote-Rescue</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.4 system-ui, -apple-system, sans-serif;
+    background: #0f1115; color: #e6e6e6;
+  }
+  header {
+    padding: 12px 16px; border-bottom: 1px solid #262b36;
+    display: flex; align-items: baseline; gap: 12px; position: sticky; top: 0;
+    background: #0f1115;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .meta { color: #8a93a2; font-size: 12px; }
+  #key { display: flex; gap: 10px; flex-wrap: wrap; padding: 8px 16px; font-size: 12px; color: #8a93a2; }
+  #key span::before {
+    content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 5px; vertical-align: middle;
+  }
+  .k-live::before { background: #46c26a; }
+  .k-ghost::before { background: #e0a53b; }
+  .k-crashed::before { background: #e05252; }
+  #sessions { padding: 8px 16px 40px; display: grid; gap: 10px; }
+  .card {
+    border: 1px solid #262b36; border-radius: 10px; padding: 12px 14px; background: #161a22;
+  }
+  .card.dup { border-left: 3px solid #6f7cf5; }
+  .card .top { display: flex; align-items: center; gap: 10px; }
+  .id { font-family: ui-monospace, monospace; font-size: 13px; color: #b9c1cf; }
+  .badge {
+    margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 8px; border-radius: 999px; font-weight: 600;
+  }
+  .badge.live { background: #123a22; color: #46c26a; }
+  .badge.ghost { background: #3a2f12; color: #e0a53b; }
+  .badge.crashed { background: #3a1616; color: #e05252; }
+  .cwd { color: #8a93a2; font-size: 12px; margin-top: 6px; font-family: ui-monospace, monospace; word-break: break-all; }
+  .prompt { margin-top: 6px; color: #cdd3dd; font-size: 13px; }
+  .prompt:empty { display: none; }
+  .src { font-size: 11px; color: #6b7280; margin-left: 6px; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px;
+    border: 1px solid #2f3745; background: #1c222c; color: #cdd3dd; cursor: pointer;
+  }
+  button:hover { background: #232b37; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.danger { color: #e0857f; }
+  #empty, #stale { color: #8a93a2; padding: 20px 16px; }
+  #stale { color: #e0a53b; display: none; }
+  #notice {
+    position: sticky; top: 49px; margin: 0 16px; padding: 8px 12px; border-radius: 8px;
+    background: #3a2f12; color: #e0a53b; font-size: 13px; display: none;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Claude-Remote-Rescue</h1>
+  <span class="meta" id="count"></span>
+</header>
+<div id="key">
+  <span class="k-live">live</span>
+  <span class="k-ghost">ghost</span>
+  <span class="k-crashed">crashed</span>
+</div>
+<div id="stale">A newer version is available — reloading…</div>
+<div id="notice"></div>
+<div id="sessions"></div>
+<div id="empty" style="display:none">No journaled sessions.</div>
+
+<script>
+"use strict";
+// Baked at serve time; compared against /api/version to self-heal a cached page.
+var PAGE_VERSION = "@PAGE_VERSION@";
+var POLL_MS = 5000;
+var VERSION_MS = 30000;
+
+function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
+// Untrusted fields (cwd, last_prompt, ids) reach the DOM via textContent ONLY.
+function renderCard(s) {
+  var card = el("div", "card" + (s.duplicate_group ? " dup" : ""));
+  var top = el("div", "top");
+  var id = el("span", "id");
+  id.textContent = "#" + s.pid + " · " + s.sid8;
+  var src = el("span", "src");
+  src.textContent = s.sid_source;
+  id.appendChild(src);
+  top.appendChild(id);
+  var badge = el("span", "badge " + s.state);
+  badge.textContent = s.state;
+  top.appendChild(badge);
+  card.appendChild(top);
+  var cwd = el("div", "cwd");
+  cwd.textContent = s.cwd;
+  card.appendChild(cwd);
+  var prompt = el("div", "prompt");
+  prompt.textContent = s.last_prompt || "";
+  card.appendChild(prompt);
+
+  var actions = el("div", "actions");
+  function addBtn(label, op, danger) {
+    var b = el("button", danger ? "danger" : "");
+    b.textContent = label;
+    b.addEventListener("click", function () { action(op, s.pid, b); });
+    actions.appendChild(b);
+  }
+  if (s.state === "crashed") {
+    addBtn("Reopen", "reopen", false);
+    addBtn("Dismiss", "dismiss", false);
+  }
+  addBtn("Remove", "remove", true);
+  card.appendChild(actions);
+  return card;
+}
+
+function showNotice(text) {
+  var n = document.getElementById("notice");
+  n.textContent = text;
+  n.style.display = "block";
+  setTimeout(function () { n.style.display = "none"; }, 3000);
+}
+
+function action(op, pid, btn) {
+  btn.disabled = true;
+  fetch("/api/action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ op: op, pid: pid })
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { showNotice(j.message || "action failed"); }
+      pollSessions();
+    })
+    .catch(function () { showNotice("request failed"); })
+    .finally(function () { btn.disabled = false; });
+}
+
+function render(payload) {
+  var list = document.getElementById("sessions");
+  var empty = document.getElementById("empty");
+  list.textContent = "";
+  var sessions = (payload && payload.sessions) || [];
+  document.getElementById("count").textContent =
+    sessions.length + (sessions.length === 1 ? " session" : " sessions");
+  empty.style.display = sessions.length ? "none" : "block";
+  for (var i = 0; i < sessions.length; i++) {
+    list.appendChild(renderCard(sessions[i]));
+  }
+}
+
+function pollSessions() {
+  fetch("/api/sessions", { headers: { "Accept": "application/json" } })
+    .then(function (r) { return r.json(); })
+    .then(render)
+    .catch(function () { /* transient; next tick retries */ });
+}
+
+function pollVersion() {
+  fetch("/api/version")
+    .then(function (r) { return r.json(); })
+    .then(function (v) {
+      if (String(v.version) !== PAGE_VERSION) {
+        document.getElementById("stale").style.display = "block";
+        setTimeout(function () { location.reload(); }, 800);
+      }
+    })
+    .catch(function () {});
+}
+
+pollSessions();
+pollVersion();
+setInterval(pollSessions, POLL_MS);
+setInterval(pollVersion, VERSION_MS);
+</script>
+</body>
+</html>

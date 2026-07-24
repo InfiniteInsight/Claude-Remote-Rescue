@@ -29,8 +29,9 @@ CONFIG_DEFAULTS_VERSION = 1
 # caught (or a peer of one). Value is the versioned default.
 DEFAULTS: dict[str, Any] = {
     # watchdog / revival
-    "zombie_strikes": 3,          # strikes before a re-dying session is archived
-    "watcher_backoff_count": 5,   # consecutive revival attempts before backing off
+    "zombie_strikes": 3,             # strikes before a re-dying session is archived
+    "watchdog_interval_seconds": 30, # how often the systemd timer sweeps for revivals
+    "watcher_backoff_count": 5,      # consecutive revival attempts before backing off
     "watcher_cooldown_seconds": 60,
     # session operations
     "close_grace_seconds": 5,     # wait after a polite close before force
