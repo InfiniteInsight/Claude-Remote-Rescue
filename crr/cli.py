@@ -28,7 +28,7 @@ from typing import Callable, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
-from crr.adapters import process_probe, state_dir, systemd, tmux
+from crr.adapters import process_probe, state_dir, systemd, tmux, transcript_source
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
@@ -38,6 +38,16 @@ from crr.core.journal import JournalStore, new_entry
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _last_prompt_extractor(config: cfg.Config):
+    """A last_prompt(entry)->str closure for status.assemble_sessions.
+
+    Only called for claude-bearing entries (assemble_sessions filters the
+    rest), so entry["claude"] is always present here.
+    """
+    cap = config.get("last_prompt_display_cap")
+    return lambda entry: transcript_source.read_last_prompt(entry["claude"]["session_id"], cap)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -199,7 +209,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
 
     scan = store.scan()
-    payload = status.assemble_sessions(scan.entries, boot, probe)
+    payload = status.assemble_sessions(
+        scan.entries, boot, probe, last_prompt=_last_prompt_extractor(config)
+    )
     # Validate our own output before emitting it (the P7 validator doubles
     # as a debug guard — the server will run the same check).
     contracts.validate_sessions_payload(payload)
@@ -477,8 +489,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     archive = ArchiveStore(sd)
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
 
+    extract = _last_prompt_extractor(config)
+
     def provider() -> dict:
-        return status.assemble_sessions(store.scan().entries, boot, probe)
+        return status.assemble_sessions(store.scan().entries, boot, probe, last_prompt=extract)
 
     def action_provider(op: str, pid: int) -> tuple[bool, str]:
         # Same classifier-gated ops the CLI uses — one implementation — and
