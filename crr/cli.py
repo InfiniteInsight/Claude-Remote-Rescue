@@ -5,9 +5,10 @@ This is the ONE module allowed to import both ``crr.core`` and
 is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
-Phase 1 (in progress) adds ``status --json`` and ``config --effective``
-on the shared core. The remaining session operations (kick/close/reopen/
-dismiss/remove/diagnose) and the web dashboard follow.
+Phase 1 (headless Linux) is implemented: status, revive, session ops
+(reopen/dismiss/remove), diagnose, gc, the web dashboard, the systemd
+watchdog, and the shim-facing hooks. kick/close (which signal live
+processes) are deferred until revival is proven on real hardware.
 """
 
 from __future__ import annotations
@@ -205,19 +206,68 @@ def _cmd_shim(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check(label: str, ok: bool, detail: str = "") -> None:
+    mark = "ok  " if ok else "WARN"
+    print(f"  [{mark}] {label}" + (f" — {detail}" if detail else ""))
+
+
 def _cmd_doctor(_args: argparse.Namespace) -> int:
+    """Install-health checklist. Read-only; never changes anything."""
     print(f"crr {__version__}")
     print(
         "contracts: journal v"
-        f"{contracts.JOURNAL_SCHEMA_VERSION}, "
-        f"sessions v{contracts.SESSIONS_CONTRACT_VERSION}, "
+        f"{contracts.JOURNAL_SCHEMA_VERSION}, sessions v{contracts.SESSIONS_CONTRACT_VERSION}, "
         f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}"
     )
+
+    # Platform integration.
     try:
         adapter = boot_identity.detect()
-        print(f"boot-identity adapter: {type(adapter).__name__}")
+        _check("boot-identity adapter", True, type(adapter).__name__)
     except NotImplementedError as exc:
-        print(f"boot-identity adapter: unavailable ({exc})")
+        _check("boot-identity adapter", False, str(exc))
+    _check("tmux (revival substrate)", shutil.which("tmux") is not None,
+           shutil.which("tmux") or "MISSING — revival unavailable")
+    _check("journalctl (diagnose)", shutil.which("journalctl") is not None,
+           "" if shutil.which("journalctl") else "absent — diagnose degrades")
+
+    # State.
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+    scan = store.scan()
+    cards = [e for e in scan.entries if e.get("claude") is not None]
+    _check("state dir", sd.exists(), str(sd))
+    print(f"         {len(scan.entries)} shell(s) journaled, {len(cards)} with a claude "
+          f"session, {len(archive.scan().records)} archived")
+    for name, reason in scan.problems:
+        _check(f"journal file {name}", False, reason)
+
+    # Config.
+    toml_path = sd / "config.toml"
+    if toml_path.is_file():
+        try:
+            cfg.Config(cfg.load_toml_overrides(toml_path))
+            _check("config.toml", True, str(toml_path))
+        except (cfg.ConfigError, ValueError, OSError) as exc:
+            _check("config.toml", False, f"{toml_path}: {exc}")
+    else:
+        print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
+
+    # systemd units (installed? enabled?).
+    ud = systemd.unit_dir(Path.home())
+    for unit in (systemd.TIMER_NAME, systemd.WEB_SERVICE_NAME):
+        installed = (ud / unit).is_file()
+        enabled = ""
+        if installed and shutil.which("systemctl"):
+            try:
+                r = subprocess.run(["systemctl", "--user", "is-enabled", unit],
+                                   capture_output=True, text=True, timeout=5)
+                enabled = r.stdout.strip() or r.stderr.strip()
+            except (subprocess.SubprocessError, OSError):
+                enabled = "unknown"
+        _check(f"unit {unit}", installed,
+               f"{'enabled: ' + enabled if installed else 'not installed — run crr systemd --install'}")
     return 0
 
 
