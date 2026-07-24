@@ -141,11 +141,14 @@ def validate_journal_entry(entry: Any) -> None:
     if entry["tmux_session"] is not None:
         _require_type(entry["tmux_session"], str, "journal 'tmux_session'")
 
-    claude = _require_mapping(entry["claude"], "journal 'claude'")
-    _require_exact_keys(claude, JOURNAL_CLAUDE_KEYS, "journal 'claude'")
-    _require_type(claude["session_id"], str, "journal 'claude.session_id'")
-    _require_enum(claude["sid_source"], SID_SOURCES, "journal 'claude.sid_source'")
-    _require_type(claude["started"], str, "journal 'claude.started'")
+    # claude is nullable: a shell registers at start, before any claude
+    # session exists (None). Once present it must be fully formed.
+    if entry["claude"] is not None:
+        claude = _require_mapping(entry["claude"], "journal 'claude'")
+        _require_exact_keys(claude, JOURNAL_CLAUDE_KEYS, "journal 'claude'")
+        _require_type(claude["session_id"], str, "journal 'claude.session_id'")
+        _require_enum(claude["sid_source"], SID_SOURCES, "journal 'claude.sid_source'")
+        _require_type(claude["started"], str, "journal 'claude.started'")
 
 
 # --------------------------------------------------------------------------

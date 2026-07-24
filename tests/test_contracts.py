@@ -128,6 +128,23 @@ def test_journal_claude_missing_key_rejected():
         contracts.validate_journal_entry(e)
 
 
+def test_journal_claude_may_be_null():
+    # A shell registers at start, before any claude launches: claude=null
+    # is the honest "no rescuable session yet" state.
+    e = _journal_entry()
+    e["claude"] = None
+    contracts.validate_journal_entry(e)  # must not raise
+
+
+def test_journal_claude_missing_key_still_rejected_when_present():
+    # Nullable does not mean "anything goes" — a partial claude object is
+    # still invalid.
+    e = _journal_entry()
+    del e["claude"]["sid_source"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
 def test_journal_pid_must_be_int():
     e = _journal_entry()
     e["pid"] = "12345"
