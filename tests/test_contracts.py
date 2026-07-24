@@ -33,6 +33,7 @@ def _journal_entry():
         },
         "last_cmd": "claude",
         "tmux_session": None,
+        "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
     }
 
@@ -148,6 +149,20 @@ def test_journal_claude_missing_key_still_rejected_when_present():
 def test_journal_pid_must_be_int():
     e = _journal_entry()
     e["pid"] = "12345"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_revive_strikes_required_and_int():
+    e = _journal_entry()
+    del e["revive_strikes"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_revive_strikes_rejects_non_int():
+    e = _journal_entry()
+    e["revive_strikes"] = "3"
     with pytest.raises(contracts.ContractError):
         contracts.validate_journal_entry(e)
 

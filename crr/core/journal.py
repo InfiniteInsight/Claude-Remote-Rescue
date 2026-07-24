@@ -32,6 +32,7 @@ def new_entry(
     now: str,
     last_cmd: str = "",
     tmux_session: str | None = None,
+    revive_strikes: int = 0,
     claude: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a schema-v1 journal entry, validated before it is returned.
@@ -51,6 +52,7 @@ def new_entry(
         "claude": dict(claude) if claude is not None else None,
         "last_cmd": last_cmd,
         "tmux_session": tmux_session,
+        "revive_strikes": revive_strikes,
         "updated": now,
     }
     contracts.validate_journal_entry(entry)

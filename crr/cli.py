@@ -24,9 +24,9 @@ from typing import Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
-from crr.adapters import process_probe, state_dir
+from crr.adapters import process_probe, state_dir, tmux
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, status
+from crr.core import contracts, reviver, status
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -48,6 +48,12 @@ def _build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="list journaled sessions and their state")
     st.add_argument("--json", action="store_true", help="emit the /api/sessions payload")
     st.set_defaults(func=_cmd_status)
+
+    rev = sub.add_parser(
+        "revive",
+        help="revive crashed claude sessions into detached tmux (watchdog action)",
+    )
+    rev.set_defaults(func=_cmd_revive)
 
     conf = sub.add_parser("config", help="inspect configuration")
     conf.add_argument(
@@ -257,6 +263,36 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
     entry["claude"] = None
     entry["updated"] = _now()
     store.write(entry)
+    return 0
+
+
+def _cmd_revive(_args: argparse.Namespace) -> int:
+    config = cfg.Config()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr revive: {exc}", file=sys.stderr)
+        return 2
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr revive: tmux is required for revival but was not found", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    store = JournalStore(state_dir.state_dir())
+
+    scan = store.scan()
+    outcome = reviver.revive_crashed(
+        scan.entries, boot, probe, tmux_spawner, store,
+        max_strikes=config.get("zombie_strikes"),
+        now=_now(),
+    )
+    for name, reason in scan.problems:
+        print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    print(
+        f"revived {len(outcome.revived)}, "
+        f"gave up {len(outcome.gave_up)}, "
+        f"already running {len(outcome.reset)}"
+    )
     return 0
 
 

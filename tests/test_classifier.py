@@ -29,6 +29,7 @@ def _entry(boot_id=_SAME_BOOT, pid=12345):
         },
         "last_cmd": "claude",
         "tmux_session": None,
+        "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
     }
 

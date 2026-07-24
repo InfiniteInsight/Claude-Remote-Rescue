@@ -9,6 +9,8 @@ this way.
 import json
 import os
 import platform
+import shutil
+import subprocess
 
 import pytest
 
@@ -43,6 +45,7 @@ def _live_entry(pid, boot_id):
         },
         "last_cmd": "claude",
         "tmux_session": None,
+        "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
     }
 
@@ -179,3 +182,44 @@ def test_claude_exit_clears_claude_field(tmp_path, monkeypatch, capsys):
 def test_claude_exit_missing_entry_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     assert cli.main(["claude-exit", "--pid", "999"]) == 0
+
+
+# --- revive: crashed claude session -> detached tmux (end to end) ---------
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("tmux") is None,
+    reason="needs Linux boot adapter + tmux",
+)
+def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
+    # Fake claude that stays alive, so the revived session persists.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "claude"
+    fake.write_text("#!/usr/bin/env bash\nexec sleep 300\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    # A different boot_id => classifier crashed; claude set => resumable.
+    store.write(new_entry(
+        pid=4242, cwd=str(tmp_path), host="tmux", shell="zsh",
+        boot_id="00000000-0000-4000-8000-000000000000", now="2026-07-24T00:00:00Z",
+        claude={"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"},
+    ))
+    try:
+        rc = cli.main(["revive"])
+        assert rc == 0
+        entry = store.read(4242)
+        assert entry["tmux_session"] == f"crr-{sid[:8]}"
+        assert entry["revive_strikes"] == 1
+        sessions = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        ).stdout
+        assert f"crr-{sid[:8]}" in sessions
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)

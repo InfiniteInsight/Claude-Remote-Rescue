@@ -46,6 +46,7 @@ JOURNAL_KEYS = (
     "claude",
     "last_cmd",
     "tmux_session",
+    "revive_strikes",
     "updated",
 )
 JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started")
@@ -137,6 +138,7 @@ def validate_journal_entry(entry: Any) -> None:
     _require_enum(entry["shell"], SHELLS, "journal 'shell'")
     _require_type(entry["last_cmd"], str, "journal 'last_cmd'")
     _require_type(entry["updated"], str, "journal 'updated'")
+    _require_type(entry["revive_strikes"], int, "journal 'revive_strikes'")
     # tmux_session is nullable string.
     if entry["tmux_session"] is not None:
         _require_type(entry["tmux_session"], str, "journal 'tmux_session'")
