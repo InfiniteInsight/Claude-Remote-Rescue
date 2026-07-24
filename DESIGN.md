@@ -37,6 +37,14 @@ server already requires it, it removes ccresume's fish+jq dependency wall
 (strangers won't have those), and it makes the core unit-testable with
 pytest. Shims stay dependency-free by shelling out to `crr`.
 
+**Requirement (audit P2 — One-way layering):** the layer direction below is
+machine-enforced from day one, not prose: a committed ruleset file
+(`CLAUDE.md`/`AGENTS.md`) declares it for agent sessions, and a CI check
+(import-linter or equivalent) fails the build on an upward import. The one
+named exception (composition root) is the CLI entry module, which wires
+adapters to the core. ccresume's boundary held by review discipline alone —
+the audit could only verify it by reading.
+
 ```
 ┌─ shell shims (zsh / bash / fish) ──────┐
 │ register · last-cmd · deregister · claude() wrapper
@@ -64,7 +72,7 @@ One JSON file per session, `state_dir/tabs/<pid>.json`, schema v1:
   "cwd": "/home/u/project",
   "host": "tab | tmux | ssh",
   "shell": "zsh | bash | fish",
-  "claude": {"session_id": "…", "started": "…"} ,
+  "claude": {"session_id": "…", "sid_source": "injected | guessed | verified", "started": "…"} ,
   "last_cmd": "…",
   "tmux_session": null,
   "updated": "ISO-8601"
@@ -119,10 +127,16 @@ reboot-recycled pid gets an unrelated process killed.
 - **[lesson: flag files]** Relaunch flags are written only when a kill
   actually lands, cleared at wrapper start; a stale flag silently resumes
   a session the user closed on purpose.
-- Known open problem inherited from ccresume: bare `--resume` (picker)
-  sessions get a *guessed* session id journaled. The wrapper should
-  re-verify the sid after launch (newest transcript mtime match) —
-  design-level fix TBD in Phase 1.
+- **Requirement (audit P3 — Confidence + provenance):** the session id's
+  origin travels with it. `sid_source` is `injected` (wrapper generated
+  it — certain), `guessed` (derived from newest-transcript heuristics for
+  picker/`--continue` resumes — uncertain), or `verified` (a guess later
+  confirmed against the live transcript). The wrapper re-verifies guessed
+  sids after launch and upgrades them; `status --json` carries
+  `sid_source` so the dashboard's duplicate detection can weight
+  `guessed` claims accordingly instead of presenting them as truth.
+  ccresume shipped without this and two tabs journaled the same sid in
+  production (2026-07-21) — the laundering is observed, not theoretical.
 
 ### Reviver
 
@@ -164,6 +178,14 @@ Port of ccresume's single-file stdlib server and page, including:
 - Last-prompt extractor skip-list (tool results, command wrappers,
   task-notifications, system-reminders, compaction continuations) — all
   discovered by real garbage on real cards.
+- **Requirement (audit P7 — Contracted outputs):** the `/api/sessions` and
+  `/api/diagnostics` payloads are versioned contracts, not incidental
+  shapes: a version constant served alongside the data, a canonical key
+  list, and a validator the tests import (the same validator the server
+  can run in a debug mode). The journal file's `"v": 1` is the same rule
+  applied to stored state. ccresume pinned these shapes only behaviorally
+  in tests; a stored entry from an old version was indistinguishable from
+  a current one.
 - Security model (inherited wholesale): bind loopback only; tailnet (or
   user's own proxy) is the auth boundary; Host allowlist = {loopback,
   own hostname, *.ts.net, config extras} with exact-match semantics;
@@ -217,6 +239,20 @@ the recovery state it exists to preserve).
 One TOML file (`config.toml` in the state-dir parent): terminal choice,
 wt/tab profile, archive retention, zombie action, host allowlist extras,
 resume flags. Same shape as ccresume's, extended per-platform.
+
+**Requirement (audit P5 — Injectable priors):** every constant that encodes
+a judgment call is named config with a versioned default — never a magic
+number in logic. The audit's caught set becomes the floor: zombie strike
+count, close/reopen grace windows, diagnose lookback window / event cap /
+line cap / interop timeout, dashboard poll and version-check intervals,
+last-prompt display cap, watcher backoff count and cooldown. New timing or
+threshold decisions join this list at introduction time, not at audit time.
+
+**Requirement (audit P3 — Confidence + provenance, applied to config):**
+`crr config --effective` prints every key with its value AND its origin
+(`configured` vs `default`), so a consumer can always distinguish an
+explicit choice from an assumed one — defaults drive kill decisions, and
+an invisible default is an invisible prior.
 
 ## Performance requirements
 

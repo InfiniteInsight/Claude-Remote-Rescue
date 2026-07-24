@@ -6,7 +6,10 @@ verification on actual hardware before the next begins.
 ## Phase 0 — scaffold (this commit)
 
 Founding docs. Then: Python package skeleton (`crr/`), pytest wiring,
-MIT license, CI stub (ubuntu + macos).
+MIT license, CI stub (ubuntu + macos), and the plumb-line-derived
+guardrails from day one: ruleset file declaring the layer direction,
+import-linter boundary check in CI, contract validators as the first
+test fixtures (see DESIGN.md audit-requirement paragraphs).
 
 ## Phase 1 — core + headless Linux (testbed: the author's SSH server)
 
