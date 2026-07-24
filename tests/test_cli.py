@@ -35,7 +35,7 @@ def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or shutil.which("journalctl") is None,
+    platform.system() not in ("Linux", "Darwin") or shutil.which("journalctl") is None,
     reason="needs Linux journald",
 )
 def test_diagnose_emits_contract_valid_payload_from_journald(capsys):
@@ -136,7 +136,7 @@ def _live_entry(pid, boot_id):
     }
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="boot-identity adapter is Linux-only (Phase 1)")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
 def test_status_json_reports_live_process(tmp_path, monkeypatch, capsys):
     boot_id = boot_identity.LinuxBootIdentity().current()
     store = JournalStore(tmp_path)
@@ -155,7 +155,7 @@ def test_status_json_reports_live_process(tmp_path, monkeypatch, capsys):
     assert card["state"] in ("live", "ghost")
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="boot-identity adapter is Linux-only (Phase 1)")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
 def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsys):
     # An entry from a different boot must classify crashed even though its
     # pid (ours) is alive — the recycled-pid guard, end to end.
@@ -178,7 +178,7 @@ def _seed(store, pid, cwd="/home/u/p", last_cmd=""):
     ))
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")
 def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     rc = cli.main(["register", "--pid", "4242", "--cwd", "/home/u/proj",
@@ -194,7 +194,7 @@ def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
     return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"}
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")
 def test_register_after_reboot_archives_old_claude_session(tmp_path, monkeypatch):
     # A stale entry from before a reboot (different boot_id) carries revival
     # data. Register must preserve it in the archive, not clobber it.
@@ -215,7 +215,7 @@ def test_register_after_reboot_archives_old_claude_session(tmp_path, monkeypatch
     assert rec["entry"]["claude"]["session_id"] == sid
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")
 def test_register_same_boot_preserves_claude_in_place(tmp_path, monkeypatch):
     # Same boot => can't tell an rc re-source from pid reuse. Preserve the
     # claude field (never wipe a possibly-live session, never risk a
@@ -238,7 +238,7 @@ def test_register_same_boot_preserves_claude_in_place(tmp_path, monkeypatch):
     assert archive.scan().records == []  # nothing archived on same boot
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")
 def test_register_over_claude_less_entry_does_not_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
@@ -380,7 +380,7 @@ def test_remove_delists_without_archiving(tmp_path, monkeypatch):
     assert cli.main(["remove", "--pid", "42"]) == 0  # idempotent
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="dismiss classifies (Linux boot adapter)")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="dismiss classifies (needs Linux or macOS boot adapter)")
 def test_dismiss_archives_crashed_claude_session(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
@@ -394,7 +394,7 @@ def test_dismiss_archives_crashed_claude_session(tmp_path, monkeypatch):
     assert archive.read(sid)["reason"] == "dismissed"
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="dismiss classifies (Linux boot adapter)")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="dismiss classifies (needs Linux or macOS boot adapter)")
 def test_dismiss_refuses_a_live_session(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
@@ -409,7 +409,7 @@ def test_dismiss_refuses_a_live_session(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or shutil.which("tmux") is None,
+    platform.system() not in ("Linux", "Darwin") or shutil.which("tmux") is None,
     reason="reopen needs Linux boot adapter + tmux",
 )
 def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
@@ -440,7 +440,7 @@ def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="reopen classifies (Linux boot adapter)")
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="reopen classifies (needs Linux or macOS boot adapter)")
 def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
@@ -452,7 +452,7 @@ def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or shutil.which("tmux") is None,
+    platform.system() not in ("Linux", "Darwin") or shutil.which("tmux") is None,
     reason="needs Linux boot adapter + tmux",
 )
 def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
