@@ -29,6 +29,7 @@ from pathlib import Path
 
 SERVICE_NAME = "crr-revive.service"
 TIMER_NAME = "crr-revive.timer"
+WEB_SERVICE_NAME = "crr-web.service"
 
 # Binaries `crr revive` shells out to (directly or via the revived command).
 SERVICE_BINARIES = ("tmux", "ps", "claude")
@@ -93,29 +94,55 @@ def revive_timer_unit(interval_seconds: int) -> str:
     )
 
 
+def web_service_unit(crr_bin: str, path: str, state_home: str, port: int) -> str:
+    """A long-running dashboard service (loopback; tailnet-served).
+
+    Type=simple + Restart so the dashboard stays up across crashes, and
+    WantedBy=default.target + linger so it survives logout and comes back
+    at (re)boot — the ROADMAP's "dashboard reachable after reboot".
+    """
+    return (
+        "[Unit]\n"
+        "Description=Claude-Remote-Rescue dashboard (loopback; tailnet-served)\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"Environment=PATH={path}\n"
+        f"Environment=XDG_STATE_HOME={state_home}\n"
+        f"ExecStart={crr_bin} web --port {port}\n"
+        "Restart=on-failure\n"
+        "RestartSec=2\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
 def unit_dir(home: Path) -> Path:
     return home / ".config" / "systemd" / "user"
 
 
-def write_units(target_dir: Path, service_text: str, timer_text: str) -> tuple[Path, Path]:
-    """Write the .service and .timer files; return their paths."""
+def write_units(target_dir: Path, units: dict[str, str]) -> list[Path]:
+    """Write ``{filename: content}`` units; return their paths."""
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    svc = target_dir / SERVICE_NAME
-    timer = target_dir / TIMER_NAME
-    svc.write_text(service_text, encoding="utf-8")
-    timer.write_text(timer_text, encoding="utf-8")
-    return svc, timer
+    paths = []
+    for name, content in units.items():
+        p = target_dir / name
+        p.write_text(content, encoding="utf-8")
+        paths.append(p)
+    return paths
 
 
 def enable_commands() -> list[list[str]]:
-    """The commands that activate the watchdog (returned as data, not run).
+    """The commands that activate the watchdog + dashboard (data, not run).
 
-    linger lets the user manager run the timer without an active login —
-    essential on a headless box reached only by SSH.
+    linger lets the user manager run the timer and the dashboard without an
+    active login — essential on a headless box reached only by SSH.
     """
     return [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", TIMER_NAME],
+        ["systemctl", "--user", "enable", "--now", WEB_SERVICE_NAME],
         ["loginctl", "enable-linger"],
     ]

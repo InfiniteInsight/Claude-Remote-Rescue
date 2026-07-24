@@ -176,6 +176,12 @@ def test_post_to_non_action_path_is_404():
     assert resp.status == 404
 
 
+def test_options_preflight_is_rejected():
+    # The CSRF defense relies on the forced preflight failing. There is no
+    # do_OPTIONS handler; guard that a future one can't silently reopen it.
+    assert _handle(method="OPTIONS", path="/api/action").status == 405
+
+
 # --------------------------------------------------------------------------
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------

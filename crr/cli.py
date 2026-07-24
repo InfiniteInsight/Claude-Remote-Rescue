@@ -29,6 +29,7 @@ from typing import Callable, Sequence
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import process_probe, state_dir, systemd, tmux
+from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
 from crr.core.archive import ArchiveStore
@@ -82,9 +83,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print (or --install) the systemd user watchdog timer + service",
     )
     sysd.add_argument("--install", action="store_true",
-                      help="write units to ~/.config/systemd/user and enable the timer + linger")
+                      help="write units to ~/.config/systemd/user and enable the timer + web + linger")
     sysd.add_argument("--crr-bin", default=None,
-                      help="absolute crr path to bake into the unit (default: this crr binary)")
+                      help="absolute crr path to bake into the units (default: this crr binary)")
+    sysd.add_argument("--port", type=int, default=8377,
+                      help="dashboard port to bake into crr-web.service (default: 8377)")
     sysd.set_defaults(func=_cmd_systemd)
 
     conf = sub.add_parser("config", help="inspect configuration")
@@ -238,56 +241,61 @@ def _cmd_register(args: argparse.Namespace) -> int:
     claude = None
     tmux_session = None
     revive_strikes = 0
-    try:
-        existing = store.read(args.pid)
-    except (KeyError, contracts.ContractError):
-        existing = None
-    if existing is not None and existing.get("claude") is not None:
-        if existing["boot_id"] != current_boot:
-            # Different boot => the old process is unambiguously gone (reboot
-            # or stale). Preserve its session in the archive so the reviver
-            # can bring it back, then register fresh.
-            ArchiveStore(sd).archive(existing, "superseded-on-register", _now())
-        else:
-            # Same boot => can't distinguish an rc re-source (this same live
-            # shell) from pid reuse. Keep the claude field in place: never
-            # wipe a possibly-live session, never risk a duplicate revival.
-            claude = existing["claude"]
-            tmux_session = existing["tmux_session"]
-            revive_strikes = existing["revive_strikes"]
+    with mutation_lock(sd):
+        try:
+            existing = store.read(args.pid)
+        except (KeyError, contracts.ContractError):
+            existing = None
+        if existing is not None and existing.get("claude") is not None:
+            if existing["boot_id"] != current_boot:
+                # Different boot => the old process is unambiguously gone
+                # (reboot or stale). Preserve its session in the archive so
+                # the reviver can bring it back, then register fresh.
+                ArchiveStore(sd).archive(existing, "superseded-on-register", _now())
+            else:
+                # Same boot => can't distinguish an rc re-source (this same
+                # live shell) from pid reuse. Keep the claude field in place:
+                # never wipe a possibly-live session, never risk a duplicate.
+                claude = existing["claude"]
+                tmux_session = existing["tmux_session"]
+                revive_strikes = existing["revive_strikes"]
 
-    store.write(new_entry(
-        pid=args.pid,
-        cwd=args.cwd,
-        host=args.host,
-        shell=args.shell,
-        boot_id=current_boot,
-        now=_now(),
-        claude=claude,
-        tmux_session=tmux_session,
-        revive_strikes=revive_strikes,
-    ))
+        store.write(new_entry(
+            pid=args.pid,
+            cwd=args.cwd,
+            host=args.host,
+            shell=args.shell,
+            boot_id=current_boot,
+            now=_now(),
+            claude=claude,
+            tmux_session=tmux_session,
+            revive_strikes=revive_strikes,
+        ))
     return 0
 
 
 def _cmd_last_cmd(args: argparse.Namespace) -> int:
     # Hot-path prompt hook: if the entry is gone (never registered, already
     # deregistered), do nothing rather than error into the user's prompt.
-    store = JournalStore(state_dir.state_dir())
-    try:
-        entry = store.read(args.pid)
-    except (KeyError, contracts.ContractError):
-        return 0
-    entry["last_cmd"] = args.cmd
-    if args.cwd is not None:
-        entry["cwd"] = args.cwd
-    entry["updated"] = _now()
-    store.write(entry)
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    with mutation_lock(sd):
+        try:
+            entry = store.read(args.pid)
+        except (KeyError, contracts.ContractError):
+            return 0
+        entry["last_cmd"] = args.cmd
+        if args.cwd is not None:
+            entry["cwd"] = args.cwd
+        entry["updated"] = _now()
+        store.write(entry)
     return 0
 
 
 def _cmd_deregister(args: argparse.Namespace) -> int:
-    JournalStore(state_dir.state_dir()).remove(args.pid)
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        JournalStore(sd).remove(args.pid)
     return 0
 
 
@@ -298,25 +306,26 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
     sid = args.session_id or str(uuid.uuid4())
     sd = state_dir.state_dir()
     store = JournalStore(sd)
-    try:
-        entry = store.read(args.pid)
-    except (KeyError, contracts.ContractError):
-        entry = None
-    if entry is not None:
-        # If the entry already carries a claude session, it is a dead one
-        # (the wrapper blocks while claude runs, and claude-exit clears the
-        # field on any exit) — most often a reused pid. Preserve it in the
-        # archive before overwriting, or its revival data is lost (the
-        # symmetric hole to register-safety).
-        if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
-            ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
-        entry["claude"] = {
-            "session_id": sid,
-            "sid_source": "injected",
-            "started": _now(),
-        }
-        entry["updated"] = _now()
-        store.write(entry)
+    with mutation_lock(sd):
+        try:
+            entry = store.read(args.pid)
+        except (KeyError, contracts.ContractError):
+            entry = None
+        if entry is not None:
+            # If the entry already carries a claude session, it is a dead one
+            # (the wrapper blocks while claude runs, and claude-exit clears the
+            # field on any exit) — most often a reused pid. Preserve it in the
+            # archive before overwriting, or its revival data is lost (the
+            # symmetric hole to register-safety).
+            if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
+                ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
+            entry["claude"] = {
+                "session_id": sid,
+                "sid_source": "injected",
+                "started": _now(),
+            }
+            entry["updated"] = _now()
+            store.write(entry)
     print(sid)
     return 0
 
@@ -324,14 +333,16 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
 def _cmd_claude_exit(args: argparse.Namespace) -> int:
     # Clean exit: clear the claude field. A crash skips this call, leaving
     # claude set so the reviver knows the shell died mid-session.
-    store = JournalStore(state_dir.state_dir())
-    try:
-        entry = store.read(args.pid)
-    except (KeyError, contracts.ContractError):
-        return 0
-    entry["claude"] = None
-    entry["updated"] = _now()
-    store.write(entry)
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    with mutation_lock(sd):
+        try:
+            entry = store.read(args.pid)
+        except (KeyError, contracts.ContractError):
+            return 0
+        entry["claude"] = None
+        entry["updated"] = _now()
+        store.write(entry)
     return 0
 
 
@@ -351,12 +362,13 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
 
-    scan = store.scan()
-    outcome = reviver.revive_crashed(
-        scan.entries, boot, probe, tmux_spawner, store, archive,
-        max_strikes=config.get("zombie_strikes"),
-        now=_now(),
-    )
+    with mutation_lock(sd):
+        scan = store.scan()
+        outcome = reviver.revive_crashed(
+            scan.entries, boot, probe, tmux_spawner, store, archive,
+            max_strikes=config.get("zombie_strikes"),
+            now=_now(),
+        )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
     print(
@@ -368,7 +380,9 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
-    res = ops.remove(JournalStore(state_dir.state_dir()), args.pid)
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        res = ops.remove(JournalStore(sd), args.pid)
     print(res.message)
     return 0 if res.ok else 1
 
@@ -382,7 +396,8 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     config = cfg.Config()
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
-    res = ops.dismiss(JournalStore(sd), ArchiveStore(sd), boot, probe, args.pid, _now())
+    with mutation_lock(sd):
+        res = ops.dismiss(JournalStore(sd), ArchiveStore(sd), boot, probe, args.pid, _now())
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
 
@@ -399,8 +414,9 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         print("crr reopen: tmux is required for revival but was not found", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
-    store = JournalStore(state_dir.state_dir())
-    res = ops.reopen(store, tmux_spawner, boot, probe, args.pid, _now())
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        res = ops.reopen(JournalStore(sd), tmux_spawner, boot, probe, args.pid, _now())
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
 
@@ -465,15 +481,18 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return status.assemble_sessions(store.scan().entries, boot, probe)
 
     def action_provider(op: str, pid: int) -> tuple[bool, str]:
-        # Same classifier-gated ops the CLI uses — one implementation.
-        if op == "remove":
-            res = ops.remove(store, pid)
-        elif op == "dismiss":
-            res = ops.dismiss(store, archive, boot, probe, pid, _now())
-        elif op == "reopen":
-            res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now())
-        else:
-            return False, f"unknown op {op}"
+        # Same classifier-gated ops the CLI uses — one implementation — and
+        # under the same mutation lock, so a double-tapped button (two
+        # handler threads) or a race with the revive timer can't interleave.
+        with mutation_lock(sd):
+            if op == "remove":
+                res = ops.remove(store, pid)
+            elif op == "dismiss":
+                res = ops.dismiss(store, archive, boot, probe, pid, _now())
+            elif op == "reopen":
+                res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now())
+            else:
+                return False, f"unknown op {op}"
         return res.ok, res.message
 
     # Host allowlist: loopback + this host's name + tailnet suffix. (config
@@ -501,8 +520,11 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     # write to (state_dir() is <XDG_STATE_HOME>/crr; bake its parent).
     state_home = str(state_dir.state_dir().parent)
     interval = config.get("watchdog_interval_seconds")
-    service_text = systemd.revive_service_unit(crr_bin, path, state_home)
-    timer_text = systemd.revive_timer_unit(interval)
+    units = {
+        systemd.SERVICE_NAME: systemd.revive_service_unit(crr_bin, path, state_home),
+        systemd.TIMER_NAME: systemd.revive_timer_unit(interval),
+        systemd.WEB_SERVICE_NAME: systemd.web_service_unit(crr_bin, path, state_home, args.port),
+    }
 
     if missing:
         print(
@@ -513,17 +535,16 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
 
     if args.install:
         ud = systemd.unit_dir(Path.home())
-        systemd.write_units(ud, service_text, timer_text)
+        systemd.write_units(ud, units)
         for cmd in systemd.enable_commands():
             subprocess.run(cmd, check=False)
-        print(f"installed watchdog units to {ud} and enabled {systemd.TIMER_NAME}")
+        print(f"installed watchdog + dashboard units to {ud} and enabled them")
         return 0
 
     # Default: print for inspection (no changes to the user manager).
-    print(f"# ---- {systemd.SERVICE_NAME} ----")
-    print(service_text)
-    print(f"# ---- {systemd.TIMER_NAME} ----")
-    print(timer_text)
+    for name, text in units.items():
+        print(f"# ---- {name} ----")
+        print(text)
     print("# Install with:  crr systemd --install")
     print("# (writes the units above to ~/.config/systemd/user/ and runs:)")
     for cmd in systemd.enable_commands():
