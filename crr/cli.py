@@ -16,15 +16,17 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
 from importlib import resources
+from pathlib import Path
 from typing import Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
-from crr.adapters import process_probe, state_dir, tmux
+from crr.adapters import process_probe, state_dir, systemd, tmux
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, reviver, status
 from crr.core.archive import ArchiveStore
@@ -69,6 +71,16 @@ def _build_parser() -> argparse.ArgumentParser:
     reo = sub.add_parser("reopen", help="revive one specific crashed session now")
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
+
+    sysd = sub.add_parser(
+        "systemd",
+        help="print (or --install) the systemd user watchdog timer + service",
+    )
+    sysd.add_argument("--install", action="store_true",
+                      help="write units to ~/.config/systemd/user and enable the timer + linger")
+    sysd.add_argument("--crr-bin", default=None,
+                      help="absolute crr path to bake into the unit (default: this crr binary)")
+    sysd.set_defaults(func=_cmd_systemd)
 
     conf = sub.add_parser("config", help="inspect configuration")
     conf.add_argument(
@@ -421,6 +433,44 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     entry["updated"] = _now()
     store.write(entry)
     print(f"reopened {args.pid} as {name}")
+    return 0
+
+
+def _cmd_systemd(args: argparse.Namespace) -> int:
+    config = cfg.Config()
+    crr_bin = _resolve_crr_bin(args.crr_bin)
+    path, missing = systemd.resolve_service_path(crr_bin)
+    # XDG_STATE_HOME baked so the service watches the SAME state dir the shims
+    # write to (state_dir() is <XDG_STATE_HOME>/crr; bake its parent).
+    state_home = str(state_dir.state_dir().parent)
+    interval = config.get("watchdog_interval_seconds")
+    service_text = systemd.revive_service_unit(crr_bin, path, state_home)
+    timer_text = systemd.revive_timer_unit(interval)
+
+    if missing:
+        print(
+            "crr systemd: WARNING — not found on PATH: "
+            f"{', '.join(missing)}; revived sessions will fail on exec until these resolve",
+            file=sys.stderr,
+        )
+
+    if args.install:
+        ud = systemd.unit_dir(Path.home())
+        systemd.write_units(ud, service_text, timer_text)
+        for cmd in systemd.enable_commands():
+            subprocess.run(cmd, check=False)
+        print(f"installed watchdog units to {ud} and enabled {systemd.TIMER_NAME}")
+        return 0
+
+    # Default: print for inspection (no changes to the user manager).
+    print(f"# ---- {systemd.SERVICE_NAME} ----")
+    print(service_text)
+    print(f"# ---- {systemd.TIMER_NAME} ----")
+    print(timer_text)
+    print("# Install with:  crr systemd --install")
+    print("# (writes the units above to ~/.config/systemd/user/ and runs:)")
+    for cmd in systemd.enable_commands():
+        print("#   " + " ".join(cmd))
     return 0
 
 

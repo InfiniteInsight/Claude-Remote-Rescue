@@ -22,6 +22,20 @@ from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
+def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd"])  # default: print, no --install
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "crr-revive.service" in out and "crr-revive.timer" in out
+    assert "ExecStart=/opt/crr/bin/crr revive" in out
+    # XDG_STATE_HOME baked as the parent of the resolved state dir.
+    assert f"Environment=XDG_STATE_HOME={tmp_path / 'state'}" in out
+    # Print mode must not touch the user's systemd dir.
+    assert not (tmp_path / ".config" / "systemd").exists()
+
+
 def test_config_effective_lists_every_key_with_origin(capsys):
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out
