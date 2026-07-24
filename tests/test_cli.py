@@ -16,7 +16,7 @@ from crr import cli
 from crr.adapters import boot_identity, state_dir
 from crr.core import config as cfg
 from crr.core import contracts
-from crr.core.journal import JournalStore
+from crr.core.journal import JournalStore, new_entry
 
 
 def test_config_effective_lists_every_key_with_origin(capsys):
@@ -77,3 +77,53 @@ def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsy
     cli.main(["status", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["sessions"][0]["state"] == "crashed"
+
+
+# --- shim-facing commands: register / last-cmd / deregister --------------
+
+def _seed(store, pid, cwd="/home/u/p", last_cmd=""):
+    store.write(new_entry(
+        pid=pid, cwd=cwd, host="tmux", shell="zsh",
+        boot_id="b8f3c0de-0000-4000-8000-000000000000",
+        now="2026-07-23T00:00:00Z", last_cmd=last_cmd,
+    ))
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="register uses the Linux boot adapter")
+def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["register", "--pid", "4242", "--cwd", "/home/u/proj",
+                   "--shell", "zsh", "--host", "tmux"])
+    assert rc == 0
+    entry = JournalStore(tmp_path).read(4242)
+    assert entry["claude"] is None
+    assert entry["cwd"] == "/home/u/proj"
+    assert entry["boot_id"] == boot_identity.LinuxBootIdentity().current()
+
+
+def test_last_cmd_updates_existing_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242, cwd="/old", last_cmd="")
+    rc = cli.main(["last-cmd", "--pid", "4242", "--cmd", "claude --resume", "--cwd", "/new"])
+    assert rc == 0
+    entry = store.read(4242)
+    assert entry["last_cmd"] == "claude --resume"
+    assert entry["cwd"] == "/new"
+
+
+def test_last_cmd_on_missing_pid_is_quiet_noop(tmp_path, monkeypatch):
+    # Hot-path hook: never disrupt the prompt if the entry is gone.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["last-cmd", "--pid", "999", "--cmd", "x"])
+    assert rc == 0
+    assert not JournalStore(tmp_path).tabs_dir.joinpath("999.json").exists()
+
+
+def test_deregister_removes_and_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+    assert not store.tabs_dir.joinpath("4242.json").exists()
+    assert cli.main(["deregister", "--pid", "4242"]) == 0  # second call: no error

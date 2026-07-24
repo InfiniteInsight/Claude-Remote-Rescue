@@ -12,7 +12,7 @@ import json
 import pytest
 
 from crr.core import contracts
-from crr.core.journal import JournalStore
+from crr.core.journal import JournalStore, new_entry
 
 
 def _entry(pid=12345):
@@ -153,3 +153,37 @@ def test_scan_ignores_non_json_and_temp_files(tmp_path):
     scan = store.scan()
     assert [e["pid"] for e in scan.entries] == [1]
     assert scan.problems == []
+
+
+# --- new_entry(): build a valid schema-v1 entry --------------------------
+
+def test_new_entry_is_contract_valid_and_claude_less_by_default():
+    entry = new_entry(
+        pid=42,
+        cwd="/home/u/p",
+        host="tmux",
+        shell="zsh",
+        boot_id="b8f3c0de-0000-4000-8000-000000000000",
+        now="2026-07-23T00:00:00Z",
+    )
+    contracts.validate_journal_entry(entry)  # must not raise
+    assert entry["v"] == 1
+    assert entry["pid"] == 42
+    assert entry["updated"] == "2026-07-23T00:00:00Z"
+    assert entry["claude"] is None
+    assert entry["last_cmd"] == ""
+    assert entry["tmux_session"] is None
+
+
+def test_new_entry_carries_claude_when_given():
+    claude = {
+        "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        "sid_source": "injected",
+        "started": "2026-07-23T00:00:00Z",
+    }
+    entry = new_entry(
+        pid=42, cwd="/x", host="ssh", shell="bash",
+        boot_id="b", now="2026-07-23T00:00:00Z", claude=claude,
+    )
+    contracts.validate_journal_entry(entry)
+    assert entry["claude"] == claude

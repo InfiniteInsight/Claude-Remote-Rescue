@@ -38,11 +38,17 @@ def assemble_sessions(
     *,
     last_prompt: Callable[[Mapping[str, Any]], str] = _empty_prompt,
 ) -> dict[str, Any]:
-    """Build the /api/sessions payload for ``entries``."""
-    sid_counts = Counter(e["claude"]["session_id"] for e in entries)
+    """Build the /api/sessions payload for ``entries``.
+
+    Entries with ``claude is None`` are registered shells that have no
+    claude session yet — live shells, but nothing to rescue — so they are
+    not emitted as cards.
+    """
+    sessions = [e for e in entries if e.get("claude") is not None]
+    sid_counts = Counter(e["claude"]["session_id"] for e in sessions)
 
     cards: list[dict[str, Any]] = []
-    for entry in entries:
+    for entry in sessions:
         sid = entry["claude"]["session_id"]
         cards.append(
             {

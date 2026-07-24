@@ -22,6 +22,41 @@ from typing import Any, Mapping, NamedTuple
 from crr.core import contracts
 
 
+def new_entry(
+    *,
+    pid: int,
+    cwd: str,
+    host: str,
+    shell: str,
+    boot_id: str,
+    now: str,
+    last_cmd: str = "",
+    tmux_session: str | None = None,
+    claude: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a schema-v1 journal entry, validated before it is returned.
+
+    Centralizes the entry shape in one place (alongside the contract), so
+    the register/wrapper code paths cannot drift from the schema. ``now``
+    and ``boot_id`` are passed in (the composition root sources them from
+    the clock and the boot-identity adapter) to keep this pure/testable.
+    """
+    entry = {
+        "v": contracts.JOURNAL_SCHEMA_VERSION,
+        "pid": pid,
+        "boot_id": boot_id,
+        "cwd": cwd,
+        "host": host,
+        "shell": shell,
+        "claude": dict(claude) if claude is not None else None,
+        "last_cmd": last_cmd,
+        "tmux_session": tmux_session,
+        "updated": now,
+    }
+    contracts.validate_journal_entry(entry)
+    return entry
+
+
 class JournalScan(NamedTuple):
     """Result of scanning the tabs dir.
 

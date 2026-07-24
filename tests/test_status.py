@@ -111,3 +111,14 @@ def test_last_prompt_defaults_to_empty_string():
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
     assert payload["sessions"][0]["last_prompt"] == ""
+
+
+def test_claude_less_shells_are_not_cards():
+    # A registered shell with no claude session yet (claude=None) is not a
+    # rescuable "session" and must not appear as a card.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entries = [_entry(1, sid), _entry(2, sid)]
+    entries[1]["claude"] = None
+    payload = assemble_sessions(entries, FakeBoot(), FakeProbe())
+    contracts.validate_sessions_payload(payload)
+    assert [c["pid"] for c in payload["sessions"]] == [1]

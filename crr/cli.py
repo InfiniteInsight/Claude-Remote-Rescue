@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from typing import Sequence
 
 from crr import __version__
@@ -22,7 +23,11 @@ from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import process_probe, state_dir
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, status
-from crr.core.journal import JournalStore
+from crr.core.journal import JournalStore, new_entry
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -47,6 +52,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print every key with its value and origin (configured|default)",
     )
     conf.set_defaults(func=_cmd_config)
+
+    # Shim-facing commands (called by the shell hooks, by absolute path).
+    reg = sub.add_parser("register", help="[shim] journal a shell at start")
+    reg.add_argument("--pid", type=int, required=True)
+    reg.add_argument("--cwd", required=True)
+    reg.add_argument("--shell", required=True, choices=contracts.SHELLS)
+    reg.add_argument("--host", required=True, choices=contracts.HOSTS)
+    reg.set_defaults(func=_cmd_register)
+
+    lc = sub.add_parser("last-cmd", help="[shim] update a shell's last command / cwd")
+    lc.add_argument("--pid", type=int, required=True)
+    lc.add_argument("--cmd", required=True)
+    lc.add_argument("--cwd", default=None)
+    lc.set_defaults(func=_cmd_last_cmd)
+
+    dereg = sub.add_parser("deregister", help="[shim] remove a shell's journal entry")
+    dereg.add_argument("--pid", type=int, required=True)
+    dereg.set_defaults(func=_cmd_deregister)
 
     return parser
 
@@ -102,6 +125,46 @@ def _print_status_human(payload: dict) -> None:
     for card in sessions:
         dup = " [dup]" if card["duplicate_group"] else ""
         print(f"#{card['pid']} · {card['sid8']} [{card['state']}] {card['cwd']}{dup}")
+
+
+def _cmd_register(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr register: {exc}", file=sys.stderr)
+        return 2
+    store = JournalStore(state_dir.state_dir())
+    entry = new_entry(
+        pid=args.pid,
+        cwd=args.cwd,
+        host=args.host,
+        shell=args.shell,
+        boot_id=boot.current(),
+        now=_now(),
+    )
+    store.write(entry)
+    return 0
+
+
+def _cmd_last_cmd(args: argparse.Namespace) -> int:
+    # Hot-path prompt hook: if the entry is gone (never registered, already
+    # deregistered), do nothing rather than error into the user's prompt.
+    store = JournalStore(state_dir.state_dir())
+    try:
+        entry = store.read(args.pid)
+    except (KeyError, contracts.ContractError):
+        return 0
+    entry["last_cmd"] = args.cmd
+    if args.cwd is not None:
+        entry["cwd"] = args.cwd
+    entry["updated"] = _now()
+    store.write(entry)
+    return 0
+
+
+def _cmd_deregister(args: argparse.Namespace) -> int:
+    JournalStore(state_dir.state_dir()).remove(args.pid)
+    return 0
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
