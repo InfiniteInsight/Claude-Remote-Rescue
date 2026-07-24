@@ -273,6 +273,12 @@ def test_archive_bad_reason_rejected():
         contracts.validate_archive_record(r)
 
 
+def test_archive_superseded_on_launch_reason_accepted():
+    r = _archive_record()
+    r["reason"] = "superseded-on-launch"
+    contracts.validate_archive_record(r)  # must not raise
+
+
 def test_archive_missing_key_rejected():
     r = _archive_record()
     del r["archived_at"]

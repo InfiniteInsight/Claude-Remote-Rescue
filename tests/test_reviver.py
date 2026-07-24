@@ -195,6 +195,22 @@ def test_archived_session_gives_up_in_place_past_limit(tmp_path):
     assert archive.read(_claude()["session_id"])["reason"] == "gave-up"  # terminal
 
 
+def test_duplicate_sids_spawn_one_session_not_two(tmp_path):
+    # Two entries journal the same sid (the documented 2026-07-21 case).
+    # They collapse to one crr-<sid8> name; the reviver must spawn it once,
+    # not try to create an already-created session (which real tmux rejects
+    # and would abort the whole pass).
+    store = JournalStore(tmp_path)
+    _seed(store, 1, claude=_claude())
+    _seed(store, 2, claude=_claude())  # same sid
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux)
+
+    assert len(tmux.created) == 1  # spawned once, not twice
+    assert 1 in outcome.revived
+    assert 2 in outcome.reset  # second sees the just-spawned session as live
+
+
 def test_gave_up_archive_record_is_not_re_revived(tmp_path):
     store = JournalStore(tmp_path)
     archive = ArchiveStore(tmp_path)

@@ -109,6 +109,7 @@ def revive_crashed(
             gave_up.append(pid)
         else:  # revive
             tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+            live.add(name)  # dedupe within the pass: a shared sid is now "live"
             store.write(updated)
             revived.append(pid)
 
@@ -131,6 +132,7 @@ def revive_crashed(
             gave_up.append(pid)
         else:  # revive
             tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+            live.add(name)  # dedupe within the pass (shared sid)
             record["entry"] = updated
             archive.write(record)
             revived.append(pid)

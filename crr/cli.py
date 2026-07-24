@@ -265,12 +265,20 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
     # never `guessed`. Print it (for the shim to pass to claude) even if the
     # shell was never registered, so claude still launches identifiably.
     sid = args.session_id or str(uuid.uuid4())
-    store = JournalStore(state_dir.state_dir())
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
     try:
         entry = store.read(args.pid)
     except (KeyError, contracts.ContractError):
         entry = None
     if entry is not None:
+        # If the entry already carries a claude session, it is a dead one
+        # (the wrapper blocks while claude runs, and claude-exit clears the
+        # field on any exit) — most often a reused pid. Preserve it in the
+        # archive before overwriting, or its revival data is lost (the
+        # symmetric hole to register-safety).
+        if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
+            ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
         entry["claude"] = {
             "session_id": sid,
             "sid_source": "injected",

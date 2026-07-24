@@ -209,6 +209,25 @@ def test_claude_launch_injects_sid_and_journals_it(tmp_path, monkeypatch, capsys
     assert claude["started"]
 
 
+def test_claude_launch_archives_a_superseded_session(tmp_path, monkeypatch, capsys):
+    # Same-boot pid reuse: entry already carries a (now-dead) claude session
+    # X; launching Y must preserve X in the archive, not silently drop it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    x = "aaaaaaaa-1111-4111-8111-111111111111"
+    store.write(new_entry(
+        pid=4242, cwd="/p", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-24T00:00:00Z", claude=_claude_field(x),
+    ))
+    cli.main(["claude-launch", "--pid", "4242"])
+    y = capsys.readouterr().out.strip()
+
+    assert y != x
+    assert store.read(4242)["claude"]["session_id"] == y  # new session active
+    rec = archive.read(x)  # old session preserved
+    assert rec["reason"] == "superseded-on-launch"
+
+
 def test_claude_launch_honors_explicit_session_id(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
