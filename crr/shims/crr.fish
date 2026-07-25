@@ -40,9 +40,9 @@ function _crr_deregister --on-event fish_exit
 end
 
 # claude() wrapper: inject + journal a --session-id on fresh launches
-# (sid_source=injected); pass resume/continue/explicit-sid through
-# untouched; clear the claude field on clean exit (a crash leaves it set
-# for the reviver).
+# (sid_source=injected); on resume/continue, journal the resumed session
+# (guessed/verified sid) so it is revivable, args untouched; clear the
+# claude field on clean exit (a crash leaves it set for the reviver).
 function claude
     # Element-wise flag detection: whole arguments only, never a substring
     # of prompt text (a prompt like "explain -r" is a fresh launch).
@@ -55,6 +55,35 @@ function claude
         end
     end
     if test $_resuming -eq 1
+        # Extract an explicit resume sid if given (-r <sid>, --resume <sid|=sid>,
+        # --session-id <sid|=sid>); a '-'-prefixed value is another flag, not the
+        # sid, so it is left empty and the sid is guessed from the newest transcript.
+        set -l _sid ""
+        set -l _want 0
+        for _arg in $argv
+            if test $_want -eq 1
+                switch $_arg
+                    case '-*'
+                    case '*'
+                        set _sid $_arg
+                end
+                set _want 0
+                continue
+            end
+            switch $_arg
+                case -r --resume --session-id
+                    set _want 1
+                case '--resume=*'
+                    set _sid (string replace -- '--resume=' '' $_arg)
+                case '--session-id=*'
+                    set _sid (string replace -- '--session-id=' '' $_arg)
+            end
+        end
+        if test -n "$_sid"
+            _crr claude-resume --pid $fish_pid --cwd $PWD --session-id $_sid >/dev/null
+        else
+            _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
+        end
         command claude $argv
     else
         set -l _crr_sid (_crr claude-launch --pid $fish_pid)

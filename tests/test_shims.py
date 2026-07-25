@@ -120,17 +120,54 @@ def _fake_claude_bindir(tmp_path) -> Path:
     return bindir
 
 
-def _run_with_fake_claude(shell, script, state_dir, bindir, record) -> subprocess.CompletedProcess:
+def _run_with_fake_claude(shell, script, state_dir, bindir, record, journal=None) -> subprocess.CompletedProcess:
     env = {
         "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
         "HOME": str(state_dir),
         "XDG_STATE_HOME": str(state_dir),
         "CRR_TEST_RECORD": str(record),
     }
+    if journal is not None:
+        env["CRR_TEST_JOURNAL"] = str(journal)
     return subprocess.run(
         _SHELLS[shell]["argv"] + [script],
         env=env, capture_output=True, text=True, timeout=30,
     )
+
+
+def _fake_claude_dumping_journal(tmp_path) -> Path:
+    """A fake `claude` that records argv AND dumps the shell's live journal
+    entry mid-run — captured BEFORE the wrapper's claude-exit clears the
+    claude field, so a resume-journaled sid is observable.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "claude"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$@" > "$CRR_TEST_RECORD"\n'
+        '[ -n "$CRR_TEST_JOURNAL" ] && '
+        'cat "$XDG_STATE_HOME/crr/tabs/$PPID.json" > "$CRR_TEST_JOURNAL" 2>/dev/null\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return bindir
+
+
+def _resume_journal(shell, tmp_path, capsys, cmdline):
+    """Run `claude <cmdline>` under the shim and return the mid-run journal
+    entry's claude field (None if the session was left untracked)."""
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_dumping_journal(tmp_path)
+    record, journal = tmp_path / "argv", tmp_path / "journal"
+    script = f'source "{shim}"\nclaude {cmdline}\n'
+    result = _run_with_fake_claude(shell, script, state, bindir, record, journal=journal)
+    assert result.returncode == 0, result.stderr
+    if not journal.exists() or not journal.read_text().strip():
+        return None
+    return json.loads(journal.read_text())["claude"]
 
 
 @pytest.mark.parametrize("shell", list(_SHELLS))
@@ -187,6 +224,39 @@ def test_wrapper_passes_resume_through_untouched(shell, tmp_path, capsys):
     argv = record.read_text().split("\n")
     assert "--session-id" not in argv  # resume must not get a fresh sid
     assert "--resume" in argv and "abc123" in argv
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+@pytest.mark.parametrize("cmdline", ["--resume abc123", "-r abc123", "--resume=abc123"])
+def test_wrapper_journals_an_explicit_resume_sid(shell, cmdline, tmp_path, capsys):
+    # A resumed session must be journaled so it is revivable. With no
+    # transcript under the test HOME, an explicit sid is confidence 'guessed'
+    # (nothing confirms it yet) — but the exact sid is recorded.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    claude = _resume_journal(shell, tmp_path, capsys, cmdline)
+    assert claude is not None, f"{shell}: resume left the session untracked"
+    assert claude["session_id"] == "abc123"
+    assert claude["sid_source"] == "guessed"
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_does_not_mistake_a_following_flag_for_the_sid(shell, tmp_path, capsys):
+    # `claude -r --model foo`: -r has no sid value (--model is a flag), so no
+    # explicit sid is extracted; with no transcript to guess, the session is
+    # left untracked rather than journaling "--model" as the sid.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    claude = _resume_journal(shell, tmp_path, capsys, "-r --model foo")
+    assert claude is None, f"{shell}: a following flag was wrongly taken as the sid"
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_continue_without_transcript_stays_untracked(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    claude = _resume_journal(shell, tmp_path, capsys, "--continue")
+    assert claude is None
 
 
 def test_bash_shim_records_last_cmd(tmp_path, capsys):

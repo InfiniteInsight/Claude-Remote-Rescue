@@ -11,6 +11,7 @@ import os
 import platform
 import shutil
 import subprocess
+from datetime import datetime
 
 import pytest
 
@@ -381,6 +382,91 @@ def test_claude_exit_clears_claude_field(tmp_path, monkeypatch, capsys):
 def test_claude_exit_missing_entry_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     assert cli.main(["claude-exit", "--pid", "999"]) == 0
+
+
+# --- claude() wrapper support: claude-resume (guessed / verified sids) ----
+
+def _write_transcript_file(home, cwd, sid, mtime=None):
+    d = home / ".claude" / "projects" / cwd.replace("/", "-")
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{sid}.jsonl"
+    p.write_text("{}\n", encoding="utf-8")
+    if mtime is not None:
+        os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_claude_resume_verifies_an_explicit_sid_with_a_transcript(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", "sid-explicit")
+    rc = cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+                   "--session-id", "sid-explicit"])
+    assert rc == 0
+    claude = store.read(4242)["claude"]
+    assert claude["session_id"] == "sid-explicit"
+    assert claude["sid_source"] == "verified"  # its transcript exists
+
+
+def test_claude_resume_guesses_newest_transcript_without_explicit_sid(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", "older", mtime=1000)
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", "newest", mtime=5000)
+    rc = cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj"])
+    assert rc == 0
+    claude = store.read(4242)["claude"]
+    assert claude["session_id"] == "newest"
+    assert claude["sid_source"] == "guessed"
+
+
+def test_claude_resume_leaves_untracked_when_no_sid_and_no_transcript(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    rc = cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj"])
+    assert rc == 0
+    assert store.read(4242)["claude"] is None  # nothing to guess -> untracked
+
+
+def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkeypatch):
+    # The revive-sweep helper upgrades a guessed sid to verified once its
+    # transcript shows activity after the session started.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    entry = new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-25T12:00:00+00:00",
+        claude={"session_id": "g1", "sid_source": "guessed",
+                "started": "2026-07-25T12:00:00+00:00"},
+    )
+    store.write(entry)
+    started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", "g1", mtime=started + 60)
+
+    cli._verify_guessed_sids(store, "2026-07-25T12:05:00+00:00")
+    assert store.read(7)["claude"]["sid_source"] == "verified"
+
+
+def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    entry = new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-25T12:00:00+00:00",
+        claude={"session_id": "g1", "sid_source": "guessed",
+                "started": "2026-07-25T12:00:00+00:00"},
+    )
+    store.write(entry)
+    started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", "g1", mtime=started - 30)  # pre-launch
+    cli._verify_guessed_sids(store, "2026-07-25T12:05:00+00:00")
+    assert store.read(7)["claude"]["sid_source"] == "guessed"  # unconfirmed stays guessed
 
 
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
