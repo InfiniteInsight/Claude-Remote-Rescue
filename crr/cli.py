@@ -30,7 +30,7 @@ from typing import Callable, Sequence
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
-from crr.adapters import process_probe, state_dir, systemd, tmux, transcript_source
+from crr.adapters import launchd, process_probe, state_dir, systemd, tmux, transcript_source
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
@@ -123,6 +123,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sysd.add_argument("--port", type=int, default=8377,
                       help="dashboard port to bake into crr-web.service (default: 8377)")
     sysd.set_defaults(func=_cmd_systemd)
+
+    lncd = sub.add_parser(
+        "launchd",
+        help="print (or --install) the macOS launchd user agents (watchdog + dashboard)",
+    )
+    lncd.add_argument("--install", action="store_true",
+                      help="write agents to ~/Library/LaunchAgents and launchctl-load them")
+    lncd.add_argument("--crr-bin", default=None,
+                      help="absolute crr path to bake into the agents (default: this crr binary)")
+    lncd.add_argument("--port", type=int, default=8377,
+                      help="dashboard port to bake into the web agent (default: 8377)")
+    lncd.set_defaults(func=_cmd_launchd)
 
     conf = sub.add_parser("config", help="inspect configuration")
     conf.add_argument(
@@ -721,6 +733,45 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     print("# Install with:  crr systemd --install")
     print("# (writes the units above to ~/.config/systemd/user/ and runs:)")
     for cmd in systemd.enable_commands():
+        print("#   " + " ".join(cmd))
+    return 0
+
+
+def _cmd_launchd(args: argparse.Namespace) -> int:
+    config = _load_config()
+    crr_bin = _resolve_crr_bin(args.crr_bin)
+    path, missing = launchd.resolve_service_path(crr_bin)
+    # State dir is NOT baked: state_dir.resolve("Darwin", …) is env-independent,
+    # so the agent resolves the same dir the shims write to via HOME alone.
+    interval = config.get("watchdog_interval_seconds")
+    agents = {
+        launchd.REVIVE_PLIST: launchd.revive_agent_plist(crr_bin, path, interval),
+        launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin, path, args.port),
+    }
+
+    if missing:
+        print(
+            "crr launchd: WARNING — not found on PATH: "
+            f"{', '.join(missing)}; revived sessions will fail on exec until these resolve",
+            file=sys.stderr,
+        )
+
+    if args.install:
+        ad = launchd.agent_dir(Path.home())
+        launchd.write_agents(ad, agents)
+        for cmd in launchd.enable_commands(ad):
+            subprocess.run(cmd, check=False)
+        print(f"installed watchdog + dashboard agents to {ad} and loaded them")
+        return 0
+
+    # Default: print for inspection (no changes to the launchd user domain).
+    ad = launchd.agent_dir(Path.home())
+    for name, text in agents.items():
+        print(f"# ---- {name} ----")
+        print(text)
+    print("# Install with:  crr launchd --install")
+    print(f"# (writes the plists above to {ad}/ and runs:)")
+    for cmd in launchd.enable_commands(ad):
         print("#   " + " ".join(cmd))
     return 0
 
