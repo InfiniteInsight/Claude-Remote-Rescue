@@ -31,6 +31,7 @@ from typing import Callable, Sequence
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
+from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
@@ -580,41 +581,25 @@ def make_web_handler(
     return _Handler
 
 
-def gather_diagnostics(config: cfg.Config) -> dict:
-    """Query journald per-source, degrading (never aborting) on failure.
+def _select_diag_source():
+    """The diagnostics source adapter for this platform (composition root)."""
+    if platform.system() == "Darwin":
+        return diagnostics_macos
+    return diag_source  # journald (Linux; Windows adapter arrives in Phase 4)
 
-    Timeout-guarded and lazy (never on the poll path). Returns the
-    contract-valid /api/diagnostics payload; failed sources are listed in
-    ``degraded`` rather than silently emitting empty results.
+
+def gather_diagnostics(config: cfg.Config, source=None) -> dict:
+    """Query the platform diagnostics source, degrading (never aborting).
+
+    Timeout-guarded and lazy (never on the poll path). The per-source
+    query/degrade lives in the adapter's ``collect``; this only selects the
+    source and wraps its result in the contract-valid /api/diagnostics
+    payload (failed sources listed in ``degraded``, never silently empty).
     """
-    timeout = config.get("interop_timeout_seconds")
-    lookback = config.get("diagnose_lookback_boots")
-    event_cap = config.get("diagnose_event_cap")
-    line_cap = config.get("diagnose_line_cap")
-    boots: list = []
-    prev: list = []
-    events: list = []
-    degraded: list = []
-
-    if not diag_source.available():
-        degraded = ["boots", "prev_boot_errors", "host_events"]
-    else:
-        _errs = (subprocess.SubprocessError, OSError, RuntimeError, ValueError)
-        try:
-            boots = diag_source.list_boots(event_cap, timeout)
-        except _errs:
-            degraded.append("boots")
-        try:
-            prev = diag_source.prev_boot_errors(lookback, line_cap, timeout)
-        except _errs:
-            degraded.append("prev_boot_errors")
-        try:
-            events = diag_source.host_events(lookback, event_cap, timeout)
-        except _errs:
-            degraded.append("host_events")
-
+    source = source or _select_diag_source()
+    boots, prev, events, degraded = source.collect(config)
     return diag_core.build_payload(
-        source="journald", boots=boots, prev_boot_errors=prev,
+        source=source.SOURCE_NAME, boots=boots, prev_boot_errors=prev,
         host_events=events, degraded=degraded,
     )
 

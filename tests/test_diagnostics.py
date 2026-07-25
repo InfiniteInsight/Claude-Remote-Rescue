@@ -29,6 +29,30 @@ def test_parse_boots_tolerates_bad_json():
     assert diagnostics.parse_boots("not json", cap=10) == []
 
 
+def test_parse_mac_boottime_yields_one_current_boot_record():
+    boots = diagnostics.parse_mac_boottime("{ sec = 1000, usec = 0 } Wed Jul 23")
+    assert len(boots) == 1
+    assert boots[0]["boot_id"] == "1000"
+    assert boots[0]["index"] == 0
+    assert boots[0]["start"].startswith("1970-01-01T00:16:40")  # 1000 s past epoch
+    assert boots[0]["stop"] == ""
+
+
+def test_parse_mac_boottime_degrades_on_unparseable():
+    assert diagnostics.parse_mac_boottime("no seconds here") == []
+
+
+def test_filter_lines_keeps_matching_nonblank_lines_capped():
+    text = "boot ok\nkernel panic: foo\n\nnormal wake event\nshutdown by user\n"
+    hits = diagnostics.filter_lines(text, ("panic", "shutdown"), cap=10)
+    assert hits == ["kernel panic: foo", "shutdown by user"]
+
+
+def test_filter_lines_is_case_insensitive_and_caps():
+    text = "Sleep now\nWAKE up\nDarkWake later\n"
+    assert diagnostics.filter_lines(text, ("wake",), cap=1) == ["WAKE up"]
+
+
 def test_build_payload_is_contract_valid():
     payload = diagnostics.build_payload(
         source="journald",

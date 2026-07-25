@@ -42,6 +42,8 @@ DEFAULTS: dict[str, Any] = {
     "diagnose_lookback_boots": 1,  # how many prior boots to inspect
     "diagnose_event_cap": 50,      # max events returned per source
     "diagnose_line_cap": 200,      # max log lines scanned per source
+    "diagnose_macos_lookback": "1d",  # macOS `log show --last` window (no boot index on macOS)
+    "diagnose_macos_timeout_seconds": 30,  # macOS `log show` is slow to start; own timeout
     "interop_timeout_seconds": 5,  # per external-command guard in diagnostics/probes
     # dashboard
     "dashboard_poll_seconds": 5,   # session-list poll cadence
