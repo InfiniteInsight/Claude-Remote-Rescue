@@ -110,6 +110,26 @@ def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatc
     assert not (tmp_path / "Library" / "LaunchAgents").exists()
 
 
+def test_tab_spawner_is_none_off_macos(monkeypatch):
+    # Headless Linux (and anything non-Darwin) has no visible-tab spawner, so
+    # reopen degrades to detached-tmux rather than erroring.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    assert cli._tab_spawner(cfg.Config()) is None
+
+
+def test_tab_spawner_selects_a_macos_spawner_when_app_present(monkeypatch):
+    # On macOS, _tab_spawner returns the chosen spawner when its app is
+    # installed (available() true), or None when it isn't.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.tab_spawn.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {"returncode": 0})())
+    spawner = cli._tab_spawner(cfg.Config(overrides={"terminal": "iterm"}))
+    assert isinstance(spawner, cli.tab_spawn.ITerm2Spawner)
+    monkeypatch.setattr(cli.tab_spawn.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {"returncode": 1})())
+    assert cli._tab_spawner(cfg.Config()) is None
+
+
 def test_doctor_reports_install_health(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     rc = cli.main(["doctor"])

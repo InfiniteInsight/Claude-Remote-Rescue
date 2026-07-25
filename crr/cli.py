@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -30,7 +31,7 @@ from typing import Callable, Sequence
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
-from crr.adapters import launchd, process_probe, state_dir, systemd, tmux, transcript_source
+from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
@@ -499,6 +500,21 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     return 0 if res.ok else 2
 
 
+def _tab_spawner(config: cfg.Config):
+    """The visible-tab spawner for this platform, or None where none applies.
+
+    macOS only for now (Terminal.app / iTerm2); Linux-desktop spawners are
+    Phase 3, headless Linux has no tabs. Returns None when the chosen
+    terminal app isn't actually installed, so reopen degrades to
+    detached-tmux instead of erroring.
+    """
+    if platform.system() != "Darwin":
+        return None
+    kind = tab_spawn.choose(config.get("terminal"), os.environ)
+    spawner = tab_spawn.spawner_for(kind, config.get("interop_timeout_seconds"))
+    return spawner if spawner.available() else None
+
+
 def _cmd_reopen(args: argparse.Namespace) -> int:
     try:
         boot = boot_identity.detect()
@@ -513,7 +529,8 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     with mutation_lock(sd):
-        res = ops.reopen(JournalStore(sd), tmux_spawner, boot, probe, args.pid, _now())
+        res = ops.reopen(JournalStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
+                         tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
 
@@ -653,6 +670,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tab = _tab_spawner(config)
 
     extract = _last_prompt_extractor(config)
 
@@ -669,7 +687,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "dismiss":
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
-                res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now())
+                res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message

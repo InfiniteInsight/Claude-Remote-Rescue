@@ -16,7 +16,7 @@ import pytest
 
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
-from crr.core.reviver import revive_crashed, session_name
+from crr.core.reviver import attach_argv, revive_crashed, session_name
 
 _ENTRY_BOOT = "entry-boot-0000"
 _NOW = "2026-07-24T00:00:00Z"
@@ -68,6 +68,12 @@ def _run(entries_store, tmux, max_strikes=3, archive=None):
         archive if archive is not None else ArchiveStore(entries_store._state_dir),
         max_strikes=max_strikes, now=_NOW,
     )
+
+
+def test_attach_argv_is_word_form_tmux_attach():
+    # A visible tab attaches to the detached session by name — word-form,
+    # never a shell string (the name is crr-<8hex>, metacharacter-free).
+    assert attach_argv("crr-8a1b2c3d") == ["tmux", "attach", "-t", "crr-8a1b2c3d"]
 
 
 def test_crashed_claude_session_is_revived(tmp_path):

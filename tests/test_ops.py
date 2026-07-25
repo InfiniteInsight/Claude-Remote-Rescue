@@ -57,6 +57,20 @@ class FakeTmux:
         self._live.add(name)
 
 
+class FakeTabSpawner:
+    def __init__(self, available=True, fail=False):
+        self._available, self._fail = available, fail
+        self.opened = []
+
+    def available(self):
+        return self._available
+
+    def open_tab(self, argv, cwd=None):
+        if self._fail:
+            raise RuntimeError("osascript boom")
+        self.opened.append((list(argv), cwd))
+
+
 # --- remove ---------------------------------------------------------------
 
 def test_remove_deletes_and_is_idempotent(tmp_path):
@@ -124,3 +138,50 @@ def test_reopen_already_running_does_not_respawn(tmp_path):
     res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW)
     assert res.ok
     assert tmux.created == []  # already up
+
+
+# --- reopen + visible tab (macOS tab-spawn) -------------------------------
+
+def test_reopen_opens_a_visible_tab_attaching_to_the_revived_session(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux, tab = FakeTmux(), FakeTabSpawner()
+    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    name = f"crr-{_SID[:8]}"
+    assert res.ok
+    assert tmux.created  # revived detached first (durable)
+    # The tab attaches to the tmux session — word-form, no shell string.
+    assert tab.opened == [(["tmux", "attach", "-t", name], None)]
+
+
+def test_reopen_opens_a_tab_even_when_already_running(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    name = f"crr-{_SID[:8]}"
+    tmux, tab = FakeTmux(live={name}), FakeTabSpawner()
+    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    assert res.ok
+    assert tmux.created == []                 # not respawned
+    assert tab.opened[0][0] == ["tmux", "attach", "-t", name]  # but a tab is opened
+
+
+def test_reopen_tab_failure_does_not_fail_the_op(tmp_path):
+    # Revival is primary and already durable; a tab failure is surfaced in
+    # the message but must not turn a successful revival into a failure
+    # (DESIGN's swallowed-exit-code lesson, inverted — no false failure).
+    store = JournalStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux, tab = FakeTmux(), FakeTabSpawner(fail=True)
+    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    assert res.ok
+    assert "tab" in res.message.lower() and "fail" in res.message.lower()
+    assert store.read(42)["tmux_session"] == f"crr-{_SID[:8]}"  # revival persisted
+
+
+def test_reopen_unavailable_spawner_stays_detached(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux, tab = FakeTmux(), FakeTabSpawner(available=False)
+    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    assert res.ok
+    assert tab.opened == []  # never consulted an unavailable spawner

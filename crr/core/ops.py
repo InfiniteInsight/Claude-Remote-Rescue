@@ -19,8 +19,8 @@ from crr.core import contracts
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore
-from crr.core.ports import BootIdentity, ProcessProbe, TmuxSpawner
-from crr.core.reviver import revival_argv, session_name
+from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TmuxSpawner
+from crr.core.reviver import attach_argv, revival_argv, session_name
 
 
 class OpResult(NamedTuple):
@@ -63,8 +63,16 @@ def reopen(
     probe: ProcessProbe,
     pid: int,
     now: str,
+    *,
+    tab_spawner: TabSpawner | None = None,
 ) -> OpResult:
-    """Revive one CRASHED claude session on demand (no strike accounting)."""
+    """Revive one CRASHED claude session on demand (no strike accounting).
+
+    Revival always lands in a detached tmux session first (durable). If a
+    ``tab_spawner`` is available, a visible tab then attaches to it — a
+    best-effort convenience: a tab failure is surfaced in the message but
+    never demotes the successful revival to a failure.
+    """
     try:
         entry = store.read(pid)
     except (KeyError, contracts.ContractError):
@@ -77,9 +85,26 @@ def reopen(
 
     name = session_name(entry)
     if name in tmux.list_sessions():
-        return OpResult(True, f"already running as {name}")
-    tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
-    entry["tmux_session"] = name
-    entry["updated"] = now
-    store.write(entry)
-    return OpResult(True, f"reopened {pid} as {name}")
+        base = f"already running as {name}"
+    else:
+        tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+        entry["tmux_session"] = name
+        entry["updated"] = now
+        store.write(entry)
+        base = f"reopened {pid} as {name}"
+    return OpResult(True, base + _open_tab(tab_spawner, name))
+
+
+def _open_tab(tab_spawner: TabSpawner | None, name: str) -> str:
+    """Best-effort visible tab attaching to ``name``; returns a message suffix.
+
+    The tmux revival is already durable by the time this runs, so any
+    failure here is convenience-only — reported, never fatal.
+    """
+    if tab_spawner is None or not tab_spawner.available():
+        return ""
+    try:
+        tab_spawner.open_tab(attach_argv(name))
+        return " (opened in a new tab)"
+    except Exception as exc:  # best-effort: an osascript/subprocess failure
+        return f" (tab spawn failed: {exc})"
