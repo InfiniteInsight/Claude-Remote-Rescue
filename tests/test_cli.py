@@ -96,6 +96,20 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert not (tmp_path / ".config" / "systemd").exists()
 
 
+def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["launchd"])  # default: print, no --install
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "com.claude-remote-rescue.revive.plist" in out
+    assert "com.claude-remote-rescue.web.plist" in out
+    assert "/opt/crr/bin/crr" in out  # baked ProgramArguments
+    assert "launchctl" in out and "load" in out  # printed enable guidance
+    # Print mode must not touch the user's LaunchAgents dir.
+    assert not (tmp_path / "Library" / "LaunchAgents").exists()
+
+
 def test_doctor_reports_install_health(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     rc = cli.main(["doctor"])

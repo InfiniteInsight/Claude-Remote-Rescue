@@ -71,7 +71,8 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr diagnose [--json]` | Explain why the previous boot / sessions may have died |
 | `crr gc` | Drop archive records past the retention window |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |
-| `crr systemd [--install]` | Print (or install) the watchdog timer + dashboard service |
+| `crr systemd [--install]` | Print (or install) the Linux watchdog timer + dashboard service |
+| `crr launchd [--install]` | Print (or install) the macOS launchd user agents (watchdog + dashboard) |
 | `crr config --effective` | Every config key with its value and origin (`configured` / `default`) |
 | `crr doctor` | Install-health checklist |
 
