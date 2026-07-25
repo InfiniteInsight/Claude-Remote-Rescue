@@ -469,6 +469,46 @@ def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
     assert store.read(7)["claude"]["sid_source"] == "guessed"  # unconfirmed stays guessed
 
 
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
+def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_path, monkeypatch):
+    # End-to-end through `crr revive`: the guessed->verified upgrade must
+    # survive revive's own store.write of the same entry — pins the re-scan
+    # ordering (without it, revive would write back the stale guessed dict).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()  # nothing live -> the crashed entry is revived
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+
+    store = JournalStore(tmp_path / "state")
+    store.write(new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="an-old-boot-that-cannot-match",  # boot mismatch => crashed
+        now="2026-07-25T12:00:00+00:00",
+        claude={"session_id": "g1", "sid_source": "guessed",
+                "started": "2026-07-25T12:00:00+00:00"},
+    ))
+    started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", "g1", mtime=started + 60)
+
+    assert cli.main(["revive"]) == 0
+    entry = store.read(7)
+    assert entry["claude"]["sid_source"] == "verified"  # upgrade survived revive's write
+    assert entry["tmux_session"] == "crr-g1"            # and it was actually revived
+
+
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
 
 # --- session ops: remove / dismiss / reopen -----------------------------
