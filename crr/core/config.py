@@ -50,6 +50,10 @@ DEFAULTS: dict[str, Any] = {
     "host_allowlist_extras": [],   # extra Host values the dashboard accepts
     # retention
     "archive_retention_days": 14,  # gc drops archive records older than this
+    # tab spawn (macOS/desktop): which terminal a visible reopen uses.
+    # "auto" = $TERM_PROGRAM then the always-present default; or "terminal"
+    # / "iterm" to force one (a named prior, not a magic default).
+    "terminal": "auto",
 }
 
 

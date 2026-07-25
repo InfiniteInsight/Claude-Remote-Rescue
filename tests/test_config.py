@@ -41,6 +41,14 @@ def test_audit_floor_priors_are_present():
     assert floor <= set(cfg.DEFAULTS)
 
 
+def test_terminal_prior_defaults_to_auto():
+    # DESIGN: tab choice is auto-detected but config-overridable — so the
+    # choice is a named prior (audit P5), not a magic default in logic.
+    assert cfg.DEFAULTS["terminal"] == "auto"
+    assert cfg.Config().get("terminal") == "auto"
+    assert cfg.Config(overrides={"terminal": "iterm"}).get("terminal") == "iterm"
+
+
 def test_no_overrides_all_default():
     c = cfg.Config()
     eff = c.effective()

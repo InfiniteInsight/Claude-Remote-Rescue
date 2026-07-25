@@ -50,6 +50,15 @@ def revival_argv(entry: Mapping[str, Any]) -> list[str]:
     return ["claude", "--resume", entry["claude"]["session_id"]]
 
 
+def attach_argv(name: str) -> list[str]:
+    """Word-form argv for a visible tab to attach to the detached session.
+
+    The session name is ``crr-<8hex>`` (metacharacter-free), so this stays
+    safe even where an adapter must render it into a shell string.
+    """
+    return ["tmux", "attach", "-t", name]
+
+
 def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str):
     """Return (action, updated_entry, name) for one candidate.
 

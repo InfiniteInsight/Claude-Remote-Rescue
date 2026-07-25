@@ -66,3 +66,25 @@ class TmuxSpawner(Protocol):
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:
         """Create a detached session ``name`` in ``cwd`` running ``argv``."""
         ...
+
+
+@runtime_checkable
+class TabSpawner(Protocol):
+    """Opens a *visible* terminal tab — the counterpart to detached tmux.
+
+    DESIGN: revival lands in a detached tmux session (durable, survives the
+    tab closing); a TabSpawner then attaches to it visibly ``where tabs
+    exist`` (macOS Terminal/iTerm now, Linux desktop later). ``open_tab``
+    takes argv **word-form**; the adapter is responsible for quoting it into
+    whatever its mechanism needs (a shell string for ``osascript``), never
+    the caller. It is best-effort: the caller has already made the session
+    durable, so a raised error costs convenience, not state.
+    """
+
+    def available(self) -> bool:
+        """Return True if this spawner's terminal app is present/usable."""
+        ...
+
+    def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
+        """Open a visible tab running ``argv`` (optionally ``cd`` to cwd)."""
+        ...
