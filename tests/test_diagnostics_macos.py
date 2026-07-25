@@ -4,11 +4,11 @@ The ``collect`` orchestration + degrade logic is tested cross-platform by
 monkeypatching ``_run`` with canned command output (no Mac needed). A
 Darwin-gated smoke test then asserts the REAL commands run — strictly, so
 a broken invocation surfaces as a red test instead of a silent empty
-``host_events`` (the swallowed-exit-code lesson).
+``host_events`` (the swallowed-exit-code lesson). That strict smoke test is
+what will validate the real ``log show`` / ``pmset`` format on macOS CI.
 """
 
 import platform
-import subprocess
 
 import pytest
 
@@ -86,32 +86,3 @@ def test_collect_runs_real_sources_on_macos():
     assert "host_events" not in degraded, f"log show / pmset did not run: {degraded}"
     assert "prev_boot_errors" in degraded
     assert isinstance(boots, list) and isinstance(events, list)
-
-
-@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
-def test_HARVEST_macos_command_formats_TEMPORARY():
-    # TEMPORARY: surfaces the real command output/timing/rc in the CI log so
-    # the parsers can be written from the true format, then deleted. Raises
-    # on purpose (pytest shows the message for a failing test).
-    import time
-    cmds = {
-        "sysctl": ["sysctl", "-n", "kern.boottime"],
-        "pmset": ["pmset", "-g", "log"],
-        "logshow": ["log", "show", "--last", "1d", "--style", "compact",
-                    "--predicate", mac._LOG_PREDICATE],
-    }
-    report = []
-    for label, cmd in cmds.items():
-        t0 = time.monotonic()
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            dt = time.monotonic() - t0
-            lines = r.stdout.splitlines()
-            report.append(
-                f"[{label}] rc={r.returncode} {dt:.1f}s stdout_lines={len(lines)}\n"
-                "HEAD:\n" + "\n".join(lines[:25]) +
-                f"\nSTDERR: {r.stderr[:400]}"
-            )
-        except Exception as exc:  # noqa: BLE001 - harvest wants every failure verbatim
-            report.append(f"[{label}] EXC {exc!r}")
-    raise AssertionError("HARVEST OUTPUT >>>\n" + "\n\n".join(report))
