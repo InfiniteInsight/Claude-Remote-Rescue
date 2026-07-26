@@ -68,9 +68,10 @@ def test_choose_returns_none_when_no_terminal_is_installed():
 # --- headless guard + detect() -------------------------------------------
 
 def test_detect_is_none_without_a_display():
-    # Headless (no $DISPLAY/$WAYLAND_DISPLAY) has no tabs — tmux-only.
-    got = tsl.detect("auto", {}, timeout_seconds=5, which=lambda b: "/usr/bin/kitty")
-    assert got is None
+    # Headless (no $DISPLAY/$WAYLAND_DISPLAY) has no tabs — tmux-only. Even
+    # with every terminal "installed", the display check short-circuits.
+    only_kitty = lambda b: "/usr/bin/kitty" if b == "kitty" else None
+    assert tsl.detect("auto", {}, timeout_seconds=5, which=only_kitty) is None
 
 
 def test_detect_returns_a_spawner_with_a_display_and_an_installed_terminal():

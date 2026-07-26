@@ -13,19 +13,28 @@ Not affiliated with Anthropic. MIT licensed.
 
 ## Status
 
-**Phase 1 implemented — headless Linux.** The core, shell shims, reviver,
-web dashboard, watchdog, and diagnostics are built and green in CI
-(ubuntu + macOS runners, Python 3.11/3.12; the served page's JavaScript is
-`node --check`-gated). See [DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md).
+**Phases 1–4 code is on `main` (v0.1.0).** Headless Linux (Phase 1) plus the
+platform adapters — macOS (Phase 2: boot identity, launchd, Terminal.app /
+iTerm2 tab-spawn, `log show`/`pmset` diagnostics), Linux desktop (Phase 3:
+gnome-terminal / konsole / kitty / wezterm), and Windows/WSL (Phase 4:
+`wt.exe` spawn, Scheduled Task, WinEvent + WSL-OOM diagnostics) — are built,
+along with guessed/verified resume-sid tracking and the batched status probe.
+See [DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md).
 
-Honest calibration: everything below is covered by automated tests and
-verified single-process on the author's box, **but the end-to-end
-acceptance — kill the tmux server, reboot, watch every conversation
-revive and the dashboard return over the tailnet — has not yet been run on
-real hardware.** Two commands are deliberately not shipped yet: `kick` and
-`close` (they signal live processes and need the shim repair loop; held
-until revival is proven on hardware). macOS/Windows-desktop adapters are
-Phases 2–4.
+Honest calibration — what is and isn't verified:
+
+- **Verified:** the Linux CI matrix (ubuntu, Python 3.11/3.12), the
+  `node --check` page-JS gate, and the import-linter layering contract all
+  pass. Business logic is covered by unit tests with fakes.
+- **NOT yet verified:** the macOS-runner tests (`plutil`, `osacompile`,
+  `log show`/`pmset`, mac boot-identity) have not run on this batch; any real
+  GUI tab spawn (macOS/Linux-desktop/`wt.exe`) and all Windows integration
+  are unrun; and the **end-to-end hardware acceptance** — kill the tmux
+  server, reboot, watch every conversation revive and the dashboard return
+  over the tailnet — has not been run. These are the next milestone.
+- **Deliberately not shipped:** `kick` and `close` (they signal live
+  processes and need the shim repair loop; held until revival is proven on
+  real hardware).
 
 This is a ground-up OSS rewrite of a private Windows/WSL tool that
 survived two real outages in production (a Windows-Update reboot and a WSL
