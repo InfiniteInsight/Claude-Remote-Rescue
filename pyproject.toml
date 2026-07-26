@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-remote-rescue"
-version = "0.0.0"
+version = "0.1.0"
 description = "Keep Claude Code sessions alive and remotely rescuable when terminals, shells, or whole hosts die."
 readme = "README.md"
 requires-python = ">=3.11"
