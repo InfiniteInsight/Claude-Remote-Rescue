@@ -65,6 +65,25 @@ def test_build_payload_is_contract_valid():
     assert payload["source"] == "journald"
 
 
+def test_build_payload_auto_derives_a_plain_english_summary():
+    # Callers that don't pass summary get one derived from the events, so the
+    # dashboard + CLI always have the "why" without duplicating the call.
+    payload = diagnostics.build_payload(
+        source="journald", boots=[], prev_boot_errors=[],
+        host_events=["Out of memory: Killed process 4242"], degraded=[],
+    )
+    contracts.validate_diagnostics_payload(payload)
+    assert payload["summary"]
+    assert any("memory" in s.lower() for s in payload["summary"])
+
+
+def test_build_payload_summary_is_clean_verdict_when_no_events():
+    payload = diagnostics.build_payload(
+        source="journald", boots=[], prev_boot_errors=[], host_events=[], degraded=[],
+    )
+    assert len(payload["summary"]) == 1  # explicit "looks clean", never empty
+
+
 def test_build_payload_records_degraded_sources():
     payload = diagnostics.build_payload(
         source="journald", boots=[], prev_boot_errors=[], host_events=[],

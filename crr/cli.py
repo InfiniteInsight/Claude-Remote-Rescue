@@ -693,6 +693,10 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
         return 0
     if payload["degraded"]:
         print(f"(degraded sources: {', '.join(payload['degraded'])})", file=sys.stderr)
+    # Plain-English verdict first (the "why", before the raw evidence).
+    for sentence in payload["summary"]:
+        print(f"• {sentence}")
+    print()
     print(f"boots on record: {len(payload['boots'])}")
     events = payload["host_events"]
     if events:

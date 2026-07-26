@@ -69,6 +69,7 @@
   }
   #diag-panel h3 { margin: 8px 0 4px; font-size: 12px; color: #8a93a2; font-weight: 600; }
   #diag-panel .ev { font-family: ui-monospace, monospace; color: #cdd3dd; margin: 3px 0; word-break: break-word; }
+  #diag-panel .verdict { color: #f0d886; margin: 6px 0; line-height: 1.4; border-left: 3px solid #6b5d2f; padding-left: 8px; }
 </style>
 </head>
 <body>
@@ -201,8 +202,15 @@ function renderDiag(d) {
     warn.textContent = "degraded sources: " + d.degraded.join(", ");
     panel.appendChild(warn);
   }
+  // Plain-English verdict first — the "why", above the raw evidence.
+  var summary = d.summary || [];
+  summary.forEach(function (sentence) {
+    var s = el("div", "verdict");
+    s.textContent = sentence;  // trusted server text, still textContent
+    panel.appendChild(s);
+  });
   var h1 = el("h3");
-  h1.textContent = "host death / shutdown / OOM (previous boot)";
+  h1.textContent = "raw evidence — host death / shutdown / OOM (previous boot)";
   panel.appendChild(h1);
   var events = d.host_events || [];
   if (!events.length) {

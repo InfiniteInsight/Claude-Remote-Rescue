@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping
 
 JOURNAL_SCHEMA_VERSION = 1
 SESSIONS_CONTRACT_VERSION = 1
-DIAGNOSTICS_CONTRACT_VERSION = 1
+DIAGNOSTICS_CONTRACT_VERSION = 2  # v2 adds the plain-English `summary` list
 ARCHIVE_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
@@ -70,6 +70,7 @@ SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
 DIAGNOSTICS_PAYLOAD_KEYS = (
     "contract",
     "source",
+    "summary",
     "boots",
     "prev_boot_errors",
     "host_events",
@@ -222,6 +223,7 @@ def validate_diagnostics_payload(payload: Any) -> None:
         )
 
     _require_type(payload["source"], str, "/api/diagnostics 'source'")
+    _require_type(payload["summary"], list, "/api/diagnostics 'summary'")
     _require_type(payload["boots"], list, "/api/diagnostics 'boots'")
     _require_type(payload["prev_boot_errors"], list, "/api/diagnostics 'prev_boot_errors'")
     _require_type(payload["host_events"], list, "/api/diagnostics 'host_events'")

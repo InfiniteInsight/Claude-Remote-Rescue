@@ -89,13 +89,21 @@ def build_payload(
     prev_boot_errors: list,
     host_events: list,
     degraded: list,
+    summary: list | None = None,
 ) -> dict[str, Any]:
-    """Assemble and validate the /api/diagnostics payload."""
-    from crr.core import contracts
+    """Assemble and validate the /api/diagnostics payload.
 
+    ``summary`` is the plain-English death verdict; when omitted it is derived
+    from the events here so every caller gets it without duplicating the call.
+    """
+    from crr.core import contracts, explain
+
+    if summary is None:
+        summary = explain.summarize(host_events, prev_boot_errors)
     payload = {
         "contract": contracts.DIAGNOSTICS_CONTRACT_VERSION,
         "source": source,
+        "summary": summary,
         "boots": boots,
         "prev_boot_errors": prev_boot_errors,
         "host_events": host_events,

@@ -71,6 +71,7 @@ def _diagnostics_payload():
     return {
         "contract": contracts.DIAGNOSTICS_CONTRACT_VERSION,
         "source": "journald",
+        "summary": ["Out-of-memory: the host ran low on memory."],
         "boots": [{"index": -1, "boot_id": "…", "start": "…", "stop": "…"}],
         "prev_boot_errors": ["oom-killer: killed process 4242"],
         "host_events": ["reboot at 03:14"],
@@ -247,6 +248,18 @@ def test_diagnostics_missing_key_rejected():
 def test_diagnostics_degraded_must_be_list():
     p = _diagnostics_payload()
     p["degraded"] = "journald"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_summary_is_required_and_must_be_list():
+    # v2 contract: the plain-English summary is a required list field.
+    p = _diagnostics_payload()
+    del p["summary"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+    p = _diagnostics_payload()
+    p["summary"] = "out of memory"  # a bare string, not a list
     with pytest.raises(contracts.ContractError):
         contracts.validate_diagnostics_payload(p)
 
