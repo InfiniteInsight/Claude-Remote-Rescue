@@ -11,8 +11,8 @@ those platforms.)
 from __future__ import annotations
 
 import shutil
-import subprocess
 
+from crr.adapters._proc import run_capture
 from crr.core import config as cfg
 from crr.core import diagnostics as core
 
@@ -24,8 +24,6 @@ _HOST_EVENT_PATTERN = (
     "oom-killer|Out of memory|Killed process|"
     "[Ss]hutting down|reboot|power-off|watchdog did not stop"
 )
-
-_ERRS = (subprocess.SubprocessError, OSError, RuntimeError, ValueError)
 
 
 def available() -> bool:
@@ -53,27 +51,21 @@ def collect(config: cfg.Config) -> tuple[list, list, list, list]:
     degraded: list = []
     try:
         boots = list_boots(event_cap, timeout)
-    except _ERRS:
+    except core.DEGRADE_ERRORS:
         degraded.append("boots")
     try:
         prev = prev_boot_errors(lookback, line_cap, timeout)
-    except _ERRS:
+    except core.DEGRADE_ERRORS:
         degraded.append("prev_boot_errors")
     try:
         events = host_events(lookback, event_cap, timeout)
-    except _ERRS:
+    except core.DEGRADE_ERRORS:
         degraded.append("host_events")
     return boots, prev, events, degraded
 
 
 def _run(args: list[str], timeout: float) -> str:
-    result = subprocess.run(
-        ["journalctl", "--no-pager", *args],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"journalctl {args} exited {result.returncode}")
-    return result.stdout
+    return run_capture(["journalctl", "--no-pager", *args], timeout)
 
 
 def list_boots(cap: int, timeout: float) -> list[dict]:

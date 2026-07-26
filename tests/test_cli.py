@@ -30,7 +30,7 @@ def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
     # macOS the log+pmset source is selected; under WSL, the WinEvent+OOM one.)
     from crr.adapters import diagnostics as diag_source
     monkeypatch.setattr(diag_source, "available", lambda: False)
-    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)  # pin native Linux
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)  # pin native Linux
     rc = cli.main(["diagnose", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
@@ -43,12 +43,12 @@ def test_select_diag_source_uses_windows_wsl_source_when_journald_absent(monkeyp
     # WSL without journald -> the WinEvent+OOM source; with journald present
     # (or native Linux) -> journald.
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.diag_source, "available", lambda: False)
     assert cli._select_diag_source() is cli.diagnostics_windows
     monkeypatch.setattr(cli.diag_source, "available", lambda: True)
     assert cli._select_diag_source() is cli.diag_source
-    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
     monkeypatch.setattr(cli.diag_source, "available", lambda: False)
     assert cli._select_diag_source() is cli.diag_source  # native Linux stays journald
 
@@ -160,7 +160,7 @@ def test_tab_spawner_is_none_on_headless_non_wsl_linux(monkeypatch):
     # Non-WSL Linux with no display has no tabs (Phase 3 desktop needs one),
     # so reopen degrades to detached-tmux rather than erroring.
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
     monkeypatch.setattr(cli.os, "environ", {})  # no display
     assert cli._tab_spawner(cfg.Config()) is None
 
@@ -168,7 +168,7 @@ def test_tab_spawner_is_none_on_headless_non_wsl_linux(monkeypatch):
 def test_tab_spawner_selects_a_linux_terminal_on_a_desktop(monkeypatch):
     # Non-WSL Linux desktop with a display + an installed terminal.
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
     monkeypatch.setattr(cli.os, "environ", {"DISPLAY": ":0"})
     monkeypatch.setattr(cli.tab_spawn_linux.shutil, "which",
                         lambda b: "/usr/bin/kitty" if b == "kitty" else None)
@@ -180,7 +180,7 @@ def test_tab_spawner_selects_a_linux_terminal_on_a_desktop(monkeypatch):
 def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
     # WSL is checked before the Linux desktop path: wt.exe wins when present.
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
                         lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
     spawner = cli._tab_spawner(cfg.Config())

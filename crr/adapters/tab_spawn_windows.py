@@ -19,15 +19,6 @@ import subprocess
 from typing import Sequence
 
 
-def is_wsl(proc_version_path: str = "/proc/version") -> bool:
-    """True if this Linux userland is WSL (``/proc/version`` names microsoft)."""
-    try:
-        with open(proc_version_path, "r", encoding="utf-8", errors="replace") as fh:
-            return "microsoft" in fh.read().lower()
-    except OSError:
-        return False
-
-
 def wt_command(
     argv: Sequence[str],
     cwd: str | None = None,

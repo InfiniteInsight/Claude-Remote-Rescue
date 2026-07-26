@@ -20,8 +20,9 @@ source: ``SOURCE_NAME``, ``available()``, ``collect(config)``.
 
 from __future__ import annotations
 
-import subprocess
+import shutil
 
+from crr.adapters._proc import run_capture as _run
 from crr.core import config as cfg
 from crr.core import diagnostics as core
 
@@ -29,28 +30,16 @@ SOURCE_NAME = "log+pmset"
 
 # `log show` predicate bounds the query server-side (an unfiltered 1d window
 # is huge); the client-side filter below is redundant insurance.
-_LOG_PREDICATE = (
-    'eventMessage CONTAINS[c] "panic" '
-    'OR eventMessage CONTAINS[c] "shutdown" '
-    'OR eventMessage CONTAINS[c] "watchdog"'
-)
 _LOG_TERMS = ("panic", "shutdown", "watchdog")
 _PMSET_TERMS = ("Sleep", "Wake", "DarkWake", "Thermal")
-
-_ERRS = (subprocess.SubprocessError, OSError, RuntimeError, ValueError)
+# Build the server-side predicate from the same terms the client filter uses,
+# so the two lists can't drift.
+_LOG_PREDICATE = " OR ".join(f'eventMessage CONTAINS[c] "{t}"' for t in _LOG_TERMS)
 
 
 def available() -> bool:
     # `log`, `pmset`, `sysctl` ship with macOS; `log` is the load-bearing one.
-    import shutil
     return shutil.which("log") is not None
-
-
-def _run(argv: list[str], timeout: float) -> str:
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"{argv[0]} exited {result.returncode}")
-    return result.stdout
 
 
 def _current_boot(timeout: float) -> list:
@@ -83,10 +72,10 @@ def collect(config: cfg.Config) -> tuple[list, list, list, list]:
     events: list = []
     try:
         boots = _current_boot(timeout)
-    except _ERRS:
+    except core.DEGRADE_ERRORS:
         degraded.append("boots")
     try:
         events = _host_events(window, event_cap, timeout)
-    except _ERRS:
+    except core.DEGRADE_ERRORS:
         degraded.append("host_events")
     return boots, [], events, degraded

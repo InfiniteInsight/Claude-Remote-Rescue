@@ -65,8 +65,8 @@ def verify_guessed(entry: Mapping[str, Any], transcripts: _Transcripts, now: str
     started_epoch = _iso_to_epoch(claude.get("started", ""))
     if started_epoch is None:
         return None
-    by_id = {t["session_id"]: t for t in transcripts}
-    transcript = by_id.get(claude["session_id"])
+    sid = claude["session_id"]
+    transcript = next((t for t in transcripts if t["session_id"] == sid), None)
     if transcript is None or transcript["mtime"] <= started_epoch:
         return None
     updated = dict(entry)

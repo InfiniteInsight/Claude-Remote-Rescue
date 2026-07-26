@@ -17,3 +17,6 @@ venv/
 
 # OS
 .DS_Store
+
+# test/coverage artifacts
+.coverage

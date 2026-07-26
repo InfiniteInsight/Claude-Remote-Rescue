@@ -20,14 +20,17 @@ powershell/dmesg round-trip is author-verified on Windows (task #8).
 from __future__ import annotations
 
 import re
-import subprocess
+import shutil
+
+from crr.adapters._proc import run_capture as _run
+from crr.core import diagnostics as core
+from crr.core import explain
 
 SOURCE_NAME = "winevent+wsl-oom"
 
 # Windows System-log event IDs that explain a host death/reboot.
 SHUTDOWN_EVENT_IDS = (1074, 6008, 41)
 
-_OOM_RE = re.compile(r"out of memory|oom-killer|killed process", re.IGNORECASE)
 _MEMINFO_RE = re.compile(r"^([^:]+):\s+(\d+)\s*kB", re.MULTILINE)
 # The bystander fields the RSS view misses, in report order.
 _FORENSIC_FIELDS = ("MemTotal", "MemAvailable", "Shmem", "Inactive(anon)")
@@ -49,7 +52,9 @@ def parse_winevents(text: str) -> list[str]:
 
 
 def parse_oom_lines(dmesg_text: str) -> list[str]:
-    return [line.strip() for line in dmesg_text.splitlines() if _OOM_RE.search(line)]
+    # OOM terms are shared with explain.summarize so a line that lands in
+    # host_events here is the same one the verdict will recognize.
+    return core.filter_lines(dmesg_text, explain.OOM_TERMS, cap=0)
 
 
 def parse_meminfo(text: str) -> dict[str, int]:
@@ -75,19 +80,8 @@ def format_memory_forensics(meminfo: dict[str, int]) -> str:
             + " (shmem/inactive_anon bystanders, not just process RSS)")
 
 
-_ERRS = (subprocess.SubprocessError, OSError, RuntimeError, ValueError)
-
-
 def available() -> bool:
-    import shutil
     return shutil.which("powershell.exe") is not None or shutil.which("dmesg") is not None
-
-
-def _run(argv: list[str], timeout: float) -> str:
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"{argv[0]} exited {result.returncode}")
-    return result.stdout
 
 
 def _read(path: str) -> str:
@@ -116,6 +110,6 @@ def collect(config) -> tuple[list, list, list, list]:
             forensics = format_memory_forensics(parse_meminfo(_read("/proc/meminfo")))
             if forensics:
                 events.append(forensics)
-    except _ERRS:
+    except core.DEGRADE_ERRORS:
         degraded.append("host_events")
     return [], [], events[:cap] if cap else events, degraded

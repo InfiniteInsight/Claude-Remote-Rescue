@@ -33,7 +33,7 @@ from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
-from crr.adapters import diagnostics_windows, scheduled_task, tab_spawn_linux, tab_spawn_windows
+from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, resume, reviver, status, web
@@ -495,10 +495,15 @@ def _verify_guessed_sids(store: JournalStore, now: str) -> None:
     against its cwd's live transcript activity; unconfirmed guesses are left
     guessed (silence never confirms).
     """
+    by_cwd: dict[str, list] = {}  # one transcript glob+stat per unique cwd
     for entry in store.scan().entries:
-        updated = resume.verify_guessed(
-            entry, transcript_source.list_transcripts(entry["cwd"]), now
-        )
+        claude = entry.get("claude")
+        if not claude or claude.get("sid_source") != "guessed":
+            continue  # only a guessed sid can be upgraded — skip the FS walk
+        cwd = entry["cwd"]
+        if cwd not in by_cwd:
+            by_cwd[cwd] = transcript_source.list_transcripts(cwd)
+        updated = resume.verify_guessed(entry, by_cwd[cwd], now)
         if updated is not None:
             store.write(updated)
 
@@ -571,13 +576,14 @@ def _tab_spawner(config: cfg.Config):
     durable) revival.
     """
     timeout = config.get("interop_timeout_seconds")
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Darwin":
         kind = tab_spawn.choose(config.get("terminal"), os.environ)
         spawner = tab_spawn.spawner_for(kind, timeout)
         return spawner if spawner.available() else None
-    if platform.system() == "Linux":
+    if system == "Linux":
         # WSL first: reach the Windows side via wt.exe (crr runs in the distro).
-        if tab_spawn_windows.is_wsl():
+        if host.is_wsl():
             spawner = tab_spawn_windows.WindowsTerminalSpawner(
                 timeout, config.get("wt_profile"), os.environ.get("WSL_DISTRO_NAME")
             )
@@ -663,7 +669,7 @@ def _select_diag_source():
     # WSL source degrades.
     if (
         platform.system() == "Linux"
-        and tab_spawn_windows.is_wsl()
+        and host.is_wsl()
         and not diag_source.available()
     ):
         return diagnostics_windows

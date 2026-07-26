@@ -18,27 +18,32 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
-# (regex, sentence, severity) — higher severity is reported first. Each
-# category emits at most one sentence regardless of how many lines match.
-_SIGNATURES: list[tuple[re.Pattern[str], str, int]] = [
-    (re.compile(r"out of memory|oom-killer|killed process", re.I),
+# OOM detection terms — the SINGLE source shared with the diagnostics
+# collectors (adapters/diagnostics_windows), so what lands in host_events and
+# what the verdict recognizes can never drift apart.
+OOM_TERMS = ("out of memory", "oom-killer", "killed process")
+
+# (pattern, sentence) pairs, declared MOST-SEVERE FIRST — summarize emits any
+# that match in this order, so declaration order IS the reporting order.
+_SIGNATURES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile("|".join(OOM_TERMS), re.I),
      "Out-of-memory: the host ran low on memory and the kernel killed one or "
      "more processes. On WSL, check the Shmem / Inactive(anon) figures — the "
-     "victim is often shared/tmpfs memory, not the biggest process.", 4),
+     "victim is often shared/tmpfs memory, not the biggest process."),
     (re.compile(r"panic", re.I),
-     "Kernel panic: the host crashed.", 3),
+     "Kernel panic: the host crashed."),
     (re.compile(r"unexpected|6008|kernel-power|\b41\b|power[- ]?loss", re.I),
      "Unexpected shutdown: the host lost power or crashed — no clean shutdown "
-     "was recorded before it went down.", 3),
+     "was recorded before it went down."),
     (re.compile(r"watchdog", re.I),
-     "Watchdog reset: a watchdog timer restarted the host.", 2),
+     "Watchdog reset: a watchdog timer restarted the host."),
     # Actual shutdown phrases only — NOT a bare "reboot"/"restart", which also
     # matches noise like `@reboot` cron jobs or `ua-reboot-cmds.service`.
     (re.compile(
         r"shutting down|systemd-shutdown|rebooting|power(?:ed)?[- ]?off|poweroff|"
         r"halt(?:ing|ed)?\b|1074|reached target (?:shutdown|reboot|power)", re.I),
      "Clean shutdown/restart: the host was shut down or rebooted normally "
-     "(a planned reboot or an update, not a crash).", 1),
+     "(a planned reboot or an update, not a crash)."),
 ]
 
 _CLEAN = (
@@ -49,24 +54,12 @@ _CLEAN = (
 
 
 def summarize(host_events: Sequence[str], prev_boot_errors: Sequence[str]) -> list[str]:
-    """Return severity-ordered, deduped plain-English death summaries.
+    """Return the matching plain-English death summaries, most severe first.
 
     Scans both the host-death events and the previous-boot error lines (an OOM
     can surface in either). Always returns at least one sentence: the explicit
-    "looks clean" verdict when nothing matches.
+    "looks clean" verdict when nothing matches. Order and uniqueness come for
+    free from ``_SIGNATURES`` (declared severity-desc, distinct sentences).
     """
     haystack = "\n".join([*host_events, *prev_boot_errors])
-    hits: list[tuple[int, str]] = []
-    for pattern, sentence, severity in _SIGNATURES:
-        if pattern.search(haystack):
-            hits.append((severity, sentence))
-    if not hits:
-        return [_CLEAN]
-    # Severity desc, preserving signature order within a tie; dedupe sentences.
-    seen: set[str] = set()
-    out: list[str] = []
-    for _, sentence in sorted(hits, key=lambda h: -h[0]):
-        if sentence not in seen:
-            seen.add(sentence)
-            out.append(sentence)
-    return out
+    return [sentence for pattern, sentence in _SIGNATURES if pattern.search(haystack)] or [_CLEAN]

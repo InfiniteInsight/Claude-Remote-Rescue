@@ -29,18 +29,6 @@ def test_wt_command_threads_profile_startdir_and_distro():
     ]
 
 
-def test_is_wsl_reads_proc_version(tmp_path):
-    micro = tmp_path / "version_wsl"
-    micro.write_text("Linux version 5.15.0-microsoft-standard-WSL2 ...", encoding="utf-8")
-    assert tsw.is_wsl(str(micro)) is True
-
-    native = tmp_path / "version_native"
-    native.write_text("Linux version 6.8.0-generic ...", encoding="utf-8")
-    assert tsw.is_wsl(str(native)) is False
-
-    assert tsw.is_wsl(str(tmp_path / "missing")) is False  # absent -> not WSL
-
-
 def test_spawner_open_tab_runs_the_built_command(monkeypatch):
     calls = []
     monkeypatch.setattr(tsw.subprocess, "run", lambda cmd, **kw: calls.append(cmd))

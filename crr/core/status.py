@@ -52,9 +52,6 @@ class _MemoTtyProbe:
     def has_controlling_tty(self, pid: int) -> bool:
         return pid in self._tty_pids
 
-    def controlling_ttys(self, pids):
-        return {p for p in pids if p in self._tty_pids}
-
 
 def assemble_sessions(
     entries: Sequence[Mapping[str, Any]],

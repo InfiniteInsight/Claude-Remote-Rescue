@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
+# The per-source degrade contract: a diagnostics sub-source that raises one of
+# these is recorded in ``degraded`` rather than aborting the diagnosis. Shared
+# by every diagnostics adapter so the "never raise per source" guarantee has
+# one definition (adding a type here widens it everywhere, not in one copy).
+DEGRADE_ERRORS = (subprocess.SubprocessError, OSError, RuntimeError, ValueError)
+
 # macOS ``sysctl -n kern.boottime`` looks like ``{ sec = 1784723478, usec = 0
-# } <date>``; the seconds field is the per-boot identity. Duplicated (not
-# imported) from the boot-identity adapter to avoid an adapter→adapter edge.
+# } <date>``. The boot-identity adapter parses the same field for a different
+# return shape; the one-line regex is intentionally restated here rather than
+# creating a diagnostics→boot_identity coupling for a trivial pattern.
 _MAC_BOOTTIME_SEC_RE = re.compile(r"sec\s*=\s*(\d+)")
 
 
