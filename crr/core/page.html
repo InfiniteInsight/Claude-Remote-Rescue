@@ -31,6 +31,7 @@
     border: 1px solid #262b36; border-radius: 10px; padding: 12px 14px; background: #161a22;
   }
   .card.dup { border-left: 3px solid #6f7cf5; }
+  .card.dup-uncertain { border-left-color: #e0a53b; }
   .card .top { display: flex; align-items: center; gap: 10px; }
   .id { font-family: ui-monospace, monospace; font-size: 13px; color: #b9c1cf; }
   .badge {
@@ -40,6 +41,8 @@
   .badge.live { background: #123a22; color: #46c26a; }
   .badge.ghost { background: #3a2f12; color: #e0a53b; }
   .badge.crashed { background: #3a1616; color: #e05252; }
+  .badge.dup-badge { margin-left: 8px; background: #1e2740; color: #9fb0f5; text-transform: none; letter-spacing: 0; }
+  .badge.dup-badge.uncertain { background: #3a2f12; color: #e0a53b; }
   .cwd { color: #8a93a2; font-size: 12px; margin-top: 6px; font-family: ui-monospace, monospace; word-break: break-all; }
   .prompt { margin-top: 6px; color: #cdd3dd; font-size: 13px; }
   .prompt:empty { display: none; }
@@ -100,9 +103,27 @@ var VERSION_MS = 30000;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
+// Audit P3 weighting: a duplicate group is only a CERTAIN collision when every
+// member's sid is injected/verified. If any member's sid is `guessed`, the
+// shared id may be a laundered guess (two tabs guessing the same newest
+// transcript), so the group is shown as UNCERTAIN rather than presented as
+// truth. The provenance (sid_source) is on each card; the weighting is here.
+function uncertainGroups(sessions) {
+  var groups = {}, uncertain = {};
+  sessions.forEach(function (s) {
+    if (s.duplicate_group) (groups[s.duplicate_group] = groups[s.duplicate_group] || []).push(s);
+  });
+  Object.keys(groups).forEach(function (g) {
+    uncertain[g] = groups[g].some(function (s) { return s.sid_source === "guessed"; });
+  });
+  return uncertain;
+}
+
 // Untrusted fields (cwd, last_prompt, ids) reach the DOM via textContent ONLY.
-function renderCard(s) {
-  var card = el("div", "card" + (s.duplicate_group ? " dup" : ""));
+function renderCard(s, uncertain) {
+  var isDup = !!s.duplicate_group;
+  var isUncertain = isDup && uncertain[s.duplicate_group];
+  var card = el("div", "card" + (isDup ? (isUncertain ? " dup dup-uncertain" : " dup") : ""));
   var top = el("div", "top");
   var id = el("span", "id");
   id.textContent = "#" + s.pid + " · " + s.sid8;
@@ -113,6 +134,11 @@ function renderCard(s) {
   var badge = el("span", "badge " + s.state);
   badge.textContent = s.state;
   top.appendChild(badge);
+  if (isDup) {
+    var dup = el("span", "badge dup-badge" + (isUncertain ? " uncertain" : ""));
+    dup.textContent = isUncertain ? "possible duplicate · guessed sid" : "duplicate";
+    top.appendChild(dup);
+  }
   card.appendChild(top);
   var cwd = el("div", "cwd");
   cwd.textContent = s.cwd;
@@ -168,8 +194,9 @@ function render(payload) {
   document.getElementById("count").textContent =
     sessions.length + (sessions.length === 1 ? " session" : " sessions");
   empty.style.display = sessions.length ? "none" : "block";
+  var uncertain = uncertainGroups(sessions);
   for (var i = 0; i < sessions.length; i++) {
-    list.appendChild(renderCard(sessions[i]));
+    list.appendChild(renderCard(sessions[i], uncertain));
   }
 }
 

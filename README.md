@@ -41,6 +41,27 @@ survived two real outages in production (a Windows-Update reboot and a WSL
 OOM crash) with zero lost conversations; every decision marked **[lesson]**
 in DESIGN.md was paid for the honest way.
 
+## Dashboard
+
+A tailnet-only, loopback-bound web dashboard for reopening, dismissing, or
+removing any session from any device.
+
+![The session dashboard](docs/screenshots/dashboard.png)
+
+Each card carries a state badge (live / ghost / crashed), the `#pid · sid8`
+identity, the sid's provenance (`injected` / `guessed` / `verified`), and the
+last human prompt. Duplicate detection is **confidence-weighted** (audit P3):
+two sessions that share an `injected`/`verified` id are a real **duplicate**
+(blue); a collision that involves a `guessed` id is only a **possible
+duplicate · guessed sid** (amber), because two `--continue` tabs can guess the
+same newest transcript.
+
+![The "why did sessions die?" panel](docs/screenshots/diagnostics.png)
+
+The lazy "Why did sessions die?" panel leads with a **plain-English verdict**
+(out-of-memory, kernel panic, unexpected shutdown, clean reboot, or "looks
+clean") above the raw journald/WinEvent evidence.
+
 ## Install (headless Linux)
 
 Requires Python ≥ 3.11 and `tmux`. Zero runtime dependencies otherwise.

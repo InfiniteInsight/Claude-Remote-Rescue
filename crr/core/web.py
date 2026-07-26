@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, NamedTuple
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 2  # v2: plain-English diagnostics verdict in the panel
+PAGE_VERSION = 3  # v3: certain vs uncertain (guessed-sid) duplicate weighting
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
