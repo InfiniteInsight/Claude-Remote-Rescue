@@ -32,6 +32,7 @@ from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
+from crr.adapters import tab_spawn_linux
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, resume, reviver, status, web
@@ -549,16 +550,20 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
 def _tab_spawner(config: cfg.Config):
     """The visible-tab spawner for this platform, or None where none applies.
 
-    macOS only for now (Terminal.app / iTerm2); Linux-desktop spawners are
-    Phase 3, headless Linux has no tabs. Returns None when the chosen
-    terminal app isn't actually installed, so reopen degrades to
-    detached-tmux instead of erroring.
+    macOS → Terminal.app / iTerm2; Linux desktop → gnome-terminal / konsole /
+    kitty / wezterm (None when headless or the terminal isn't installed);
+    anything else → None. A None spawner makes reopen degrade to detached
+    tmux instead of erroring.
     """
-    if platform.system() != "Darwin":
-        return None
-    kind = tab_spawn.choose(config.get("terminal"), os.environ)
-    spawner = tab_spawn.spawner_for(kind, config.get("interop_timeout_seconds"))
-    return spawner if spawner.available() else None
+    timeout = config.get("interop_timeout_seconds")
+    system = platform.system()
+    if system == "Darwin":
+        kind = tab_spawn.choose(config.get("terminal"), os.environ)
+        spawner = tab_spawn.spawner_for(kind, timeout)
+        return spawner if spawner.available() else None
+    if system == "Linux":
+        return tab_spawn_linux.detect(config.get("terminal"), os.environ, timeout)
+    return None
 
 
 def _cmd_reopen(args: argparse.Namespace) -> int:

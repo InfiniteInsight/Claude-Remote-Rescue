@@ -111,10 +111,26 @@ def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatc
     assert not (tmp_path / "Library" / "LaunchAgents").exists()
 
 
-def test_tab_spawner_is_none_off_macos(monkeypatch):
-    # Headless Linux (and anything non-Darwin) has no visible-tab spawner, so
-    # reopen degrades to detached-tmux rather than erroring.
+def test_tab_spawner_is_none_on_headless_linux(monkeypatch):
+    # Headless Linux (no $DISPLAY/$WAYLAND_DISPLAY) has no tabs, so reopen
+    # degrades to detached-tmux rather than erroring.
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.os, "environ", {})  # no display
+    assert cli._tab_spawner(cfg.Config()) is None
+
+
+def test_tab_spawner_selects_a_linux_terminal_on_a_desktop(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.os, "environ", {"DISPLAY": ":0"})
+    monkeypatch.setattr(cli.tab_spawn_linux.shutil, "which",
+                        lambda b: "/usr/bin/kitty" if b == "kitty" else None)
+    spawner = cli._tab_spawner(cfg.Config(overrides={"terminal": "kitty"}))
+    assert isinstance(spawner, cli.tab_spawn_linux.LinuxTerminalSpawner)
+    assert spawner.kind == "kitty"
+
+
+def test_tab_spawner_is_none_on_other_platforms(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
     assert cli._tab_spawner(cfg.Config()) is None
 
 
