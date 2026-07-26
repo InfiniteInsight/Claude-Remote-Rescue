@@ -21,4 +21,4 @@ The DESIGN diagram's arrows (core → adapters) are runtime call flow, the
 *inverse* of the import direction enforced here.
 """
 
-__version__ = "0.0.0"
+__version__ = "0.1.0"
