@@ -35,7 +35,7 @@ from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, ops, reviver, status, web
+from crr.core import contracts, ops, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.journal import JournalStore, new_entry
@@ -171,6 +171,15 @@ def _build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--pid", type=int, required=True)
     cl.add_argument("--session-id", default=None, help="use this sid instead of generating one")
     cl.set_defaults(func=_cmd_claude_launch)
+
+    cr = sub.add_parser(
+        "claude-resume",
+        help="[shim] journal a resumed/continued claude session (guessed/verified sid)",
+    )
+    cr.add_argument("--pid", type=int, required=True)
+    cr.add_argument("--cwd", required=True, help="cwd, to locate the transcript(s) to guess from")
+    cr.add_argument("--session-id", default=None, help="explicit sid from --resume <sid>, if any")
+    cr.set_defaults(func=_cmd_claude_resume)
 
     ce = sub.add_parser(
         "claude-exit",
@@ -398,34 +407,54 @@ def _cmd_deregister(args: argparse.Namespace) -> int:
     return 0
 
 
+def _attach_claude_session(sd: Path, pid: int, sid: str, sid_source: str) -> None:
+    """Attach a claude session to a journaled shell, archiving a superseded one.
+
+    Shared by claude-launch (injected) and claude-resume (guessed/verified).
+    Under the mutation lock: the read-modify-write plus the superseded-archive
+    must be atomic against the revive timer. A shell that was never registered
+    has no entry to attach to — a no-op (claude-launch still prints its sid).
+    """
+    store = JournalStore(sd)
+    with mutation_lock(sd):
+        try:
+            entry = store.read(pid)
+        except (KeyError, contracts.ContractError):
+            return
+        # An existing claude field here is a dead one (the wrapper blocks while
+        # claude runs; claude-exit clears it on any exit) — usually a reused
+        # pid. Preserve it before overwriting or its revival data is lost.
+        if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
+            ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
+        entry["claude"] = {"session_id": sid, "sid_source": sid_source, "started": _now()}
+        entry["updated"] = _now()
+        store.write(entry)
+
+
 def _cmd_claude_launch(args: argparse.Namespace) -> int:
     # A wrapper-supplied or freshly generated sid is `injected` — certain,
     # never `guessed`. Print it (for the shim to pass to claude) even if the
     # shell was never registered, so claude still launches identifiably.
     sid = args.session_id or str(uuid.uuid4())
-    sd = state_dir.state_dir()
-    store = JournalStore(sd)
-    with mutation_lock(sd):
-        try:
-            entry = store.read(args.pid)
-        except (KeyError, contracts.ContractError):
-            entry = None
-        if entry is not None:
-            # If the entry already carries a claude session, it is a dead one
-            # (the wrapper blocks while claude runs, and claude-exit clears the
-            # field on any exit) — most often a reused pid. Preserve it in the
-            # archive before overwriting, or its revival data is lost (the
-            # symmetric hole to register-safety).
-            if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
-                ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
-            entry["claude"] = {
-                "session_id": sid,
-                "sid_source": "injected",
-                "started": _now(),
-            }
-            entry["updated"] = _now()
-            store.write(entry)
+    _attach_claude_session(state_dir.state_dir(), args.pid, sid, "injected")
     print(sid)
+    return 0
+
+
+def _cmd_claude_resume(args: argparse.Namespace) -> int:
+    # Resume / continue / picker launches carry no injected sid, so derive one
+    # (audit P3): an explicit --resume <sid> is certain (verified if its
+    # transcript exists), a --continue/picker launch is the newest transcript
+    # (guessed). Journal it so a resumed session is revivable too — without
+    # this it would be untracked. Prints nothing: claude already knows its
+    # session from --resume/--continue.
+    derived = resume.derive_resume_sid(
+        args.session_id, transcript_source.list_transcripts(args.cwd)
+    )
+    if derived is None:
+        return 0  # no explicit sid and no transcript to guess — leave untracked
+    sid, sid_source = derived
+    _attach_claude_session(state_dir.state_dir(), args.pid, sid, sid_source)
     return 0
 
 
@@ -445,6 +474,22 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify_guessed_sids(store: JournalStore, now: str) -> None:
+    """Upgrade guessed→verified where a transcript now confirms the sid.
+
+    The re-verification runs here (the periodic, mutation-locked revive
+    sweep), never on the read-only poll path. Each guessed entry is checked
+    against its cwd's live transcript activity; unconfirmed guesses are left
+    guessed (silence never confirms).
+    """
+    for entry in store.scan().entries:
+        updated = resume.verify_guessed(
+            entry, transcript_source.list_transcripts(entry["cwd"]), now
+        )
+        if updated is not None:
+            store.write(updated)
+
+
 def _cmd_revive(_args: argparse.Namespace) -> int:
     config = _load_config()
     try:
@@ -462,7 +507,8 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     archive = ArchiveStore(sd)
 
     with mutation_lock(sd):
-        scan = store.scan()
+        _verify_guessed_sids(store, _now())  # upgrade guessed sids before reviving
+        scan = store.scan()                  # re-scan so revive sees the upgrades
         outcome = reviver.revive_crashed(
             scan.entries, boot, probe, tmux_spawner, store, archive,
             max_strikes=config.get("zombie_strikes"),

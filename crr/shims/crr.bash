@@ -41,9 +41,9 @@ _crr_deregister() { _crr deregister --pid "$$" >/dev/null; }
 trap '_crr_deregister' EXIT
 
 # claude() wrapper: on a fresh launch, inject a --session-id so the session
-# is identifiable and journal it (sid_source=injected). On resume/continue
-# or an explicit --session-id, pass through untouched (guessed-sid
-# re-verification is a later increment). On clean exit, clear the claude
+# is identifiable and journal it (sid_source=injected). On resume/continue,
+# journal the resumed session too (guessed/verified sid) so it is revivable —
+# claude runs with the user's args untouched. On clean exit, clear the claude
 # field; a crash skips that, leaving the sid for the reviver.
 claude() {
   # Element-wise flag detection: match whole arguments, never a substring
@@ -56,6 +56,28 @@ claude() {
     esac
   done
   if [ -n "$_resuming" ]; then
+    # Extract an explicit resume sid if one was given (-r <sid>,
+    # --resume <sid|=sid>, --session-id <sid|=sid>); a value that starts with
+    # '-' is another flag, not the sid (`claude -r --model x`), so it is left
+    # empty and the sid is guessed from the newest transcript instead.
+    local _sid= _want=
+    for _arg in "$@"; do
+      if [ -n "$_want" ]; then
+        case "$_arg" in -*) ;; *) _sid="$_arg" ;; esac
+        _want=
+        continue
+      fi
+      case "$_arg" in
+        -r|--resume|--session-id) _want=1 ;;
+        --resume=*) _sid="${_arg#--resume=}" ;;
+        --session-id=*) _sid="${_arg#--session-id=}" ;;
+      esac
+    done
+    if [ -n "$_sid" ]; then
+      _crr claude-resume --pid "$$" --cwd "$PWD" --session-id "$_sid" >/dev/null
+    else
+      _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
+    fi
     command claude "$@"
   else
     local _crr_sid

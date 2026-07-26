@@ -29,6 +29,32 @@ def find_transcript(session_id: str, home: Path | None = None) -> Path | None:
     return None
 
 
+def _project_dir_name(cwd: str) -> str:
+    """Claude Code encodes a cwd as its path with '/' replaced by '-'."""
+    return cwd.replace("/", "-")
+
+
+def list_transcripts(cwd: str, home: Path | None = None) -> list[dict]:
+    """Return ``[{"session_id", "mtime"}, ...]`` for the transcripts of ``cwd``.
+
+    Empty when the project dir is absent (unknown cwd, or Claude's encoding
+    differs), so the resume path degrades to an untracked passthrough rather
+    than raising. Used to guess/verify a resume sid, never on the poll path.
+    """
+    home = home or Path.home()
+    project = (home / ".claude" / "projects" / _project_dir_name(cwd))
+    if not project.is_dir():
+        return []
+    out = []
+    for path in project.glob("*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        out.append({"session_id": path.stem, "mtime": mtime})
+    return out
+
+
 def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
     """Yield non-empty lines of ``path`` from the end to the start."""
     with open(path, "rb") as fh:

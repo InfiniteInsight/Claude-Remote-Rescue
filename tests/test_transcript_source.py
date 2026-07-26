@@ -56,6 +56,25 @@ def test_reverse_read_handles_lines_spanning_block_boundary(tmp_path):
     assert out == "x" * 50
 
 
+def test_list_transcripts_returns_sids_and_mtimes_for_a_cwd(tmp_path):
+    # The project dir encodes the cwd as path-with-slashes-as-dashes.
+    _write_transcript(tmp_path, "sidA", [_user("a")], project="-home-u-proj")
+    _write_transcript(tmp_path, "sidB", [_user("b")], project="-home-u-proj")
+    # A different cwd's transcript must not leak in.
+    _write_transcript(tmp_path, "other", [_user("c")], project="-home-u-elsewhere")
+
+    got = transcript_source.list_transcripts("/home/u/proj", home=tmp_path)
+    by_id = {t["session_id"]: t for t in got}
+    assert set(by_id) == {"sidA", "sidB"}
+    assert all(isinstance(t["mtime"], float) for t in got)
+
+
+def test_list_transcripts_absent_project_dir_is_empty(tmp_path):
+    # Unknown cwd (or Claude's encoding differs) → empty, so the caller
+    # degrades to an untracked passthrough rather than erroring.
+    assert transcript_source.list_transcripts("/no/such/cwd", home=tmp_path) == []
+
+
 def test_reverse_lines_yields_end_to_start(tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("a\nb\nc\n", encoding="utf-8")

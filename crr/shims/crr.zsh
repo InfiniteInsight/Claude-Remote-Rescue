@@ -40,9 +40,9 @@ else
 fi
 
 # claude() wrapper: inject + journal a --session-id on fresh launches
-# (sid_source=injected); pass resume/continue/explicit-sid through
-# untouched; clear the claude field on clean exit (a crash leaves it set
-# for the reviver).
+# (sid_source=injected); on resume/continue, journal the resumed session
+# (guessed/verified sid) so it is revivable, args untouched; clear the
+# claude field on clean exit (a crash leaves it set for the reviver).
 claude() {
   # Element-wise flag detection: match whole arguments, never a substring
   # of prompt text (a prompt like "explain -r" is a fresh launch).
@@ -54,6 +54,27 @@ claude() {
     esac
   done
   if [ -n "$_resuming" ]; then
+    # Extract an explicit resume sid if given (-r <sid>, --resume <sid|=sid>,
+    # --session-id <sid|=sid>); a '-'-prefixed value is another flag, not the
+    # sid, so it is left empty and the sid is guessed from the newest transcript.
+    local _sid= _want=
+    for _arg in "$@"; do
+      if [ -n "$_want" ]; then
+        case "$_arg" in -*) ;; *) _sid="$_arg" ;; esac
+        _want=
+        continue
+      fi
+      case "$_arg" in
+        -r|--resume|--session-id) _want=1 ;;
+        --resume=*) _sid="${_arg#--resume=}" ;;
+        --session-id=*) _sid="${_arg#--session-id=}" ;;
+      esac
+    done
+    if [ -n "$_sid" ]; then
+      _crr claude-resume --pid "$$" --cwd "$PWD" --session-id "$_sid" >/dev/null
+    else
+      _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
+    fi
     command claude "$@"
   else
     local _crr_sid
