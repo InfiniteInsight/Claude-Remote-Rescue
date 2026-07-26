@@ -25,17 +25,32 @@ from crr.core.journal import JournalStore, new_entry
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="journald source is Linux-selected")
 def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
-    # No journald => a valid payload with every source marked degraded,
-    # never a crash or a silently-empty result. (Linux-only: on macOS the
-    # composition root selects the log+pmset source instead.)
+    # No journald on native (non-WSL) Linux => a valid payload with every
+    # source marked degraded, never a crash or a silently-empty result. (On
+    # macOS the log+pmset source is selected; under WSL, the WinEvent+OOM one.)
     from crr.adapters import diagnostics as diag_source
     monkeypatch.setattr(diag_source, "available", lambda: False)
+    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)  # pin native Linux
     rc = cli.main(["diagnose", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "journald"
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+
+
+def test_select_diag_source_uses_windows_wsl_source_when_journald_absent(monkeypatch):
+    # WSL without journald -> the WinEvent+OOM source; with journald present
+    # (or native Linux) -> journald.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.diag_source, "available", lambda: False)
+    assert cli._select_diag_source() is cli.diagnostics_windows
+    monkeypatch.setattr(cli.diag_source, "available", lambda: True)
+    assert cli._select_diag_source() is cli.diag_source
+    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.diag_source, "available", lambda: False)
+    assert cli._select_diag_source() is cli.diag_source  # native Linux stays journald
 
 
 def test_diagnose_selects_macos_source_and_degrades_when_tools_absent(monkeypatch, capsys):

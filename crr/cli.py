@@ -33,7 +33,7 @@ from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
-from crr.adapters import scheduled_task, tab_spawn_linux, tab_spawn_windows
+from crr.adapters import diagnostics_windows, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, resume, reviver, status, web
@@ -657,7 +657,17 @@ def _select_diag_source():
     """The diagnostics source adapter for this platform (composition root)."""
     if platform.system() == "Darwin":
         return diagnostics_macos
-    return diag_source  # journald (Linux; Windows adapter arrives in Phase 4)
+    # WSL without journald: use the Windows/WSL source (WinEvent + OOM
+    # forensics). When journald IS present (systemd-in-WSL, or native Linux)
+    # it stays the source — it already answers boots/prev_boot_errors that the
+    # WSL source degrades.
+    if (
+        platform.system() == "Linux"
+        and tab_spawn_windows.is_wsl()
+        and not diag_source.available()
+    ):
+        return diagnostics_windows
+    return diag_source  # journald (native Linux, or WSL with systemd)
 
 
 def gather_diagnostics(config: cfg.Config, source=None) -> dict:
