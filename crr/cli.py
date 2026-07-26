@@ -32,6 +32,7 @@ from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
+from crr.adapters import scheduled_task, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, reviver, status, web
@@ -136,6 +137,18 @@ def _build_parser() -> argparse.ArgumentParser:
     lncd.add_argument("--port", type=int, default=8377,
                       help="dashboard port to bake into the web agent (default: 8377)")
     lncd.set_defaults(func=_cmd_launchd)
+
+    sch = sub.add_parser(
+        "schtasks",
+        help="print (or --install) the Windows/WSL Scheduled Tasks (watchdog + dashboard)",
+    )
+    sch.add_argument("--install", action="store_true",
+                     help="run schtasks.exe to create the tasks (WSL host only)")
+    sch.add_argument("--crr-bin", default=None,
+                     help="crr path inside WSL to bake into the tasks (default: this crr binary)")
+    sch.add_argument("--port", type=int, default=8377,
+                     help="dashboard port to bake into the web task (default: 8377)")
+    sch.set_defaults(func=_cmd_schtasks)
 
     conf = sub.add_parser("config", help="inspect configuration")
     conf.add_argument(
@@ -501,18 +514,27 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
 
 
 def _tab_spawner(config: cfg.Config):
-    """The visible-tab spawner for this platform, or None where none applies.
+    """The visible-tab spawner for this host, or None where none applies.
 
-    macOS only for now (Terminal.app / iTerm2); Linux-desktop spawners are
-    Phase 3, headless Linux has no tabs. Returns None when the chosen
-    terminal app isn't actually installed, so reopen degrades to
-    detached-tmux instead of erroring.
+    macOS → Terminal.app / iTerm2. WSL → Windows Terminal (wt.exe). Other
+    Linux (desktop) spawners are Phase 3. A None spawner (headless, or the
+    terminal not installed) makes reopen degrade to detached tmux rather than
+    erroring — and the tab step is best-effort regardless, so an unverified
+    wt.exe command can never cost the (already durable) revival.
     """
-    if platform.system() != "Darwin":
-        return None
-    kind = tab_spawn.choose(config.get("terminal"), os.environ)
-    spawner = tab_spawn.spawner_for(kind, config.get("interop_timeout_seconds"))
-    return spawner if spawner.available() else None
+    timeout = config.get("interop_timeout_seconds")
+    if platform.system() == "Darwin":
+        kind = tab_spawn.choose(config.get("terminal"), os.environ)
+        spawner = tab_spawn.spawner_for(kind, timeout)
+        return spawner if spawner.available() else None
+    # WSL: reach the Windows side via wt.exe (crr itself runs in the distro).
+    if tab_spawn_windows.is_wsl():
+        spawner = tab_spawn_windows.WindowsTerminalSpawner(
+            timeout, config.get("wt_profile"), os.environ.get("WSL_DISTRO_NAME")
+        )
+        if spawner.available():
+            return spawner
+    return None
 
 
 def _cmd_reopen(args: argparse.Namespace) -> int:
@@ -792,6 +814,37 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     for cmd in launchd.enable_commands(ad):
         print("#   " + " ".join(cmd))
     return 0
+
+
+def _cmd_schtasks(args: argparse.Namespace) -> int:
+    config = _load_config()
+    crr_bin = _resolve_crr_bin(args.crr_bin)
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    interval = config.get("watchdog_interval_seconds")
+    cmds = [
+        scheduled_task.create_revive_task_command(crr_bin, interval, distro),
+        scheduled_task.create_web_task_command(crr_bin, args.port, distro),
+    ]
+
+    if args.install:
+        for cmd in cmds:
+            subprocess.run(cmd, check=False)  # schtasks.exe; no-op off Windows/WSL
+        print("created watchdog + dashboard Scheduled Tasks")
+        return 0
+
+    # Default: print the schtasks commands for inspection (no changes made).
+    for cmd in cmds:
+        print(" ".join(_quote(part) for part in cmd))
+    print("# Install with:  crr schtasks --install   (WSL host; runs the above)")
+    print("# Remove with:")
+    for cmd in scheduled_task.delete_task_commands():
+        print("#   " + " ".join(_quote(part) for part in cmd))
+    return 0
+
+
+def _quote(part: str) -> str:
+    """Quote a schtasks argv part for display when it contains spaces."""
+    return f'"{part}"' if " " in part else part
 
 
 def _cmd_config(args: argparse.Namespace) -> int:

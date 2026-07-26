@@ -54,6 +54,7 @@ DEFAULTS: dict[str, Any] = {
     # "auto" = $TERM_PROGRAM then the always-present default; or "terminal"
     # / "iterm" to force one (a named prior, not a magic default).
     "terminal": "auto",
+    "wt_profile": "",  # Windows Terminal profile for a WSL reopen ("" = default)
 }
 
 

@@ -110,10 +110,37 @@ def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatc
     assert not (tmp_path / "Library" / "LaunchAgents").exists()
 
 
-def test_tab_spawner_is_none_off_macos(monkeypatch):
-    # Headless Linux (and anything non-Darwin) has no visible-tab spawner, so
-    # reopen degrades to detached-tmux rather than erroring.
+def test_schtasks_print_emits_both_tasks_and_runs_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/usr/bin/crr")
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("print must not run schtasks")))
+    rc = cli.main(["schtasks", "--port", "8378"])  # default: print
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert cli.scheduled_task.REVIVE_TASK in out and cli.scheduled_task.WEB_TASK in out
+    assert "wsl.exe" in out and "/usr/bin/crr" in out
+    assert "web --port 8378" in out
+    assert "schtasks --install" in out  # printed install guidance
+
+
+def test_tab_spawner_is_none_on_plain_linux(monkeypatch):
+    # Non-WSL, non-macOS Linux has no visible-tab spawner (Phase 3 desktop is
+    # separate), so reopen degrades to detached-tmux rather than erroring.
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: False)
+    assert cli._tab_spawner(cfg.Config()) is None
+
+
+def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.tab_spawn_windows, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
+                        lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
+    spawner = cli._tab_spawner(cfg.Config())
+    assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
+    # wt.exe absent -> None (reopen degrades to detached tmux).
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which", lambda b: None)
     assert cli._tab_spawner(cfg.Config()) is None
 
 
