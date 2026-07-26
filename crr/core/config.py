@@ -53,8 +53,9 @@ DEFAULTS: dict[str, Any] = {
     # retention
     "archive_retention_days": 14,  # gc drops archive records older than this
     # tab spawn (macOS/desktop): which terminal a visible reopen uses.
-    # "auto" = $TERM_PROGRAM then the always-present default; or "terminal"
-    # / "iterm" to force one (a named prior, not a magic default).
+    # "auto" = $TERM_PROGRAM then a sensible default; or force one — macOS:
+    # "terminal"/"iterm"; Linux: "gnome-terminal"/"konsole"/"kitty"/"wezterm"
+    # (a named prior, not a magic default).
     "terminal": "auto",
 }
 
