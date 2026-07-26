@@ -22,15 +22,31 @@ from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
 
+@pytest.mark.skipif(platform.system() != "Linux", reason="journald source is Linux-selected")
 def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
     # No journald => a valid payload with every source marked degraded,
-    # never a crash or a silently-empty result.
+    # never a crash or a silently-empty result. (Linux-only: on macOS the
+    # composition root selects the log+pmset source instead.)
     from crr.adapters import diagnostics as diag_source
     monkeypatch.setattr(diag_source, "available", lambda: False)
     rc = cli.main(["diagnose", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     contracts.validate_diagnostics_payload(payload)
+    assert payload["source"] == "journald"
+    assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+
+
+def test_diagnose_selects_macos_source_and_degrades_when_tools_absent(monkeypatch, capsys):
+    # Force the macOS branch on any host: the composition root picks the
+    # log+pmset source, which degrades every field when its tools are absent.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.diagnostics_macos, "available", lambda: False)
+    rc = cli.main(["diagnose", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    contracts.validate_diagnostics_payload(payload)
+    assert payload["source"] == "log+pmset"
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
 
 
