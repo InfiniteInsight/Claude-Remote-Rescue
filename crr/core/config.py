@@ -57,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
     # "terminal"/"iterm"; Linux: "gnome-terminal"/"konsole"/"kitty"/"wezterm"
     # (a named prior, not a magic default).
     "terminal": "auto",
+    "wt_profile": "",  # Windows Terminal profile for a WSL reopen ("" = default)
 }
 
 
