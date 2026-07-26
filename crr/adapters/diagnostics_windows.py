@@ -104,6 +104,8 @@ def collect(config) -> tuple[list, list, list, list]:
     """
     timeout = config.get("interop_timeout_seconds")
     cap = config.get("diagnose_event_cap")
+    if not available():
+        return [], [], [], ["boots", "prev_boot_errors", "host_events"]
     degraded = ["boots", "prev_boot_errors"]
     events: list = []
     try:

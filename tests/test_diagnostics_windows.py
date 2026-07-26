@@ -67,3 +67,64 @@ def test_memory_forensics_surfaces_shmem_and_anon_not_just_rss():
 
 def test_memory_forensics_empty_when_fields_absent():
     assert dw.format_memory_forensics({}) == ""
+
+
+# --- collect() orchestration (monkeypatched; nothing is executed) ---------
+
+from crr.core import config as cfg  # noqa: E402
+
+
+def _fake_run(oom=True):
+    def run(argv, timeout):
+        if argv[0] == "powershell.exe":
+            return "2026-07-20 [6008] The previous system shutdown was unexpected.\n"
+        if argv[0] == "dmesg":
+            return ("[124.0] Out of memory: Killed process 4242 (python)\n"
+                    if oom else "[1.0] boot ok\n")
+        return ""
+    return run
+
+
+_MEMINFO = "MemTotal: 16000000 kB\nShmem: 90000000 kB\nInactive(anon): 8000000 kB\n"
+
+
+def test_collect_gathers_events_and_appends_forensics_on_oom(monkeypatch):
+    monkeypatch.setattr(dw, "available", lambda: True)
+    monkeypatch.setattr(dw, "_run", _fake_run(oom=True))
+    monkeypatch.setattr(dw, "_read", lambda path: _MEMINFO)
+    boots, prev, events, degraded = dw.collect(cfg.Config())
+    assert boots == [] and prev == []
+    assert set(degraded) == {"boots", "prev_boot_errors"}   # host_events NOT degraded
+    assert any("unexpected" in e.lower() for e in events)   # WinEvent
+    assert any("killed process 4242" in e.lower() for e in events)  # OOM
+    assert any("Shmem" in e for e in events)                # forensics appended
+
+
+def test_collect_omits_forensics_when_no_oom(monkeypatch):
+    monkeypatch.setattr(dw, "available", lambda: True)
+    monkeypatch.setattr(dw, "_run", _fake_run(oom=False))
+    called = []
+    monkeypatch.setattr(dw, "_read", lambda path: called.append(path) or _MEMINFO)
+    _, _, events, degraded = dw.collect(cfg.Config())
+    assert "host_events" not in degraded
+    assert not any("Shmem" in e for e in events)  # no OOM -> no memory breakdown
+    assert called == []                            # /proc/meminfo not even read
+
+
+def test_collect_degrades_host_events_when_a_source_fails(monkeypatch):
+    monkeypatch.setattr(dw, "available", lambda: True)
+
+    def boom(argv, timeout):
+        if argv[0] == "powershell.exe":
+            raise RuntimeError("powershell not found")
+        return "ok\n"
+
+    monkeypatch.setattr(dw, "_run", boom)
+    _, _, _, degraded = dw.collect(cfg.Config())
+    assert "host_events" in degraded
+
+
+def test_collect_all_degraded_when_tools_absent(monkeypatch):
+    monkeypatch.setattr(dw, "available", lambda: False)
+    _, _, _, degraded = dw.collect(cfg.Config())
+    assert set(degraded) == {"boots", "prev_boot_errors", "host_events"}
