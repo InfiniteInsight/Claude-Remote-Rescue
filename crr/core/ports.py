@@ -47,6 +47,16 @@ class ProcessProbe(Protocol):
         """Return True if ``pid`` owns a controlling terminal."""
         ...
 
+    def controlling_ttys(self, pids: Sequence[int]) -> set[int]:
+        """Return the subset of ``pids`` that own a controlling terminal.
+
+        One batched query for the poll path, so status assembly costs a
+        single subprocess for the whole session list instead of one per card
+        (DESIGN 'snap jq' performance requirement). Empty ``pids`` → empty
+        set (never a bare ``ps`` that would list every process).
+        """
+        ...
+
 
 @runtime_checkable
 class TmuxSpawner(Protocol):

@@ -31,6 +31,31 @@ def _empty_prompt(_entry: Mapping[str, Any]) -> str:
     return ""
 
 
+class _MemoTtyProbe:
+    """A ProcessProbe view with the tty check answered from a precomputed set.
+
+    Wraps the injected probe so ``classify`` keeps calling
+    ``has_controlling_tty`` per entry, but the answer is an O(1) membership
+    test against one batched query — collapsing N ``ps`` spawns to one on the
+    poll path. ``is_alive`` still delegates to the real probe (cheap
+    ``os.kill``). Wrapping an injected port keeps this pure core (no adapter
+    import).
+    """
+
+    def __init__(self, probe: ProcessProbe, tty_pids: set[int]) -> None:
+        self._probe = probe
+        self._tty_pids = tty_pids
+
+    def is_alive(self, pid: int) -> bool:
+        return self._probe.is_alive(pid)
+
+    def has_controlling_tty(self, pid: int) -> bool:
+        return pid in self._tty_pids
+
+    def controlling_ttys(self, pids):
+        return {p for p in pids if p in self._tty_pids}
+
+
 def assemble_sessions(
     entries: Sequence[Mapping[str, Any]],
     boot_identity: BootIdentity,
@@ -47,13 +72,18 @@ def assemble_sessions(
     sessions = [e for e in entries if e.get("claude") is not None]
     sid_counts = Counter(e["claude"]["session_id"] for e in sessions)
 
+    # Batch the tty probe: one query for every candidate pid instead of one
+    # ps per card (DESIGN 'snap jq' perf). classify then reads it O(1).
+    tty_pids = process_probe.controlling_ttys([e["pid"] for e in sessions])
+    probe = _MemoTtyProbe(process_probe, tty_pids)
+
     cards: list[dict[str, Any]] = []
     for entry in sessions:
         sid = entry["claude"]["session_id"]
         cards.append(
             {
                 "pid": entry["pid"],
-                "state": classify(entry, boot_identity, process_probe),
+                "state": classify(entry, boot_identity, probe),
                 "cwd": entry["cwd"],
                 "shell": entry["shell"],
                 "host": entry["host"],

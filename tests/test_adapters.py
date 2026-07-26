@@ -51,6 +51,47 @@ def test_tty_is_real(raw, expected):
     assert process_probe._tty_is_real(raw) is expected
 
 
+def test_parse_tty_pids_keeps_only_real_ttys():
+    # `ps -o tty=,pid=` output: tty first, pid last. Real ttys → their pids;
+    # "?"/absent tty → dropped.
+    out = process_probe._parse_tty_pids(
+        "ttys001  100\n?        200\npts/3    300\n"
+    )
+    assert out == {100, 300}
+
+
+def test_parse_tty_pids_tolerates_blank_and_short_lines():
+    assert process_probe._parse_tty_pids("\n  \n999\n") == set()
+
+
+def test_controlling_ttys_empty_pids_never_shells_out(monkeypatch):
+    # A bare `ps` with no -p lists every process — controlling_ttys([]) must
+    # short-circuit to an empty set instead.
+    def _boom(*a, **k):
+        raise AssertionError("ps must not run for an empty pid list")
+    monkeypatch.setattr(process_probe.subprocess, "run", _boom)
+    assert process_probe.PsProcessProbe(timeout_seconds=5).controlling_ttys([]) == set()
+
+
+def test_controlling_ttys_batches_current_process(monkeypatch):
+    # One ps call for all pids; the current process (which has a tty under a
+    # terminal, or not under CI) is parsed correctly either way. Assert the
+    # single batched invocation shape rather than tty presence (CI has none).
+    calls = []
+    real_run = process_probe.subprocess.run
+
+    def _spy(cmd, **kw):
+        calls.append(cmd)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(process_probe.subprocess, "run", _spy)
+    probe = process_probe.PsProcessProbe(timeout_seconds=5)
+    result = probe.controlling_ttys([os.getpid(), 1])
+    assert len(calls) == 1  # batched: a single ps for both pids
+    assert calls[0][:3] == ["ps", "-o", "tty=,pid="]
+    assert isinstance(result, set)
+
+
 # --- is_alive (real pids, POSIX) -----------------------------------------
 
 def test_is_alive_true_for_current_process():

@@ -48,6 +48,40 @@ class FakeProbe:
     def has_controlling_tty(self, pid):
         return self._tty
 
+    def controlling_ttys(self, pids):
+        return set(pids) if self._tty else set()
+
+
+def test_tty_probe_is_batched_once_across_all_cards():
+    # DESIGN 'snap jq' perf: the tty check is one batched query for all pids,
+    # never one ps per card. Prove it: controlling_ttys is called exactly
+    # once, and the per-pid has_controlling_tty is never used on this path.
+    class RecordingProbe:
+        def __init__(self):
+            self.batch_calls = 0
+            self.per_pid_calls = 0
+            self.seen = None
+
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            self.per_pid_calls += 1
+            return True
+
+        def controlling_ttys(self, pids):
+            self.batch_calls += 1
+            self.seen = list(pids)
+            return set(pids)  # all have a tty -> all live
+
+    entries = [_entry(10, "s-a"), _entry(11, "s-b"), _entry(12, "s-c")]
+    probe = RecordingProbe()
+    payload = assemble_sessions(entries, FakeBoot(), probe)
+    assert probe.batch_calls == 1
+    assert probe.per_pid_calls == 0
+    assert sorted(probe.seen) == [10, 11, 12]
+    assert all(c["state"] == "live" for c in payload["sessions"])
+
 
 def test_empty_entries_produce_empty_valid_payload():
     payload = assemble_sessions([], FakeBoot(), FakeProbe())
