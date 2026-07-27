@@ -652,8 +652,9 @@ def _cmd_close(args: argparse.Namespace) -> int:
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    flags = FlagStore(sd)
     with mutation_lock(sd):
-        res = ops.close(JournalStore(sd), controller, boot, probe,
+        res = ops.close(JournalStore(sd), controller, flags, boot, probe,
                         args.pid, grace=config.get("close_grace_seconds"))
     print(res.message)
     return 0 if res.ok else 1
@@ -813,7 +814,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "reopen":
                 res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             elif op == "close":
-                res = ops.close(store, controller, boot, probe, pid,
+                res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))
             elif op == "kick":
                 res = ops.kick(store, controller, flags, boot, probe, pid,

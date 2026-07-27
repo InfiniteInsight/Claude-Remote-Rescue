@@ -102,14 +102,18 @@ def reopen(
 def close(
     store: JournalStore,
     controller: "ProcessController",
+    flags: "FlagStore",
     boot: BootIdentity,
     probe: ProcessProbe,
     pid: int,
     *,
     grace: float,
 ) -> OpResult:
-    """End a LIVE/GHOST session (remote `exit`): SIGTERM the claude group,
-    escalating to SIGKILL after the grace window. No relaunch."""
+    """End a LIVE/GHOST session (remote `exit`): arm the close flag, then
+    SIGTERM the claude group (escalating to SIGKILL after the grace window).
+    The wrapper (repair loop) sees the close flag and exits the shell, so the
+    terminal closes and the card clears. The flag survives only if the kill
+    lands (rolled back on signal failure)."""
     try:
         entry = store.read(pid)
     except (KeyError, contracts.ContractError):
@@ -120,10 +124,12 @@ def close(
     groups = controller.claude_groups(pid)
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
+    flags.arm_close(pid)
     try:
         for pgid in groups:
             controller.terminate_group(pgid, grace)
     except OSError as exc:
+        flags.clear(pid)  # the kill did not land -> the flag must not linger
         return OpResult(False, f"close {pid} failed to signal: {exc}")
     return OpResult(True, f"closed {pid}")
 
