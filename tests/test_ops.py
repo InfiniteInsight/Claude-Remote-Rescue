@@ -206,9 +206,11 @@ class FakeController:
 
 class FakeFlags:
     def __init__(self):
-        self.armed = {}               # pid -> sid
-    def arm(self, pid, sid):
-        self.armed[pid] = sid
+        self.armed = {}               # pid -> (kind, sid|None)
+    def arm_relaunch(self, pid, sid):
+        self.armed[pid] = ("relaunch", sid)
+    def arm_close(self, pid):
+        self.armed[pid] = ("close", None)
     def clear(self, pid):
         self.armed.pop(pid, None)
 
@@ -227,30 +229,43 @@ def _crashed(store, pid):
 
 # --- close ---------------------------------------------------------------
 
-def test_close_terminates_the_claude_group_of_a_live_session(tmp_path):
+def test_close_terminates_and_arms_the_close_flag(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _live(store, 10)
-    ctrl = FakeController(groups=[555])
-    res = ops.close(store, ctrl, boot, probe, 10, grace=5)
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is True
     assert ctrl.terminated == [(555, 5)]
+    assert flags.armed[10] == ("close", None)
+
+
+def test_close_rolls_the_flag_back_when_the_signal_fails(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    ctrl.raise_on_terminate = True
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=5)
+    assert res.ok is False
+    assert 10 not in flags.armed          # flag survives only if the kill landed
 
 
 def test_close_refuses_a_crashed_session(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _crashed(store, 10)
-    ctrl = FakeController(groups=[555])
-    res = ops.close(store, ctrl, boot, probe, 10, grace=5)
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is False
-    assert ctrl.terminated == []          # never signalled
+    assert flags.armed == {}
+    assert ctrl.terminated == []
 
 
 def test_close_reports_when_no_running_claude_group(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _live(store, 10)
-    ctrl = FakeController(groups=[])
-    res = ops.close(store, ctrl, boot, probe, 10, grace=5)
+    ctrl, flags = FakeController(groups=[]), FakeFlags()
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is False
+    assert flags.armed == {}
 
 
 # --- kick ----------------------------------------------------------------
@@ -261,7 +276,7 @@ def test_kick_arms_the_flag_then_terminates(tmp_path):
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
     res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is True
-    assert flags.armed[10] == _SID        # sid armed
+    assert flags.armed[10] == ("relaunch", _SID)  # sid armed
     assert ctrl.terminated == [(555, 5)]
 
 

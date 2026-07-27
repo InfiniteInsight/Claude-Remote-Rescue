@@ -210,6 +210,14 @@ def _build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--pid", type=int, required=True)
     ce.set_defaults(func=_cmd_claude_exit)
 
+    repair = sub.add_parser(
+        "repair-check",
+        help="[shim] read/clear a session's relaunch/close flag",
+    )
+    repair.add_argument("--pid", type=int, required=True)
+    repair.add_argument("--clear", action="store_true")
+    repair.set_defaults(func=_cmd_repair_check)
+
     shim = sub.add_parser(
         "shim",
         help="print the shell shim to source from your rc file",
@@ -497,6 +505,21 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_repair_check(args: argparse.Namespace) -> int:
+    """[shim] Print the pid's relaunch/close flag for the repair loop, or
+    clear it. Output: 'relaunch <sid>' | 'close' | '' (absent)."""
+    flags = FlagStore(state_dir.state_dir())
+    if args.clear:
+        flags.clear(args.pid)
+        return 0
+    flag = flags.read(args.pid)
+    if flag is None:
+        return 0
+    kind, sid = flag
+    print(kind if sid is None else f"{kind} {sid}")
+    return 0
+
+
 def _verify_guessed_sids(store: JournalStore, now: str) -> None:
     """Upgrade guessed→verified where a transcript now confirms the sid.
 
@@ -652,8 +675,9 @@ def _cmd_close(args: argparse.Namespace) -> int:
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    flags = FlagStore(sd)
     with mutation_lock(sd):
-        res = ops.close(JournalStore(sd), controller, boot, probe,
+        res = ops.close(JournalStore(sd), controller, flags, boot, probe,
                         args.pid, grace=config.get("close_grace_seconds"))
     print(res.message)
     return 0 if res.ok else 1
@@ -813,7 +837,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "reopen":
                 res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             elif op == "close":
-                res = ops.close(store, controller, boot, probe, pid,
+                res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))
             elif op == "kick":
                 res = ops.kick(store, controller, flags, boot, probe, pid,

@@ -1,10 +1,16 @@
-from crr.core.flags import FlagStore
+from crr.core.flags import FlagStore, RELAUNCH, CLOSE
 
 
-def test_arm_then_read_roundtrips_the_sid(tmp_path):
-    flags = FlagStore(tmp_path)
-    flags.arm(42, "sid-abc")
-    assert flags.read(42) == "sid-abc"
+def test_arm_relaunch_roundtrips_kind_and_sid(tmp_path):
+    f = FlagStore(tmp_path)
+    f.arm_relaunch(42, "sid-abc")
+    assert f.read(42) == (RELAUNCH, "sid-abc")
+
+
+def test_arm_close_roundtrips_kind_with_no_sid(tmp_path):
+    f = FlagStore(tmp_path)
+    f.arm_close(7)
+    assert f.read(7) == (CLOSE, None)
 
 
 def test_read_absent_is_none(tmp_path):
@@ -12,17 +18,17 @@ def test_read_absent_is_none(tmp_path):
 
 
 def test_clear_is_idempotent(tmp_path):
-    flags = FlagStore(tmp_path)
-    flags.arm(7, "s")
-    flags.clear(7)
-    flags.clear(7)  # second clear must not raise
-    assert flags.read(7) is None
+    f = FlagStore(tmp_path)
+    f.arm_close(7)
+    f.clear(7)
+    f.clear(7)  # second clear must not raise
+    assert f.read(7) is None
 
 
 def test_arm_overwrites_and_pids_are_isolated(tmp_path):
-    flags = FlagStore(tmp_path)
-    flags.arm(1, "one")
-    flags.arm(1, "one-again")
-    flags.arm(2, "two")
-    assert flags.read(1) == "one-again"
-    assert flags.read(2) == "two"
+    f = FlagStore(tmp_path)
+    f.arm_relaunch(1, "one")
+    f.arm_close(1)              # overwrite pid 1 with a different kind
+    f.arm_relaunch(2, "two")
+    assert f.read(1) == (CLOSE, None)
+    assert f.read(2) == (RELAUNCH, "two")
