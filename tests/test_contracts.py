@@ -49,6 +49,7 @@ def _session_card():
         "sid_source": "guessed",
         "sid8": "8a1b2c3d",
         "last_prompt": "fix the reviver give-up guard",
+        "model": "claude-opus-4-8",
         "duplicate_group": None,
         "updated": "2026-07-23T00:00:00Z",
     }
@@ -219,6 +220,21 @@ def test_sessions_card_missing_sid_source_rejected():
 def test_sessions_card_unknown_key_rejected():
     p = _sessions_payload()
     p["sessions"][0]["extra"] = 1
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_missing_model_rejected():
+    # model (task #13) is a contracted card field, like last_prompt.
+    p = _sessions_payload()
+    del p["sessions"][0]["model"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_model_must_be_str():
+    p = _sessions_payload()
+    p["sessions"][0]["model"] = 5
     with pytest.raises(contracts.ContractError):
         contracts.validate_sessions_payload(p)
 

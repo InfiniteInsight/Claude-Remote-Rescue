@@ -277,6 +277,24 @@ def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsy
     assert payload["sessions"][0]["state"] == "crashed"
 
 
+def _human_card(model):
+    return {
+        "pid": 42, "sid8": "8a1b2c3d", "state": "live", "cwd": "/home/u/proj",
+        "model": model, "duplicate_group": None,
+    }
+
+
+def test_status_human_shows_model_when_known(capsys):
+    cli._print_status_human({"sessions": [_human_card("claude-opus-5")]})
+    assert "claude-opus-5" in capsys.readouterr().out
+
+
+def test_status_human_omits_model_when_unknown(capsys):
+    # No model read yet -> the line is the plain terse form, no trailing gap.
+    cli._print_status_human({"sessions": [_human_card("")]})
+    assert capsys.readouterr().out == "#42 · 8a1b2c3d [live] /home/u/proj\n"
+
+
 # --- shim-facing commands: register / last-cmd / deregister --------------
 
 def _seed(store, pid, cwd="/home/u/p", last_cmd=""):

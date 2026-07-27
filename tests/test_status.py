@@ -129,23 +129,26 @@ def test_distinct_session_ids_are_not_grouped():
         assert card["duplicate_group"] is None
 
 
-def test_last_prompt_extractor_is_used():
+def test_tail_facts_extractor_is_used_for_prompt_and_model():
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions(
         [_entry(42, sid)],
         FakeBoot(),
         FakeProbe(),
-        last_prompt=lambda entry: f"prompt-for-{entry['pid']}",
+        tail_facts=lambda entry: {"last_prompt": f"prompt-for-{entry['pid']}", "model": "claude-opus-5"},
     )
-    assert payload["sessions"][0]["last_prompt"] == "prompt-for-42"
+    card = payload["sessions"][0]
+    assert card["last_prompt"] == "prompt-for-42"
+    assert card["model"] == "claude-opus-5"
 
 
-def test_last_prompt_defaults_to_empty_string():
-    # No extractor wired yet (transcript reading is a later increment):
-    # honest empty string, not a fabricated prompt.
+def test_tail_facts_default_to_empty_strings():
+    # No extractor wired: honest empty strings, not a fabricated prompt/model.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
-    assert payload["sessions"][0]["last_prompt"] == ""
+    card = payload["sessions"][0]
+    assert card["last_prompt"] == ""
+    assert card["model"] == ""
 
 
 def test_claude_less_shells_are_not_cards():

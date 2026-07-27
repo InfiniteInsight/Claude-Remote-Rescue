@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping
 # --------------------------------------------------------------------------
 
 JOURNAL_SCHEMA_VERSION = 1
-SESSIONS_CONTRACT_VERSION = 1
+SESSIONS_CONTRACT_VERSION = 2  # v2 adds the per-session `model` card field
 DIAGNOSTICS_CONTRACT_VERSION = 2  # v2 adds the plain-English `summary` list
 ARCHIVE_CONTRACT_VERSION = 1
 
@@ -62,6 +62,7 @@ SESSION_CARD_KEYS = (
     "sid_source",
     "sid8",
     "last_prompt",
+    "model",
     "duplicate_group",
     "updated",
 )
@@ -183,6 +184,7 @@ def validate_session_card(card: Any) -> None:
     _require_enum(card["sid_source"], SID_SOURCES, "session 'sid_source'")
     _require_type(card["sid8"], str, "session 'sid8'")
     _require_type(card["last_prompt"], str, "session 'last_prompt'")
+    _require_type(card["model"], str, "session 'model'")
     _require_type(card["updated"], str, "session 'updated'")
     # duplicate_group is nullable: None (not in a group) or a group id string.
     if card["duplicate_group"] is not None:

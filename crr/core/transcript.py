@@ -74,6 +74,25 @@ def extract_prompt(record: Mapping[str, Any]) -> str | None:
     return text
 
 
+def extract_model(record: Mapping[str, Any]) -> str | None:
+    """Return the model id of an assistant turn, or None if it isn't one.
+
+    Skips ``<synthetic>`` turns — the assistant records Claude Code writes for
+    API errors and interrupts carry no real model. Reading backward, those
+    cluster at the tail, so a naive reader would stamp ``<synthetic>`` on the
+    card; skipping them here keeps walking to the last genuine model.
+    """
+    if not isinstance(record, Mapping) or record.get("type") != "assistant":
+        return None
+    message = record.get("message")
+    if not isinstance(message, Mapping):
+        return None
+    model = message.get("model")
+    if not isinstance(model, str) or not model or model == "<synthetic>":
+        return None
+    return model
+
+
 def clean_display(text: str, cap: int) -> str:
     """Collapse whitespace to one line and cap the length for a card."""
     return " ".join(text.split())[:cap]
@@ -86,3 +105,26 @@ def last_prompt(records: Iterable[Mapping[str, Any]], *, cap: int) -> str:
         if prompt is not None:
             return clean_display(prompt, cap)
     return ""
+
+
+def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, str]:
+    """Most recent real prompt + model across ``records`` in one pass.
+
+    The two facts both live near the tail, so a single reverse walk fills
+    both and stops as soon as they are found (the adapter mirrors this to
+    turn what would be two backward file reads into one). Each field is an
+    honest ``""`` when absent — never fabricated.
+    """
+    prompt = model = ""
+    for record in reversed(list(records)):
+        if not prompt:
+            found = extract_prompt(record)
+            if found is not None:
+                prompt = clean_display(found, cap)
+        if not model:
+            found = extract_model(record)
+            if found is not None:
+                model = found
+        if prompt and model:
+            break
+    return {"last_prompt": prompt, "model": model}
