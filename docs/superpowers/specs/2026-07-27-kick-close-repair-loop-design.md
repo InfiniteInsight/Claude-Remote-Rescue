@@ -198,6 +198,25 @@ A small shim-facing helper backs this: `crr repair-check --pid` prints the
 flag kind + sid (and `--clear` unlinks it), reusing the journal. Behaviour is
 identical across the three shells; only syntax differs.
 
+**Slice-2b hard requirements (from Slice-2a's final review — the wrapper MUST
+honour all four):**
+
+1. **Unknown kind → treat as absent.** `repair-check` is deliberately
+   kind-agnostic; a stale Slice-1 bare-sid flag surfaces as an unrecognized
+   kind. The wrapper's branch must fall through to offer/return, never act on
+   an unknown kind.
+2. **`relaunch` with no sid → treat as absent.** Never run `claude --resume`
+   with an empty argument (guards the empty-sid edge; the producer doesn't
+   emit one today, but the wrapper must not trust it).
+3. **Parse the line yourself.** fish command substitution splits on newlines
+   only, so `set flag (crr repair-check …)` yields the whole line in
+   `$flag[1]`; split on space (`string split ' '` in fish; `read kind sid` in
+   bash/zsh). Absent = empty output → empty list.
+4. **No atomic read-and-clear.** `read` and `--clear` are two separate `crr`
+   invocations; an op that re-arms between the wrapper's read and its clear is
+   silently discarded. Design the loop as read-then-clear and accept the small
+   window (or add a clear-on-read mode later).
+
 ## Contracts / versioning impact
 
 - **No journal schema change** — the flag lives outside the journal.
