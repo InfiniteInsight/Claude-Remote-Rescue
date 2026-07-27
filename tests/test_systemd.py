@@ -24,6 +24,10 @@ def test_service_unit_bakes_execstart_path_and_state_home():
         state_home="/home/u/.local/state",
     )
     assert "Type=oneshot" in unit
+    # KillMode=process is required: without it the oneshot's cgroup cleanup
+    # kills the detached tmux server it just spawned, so every revived session
+    # dies the instant the watchdog exits (found on real systemd, hardware test).
+    assert "KillMode=process" in unit
     assert "ExecStart=/opt/crr/bin/crr revive" in unit
     assert "Environment=PATH=/opt/crr/bin:/usr/bin:/bin" in unit
     # [lesson: interop PATH] generalized — the service can't see the shell's

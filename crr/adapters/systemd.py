@@ -67,12 +67,21 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
 
 
 def revive_service_unit(crr_bin: str, path: str, state_home: str) -> str:
+    # KillMode=process is load-bearing, not a nicety: this is a Type=oneshot
+    # service whose whole job is to spawn DETACHED tmux sessions and exit.
+    # Under the default KillMode=control-group, systemd reaps every process in
+    # the service's cgroup when the oneshot finishes — including the tmux
+    # server it just started — so the revived sessions die the instant the
+    # watchdog completes (a silent, total failure of revival). KillMode=process
+    # kills only crr itself on stop and leaves the tmux server alone.
+    # (Found on real systemd during the hardware acceptance test.)
     return (
         "[Unit]\n"
         "Description=Claude-Remote-Rescue watchdog (revive crashed claude sessions)\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "KillMode=process\n"
         f"Environment=PATH={path}\n"
         f"Environment=XDG_STATE_HOME={state_home}\n"
         f"ExecStart={crr_bin} revive\n"

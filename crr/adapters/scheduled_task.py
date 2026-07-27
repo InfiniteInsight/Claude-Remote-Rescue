@@ -38,6 +38,13 @@ def interval_minutes(interval_seconds: int) -> int:
 def create_revive_task_command(
     crr_bin: str, interval_seconds: int, distro: str | None = None
 ) -> list[str]:
+    # NOTE (verify on the Windows/WSL hardware test): systemd needed
+    # KillMode=process so its cgroup cleanup didn't reap the tmux the revive
+    # spawns. Here `wsl.exe -e crr revive` runs the revive inside the distro
+    # and exits; the detached tmux server should keep the distro (and itself)
+    # alive. Confirm a revived session survives the task completing; if not,
+    # the revive may need to nohup/setsid-detach the tmux from the wsl.exe
+    # invocation's lifetime.
     tr = _wsl_invocation(crr_bin, ["revive"], distro)
     return [
         "schtasks.exe", "/Create", "/TN", REVIVE_TASK, "/TR", tr,

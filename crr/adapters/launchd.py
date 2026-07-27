@@ -78,6 +78,13 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
 
 
 def revive_agent_plist(crr_bin: str, path: str, interval_seconds: int) -> str:
+    # NOTE: systemd needed KillMode=process here (its cgroup cleanup reaps the
+    # detached tmux the revive spawns). launchd is process-group based, not
+    # cgroup based, and `tmux new-session -d` setsid-daemonizes into its own
+    # session — so it should survive the agent exiting without an equivalent
+    # directive. This must be confirmed on the macOS hardware acceptance test;
+    # if a revived session dies when the agent finishes, add
+    # AbandonProcessGroup here (the launchd analogue of KillMode=process).
     return plistlib.dumps({
         "Label": REVIVE_LABEL,
         "ProgramArguments": [crr_bin, "revive"],
