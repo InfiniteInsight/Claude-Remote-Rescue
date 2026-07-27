@@ -468,7 +468,7 @@ Expected: FAIL with `AttributeError: module 'crr.core.ops' has no attribute 'clo
 
 - [ ] **Step 3: Implement `close` and `kick`**
 
-In `crr/core/ops.py`: update the module docstring line that says kick/close are "deliberately not here yet" to note they now live here, add `from crr.core.classifier import CRASHED, LIVE, GHOST, classify` (the file already imports `CRASHED, classify` — extend it), and append:
+In `crr/core/ops.py`: update the module docstring line that says kick/close are "deliberately not here yet" to note they now live here. The file already imports `CRASHED, classify` from `crr.core.classifier` — that is all the gate needs. Append:
 
 ```python
 def close(
@@ -546,8 +546,6 @@ if TYPE_CHECKING:
     from crr.core.ports import ProcessController
     from crr.core.flags import FlagStore
 ```
-
-(`LIVE`/`GHOST` are imported for symmetry/readability; the gate itself only tests `CRASHED`.)
 
 - [ ] **Step 4: Run to verify pass**
 
