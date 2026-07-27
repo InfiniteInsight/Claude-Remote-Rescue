@@ -231,7 +231,7 @@ def test_close_terminates_the_claude_group_of_a_live_session(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _live(store, 10)
     ctrl = FakeController(groups=[555])
-    res = ops.close(store, ctrl, boot, probe, 10, _NOW, grace=5)
+    res = ops.close(store, ctrl, boot, probe, 10, grace=5)
     assert res.ok is True
     assert ctrl.terminated == [(555, 5)]
 
@@ -240,7 +240,7 @@ def test_close_refuses_a_crashed_session(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _crashed(store, 10)
     ctrl = FakeController(groups=[555])
-    res = ops.close(store, ctrl, boot, probe, 10, _NOW, grace=5)
+    res = ops.close(store, ctrl, boot, probe, 10, grace=5)
     assert res.ok is False
     assert ctrl.terminated == []          # never signalled
 
@@ -249,7 +249,7 @@ def test_close_reports_when_no_running_claude_group(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _live(store, 10)
     ctrl = FakeController(groups=[])
-    res = ops.close(store, ctrl, boot, probe, 10, _NOW, grace=5)
+    res = ops.close(store, ctrl, boot, probe, 10, grace=5)
     assert res.ok is False
 
 
@@ -259,7 +259,7 @@ def test_kick_arms_the_flag_then_terminates(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _live(store, 10)
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
-    res = ops.kick(store, ctrl, flags, boot, probe, 10, _NOW, grace=5)
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is True
     assert flags.armed[10] == _SID        # sid armed
     assert ctrl.terminated == [(555, 5)]
@@ -270,7 +270,7 @@ def test_kick_rolls_the_flag_back_when_the_signal_fails(tmp_path):
     boot, probe = _live(store, 10)
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
     ctrl.raise_on_terminate = True
-    res = ops.kick(store, ctrl, flags, boot, probe, 10, _NOW, grace=5)
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is False
     assert 10 not in flags.armed          # flag survives only if the kill landed
 
@@ -279,7 +279,7 @@ def test_kick_refuses_a_crashed_session(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _crashed(store, 10)
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
-    res = ops.kick(store, ctrl, flags, boot, probe, 10, _NOW, grace=5)
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is False
     assert flags.armed == {}
     assert ctrl.terminated == []
@@ -289,6 +289,6 @@ def test_kick_refuses_a_claude_less_shell(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 11, boot="B", claude=None)   # registered shell, no claude
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
-    res = ops.kick(store, ctrl, flags, FakeBoot("B"), FakeProbe(), 11, _NOW, grace=5)
+    res = ops.kick(store, ctrl, flags, FakeBoot("B"), FakeProbe(), 11, grace=5)
     assert res.ok is False
     assert flags.armed == {}

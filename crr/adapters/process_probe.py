@@ -118,7 +118,7 @@ def _child_groups(rows: list[tuple[int, int, int]], shell_pid: int) -> list[int]
         return []
     groups: list[int] = []
     for _pid, ppid, pgid in rows:
-        if ppid == shell_pid and pgid != shell_pgid and pgid not in groups:
+        if ppid == shell_pid and pgid != shell_pgid and pgid not in groups and pgid > 0:
             groups.append(pgid)
     return groups
 

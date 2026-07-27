@@ -637,7 +637,7 @@ def _cmd_kick(args: argparse.Namespace) -> int:
     flags = FlagStore(sd)
     with mutation_lock(sd):
         res = ops.kick(JournalStore(sd), controller, flags, boot, probe,
-                       args.pid, _now(), grace=config.get("close_grace_seconds"))
+                       args.pid, grace=config.get("close_grace_seconds"))
     print(res.message)
     return 0 if res.ok else 1
 
@@ -654,7 +654,7 @@ def _cmd_close(args: argparse.Namespace) -> int:
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     with mutation_lock(sd):
         res = ops.close(JournalStore(sd), controller, boot, probe,
-                        args.pid, _now(), grace=config.get("close_grace_seconds"))
+                        args.pid, grace=config.get("close_grace_seconds"))
     print(res.message)
     return 0 if res.ok else 1
 
@@ -813,10 +813,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "reopen":
                 res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             elif op == "close":
-                res = ops.close(store, controller, boot, probe, pid, _now(),
+                res = ops.close(store, controller, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))
             elif op == "kick":
-                res = ops.kick(store, controller, flags, boot, probe, pid, _now(),
+                res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
             else:
                 return False, f"unknown op {op}"

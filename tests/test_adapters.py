@@ -177,3 +177,9 @@ def test_child_groups_excludes_a_child_that_shares_the_shell_group():
 def test_child_groups_empty_when_shell_absent_or_childless():
     assert pp._child_groups([(100, 1, 100)], shell_pid=100) == []
     assert pp._child_groups([(200, 100, 200)], shell_pid=100) == []
+
+
+def test_child_groups_excludes_nonpositive_pgid():
+    # pgid 0 would make os.killpg target the caller's own group — never return it.
+    rows = [(100, 1, 100), (200, 100, 0)]
+    assert pp._child_groups(rows, shell_pid=100) == []

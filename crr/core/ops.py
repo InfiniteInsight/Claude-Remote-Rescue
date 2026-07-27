@@ -105,7 +105,6 @@ def close(
     boot: BootIdentity,
     probe: ProcessProbe,
     pid: int,
-    now: str,
     *,
     grace: float,
 ) -> OpResult:
@@ -136,7 +135,6 @@ def kick(
     boot: BootIdentity,
     probe: ProcessProbe,
     pid: int,
-    now: str,
     *,
     grace: float,
 ) -> OpResult:
