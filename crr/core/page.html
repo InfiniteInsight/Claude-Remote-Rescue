@@ -26,7 +26,19 @@
   .k-live::before { background: #46c26a; }
   .k-ghost::before { background: #e0a53b; }
   .k-crashed::before { background: #e05252; }
+  #controls { display: flex; gap: 16px; padding: 0 16px 8px; font-size: 12px; color: #8a93a2; align-items: center; }
+  #controls select {
+    font: inherit; font-size: 12px; margin-left: 4px; padding: 3px 6px; border-radius: 6px;
+    background: #1c222c; color: #cdd3dd; border: 1px solid #2f3745;
+  }
   #sessions { padding: 8px 16px 40px; display: grid; gap: 10px; }
+  .group-head {
+    display: flex; align-items: center; gap: 8px; margin-top: 6px; padding-left: 10px;
+    border-left: 3px solid #444; font-family: ui-monospace, monospace; font-size: 12px; color: #b9c1cf;
+    word-break: break-all;
+  }
+  .group-head .gcount { color: #6b7280; }
+  .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; vertical-align: middle; }
   .card {
     border: 1px solid #262b36; border-radius: 10px; padding: 12px 14px; background: #161a22;
   }
@@ -85,6 +97,23 @@
   <span class="k-ghost">ghost</span>
   <span class="k-crashed">crashed</span>
 </div>
+<div id="controls">
+  <label>Sort
+    <select id="sort">
+      <option value="updated">Recent</option>
+      <option value="state">State</option>
+      <option value="cwd">Directory</option>
+      <option value="pid">PID</option>
+    </select>
+  </label>
+  <label>Group
+    <select id="group">
+      <option value="none">None</option>
+      <option value="cwd">Directory</option>
+      <option value="host">Host</option>
+    </select>
+  </label>
+</div>
 <div id="stale">A newer version is available — reloading…</div>
 <div id="notice"></div>
 <div id="diag">
@@ -103,6 +132,28 @@ var VERSION_MS = 30000;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
+// View state (sort/group), persisted across polls so a refresh keeps the view.
+var sortKey = "updated", groupKey = "none", lastSessions = [];
+var STATE_ORDER = { crashed: 0, ghost: 1, live: 2 };  // crashed floats to the top
+
+// Stable color per group key (cwd/host): hash -> hue. Deterministic, no state.
+function colorFor(key) {
+  var h = 0;
+  for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return "hsl(" + (h % 360) + ", 55%, 62%)";
+}
+
+function sortSessions(arr) {
+  return arr.slice().sort(function (x, y) {
+    if (sortKey === "state") return (STATE_ORDER[x.state] - STATE_ORDER[y.state]) || (x.pid - y.pid);
+    if (sortKey === "cwd") return x.cwd < y.cwd ? -1 : x.cwd > y.cwd ? 1 : (x.pid - y.pid);
+    if (sortKey === "pid") return x.pid - y.pid;
+    return x.updated < y.updated ? 1 : x.updated > y.updated ? -1 : 0;  // "updated" desc
+  });
+}
+
+function groupValue(s) { return groupKey === "host" ? s.host : s.cwd; }
+
 // Audit P3 weighting: a duplicate group is only a CERTAIN collision when every
 // member's sid is injected/verified. If any member's sid is `guessed`, the
 // shared id may be a laundered guess (two tabs guessing the same newest
@@ -120,11 +171,16 @@ function uncertainGroups(sessions) {
 }
 
 // Untrusted fields (cwd, last_prompt, ids) reach the DOM via textContent ONLY.
-function renderCard(s, uncertain) {
+function renderCard(s, uncertain, groupColor) {
   var isDup = !!s.duplicate_group;
   var isUncertain = isDup && uncertain[s.duplicate_group];
   var card = el("div", "card" + (isDup ? (isUncertain ? " dup dup-uncertain" : " dup") : ""));
   var top = el("div", "top");
+  if (groupColor) {  // a group dot, distinct from the duplicate left-border channel
+    var gd = el("span", "gdot");
+    gd.style.background = groupColor;
+    top.appendChild(gd);
+  }
   var id = el("span", "id");
   id.textContent = "#" + s.pid + " · " + s.sid8;
   var src = el("span", "src");
@@ -186,18 +242,40 @@ function action(op, pid, btn) {
     .finally(function () { btn.disabled = false; });
 }
 
+// render(payload) on a poll; render(null) to re-apply sort/group to the cached
+// sessions without a fetch (control changes).
 function render(payload) {
+  if (payload) lastSessions = (payload.sessions) || [];
+  var sessions = lastSessions;
   var list = document.getElementById("sessions");
-  var empty = document.getElementById("empty");
   list.textContent = "";
-  var sessions = (payload && payload.sessions) || [];
   document.getElementById("count").textContent =
     sessions.length + (sessions.length === 1 ? " session" : " sessions");
-  empty.style.display = sessions.length ? "none" : "block";
+  document.getElementById("empty").style.display = sessions.length ? "none" : "block";
+
   var uncertain = uncertainGroups(sessions);
-  for (var i = 0; i < sessions.length; i++) {
-    list.appendChild(renderCard(sessions[i], uncertain));
+  var sorted = sortSessions(sessions);
+  if (groupKey === "none") {
+    sorted.forEach(function (s) { list.appendChild(renderCard(s, uncertain, null)); });
+    return;
   }
+  // Group, preserving group order by first appearance in the sorted list.
+  var order = [], groups = {};
+  sorted.forEach(function (s) {
+    var k = groupValue(s);
+    if (!groups[k]) { groups[k] = []; order.push(k); }
+    groups[k].push(s);
+  });
+  order.forEach(function (k) {
+    var color = colorFor(k);
+    var head = el("div", "group-head");
+    head.style.borderLeftColor = color;
+    var dot = el("span", "gdot"); dot.style.background = color; head.appendChild(dot);
+    var lbl = el("span"); lbl.textContent = k; head.appendChild(lbl);  // cwd/host -> textContent
+    var cnt = el("span", "gcount"); cnt.textContent = "(" + groups[k].length + ")"; head.appendChild(cnt);
+    list.appendChild(head);
+    groups[k].forEach(function (s) { list.appendChild(renderCard(s, uncertain, color)); });
+  });
 }
 
 function pollSessions() {
@@ -272,6 +350,9 @@ document.getElementById("diag-btn").addEventListener("click", function () {
     .then(function (d) { renderDiag(d); diagLoaded = true; })
     .catch(function () { panel.textContent = "diagnostics unavailable"; });
 });
+
+document.getElementById("sort").addEventListener("change", function () { sortKey = this.value; render(null); });
+document.getElementById("group").addEventListener("change", function () { groupKey = this.value; render(null); });
 
 pollSessions();
 pollVersion();

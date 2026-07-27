@@ -1,0 +1,8 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - heading "Claude-Remote-Rescue" [level=1] [ref=e3]
+  - generic [ref=e4]:
+    - generic [ref=e5]: live
+    - generic [ref=e6]: ghost
+    - generic [ref=e7]: crashed
+  - button "Why did sessions die?" [ref=e9] [cursor=pointer]
