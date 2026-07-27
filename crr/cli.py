@@ -788,9 +788,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
         print(f"crr web: {exc}", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
+    flags = FlagStore(sd)
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     tab = _tab_spawner(config)
 
@@ -810,6 +812,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
                 res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+            elif op == "close":
+                res = ops.close(store, controller, boot, probe, pid, _now(),
+                                 grace=config.get("close_grace_seconds"))
+            elif op == "kick":
+                res = ops.kick(store, controller, flags, boot, probe, pid, _now(),
+                                grace=config.get("close_grace_seconds"))
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message

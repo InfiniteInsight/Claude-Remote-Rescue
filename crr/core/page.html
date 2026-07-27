@@ -242,6 +242,9 @@ function renderCard(s, uncertain, groupColor) {
   if (s.state === "crashed") {
     addBtn("Reopen", "reopen", false);
     addBtn("Dismiss", "dismiss", false);
+  } else {                       // live or ghost: a running claude to act on
+    addBtn("Kick", "kick", false);
+    addBtn("Close", "close", true);
   }
   addBtn("Remove", "remove", true);
   card.appendChild(actions);
