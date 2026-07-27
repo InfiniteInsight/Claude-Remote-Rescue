@@ -206,6 +206,27 @@ Every step is test-first (red → green), advisor before/after each slice,
 The cutover (moving `cc-*` under crr's shim) is a **separate** operational
 plan authored after #4 lands.
 
+## Slice-2 blockers surfaced by Slice-1's final review
+
+Two protocol/semantic gaps the shim-repair-loop slice MUST resolve (they are
+not Slice-1 code bugs — the loop does not exist yet — but the flag protocol
+Slice 1 establishes cannot express them):
+
+- **B1 — the flag cannot distinguish `close` from a crash.** `terminate_group`
+  makes claude exit nonzero (SIGTERM→143 or SIGKILL→137). The repair loop's
+  rule is "nonzero exit → offer, resume on yes/timeout/no-tty," so an
+  unattended `close` would be resumed — violating the acceptance criterion
+  "`crr close` … no relaunch." Resolution options: (a) `close` arms a
+  *suppress-resume* marker the wrapper honours (the flag grows a second
+  state: relaunch vs. do-not-resume), or (b) the wrapper treats the
+  close-range exit codes as clean. Pick one in the Slice-2 design.
+- **B2 — after a successful `close`, the shell survives, so the session
+  still classifies `live`/`ghost`** and the card persists with Kick/Close
+  still shown (a second `close` returns "no running claude process found").
+  Decide the intended semantics — does `close` also end the shell (true
+  "remote exit"), or is it "kill claude, leave the shell"? — and align the
+  button label/behaviour accordingly.
+
 ## Acceptance criteria
 
 - `crr kick <pid>` on a live session: claude's group dies, the flag is armed,
