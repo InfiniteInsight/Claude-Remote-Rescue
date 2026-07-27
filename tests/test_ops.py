@@ -185,3 +185,110 @@ def test_reopen_unavailable_spawner_stays_detached(tmp_path):
     res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
     assert res.ok
     assert tab.opened == []  # never consulted an unavailable spawner
+
+
+# --- kick / close -----------------------------------------------------------
+
+class FakeController:
+    def __init__(self, groups):
+        self.groups = groups
+        self.terminated = []          # (pgid, grace) per call
+        self.raise_on_terminate = False
+
+    def claude_groups(self, shell_pid):
+        return list(self.groups)
+
+    def terminate_group(self, pgid, grace_seconds):
+        if self.raise_on_terminate:
+            raise OSError("no such process group")
+        self.terminated.append((pgid, grace_seconds))
+
+
+class FakeFlags:
+    def __init__(self):
+        self.armed = {}               # pid -> sid
+    def arm(self, pid, sid):
+        self.armed[pid] = sid
+    def clear(self, pid):
+        self.armed.pop(pid, None)
+
+
+def _live(store, pid):
+    # same boot + alive + tty  -> classify live
+    _seed(store, pid, boot="B", claude=_claude())
+    return FakeBoot("B"), FakeProbe(alive=True, tty=True)
+
+
+def _crashed(store, pid):
+    # boot mismatch -> classify crashed (regardless of pid liveness)
+    _seed(store, pid, boot="B", claude=_claude())
+    return FakeBoot("other"), FakeProbe(alive=True, tty=True)
+
+
+# --- close ---------------------------------------------------------------
+
+def test_close_terminates_the_claude_group_of_a_live_session(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl = FakeController(groups=[555])
+    res = ops.close(store, ctrl, boot, probe, 10, _NOW, grace=5)
+    assert res.ok is True
+    assert ctrl.terminated == [(555, 5)]
+
+
+def test_close_refuses_a_crashed_session(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _crashed(store, 10)
+    ctrl = FakeController(groups=[555])
+    res = ops.close(store, ctrl, boot, probe, 10, _NOW, grace=5)
+    assert res.ok is False
+    assert ctrl.terminated == []          # never signalled
+
+
+def test_close_reports_when_no_running_claude_group(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl = FakeController(groups=[])
+    res = ops.close(store, ctrl, boot, probe, 10, _NOW, grace=5)
+    assert res.ok is False
+
+
+# --- kick ----------------------------------------------------------------
+
+def test_kick_arms_the_flag_then_terminates(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, _NOW, grace=5)
+    assert res.ok is True
+    assert flags.armed[10] == _SID        # sid armed
+    assert ctrl.terminated == [(555, 5)]
+
+
+def test_kick_rolls_the_flag_back_when_the_signal_fails(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    ctrl.raise_on_terminate = True
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, _NOW, grace=5)
+    assert res.ok is False
+    assert 10 not in flags.armed          # flag survives only if the kill landed
+
+
+def test_kick_refuses_a_crashed_session(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _crashed(store, 10)
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, _NOW, grace=5)
+    assert res.ok is False
+    assert flags.armed == {}
+    assert ctrl.terminated == []
+
+
+def test_kick_refuses_a_claude_less_shell(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 11, boot="B", claude=None)   # registered shell, no claude
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    res = ops.kick(store, ctrl, flags, FakeBoot("B"), FakeProbe(), 11, _NOW, grace=5)
+    assert res.ok is False
+    assert flags.armed == {}
