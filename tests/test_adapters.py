@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from crr.adapters import process_probe, state_dir, tmux
+from crr.adapters import process_probe as pp  # short alias used below
 
 
 # --- state_dir resolution (pure) -----------------------------------------
@@ -145,3 +146,34 @@ def test_realtmux_creates_word_form_detached_session(tmp_path, monkeypatch):
         assert got.stdout.strip() == "sleep"
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+# --- process controller pure builders (pure) ------------------------------
+
+def test_parse_ps_rows_reads_pid_ppid_pgid():
+    out = " 100 1 100\n 200 100 200\n 201 200 200\n"
+    assert pp._parse_ps_rows(out) == [(100, 1, 100), (200, 100, 200), (201, 200, 200)]
+
+
+def test_parse_ps_rows_skips_malformed_lines():
+    out = "100 1 100\ngarbage\n\n200 100 200\n"
+    assert pp._parse_ps_rows(out) == [(100, 1, 100), (200, 100, 200)]
+
+
+def test_child_groups_returns_the_claude_group_not_the_shell_group():
+    # shell pid 100 in its own group 100; its child 200 leads group 200
+    # (claude under job control); 201 is claude's own child, same group 200.
+    rows = [(100, 1, 100), (200, 100, 200), (201, 200, 200), (999, 1, 999)]
+    assert pp._child_groups(rows, shell_pid=100) == [200]
+
+
+def test_child_groups_excludes_a_child_that_shares_the_shell_group():
+    # Safety: a child in the SHELL's own group is never returned — signalling
+    # it would kill the shell. Job-control-off is treated as "nothing to kick".
+    rows = [(100, 1, 100), (200, 100, 100)]
+    assert pp._child_groups(rows, shell_pid=100) == []
+
+
+def test_child_groups_empty_when_shell_absent_or_childless():
+    assert pp._child_groups([(100, 1, 100)], shell_pid=100) == []
+    assert pp._child_groups([(200, 100, 200)], shell_pid=100) == []
