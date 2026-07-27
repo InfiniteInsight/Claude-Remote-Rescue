@@ -59,6 +59,25 @@ class ProcessProbe(Protocol):
 
 
 @runtime_checkable
+class ProcessController(Protocol):
+    """Signal a live session's claude process group (a mutation — kept
+    separate from the read-only ProcessProbe so read callers get no signal
+    power). Discovery is by ancestry; signalling targets the whole group."""
+
+    def claude_groups(self, shell_pid: int) -> list[int]:
+        """Process-group ids of the shell's non-shell child jobs (claude).
+
+        Excludes the shell's own group, so a returned pgid is always safe to
+        signal without killing the shell. Empty when none / shell absent."""
+        ...
+
+    def terminate_group(self, pgid: int, grace_seconds: float) -> None:
+        """SIGTERM the group, then SIGKILL it if still alive after the grace
+        window. Raises OSError if the initial signal cannot be delivered."""
+        ...
+
+
+@runtime_checkable
 class TmuxSpawner(Protocol):
     """The revival substrate: detached tmux sessions.
 

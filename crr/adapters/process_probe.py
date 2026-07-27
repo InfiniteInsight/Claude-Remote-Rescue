@@ -14,7 +14,9 @@ claiming a session is ``live`` on unknown evidence.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import time
 from typing import Sequence
 
 # tty strings that mean "no controlling terminal".
@@ -90,3 +92,72 @@ class PsProcessProbe:
         if result.returncode != 0:
             return set()
         return _parse_tty_pids(result.stdout)
+
+
+def _ps_snapshot_argv() -> list[str]:
+    # -A all processes; bare `=` headers -> no header line, just the columns.
+    return ["ps", "-A", "-o", "pid=,ppid=,pgid="]
+
+
+def _parse_ps_rows(stdout: str) -> list[tuple[int, int, int]]:
+    rows: list[tuple[int, int, int]] = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+        except ValueError:
+            continue
+    return rows
+
+
+def _child_groups(rows: list[tuple[int, int, int]], shell_pid: int) -> list[int]:
+    shell_pgid = next((pgid for pid, _ppid, pgid in rows if pid == shell_pid), None)
+    if shell_pgid is None:
+        return []
+    groups: list[int] = []
+    for _pid, ppid, pgid in rows:
+        if ppid == shell_pid and pgid != shell_pgid and pgid not in groups and pgid > 0:
+            groups.append(pgid)
+    return groups
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but not ours (shouldn't happen for own sessions)
+
+
+class PsProcessController:
+    def __init__(self, timeout_seconds: float) -> None:
+        self._timeout = timeout_seconds
+
+    def claude_groups(self, shell_pid: int) -> list[int]:
+        try:
+            result = subprocess.run(
+                _ps_snapshot_argv(),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return []
+        if result.returncode != 0:
+            return []
+        return _child_groups(_parse_ps_rows(result.stdout), shell_pid)
+
+    def terminate_group(self, pgid: int, grace_seconds: float) -> None:
+        os.killpg(pgid, signal.SIGTERM)  # raises OSError if undeliverable
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            if not _group_alive(pgid):
+                return
+            time.sleep(0.1)
+        if _group_alive(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # it died in the race between the check and the kill

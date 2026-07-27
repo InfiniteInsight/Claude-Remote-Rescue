@@ -19,6 +19,11 @@ def test_defaults_version_is_int():
     assert isinstance(cfg.CONFIG_DEFAULTS_VERSION, int)
 
 
+def test_close_grace_seconds_default():
+    from crr.core.config import Config
+    assert Config().get("close_grace_seconds") == 5
+
+
 def test_audit_floor_priors_are_present():
     # The DESIGN "config floor" — these MUST exist as named keys.
     floor = {

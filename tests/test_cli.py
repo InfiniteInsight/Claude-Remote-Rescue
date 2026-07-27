@@ -703,6 +703,28 @@ def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
     assert cli.main(["reopen", "--pid", "42"]) != 0  # nothing to resume
 
 
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="boot adapter")
+def test_kick_refuses_a_crashed_session(tmp_path, monkeypatch, capsys):
+    # A crashed entry is refused BEFORE any signalling (classifier gate),
+    # so this exercises the CLI wiring without touching real processes.
+    store = JournalStore(tmp_path)
+    store.write(_live_entry(pid=os.getpid(),
+                            boot_id="00000000-0000-4000-8000-000000000000"))  # foreign boot -> crashed
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["kick", str(os.getpid())])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "crashed" in out
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="boot adapter")
+def test_close_reports_no_session(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["close", "424242"])
+    assert rc == 1
+    assert "no session" in capsys.readouterr().out
+
+
 @pytest.mark.skipif(
     platform.system() not in ("Linux", "Darwin") or shutil.which("tmux") is None,
     reason="needs Linux boot adapter + tmux",

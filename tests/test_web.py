@@ -190,6 +190,30 @@ def test_post_disallowed_host_is_403_before_dispatch():
     assert called == []  # never dispatched
 
 
+def test_actions_include_kick_and_close():
+    from crr.core import web
+    assert "kick" in web.ACTIONS
+    assert "close" in web.ACTIONS
+
+
+def test_post_kick_is_accepted_and_dispatched():
+    from crr.core import web
+    seen = {}
+    def action_provider(op, pid):
+        seen["op"], seen["pid"] = op, pid
+        return True, "kicked 5 (resuming the same conversation)"
+    resp = web.handle_request(
+        "POST", "/api/action",
+        {"Host": "localhost", "Content-Type": "application/json"},
+        b'{"op":"kick","pid":5}',
+        sessions_provider=lambda: {"contract": 2, "sessions": []},
+        action_provider=action_provider,
+        allowed_hosts={"localhost"}, allowed_suffixes=(),
+    )
+    assert resp.status == 200
+    assert seen == {"op": "kick", "pid": 5}
+
+
 def test_post_to_non_action_path_is_404():
     resp = _handle(method="POST", path="/api/other", body=b"{}", headers=_JSON)
     assert resp.status == 404

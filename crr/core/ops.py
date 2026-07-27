@@ -8,12 +8,12 @@ classifier, never bare pid-existence).
 
 Pure core: takes the journal/archive stores and the BootIdentity/
 ProcessProbe/TmuxSpawner ports, so it is fully testable with fakes.
-kick/close (which signal live processes) are deliberately not here yet.
+kick/close (which signal live processes) live here too, gated the same way.
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from crr.core import contracts
 from crr.core.archive import ArchiveStore
@@ -21,6 +21,10 @@ from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TmuxSpawner
 from crr.core.reviver import attach_argv, revival_argv, session_name
+
+if TYPE_CHECKING:
+    from crr.core.flags import FlagStore
+    from crr.core.ports import ProcessController
 
 
 class OpResult(NamedTuple):
@@ -93,6 +97,71 @@ def reopen(
         store.write(entry)
         base = f"reopened {pid} as {name}"
     return OpResult(True, base + _open_tab(tab_spawner, name))
+
+
+def close(
+    store: JournalStore,
+    controller: "ProcessController",
+    boot: BootIdentity,
+    probe: ProcessProbe,
+    pid: int,
+    *,
+    grace: float,
+) -> OpResult:
+    """End a LIVE/GHOST session (remote `exit`): SIGTERM the claude group,
+    escalating to SIGKILL after the grace window. No relaunch."""
+    try:
+        entry = store.read(pid)
+    except (KeyError, contracts.ContractError):
+        return OpResult(False, f"no session {pid}")
+    state = classify(entry, boot, probe)
+    if state == CRASHED:
+        return OpResult(False, f"session {pid} is crashed, not running — refusing")
+    groups = controller.claude_groups(pid)
+    if not groups:
+        return OpResult(False, f"session {pid}: no running claude process found")
+    try:
+        for pgid in groups:
+            controller.terminate_group(pgid, grace)
+    except OSError as exc:
+        return OpResult(False, f"close {pid} failed to signal: {exc}")
+    return OpResult(True, f"closed {pid}")
+
+
+def kick(
+    store: JournalStore,
+    controller: "ProcessController",
+    flags: "FlagStore",
+    boot: BootIdentity,
+    probe: ProcessProbe,
+    pid: int,
+    *,
+    grace: float,
+) -> OpResult:
+    """Restart claude in place on the same conversation: arm the relaunch
+    flag, then SIGTERM/grace/SIGKILL the claude group. The flag survives only
+    if the kill lands (rolled back on signal failure), so the shim resumes a
+    real kick and never a failed one."""
+    try:
+        entry = store.read(pid)
+    except (KeyError, contracts.ContractError):
+        return OpResult(False, f"no session {pid}")
+    if entry.get("claude") is None:
+        return OpResult(False, f"session {pid} has no claude session to relaunch")
+    state = classify(entry, boot, probe)
+    if state == CRASHED:
+        return OpResult(False, f"session {pid} is crashed, not running — use reopen")
+    groups = controller.claude_groups(pid)
+    if not groups:
+        return OpResult(False, f"session {pid}: no running claude process found")
+    flags.arm(pid, entry["claude"]["session_id"])
+    try:
+        for pgid in groups:
+            controller.terminate_group(pgid, grace)
+    except OSError as exc:
+        flags.clear(pid)  # the kill did not land -> the flag must not linger
+        return OpResult(False, f"kick {pid} failed to signal: {exc}")
+    return OpResult(True, f"kicked {pid} (resuming the same conversation)")
 
 
 def _open_tab(tab_spawner: TabSpawner | None, name: str) -> str:

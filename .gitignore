@@ -23,3 +23,6 @@ venv/
 
 # Playwright MCP scratch (browser verification runs)
 .playwright-mcp/
+
+# SDD scratch (subagent-driven-development workspaces)
+.superpowers/
