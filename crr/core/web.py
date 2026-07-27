@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, NamedTuple
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 4  # v4: sortable sessions + group-by-cwd/host with group colors
+PAGE_VERSION = 5  # v5: filter sessions by state (all / crashed / not crashed)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 

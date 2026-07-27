@@ -1,0 +1,71 @@
+- generic [active] [ref=f2e1]:
+  - banner [ref=f2e2]:
+    - heading "Claude-Remote-Rescue" [level=1] [ref=f2e3]
+    - generic [ref=f2e4]: 5 sessions
+  - generic [ref=f2e5]:
+    - generic [ref=f2e6]: live
+    - generic [ref=f2e7]: ghost
+    - generic [ref=f2e8]: crashed
+  - generic [ref=f2e9]:
+    - generic [ref=f2e10]:
+      - text: Show
+      - combobox "Show" [ref=f2e11]:
+        - option "All" [selected]
+        - option "Crashed"
+        - option "Not crashed"
+    - generic [ref=f2e12]:
+      - text: Sort
+      - combobox "Sort" [ref=f2e13]:
+        - option "Recent" [selected]
+        - option "State"
+        - option "Directory"
+        - option "PID"
+    - generic [ref=f2e14]:
+      - text: Group
+      - combobox "Group" [ref=f2e15]:
+        - option "None" [selected]
+        - option "Directory"
+        - option "Host"
+  - button "Why did sessions die?" [ref=f2e17] [cursor=pointer]
+  - generic [ref=f2e18]:
+    - generic [ref=f2e19]:
+      - generic [ref=f2e20]:
+        - generic [ref=f2e21]: "#2553373 · aaaaaaaainjected"
+        - generic [ref=f2e22]: ghost
+      - generic [ref=f2e23]: /home/evan/projects/api-server
+      - button "Remove" [ref=f2e25] [cursor=pointer]
+    - generic [ref=f2e26]:
+      - generic [ref=f2e27]:
+        - generic [ref=f2e28]: "#2553374 · bbbbbbbbinjected"
+        - generic [ref=f2e29]: ghost
+      - generic [ref=f2e30]: /home/evan/projects/web-ui
+      - button "Remove" [ref=f2e32] [cursor=pointer]
+    - generic [ref=f2e33]:
+      - generic [ref=f2e34]:
+        - generic [ref=f2e35]: "#3001 · ccccccccverified"
+        - generic [ref=f2e36]: crashed
+      - generic [ref=f2e37]: /home/evan/projects/web-ui
+      - generic [ref=f2e38]:
+        - button "Reopen" [ref=f2e39] [cursor=pointer]
+        - button "Dismiss" [ref=f2e40] [cursor=pointer]
+        - button "Remove" [ref=f2e41] [cursor=pointer]
+    - generic [ref=f2e42]:
+      - generic [ref=f2e43]:
+        - generic [ref=f2e44]: "#3002 · ddddddddguessed"
+        - generic [ref=f2e45]: crashed
+        - generic [ref=f2e46]: possible duplicate · guessed sid
+      - generic [ref=f2e47]: /home/evan/data-pipeline
+      - generic [ref=f2e48]:
+        - button "Reopen" [ref=f2e49] [cursor=pointer]
+        - button "Dismiss" [ref=f2e50] [cursor=pointer]
+        - button "Remove" [ref=f2e51] [cursor=pointer]
+    - generic [ref=f2e52]:
+      - generic [ref=f2e53]:
+        - generic [ref=f2e54]: "#3003 · ddddddddguessed"
+        - generic [ref=f2e55]: crashed
+        - generic [ref=f2e56]: possible duplicate · guessed sid
+      - generic [ref=f2e57]: /home/evan/data-pipeline
+      - generic [ref=f2e58]:
+        - button "Reopen" [ref=f2e59] [cursor=pointer]
+        - button "Dismiss" [ref=f2e60] [cursor=pointer]
+        - button "Remove" [ref=f2e61] [cursor=pointer]

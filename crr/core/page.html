@@ -98,6 +98,13 @@
   <span class="k-crashed">crashed</span>
 </div>
 <div id="controls">
+  <label>Show
+    <select id="filter">
+      <option value="all">All</option>
+      <option value="crashed">Crashed</option>
+      <option value="active">Not crashed</option>
+    </select>
+  </label>
   <label>Sort
     <select id="sort">
       <option value="updated">Recent</option>
@@ -132,8 +139,14 @@ var VERSION_MS = 30000;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
-// View state (sort/group), persisted across polls so a refresh keeps the view.
-var sortKey = "updated", groupKey = "none", lastSessions = [];
+// View state (filter/sort/group), persisted across polls so a poll keeps the view.
+var filterKey = "all", sortKey = "updated", groupKey = "none", lastSessions = [];
+
+function passesFilter(s) {
+  if (filterKey === "crashed") return s.state === "crashed";
+  if (filterKey === "active") return s.state !== "crashed";
+  return true;  // "all"
+}
 var STATE_ORDER = { crashed: 0, ghost: 1, live: 2 };  // crashed floats to the top
 
 // Stable color per group key (cwd/host): hash -> hue. Deterministic, no state.
@@ -246,15 +259,25 @@ function action(op, pid, btn) {
 // sessions without a fetch (control changes).
 function render(payload) {
   if (payload) lastSessions = (payload.sessions) || [];
-  var sessions = lastSessions;
+  var total = lastSessions;
+  var visible = total.filter(passesFilter);
   var list = document.getElementById("sessions");
   list.textContent = "";
-  document.getElementById("count").textContent =
-    sessions.length + (sessions.length === 1 ? " session" : " sessions");
-  document.getElementById("empty").style.display = sessions.length ? "none" : "block";
+  document.getElementById("count").textContent = visible.length === total.length
+    ? total.length + (total.length === 1 ? " session" : " sessions")
+    : visible.length + " of " + total.length + " sessions";
+  var empty = document.getElementById("empty");
+  if (!visible.length) {
+    empty.textContent = total.length ? "No sessions match this filter." : "No journaled sessions.";
+    empty.style.display = "block";
+  } else {
+    empty.style.display = "none";
+  }
 
-  var uncertain = uncertainGroups(sessions);
-  var sorted = sortSessions(sessions);
+  // Weighting is computed over ALL sessions (not just visible) so a filtered
+  // view still shows a duplicate's true certain/uncertain status.
+  var uncertain = uncertainGroups(total);
+  var sorted = sortSessions(visible);
   if (groupKey === "none") {
     sorted.forEach(function (s) { list.appendChild(renderCard(s, uncertain, null)); });
     return;
@@ -351,6 +374,7 @@ document.getElementById("diag-btn").addEventListener("click", function () {
     .catch(function () { panel.textContent = "diagnostics unavailable"; });
 });
 
+document.getElementById("filter").addEventListener("change", function () { filterKey = this.value; render(null); });
 document.getElementById("sort").addEventListener("change", function () { sortKey = this.value; render(null); });
 document.getElementById("group").addEventListener("change", function () { groupKey = this.value; render(null); });
 
