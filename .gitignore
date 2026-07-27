@@ -20,3 +20,6 @@ venv/
 
 # test/coverage artifacts
 .coverage
+
+# Playwright MCP scratch (browser verification runs)
+.playwright-mcp/

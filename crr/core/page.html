@@ -56,6 +56,10 @@
   .badge.dup-badge { margin-left: 8px; background: #1e2740; color: #9fb0f5; text-transform: none; letter-spacing: 0; }
   .badge.dup-badge.uncertain { background: #3a2f12; color: #e0a53b; }
   .cwd { color: #8a93a2; font-size: 12px; margin-top: 6px; font-family: ui-monospace, monospace; word-break: break-all; }
+  .model {
+    display: inline-block; margin-top: 6px; font-family: ui-monospace, monospace; font-size: 11px;
+    color: #9fb0f5; background: #1a2030; padding: 1px 8px; border-radius: 999px;
+  }
   .prompt { margin-top: 6px; color: #cdd3dd; font-size: 13px; }
   .prompt:empty { display: none; }
   .src { font-size: 11px; color: #6b7280; margin-left: 6px; }
@@ -118,6 +122,7 @@
       <option value="none">None</option>
       <option value="cwd">Directory</option>
       <option value="host">Host</option>
+      <option value="model">Model</option>
     </select>
   </label>
 </div>
@@ -165,7 +170,13 @@ function sortSessions(arr) {
   });
 }
 
-function groupValue(s) { return groupKey === "host" ? s.host : s.cwd; }
+function groupValue(s) {
+  if (groupKey === "host") return s.host;
+  // Honest "unknown" header when no assistant turn / model was read yet,
+  // rather than an empty chip (same rule as the "" last_prompt default).
+  if (groupKey === "model") return s.model || "(unknown model)";
+  return s.cwd;
+}
 
 // Audit P3 weighting: a duplicate group is only a CERTAIN collision when every
 // member's sid is injected/verified. If any member's sid is `guessed`, the
@@ -212,6 +223,11 @@ function renderCard(s, uncertain, groupColor) {
   var cwd = el("div", "cwd");
   cwd.textContent = s.cwd;
   card.appendChild(cwd);
+  if (s.model) {  // model id from the transcript — untrusted -> textContent
+    var model = el("div", "model");
+    model.textContent = s.model;
+    card.appendChild(model);
+  }
   var prompt = el("div", "prompt");
   prompt.textContent = s.last_prompt || "";
   card.appendChild(prompt);

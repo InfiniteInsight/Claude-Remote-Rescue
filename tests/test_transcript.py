@@ -16,8 +16,11 @@ def _user(content, **extra):
     return rec
 
 
-def _assistant(text):
-    return {"type": "assistant", "message": {"role": "assistant", "content": text}}
+def _assistant(text, model=None):
+    msg = {"role": "assistant", "content": text}
+    if model is not None:
+        msg["model"] = model
+    return {"type": "assistant", "message": msg}
 
 
 def test_returns_last_real_user_prompt():
@@ -86,3 +89,48 @@ def test_collapses_whitespace_and_caps_length():
 def test_empty_when_no_real_prompt():
     records = [_assistant("only assistant"), _user([{"type": "tool_result", "content": "x"}])]
     assert transcript.last_prompt(records, cap=100) == ""
+
+
+# --- model extraction (task #13) -----------------------------------------
+
+def test_extract_model_reads_assistant_model():
+    assert transcript.extract_model(_assistant("hi", model="claude-opus-4-8")) == "claude-opus-4-8"
+
+
+def test_extract_model_ignores_non_assistant_turns():
+    assert transcript.extract_model(_user("a prompt")) is None
+
+
+def test_extract_model_skips_synthetic_turns():
+    # Reading backward, API-error / interrupt turns (model "<synthetic>")
+    # cluster at the tail; they must not be stamped on a card as the model.
+    assert transcript.extract_model(_assistant("interrupted", model="<synthetic>")) is None
+
+
+def test_extract_model_none_when_model_absent():
+    assert transcript.extract_model(_assistant("no model field")) is None
+
+
+def test_tail_facts_returns_last_prompt_and_last_model():
+    records = [
+        _user("older prompt"),
+        _assistant("answer", model="claude-opus-4-8"),
+        _user("the most recent prompt"),
+        _assistant("later answer", model="claude-opus-5"),
+    ]
+    facts = transcript.tail_facts(records, cap=100)
+    assert facts == {"last_prompt": "the most recent prompt", "model": "claude-opus-5"}
+
+
+def test_tail_facts_skips_synthetic_to_find_the_real_model():
+    records = [
+        _user("prompt"),
+        _assistant("real answer", model="claude-opus-4-8"),
+        _assistant("interrupted", model="<synthetic>"),  # most recent, but noise
+    ]
+    assert transcript.tail_facts(records, cap=100)["model"] == "claude-opus-4-8"
+
+
+def test_tail_facts_honest_empties_when_absent():
+    facts = transcript.tail_facts([_user([{"type": "tool_result", "content": "x"}])], cap=100)
+    assert facts == {"last_prompt": "", "model": ""}

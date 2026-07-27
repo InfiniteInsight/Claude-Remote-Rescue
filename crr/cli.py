@@ -60,14 +60,15 @@ def _load_config() -> cfg.Config:
         return cfg.Config()
 
 
-def _last_prompt_extractor(config: cfg.Config):
-    """A last_prompt(entry)->str closure for status.assemble_sessions.
+def _tail_facts_extractor(config: cfg.Config):
+    """A tail_facts(entry)->{last_prompt, model} closure for assemble_sessions.
 
-    Only called for claude-bearing entries (assemble_sessions filters the
-    rest), so entry["claude"] is always present here.
+    One backward transcript read per card yields both facts. Only called for
+    claude-bearing entries (assemble_sessions filters the rest), so
+    entry["claude"] is always present here.
     """
     cap = config.get("last_prompt_display_cap")
-    return lambda entry: transcript_source.read_last_prompt(entry["claude"]["session_id"], cap)
+    return lambda entry: transcript_source.read_tail_facts(entry["claude"]["session_id"], cap)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -319,7 +320,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     scan = store.scan()
     payload = status.assemble_sessions(
-        scan.entries, boot, probe, last_prompt=_last_prompt_extractor(config)
+        scan.entries, boot, probe, tail_facts=_tail_facts_extractor(config)
     )
     # Validate our own output before emitting it (the P7 validator doubles
     # as a debug guard — the server will run the same check).
@@ -343,7 +344,8 @@ def _print_status_human(payload: dict) -> None:
         return
     for card in sessions:
         dup = " [dup]" if card["duplicate_group"] else ""
-        print(f"#{card['pid']} · {card['sid8']} [{card['state']}] {card['cwd']}{dup}")
+        model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
+        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}")
 
 
 def _cmd_register(args: argparse.Namespace) -> int:
@@ -749,10 +751,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     tab = _tab_spawner(config)
 
-    extract = _last_prompt_extractor(config)
+    extract = _tail_facts_extractor(config)
 
     def provider() -> dict:
-        return status.assemble_sessions(store.scan().entries, boot, probe, last_prompt=extract)
+        return status.assemble_sessions(store.scan().entries, boot, probe, tail_facts=extract)
 
     def action_provider(op: str, pid: int) -> tuple[bool, str]:
         # Same classifier-gated ops the CLI uses — one implementation — and

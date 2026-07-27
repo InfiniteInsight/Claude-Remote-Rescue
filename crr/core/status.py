@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v1).
+"""Status assembler — journal entries -> /api/sessions payload (contract v2).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -11,10 +11,10 @@ journal the *same* ``session_id`` form a group. The refinement of
 down-weighting a ``guessed`` claim against an ``injected`` one is the
 dashboard's job — the raw provenance it needs is on each card.
 
-``last_prompt`` is supplied by an injected extractor. The transcript
-reader (with its skip-list) is a later increment; until it is wired the
-default extractor returns "" — an honest "not extracted", never a
-fabricated line.
+``last_prompt`` and ``model`` come from one injected ``tail_facts``
+extractor that reads both in a single backward pass over the transcript
+(both live near the tail). The default returns empty strings — an honest
+"not extracted", never a fabricated line or model.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from crr.core.classifier import classify
 from crr.core.ports import BootIdentity, ProcessProbe
 
 
-def _empty_prompt(_entry: Mapping[str, Any]) -> str:
-    return ""
+def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, str]:
+    return {"last_prompt": "", "model": ""}
 
 
 class _MemoTtyProbe:
@@ -58,7 +58,7 @@ def assemble_sessions(
     boot_identity: BootIdentity,
     process_probe: ProcessProbe,
     *,
-    last_prompt: Callable[[Mapping[str, Any]], str] = _empty_prompt,
+    tail_facts: Callable[[Mapping[str, Any]], dict[str, str]] = _empty_facts,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -77,6 +77,7 @@ def assemble_sessions(
     cards: list[dict[str, Any]] = []
     for entry in sessions:
         sid = entry["claude"]["session_id"]
+        facts = tail_facts(entry)
         cards.append(
             {
                 "pid": entry["pid"],
@@ -87,7 +88,8 @@ def assemble_sessions(
                 "session_id": sid,
                 "sid_source": entry["claude"]["sid_source"],
                 "sid8": sid[:8],
-                "last_prompt": last_prompt(entry),
+                "last_prompt": facts["last_prompt"],
+                "model": facts["model"],
                 "duplicate_group": sid if sid_counts[sid] > 1 else None,
                 "updated": entry["updated"],
             }

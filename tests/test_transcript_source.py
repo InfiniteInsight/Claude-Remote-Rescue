@@ -24,6 +24,13 @@ def _user(content, **extra):
     return r
 
 
+def _assistant(text, model=None):
+    msg = {"role": "assistant", "content": text}
+    if model is not None:
+        msg["model"] = model
+    return {"type": "assistant", "message": msg}
+
+
 def test_find_transcript_globs_any_project_dir(tmp_path):
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     _write_transcript(tmp_path, sid, [_user("hi")])
@@ -31,19 +38,49 @@ def test_find_transcript_globs_any_project_dir(tmp_path):
     assert transcript_source.find_transcript("no-such-sid", home=tmp_path) is None
 
 
-def test_read_last_prompt_skips_trailing_noise(tmp_path):
+def test_read_tail_facts_skips_trailing_noise(tmp_path):
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     _write_transcript(tmp_path, sid, [
         _user("an older prompt"),
         _user("the real last prompt"),
+        _assistant("answer", model="claude-opus-4-8"),
         _user([{"type": "tool_result", "content": "big output"}]),  # noise after it
         _user("<task-notification>bg task done</task-notification>"),
     ])
-    assert transcript_source.read_last_prompt(sid, cap=100, home=tmp_path) == "the real last prompt"
+    facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)
+    assert facts == {"last_prompt": "the real last prompt", "model": "claude-opus-4-8"}
 
 
-def test_read_last_prompt_missing_transcript_is_empty(tmp_path):
-    assert transcript_source.read_last_prompt("nope", cap=100, home=tmp_path) == ""
+def test_read_tail_facts_reads_model_from_a_trailing_assistant_turn(tmp_path):
+    # The model lives on assistant turns near the tail; skip <synthetic> ones.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant("real answer", model="claude-opus-5"),
+        _assistant("interrupted", model="<synthetic>"),  # most recent, noise
+    ])
+    assert transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)["model"] == "claude-opus-5"
+
+
+def test_read_tail_facts_bounds_the_model_search_to_the_tail(tmp_path):
+    # A real model always sits within a few lines of the tail (measured p99=37);
+    # 1 in 3 transcripts have NO model at all. So the model search is bounded to
+    # a tail window — otherwise a model-less transcript would be read in full on
+    # every 5s poll. The prompt search stays unbounded (last prompt can be deep).
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    deep_model = _assistant("ancient answer", model="claude-opus-4-8")
+    noise = [_user([{"type": "tool_result", "content": "x"}])
+             for _ in range(transcript_source.MODEL_TAIL_LINES + 5)]
+    _write_transcript(tmp_path, sid, [deep_model, _user("the real prompt"), *noise])
+    facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)
+    assert facts["last_prompt"] == "the real prompt"   # prompt still found (unbounded)
+    assert facts["model"] == ""                          # model beyond the window -> unknown
+
+
+def test_read_tail_facts_missing_transcript_is_empty(tmp_path):
+    assert transcript_source.read_tail_facts("nope", cap=100, home=tmp_path) == {
+        "last_prompt": "", "model": ""
+    }
 
 
 def test_reverse_read_handles_lines_spanning_block_boundary(tmp_path):
@@ -52,7 +89,7 @@ def test_reverse_read_handles_lines_spanning_block_boundary(tmp_path):
     big = "x" * 200000
     _write_transcript(tmp_path, sid, [_user("real"), _user(big)])
     # The huge one is most recent; it isn't noise, so it comes back (capped).
-    out = transcript_source.read_last_prompt(sid, cap=50, home=tmp_path)
+    out = transcript_source.read_tail_facts(sid, cap=50, home=tmp_path)["last_prompt"]
     assert out == "x" * 50
 
 
