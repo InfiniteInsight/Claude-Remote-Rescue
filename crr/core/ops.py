@@ -154,7 +154,7 @@ def kick(
     groups = controller.claude_groups(pid)
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
-    flags.arm(pid, entry["claude"]["session_id"])
+    flags.arm_relaunch(pid, entry["claude"]["session_id"])
     try:
         for pgid in groups:
             controller.terminate_group(pgid, grace)

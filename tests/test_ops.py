@@ -206,9 +206,11 @@ class FakeController:
 
 class FakeFlags:
     def __init__(self):
-        self.armed = {}               # pid -> sid
-    def arm(self, pid, sid):
-        self.armed[pid] = sid
+        self.armed = {}               # pid -> (kind, sid|None)
+    def arm_relaunch(self, pid, sid):
+        self.armed[pid] = ("relaunch", sid)
+    def arm_close(self, pid):
+        self.armed[pid] = ("close", None)
     def clear(self, pid):
         self.armed.pop(pid, None)
 
@@ -261,7 +263,7 @@ def test_kick_arms_the_flag_then_terminates(tmp_path):
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
     res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is True
-    assert flags.armed[10] == _SID        # sid armed
+    assert flags.armed[10] == ("relaunch", _SID)  # sid armed
     assert ctrl.terminated == [(555, 5)]
 
 
