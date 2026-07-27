@@ -210,6 +210,14 @@ def _build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--pid", type=int, required=True)
     ce.set_defaults(func=_cmd_claude_exit)
 
+    repair = sub.add_parser(
+        "repair-check",
+        help="[shim] read/clear a session's relaunch/close flag",
+    )
+    repair.add_argument("--pid", type=int, required=True)
+    repair.add_argument("--clear", action="store_true")
+    repair.set_defaults(func=_cmd_repair_check)
+
     shim = sub.add_parser(
         "shim",
         help="print the shell shim to source from your rc file",
@@ -494,6 +502,21 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
         entry["claude"] = None
         entry["updated"] = _now()
         store.write(entry)
+    return 0
+
+
+def _cmd_repair_check(args: argparse.Namespace) -> int:
+    """[shim] Print the pid's relaunch/close flag for the repair loop, or
+    clear it. Output: 'relaunch <sid>' | 'close' | '' (absent)."""
+    flags = FlagStore(state_dir.state_dir())
+    if args.clear:
+        flags.clear(args.pid)
+        return 0
+    flag = flags.read(args.pid)
+    if flag is None:
+        return 0
+    kind, sid = flag
+    print(kind if sid is None else f"{kind} {sid}")
     return 0
 
 

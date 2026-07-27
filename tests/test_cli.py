@@ -725,6 +725,41 @@ def test_close_reports_no_session(tmp_path, monkeypatch, capsys):
     assert "no session" in capsys.readouterr().out
 
 
+def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
+    from crr.core.flags import FlagStore
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    FlagStore(tmp_path).arm_relaunch(4242, "sid-xyz")
+    rc = cli.main(["repair-check", "--pid", "4242"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "relaunch sid-xyz"
+
+
+def test_repair_check_prints_close_kind(tmp_path, monkeypatch, capsys):
+    from crr.core.flags import FlagStore
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    FlagStore(tmp_path).arm_close(4242)
+    rc = cli.main(["repair-check", "--pid", "4242"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "close"
+
+
+def test_repair_check_absent_prints_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["repair-check", "--pid", "4242"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_repair_check_clear_unlinks_the_flag(tmp_path, monkeypatch, capsys):
+    from crr.core.flags import FlagStore
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    flags = FlagStore(tmp_path)
+    flags.arm_close(4242)
+    rc = cli.main(["repair-check", "--pid", "4242", "--clear"])
+    assert rc == 0
+    assert flags.read(4242) is None
+
+
 @pytest.mark.skipif(
     platform.system() not in ("Linux", "Darwin") or shutil.which("tmux") is None,
     reason="needs Linux boot adapter + tmux",
