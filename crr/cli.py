@@ -6,9 +6,8 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove), diagnose, gc, the web dashboard, the systemd
-watchdog, and the shim-facing hooks. kick/close (which signal live
-processes) are deferred until revival is proven on real hardware.
+(reopen/dismiss/remove/kick/close), diagnose, gc, the web dashboard, the
+systemd watchdog, and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -39,6 +38,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import contracts, ops, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
+from crr.core.flags import FlagStore
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -104,6 +104,14 @@ def _build_parser() -> argparse.ArgumentParser:
     reo = sub.add_parser("reopen", help="revive one specific crashed session now")
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
+
+    kick = sub.add_parser("kick", help="restart claude in place on the same conversation")
+    kick.add_argument("pid", type=int)
+    kick.set_defaults(func=_cmd_kick)
+
+    close = sub.add_parser("close", help="end a live session (remote exit); no revival")
+    close.add_argument("pid", type=int)
+    close.set_defaults(func=_cmd_close)
 
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
@@ -614,6 +622,41 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
+
+
+def _cmd_kick(args: argparse.Namespace) -> int:
+    config = _load_config()
+    sd = state_dir.state_dir()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr kick: {exc}", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    flags = FlagStore(sd)
+    with mutation_lock(sd):
+        res = ops.kick(JournalStore(sd), controller, flags, boot, probe,
+                       args.pid, _now(), grace=config.get("close_grace_seconds"))
+    print(res.message)
+    return 0 if res.ok else 1
+
+
+def _cmd_close(args: argparse.Namespace) -> int:
+    config = _load_config()
+    sd = state_dir.state_dir()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr close: {exc}", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    with mutation_lock(sd):
+        res = ops.close(JournalStore(sd), controller, boot, probe,
+                        args.pid, _now(), grace=config.get("close_grace_seconds"))
+    print(res.message)
+    return 0 if res.ok else 1
 
 
 def make_web_handler(
