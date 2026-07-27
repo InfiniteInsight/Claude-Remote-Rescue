@@ -66,25 +66,43 @@ transcript). If the group is still alive after a configurable grace window
 (`close_grace_seconds`, default 5), escalate to **SIGKILL**. This mirrors the
 "close/reopen grace windows" the DESIGN's config section calls out.
 
-The single difference between the two ops: **`kick` arms a relaunch flag
-before signalling; `close` does not.**
+Both ops kill claude's group identically; they differ only in **which flag
+they arm** for the wrapper to act on afterward: `kick` arms **relaunch**,
+`close` arms **close**.
 
-## The relaunch flag protocol
+## The flag protocol (3-state)
 
-A flag is the one bit of shared state between the `kick` op and the shim's
-repair loop.
+A single flag file is the shared state between the `kick`/`close` ops and the
+shim's repair loop. It carries one of two armed states, or is absent — three
+outcomes the wrapper reads after claude exits:
 
-- **Location:** `<state_dir>/relaunch/<shell_pid>`, content = the
-  `session_id` to resume. New directory under the state dir the core journal
-  already owns.
-- **Armed by `kick`, only when the kill lands:** write the flag → signal →
-  **roll the flag back (unlink) if the signal failed**, returning an error.
-  This satisfies DESIGN's "relaunch flags are written only when a kill
-  actually lands" while still having the flag present *before* the shim wakes
-  (avoiding the race where the wrapper checks before kick writes).
+| Flag | Armed by | Wrapper acts |
+|------|----------|--------------|
+| **relaunch**(sid) | `kick` | silently `claude --resume <sid>` — same conversation, shell stays |
+| **close** | `close` | run `claude-exit` (deregisters → card vanishes), then **`exit` the shell** → the tab/pane/ssh session closes |
+| *(absent)* | — | nonzero exit → **offer** `[Y/n]`; clean exit → return to prompt |
+
+This resolves the two gaps Slice 1's final review surfaced:
+
+- **A closed session is never resumed** — the wrapper sees `close`, not a
+  bare crash, so it exits instead of offering/resuming (was blocker B1).
+- **`close` ends the whole terminal** — not by an external, signal-fragile
+  kill of the shell, but by the wrapper calling `exit` itself: graceful
+  (`claude-exit` runs first, so the card disappears and no crashed entry is
+  left behind), and uniform across tab / tmux-pane / ssh (was blocker B2).
+
+Protocol details:
+
+- **Location:** `<state_dir>/relaunch/<shell_pid>`, content encodes the kind
+  (`relaunch <sid>` or `close`). New directory under the state dir core owns.
+- **Armed only when the kill lands:** both ops write the flag → signal the
+  group → **roll the flag back (unlink) if the signal failed**, returning an
+  error. Satisfies DESIGN's "flags are written only when a kill actually
+  lands" while having the flag present *before* the shim wakes (no
+  check-before-write race).
 - **Cleared at wrapper start:** the shim unlinks any stale flag for its pid
-  before running claude, so a flag from a session the user later closed on
-  purpose can never silently resume it (`[lesson: flag files]`).
+  before running claude, so a flag from a prior action can never act on a new
+  launch (`[lesson: flag files]`).
 - **Consumed + cleared by the repair loop** after it reads it.
 
 ## Architecture (respects `cli → adapters → core`)
@@ -108,31 +126,40 @@ Linux/WSL/macOS. Command *shapes* are pure builders (unit-tested without a
 real `ps`); the one method that shells out is covered like the existing
 probe.
 
-### New core module — `FlagStore` (`core/flags.py`)
+### Core module — `FlagStore` (`core/flags.py`)
 
-`arm(pid, sid)` / `read(pid) -> str | None` / `clear(pid)`, atomic writes to
+3-state interface: `arm_relaunch(pid, sid)` / `arm_close(pid)` /
+`read(pid) -> (kind, sid|None) | None` / `clear(pid)`, atomic writes to
 `<state_dir>/relaunch/`. Pure core file I/O, consistent with `journal.py`
 (core already owns the state-dir filesystem). No new versioned contract — a
-flag is an opaque marker keyed by pid; its *content* is a sid the journal is
-already the source of truth for.
+flag is an opaque per-pid marker.
+
+*(Slice 1 shipped the 1-state form `arm(pid, sid)`; Slice 2's server slice
+generalizes it to the 3-state form above and updates `ops.kick` to call
+`arm_relaunch`.)*
 
 ### Core ops (`core/ops.py`) — fill the existing kick/close stub
 
 ```
-def kick(store, controller, flags, boot, probe, pid, now, *, grace) -> OpResult
-def close(store, controller, boot, probe, pid, now, *, grace) -> OpResult
+def kick(store, controller, flags, boot, probe, pid, *, grace) -> OpResult
+def close(store, controller, flags, boot, probe, pid, *, grace) -> OpResult
 ```
 
 - **Classifier-gated to `live`/`ghost`** (refuse `crashed` — nothing is
   running to signal; that is `reopen`'s job). Same gate on both surfaces.
-- **`kick` additionally requires a claude session** (`claude is not None`) —
-  it reads the sid from the journal entry to arm the flag; a claude-less
-  shell has nothing to relaunch, so kick refuses it. `close` needs no sid.
-- `kick`: read sid from entry → resolve group → arm flag → SIGTERM → grace →
-  SIGKILL if alive → roll flag back on total failure. Returns `OpResult`.
-- `close`: resolve group → SIGTERM → grace → SIGKILL if alive. No flag.
+- **`kick` requires a claude session** (`claude is not None`) — it reads the
+  sid from the journal entry to arm the relaunch flag; a claude-less shell
+  has nothing to relaunch, so kick refuses it.
+- `kick`: read sid → resolve group → `arm_relaunch(pid, sid)` → SIGTERM →
+  grace → SIGKILL if alive → roll flag back on total failure.
+- `close`: resolve group → `arm_close(pid)` → SIGTERM → grace → SIGKILL if
+  alive → roll flag back on total failure.
 - Failure statuses **propagate** (the swallowed-exit-code → green-checkmark
   lesson).
+
+*(Slice 1 shipped `close` with no flag and both signatures carrying an unused
+`now` param, since dropped. Slice 2's server slice adds `flags` +
+`arm_close` to `close`.)*
 
 ### CLI + web
 
@@ -145,26 +172,30 @@ def close(store, controller, boot, probe, pid, now, *, grace) -> OpResult
 
 ### Shim repair loop (fish, bash, zsh — all three, together)
 
-The `claude()` wrapper gains a loop around `command claude`:
+The `claude()` wrapper gains a loop around `command claude`, reading the flag
+after each exit and branching on its state:
 
-1. **Start:** clear any stale relaunch flag for this pid.
+1. **Start:** clear any stale flag for this pid.
 2. Run `command claude …`; capture exit code.
-3. **If the relaunch flag is set** (kick): silently
-   `command claude --resume <sid>`; loop.
-4. **elif exit code is nonzero** (crash): print
-   `crr: claude exited unexpectedly (<code>). Resume this conversation?
-   [Y/n]` and read the answer. **yes / timeout / no-tty → resume**; explicit
-   **no → stop**. Loop on resume. (Timeout uses the shell's timed read where
-   it has one — bash/zsh `read -t`; fish lacks a native timed read, so it
-   falls back to a blocking read and relies on the no-tty→resume rule for the
-   unattended case.)
-5. **else** (clean exit): stop.
-6. **Bounded to 2 resume attempts** per invocation — a session that keeps
-   dying gives up in place (the shim analogue of the reviver's give-up
-   guard) instead of spinning, then falls through to `claude-exit`.
+3. **Read the flag.** Then:
+   - **relaunch**(sid) (kick): silently `command claude --resume <sid>`; loop.
+   - **close** (close): run `claude-exit` (deregisters), then **`exit` the
+     shell** — the tab/pane/ssh session closes. Terminal state; no loop.
+   - **absent + nonzero** (crash): print `crr: claude exited unexpectedly
+     (<code>). Resume this conversation? [Y/n]` and read the answer. **yes /
+     timeout / no-tty → resume**; explicit **no → stop**. Loop on resume.
+     (Timeout uses the shell's timed read where it has one — bash/zsh
+     `read -t`; fish lacks a native timed read, so it falls back to a
+     blocking read and relies on the no-tty→resume rule for the unattended
+     case.)
+   - **absent + exit 0** (you quit claude): stop; back to the prompt.
+4. **Bounded to 2 resume attempts** per invocation — a session that keeps
+   dying gives up in place (the shim analogue of the reviver's give-up guard)
+   instead of spinning, then falls through to `claude-exit`. (The `close`
+   branch is terminal and not subject to the cap.)
 
-Small shim-facing helpers back this: `crr relaunch-flag --pid --check` /
-`--clear` (presence + sid), reusing the journal for the sid. Behaviour is
+A small shim-facing helper backs this: `crr repair-check --pid` prints the
+flag kind + sid (and `--clear` unlinks it), reusing the journal. Behaviour is
 identical across the three shells; only syntax differs.
 
 ## Contracts / versioning impact
@@ -176,66 +207,62 @@ identical across the three shells; only syntax differs.
 
 ## Testing strategy
 
-**Slice 1 (server side) — fully unit-testable with fakes, no shell, no real
-processes:**
-- `PsProcessController` builders: ppid/pgid parsing, group selection, signal
-  argv shape (`-<pgid>`), grace escalation logic — pure, cross-OS.
-- `FlagStore`: arm/read/clear, atomicity, stale isolation.
-- `ops.kick`/`ops.close`: classifier gate (refuse crashed), flag arm +
-  rollback-on-signal-failure, close-arms-no-flag, failure propagation — with
-  fake controller/probe/boot.
-- CLI + web: new commands, new `/api/action` ops, strict validation.
+**Slice 1 (server side) — SHIPPED.** `PsProcessController` builders, 1-state
+`FlagStore`, `ops.kick`/`ops.close`, CLI + web + dashboard buttons; unit-
+tested with fakes.
 
-**Slice 2 (shim repair loop) — `test_shims.py`, gated per installed shell:**
-- stale-flag cleared at start; kick-flag → silent resume; nonzero → offer
-  (drive `yes`/`no`/timeout/no-tty); clean exit → no resume; 2-attempt cap.
+**Slice 2a (server-side flag) — fully unit-testable with fakes:**
+- `FlagStore` 3-state: `arm_relaunch`/`arm_close`/`read`→(kind,sid)/`clear`,
+  atomicity, stale isolation, kind round-trips.
+- `ops.close` arms the close flag + rollback-on-signal-failure; `ops.kick`
+  now calls `arm_relaunch`. Both still classifier-gated.
+
+**Slice 2b (shim repair loop) — `test_shims.py`, gated per installed shell:**
+- stale-flag cleared at start; **relaunch** flag → silent resume; **close**
+  flag → `claude-exit` + shell `exit`; **absent + nonzero** → offer (drive
+  `yes`/`no`/timeout/no-tty); **absent + exit 0** → no resume; 2-attempt cap.
+- `crr repair-check` helper: prints kind+sid; `--clear` unlinks.
 - Live verification on Linux/WSL (fish); macOS live run awaits hardware.
 
 Every step is test-first (red → green), advisor before/after each slice,
 `PAGE_VERSION` discipline, honest calibration.
 
-## Delivery — two mergeable slices
+## Delivery — three mergeable slices
 
-1. **Server side**: port + `PsProcessController` + `FlagStore` +
-   `ops.kick/close` + CLI + web endpoints + dashboard buttons. Merges on
-   local-CI-green; delivers working dashboard Kick/Close on live sessions and
-   flag-arming, with zero shell risk.
-2. **Shim repair loop**: the shell code in all three shims consuming the flag
-   + offer-on-crash, `test_shims.py` coverage, live Linux/WSL verification.
+1. **Server side (SHIPPED)**: port + `PsProcessController` + 1-state
+   `FlagStore` + `ops.kick/close` + CLI + web endpoints + dashboard buttons.
+2. **Slice 2a — server-side flag**: `FlagStore` → 3-state; `ops.close` arms
+   the close flag (rollback on failed kill); `ops.kick` → `arm_relaunch`.
+   Pure, fully unit-testable, one branch. Zero shell risk.
+3. **Slice 2b — shim repair loop**: the shell code in all three shims
+   consuming the 3-state flag (relaunch → resume, close → exit, absent →
+   offer), the `crr repair-check` helper, `test_shims.py` coverage, live
+   Linux/WSL verification.
 
 The cutover (moving `cc-*` under crr's shim) is a **separate** operational
 plan authored after #4 lands.
 
-## Slice-2 blockers surfaced by Slice-1's final review
+## Blockers B1/B2 — RESOLVED
 
-Two protocol/semantic gaps the shim-repair-loop slice MUST resolve (they are
-not Slice-1 code bugs — the loop does not exist yet — but the flag protocol
-Slice 1 establishes cannot express them):
-
-- **B1 — the flag cannot distinguish `close` from a crash.** `terminate_group`
-  makes claude exit nonzero (SIGTERM→143 or SIGKILL→137). The repair loop's
-  rule is "nonzero exit → offer, resume on yes/timeout/no-tty," so an
-  unattended `close` would be resumed — violating the acceptance criterion
-  "`crr close` … no relaunch." Resolution options: (a) `close` arms a
-  *suppress-resume* marker the wrapper honours (the flag grows a second
-  state: relaunch vs. do-not-resume), or (b) the wrapper treats the
-  close-range exit codes as clean. Pick one in the Slice-2 design.
-- **B2 — after a successful `close`, the shell survives, so the session
-  still classifies `live`/`ghost`** and the card persists with Kick/Close
-  still shown (a second `close` returns "no running claude process found").
-  Decide the intended semantics — does `close` also end the shell (true
-  "remote exit"), or is it "kill claude, leave the shell"? — and align the
-  button label/behaviour accordingly.
+Slice 1's final review surfaced two gaps; the 3-state flag protocol above
+resolves both (see "The flag protocol (3-state)"): a `close` arms a distinct
+`close` flag so the wrapper never resumes it (B1), and `close` ends the whole
+terminal by having the wrapper run `claude-exit` then `exit` the shell —
+graceful, card-clearing, no external shell-kill (B2). Retained here only as
+the rationale trail.
 
 ## Acceptance criteria
 
-- `crr kick <pid>` on a live session: claude's group dies, the flag is armed,
-  and (under crr's shim) claude comes back on the same conversation; on a
-  crashed session it is refused.
-- `crr close <pid>` on a live session: claude's group dies gracefully, no
-  relaunch; on a crashed session it is refused.
-- Repair loop: kick → silent resume; crash → offer, resume on yes/timeout,
-  stay dead on no; user-quit (clean exit) → never resumes; ≤2 attempts.
+- `crr kick <pid>` on a live/ghost session: claude's group dies, the relaunch
+  flag is armed, and (under crr's shim) claude comes back on the same
+  conversation; on a crashed session it is refused.
+- `crr close <pid>` on a live/ghost session: claude's group dies, the close
+  flag is armed, and (under crr's shim) the wrapper deregisters and exits the
+  shell so the terminal closes and the card disappears; on a crashed session
+  it is refused. Both ops roll their flag back if the kill fails.
+- Repair loop: relaunch flag → silent resume; close flag → deregister + exit;
+  crash (no flag, nonzero) → offer, resume on yes/timeout/no-tty, stay dead on
+  explicit no; user-quit (clean exit) → never resumes; ≤2 resume attempts.
 - Kill is always by process group of the claude child, never by cmdline.
 - Implemented + unit-tested on Linux/WSL/macOS and fish/bash/zsh; live-run on
   Linux/WSL. No feature is Linux-only.
