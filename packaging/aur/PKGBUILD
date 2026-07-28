@@ -1,0 +1,25 @@
+# Maintainer: Evan Nevermore <infiniteinsight@gmail.com>
+pkgname=claude-remote-rescue
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Keep Claude Code sessions alive and rescuable when terminals or hosts die"
+arch=('any')
+url="https://github.com/InfiniteInsight/Claude-Remote-Rescue"
+license=('MIT')
+depends=('python')
+optdepends=('tmux: session revival, watchdog, and de-tmux')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/InfiniteInsight/Claude-Remote-Rescue/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('PLACEHOLDER_FILL_AFTER_TAGGING')
+
+# check() omitted deliberately: tests are dev-extras (pytest) and Arch guidelines make check() optional.
+build() {
+  cd "Claude-Remote-Rescue-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "Claude-Remote-Rescue-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
