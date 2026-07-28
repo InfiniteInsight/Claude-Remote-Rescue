@@ -11,6 +11,7 @@ pkgbase = claude-remote-rescue
 	makedepends = python-wheel
 	makedepends = python-setuptools
 	depends = python
+	optdepends = tmux: session revival, watchdog, and de-tmux
 	source = claude-remote-rescue-0.1.0.tar.gz::https://github.com/InfiniteInsight/Claude-Remote-Rescue/archive/refs/tags/v0.1.0.tar.gz
 	sha256sums = PLACEHOLDER_FILL_AFTER_TAGGING
 

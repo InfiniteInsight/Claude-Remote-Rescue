@@ -37,8 +37,7 @@ sha256 placeholder:
 real checksum of the release tarball:
 
 ```sh
-curl -L https://github.com/InfiniteInsight/Claude-Remote-Rescue/archive/refs/tags/v0.1.0.tar.gz \
-  | sha256sum
+curl -L <tarball-url> | shasum -a 256   # on Linux: sha256sum
 ```
 
 Paste the resulting hex digest into both `sha256 "..."` in
@@ -87,7 +86,9 @@ checksums above are filled in:
   ```sh
   brew audit --new --strict packaging/homebrew/claude-remote-rescue.rb
   brew install --build-from-source packaging/homebrew/claude-remote-rescue.rb
+  brew test packaging/homebrew/claude-remote-rescue.rb
   ```
+  Note: homebrew-core's `brew audit --new` applies a repository-notability gate (~75 stars); if the repo doesn't clear it yet, submit to a personal tap (e.g. `InfiniteInsight/homebrew-tap`) instead — the formula file is identical either way.
 - **AUR (on an Arch machine or container):**
   ```sh
   makepkg -si          # build + install, verifies PKGBUILD end-to-end

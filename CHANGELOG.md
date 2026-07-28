@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.0] — unreleased
 
 No tag or release has been cut yet. This section describes everything on
-`main` as of the packaging work, pending the first public `v0.1.0` tag.
+`main` as of the packaging work, pending the first public `v0.1.0` tag. Licensed MIT.
 
 ### Added
 
@@ -19,8 +19,7 @@ No tag or release has been cut yet. This section describes everything on
   launches and tracks resumed/continued sessions by guessed or verified sid.
 - tmux reviver (`crr revive`) that resumes crashed sessions into detached
   tmux, with a give-up guard against repeated-crash loops and a
-  cross-platform boot-identity adapter so revival only fires for sessions
-  from the current boot.
+  cross-platform boot-identity adapter so a session from a previous boot is recognized as crashed rather than mistaken for live under pid reuse.
 - Remote session control: `crr kick` (restart claude in place on the same
   conversation) and `crr close` (cooperative remote exit, no revival),
   backed by a 3-state flag store (`relaunch` / `close` / absent) and a
@@ -31,8 +30,7 @@ No tag or release has been cut yet. This section describes everything on
 - Web dashboard (`crr web`), a stdlib-only HTTP server bound to loopback by
   default (meant to be exposed via `tailscale serve`), with sortable/
   groupable/filterable session cards, confidence-weighted duplicate
-  detection, and versioned JSON contracts (`/api/sessions`, `/api/action`,
-  `/api/diagnostics`) plus a versioned page bundle (`PAGE_VERSION`) so the
+  detection, and versioned JSON contracts (`/api/sessions`, `/api/diagnostics`) plus a versioned page bundle (`PAGE_VERSION`) so the
   server can detect a stale cached client.
 - `crr diagnose` — a plain-English "why did sessions die?" verdict
   (out-of-memory, kernel panic, unexpected shutdown, clean reboot, or
@@ -55,11 +53,8 @@ No tag or release has been cut yet. This section describes everything on
 ### Changed
 
 - **Any nonzero `claude` exit — including a SIGINT quit — now triggers the
-  shim's resume offer.** Previously a nonzero exit returned silently to the
-  shell prompt; now the `claude()` wrapper in each shim (fish, bash, zsh)
-  prompts `Resume this conversation? [Y/n]`. Only an explicit `n`/`no`
-  declines; anything else — including no answer because stdin isn't a
-  terminal (bash/zsh time out via `read -t`; fish has no timed read) —
+  shim's resume offer.** Without the crr shim, a nonzero `claude` exit returns silently to the shell prompt; with it, the `claude()` wrapper prompts to resume. Only an explicit `n`/`no`
+  declines; anything else — including no answer at all — a non-tty stdin skips the prompt entirely in all three shells, and bash/zsh additionally time out an unanswered prompt after 30 seconds via `read -t` (fish has no timed read) —
   resumes automatically, capped at 2 consecutive crash-resumes.
 
 ### Security
@@ -75,6 +70,3 @@ No tag or release has been cut yet. This section describes everything on
   shims are dependency-free, by design (`pyproject.toml`
   `dependencies = []`) — a supply-chain guarantee, not an incidental state.
 
-### Notes
-
-- License: MIT.

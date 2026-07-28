@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27 · **Status:** approved design (resolved autonomously
 per the handoff). Publishing itself (tag, submissions, announcement) is
-human-gated and lives in `docs/RUNBOOK-cutover-and-release.md` — this task
+human-gated and lives in `docs/RUNBOOK-cutover-and-release.md` (to be written) — this task
 only authors repo files.
 
 ## Decisions

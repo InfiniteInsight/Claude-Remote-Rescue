@@ -19,6 +19,7 @@ class ClaudeRemoteRescue < Formula
   end
 
   test do
+    assert_match version.to_s, shell_output("#{bin}/crr --version")
     assert_match "crr", shell_output("#{bin}/crr --help")
   end
 end
