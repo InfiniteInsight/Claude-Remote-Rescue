@@ -51,6 +51,7 @@ def _session_card():
         "last_prompt": "fix the reviver give-up guard",
         "model": "claude-opus-4-8",
         "duplicate_group": None,
+        "tmux_session": None,
         "updated": "2026-07-23T00:00:00Z",
     }
 
@@ -237,6 +238,20 @@ def test_sessions_card_model_must_be_str():
     p["sessions"][0]["model"] = 5
     with pytest.raises(contracts.ContractError):
         contracts.validate_sessions_payload(p)
+
+
+def test_session_card_rejects_non_string_tmux_session():
+    card = _session_card()
+    card["tmux_session"] = 7
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)
+
+
+def test_sessions_payload_rejects_previous_contract_version():
+    payload = _sessions_payload()
+    payload["contract"] = 2
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(payload)
 
 
 # --------------------------------------------------------------------------

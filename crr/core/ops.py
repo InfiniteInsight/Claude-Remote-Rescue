@@ -170,6 +170,44 @@ def kick(
     return OpResult(True, f"kicked {pid} (resuming the same conversation)")
 
 
+def detmux(
+    store: JournalStore,
+    tmux: TmuxSpawner,
+    pid: int,
+    now: str,
+    *,
+    tab_spawner: TabSpawner | None,
+) -> OpResult:
+    """Re-home a revived (detached-tmux) session into a visible tab.
+
+    Opens a tab attached to the stored ``tmux_session`` name and clears
+    that bookkeeping on success. Liveness comes from tmux itself, never
+    the stored field (reviver lesson). Unlike reopen — where the tab is a
+    best-effort convenience on an already-durable revival — the tab IS
+    this operation: no spawner is a refusal, and a spawn failure leaves
+    the bookkeeping untouched so the card keeps offering the button.
+    """
+    try:
+        entry = store.read(pid)
+    except (KeyError, contracts.ContractError):
+        return OpResult(False, f"no session {pid}")
+    name = entry.get("tmux_session")
+    if not name:
+        return OpResult(False, f"session {pid} is not tmux-parked")
+    if name not in tmux.list_sessions():
+        return OpResult(False, f"tmux session {name} is gone")
+    if tab_spawner is None or not tab_spawner.available():
+        return OpResult(False, "no terminal tab spawner available on this host")
+    try:
+        tab_spawner.open_tab(attach_argv(name))
+    except Exception as exc:  # adapter subprocess/osascript failure
+        return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
+    entry["tmux_session"] = None
+    entry["updated"] = now
+    store.write(entry)
+    return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab")
+
+
 def _open_tab(tab_spawner: TabSpawner | None, name: str) -> str:
     """Best-effort visible tab attaching to ``name``; returns a message suffix.
 

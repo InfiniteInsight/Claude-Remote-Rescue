@@ -91,6 +91,7 @@ def assemble_sessions(
                 "last_prompt": facts["last_prompt"],
                 "model": facts["model"],
                 "duplicate_group": sid if sid_counts[sid] > 1 else None,
+                "tmux_session": entry["tmux_session"],
                 "updated": entry["updated"],
             }
         )

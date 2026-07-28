@@ -187,6 +187,70 @@ def test_reopen_unavailable_spawner_stays_detached(tmp_path):
     assert tab.opened == []  # never consulted an unavailable spawner
 
 
+# --- detmux ----------------------------------------------------------------
+
+def _seed_parked(store, pid, name):
+    _seed(store, pid, claude=_claude())
+    e = store.read(pid)
+    e["tmux_session"] = name
+    store.write(e)
+
+
+def test_detmux_opens_attach_tab_and_clears_bookkeeping(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tab = FakeTabSpawner()
+    res = ops.detmux(store, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW, tab_spawner=tab)
+    assert res.ok, res.message
+    assert tab.opened == [(["tmux", "attach", "-t", "crr-8a1b2c3d"], None)]
+    assert store.read(42)["tmux_session"] is None
+
+
+def test_detmux_refuses_missing_entry(tmp_path):
+    res = ops.detmux(JournalStore(tmp_path), FakeTmux(), 999, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert not res.ok and "no session" in res.message
+
+
+def test_detmux_refuses_unparked_session(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    res = ops.detmux(store, FakeTmux(), 42, _NOW, tab_spawner=FakeTabSpawner())
+    assert not res.ok and "not tmux-parked" in res.message
+
+
+def test_detmux_refuses_when_tmux_session_is_gone(tmp_path):
+    # Liveness comes from tmux, never the stored field (reviver lesson);
+    # a stale field refuses and mutates nothing.
+    store = JournalStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, FakeTmux(live=set()), 42, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert not res.ok and "gone" in res.message
+    assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
+
+
+def test_detmux_requires_a_tab_spawner(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    for tab in (None, FakeTabSpawner(available=False)):
+        res = ops.detmux(store, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW,
+                         tab_spawner=tab)
+        assert not res.ok and "no terminal tab spawner" in res.message
+    assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
+
+
+def test_detmux_spawn_failure_keeps_bookkeeping(tmp_path):
+    # The tab IS the operation: a spawn failure fails the op and the card
+    # must keep offering the button.
+    store = JournalStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW,
+                     tab_spawner=FakeTabSpawner(fail=True))
+    assert not res.ok and "failed to open a tab" in res.message
+    assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
+
+
 # --- kick / close -----------------------------------------------------------
 
 class FakeController:

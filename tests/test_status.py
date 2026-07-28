@@ -151,6 +151,16 @@ def test_tail_facts_default_to_empty_strings():
     assert card["model"] == ""
 
 
+def test_card_carries_tmux_session():
+    parked = _entry(1, "deadbeefcafe0001")
+    parked["tmux_session"] = "crr-deadbeef"
+    plain = _entry(2, "deadbeefcafe0002")
+    payload = assemble_sessions([parked, plain], FakeBoot(), FakeProbe())
+    by_pid = {c["pid"]: c for c in payload["sessions"]}
+    assert by_pid[1]["tmux_session"] == "crr-deadbeef"
+    assert by_pid[2]["tmux_session"] is None
+
+
 def test_claude_less_shells_are_not_cards():
     # A registered shell with no claude session yet (claude=None) is not a
     # rescuable "session" and must not appear as a card.

@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping
 # --------------------------------------------------------------------------
 
 JOURNAL_SCHEMA_VERSION = 1
-SESSIONS_CONTRACT_VERSION = 2  # v2 adds the per-session `model` card field
+SESSIONS_CONTRACT_VERSION = 3  # v3 adds the per-session nullable tmux_session field
 DIAGNOSTICS_CONTRACT_VERSION = 2  # v2 adds the plain-English `summary` list
 ARCHIVE_CONTRACT_VERSION = 1
 
@@ -64,6 +64,7 @@ SESSION_CARD_KEYS = (
     "last_prompt",
     "model",
     "duplicate_group",
+    "tmux_session",
     "updated",
 )
 SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
@@ -189,6 +190,8 @@ def validate_session_card(card: Any) -> None:
     # duplicate_group is nullable: None (not in a group) or a group id string.
     if card["duplicate_group"] is not None:
         _require_type(card["duplicate_group"], str, "session 'duplicate_group'")
+    if card["tmux_session"] is not None:
+        _require_type(card["tmux_session"], str, "session 'tmux_session'")
 
 
 def validate_sessions_payload(payload: Any) -> None:
