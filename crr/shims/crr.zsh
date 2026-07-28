@@ -48,6 +48,8 @@ fi
 claude() {
   # Offer timeout (seconds) for the crash prompt; overridable, never inline.
   : "${_CRR_OFFER_TIMEOUT:=30}"
+  # Give-up cap for consecutive crash resumes; overridable, never inline.
+  : "${_CRR_MAX_RESUMES:=2}"
   # [lesson: flag files] A stale flag from a prior action must never act on
   # this launch.
   _crr repair-check --pid "$$" --clear >/dev/null
@@ -101,7 +103,7 @@ claude() {
   local _code=$?
 
   local _crashes=0 _flagline _kind _fsid _ans
-  while :; do
+  while [ -x "$_CRR_BIN" ]; do
     # Read, then clear: two calls by design (re-arm window accepted).
     _flagline="$(_crr repair-check --pid "$$")"
     _crr repair-check --pid "$$" --clear >/dev/null
@@ -122,7 +124,7 @@ claude() {
     fi
     # Unknown kind or no flag: branch on how claude exited.
     [ "$_code" -eq 0 ] && break
-    [ "$_crashes" -ge 2 ] && break
+    [ "$_crashes" -ge "$_CRR_MAX_RESUMES" ] && break
     _ans=
     if [ -t 0 ]; then
       printf 'crr: claude exited unexpectedly (%s). Resume this conversation? [Y/n] ' "$_code" >&2

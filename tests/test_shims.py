@@ -67,7 +67,7 @@ def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
     }
     return subprocess.run(
         _SHELLS[shell]["argv"] + [script],
-        env=env, capture_output=True, text=True, timeout=30,
+        env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
     )
 
 
@@ -132,7 +132,7 @@ def _run_with_fake_claude(shell, script, state_dir, bindir, record, journal=None
         env["CRR_TEST_JOURNAL"] = str(journal)
     return subprocess.run(
         _SHELLS[shell]["argv"] + [script],
-        env=env, capture_output=True, text=True, timeout=30,
+        env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
     )
 
 
@@ -399,6 +399,7 @@ def test_repair_stale_flag_cleared_at_wrapper_start(shell, tmp_path, capsys):
     script = _repair_script(shell, shim, pre=pre)
     env = _repair_env(state, bindir, tmp_path, exits="0")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert len(_record_lines(tmp_path)) == 1  # never resumed the stale sid
@@ -419,6 +420,7 @@ def test_repair_relaunch_flag_resumes_silently(shell, tmp_path, capsys):
     env = _repair_env(state, bindir, tmp_path, exits="143 0",
                       flag="relaunch test-sid-123")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     lines = _record_lines(tmp_path)
@@ -443,6 +445,7 @@ def test_repair_close_flag_exits_the_shell(shell, tmp_path, capsys):
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="143", flag="close")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert len(_record_lines(tmp_path)) == 1  # close never relaunches
     assert "AFTER-MARKER" not in result.stdout
@@ -462,6 +465,7 @@ def test_repair_unknown_flag_kind_treated_as_absent(shell, tmp_path, capsys):
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="0", flag="defer xyz")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert len(_record_lines(tmp_path)) == 1
@@ -479,6 +483,7 @@ def test_repair_relaunch_without_sid_treated_as_absent(shell, tmp_path, capsys):
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="0", flag="relaunch")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert len(_record_lines(tmp_path)) == 1
@@ -497,6 +502,7 @@ def test_repair_crash_without_tty_resumes_with_known_sid(shell, tmp_path, capsys
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="7 0")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     lines = _record_lines(tmp_path)
@@ -519,6 +525,7 @@ def test_repair_crash_resume_capped_at_two_attempts(shell, tmp_path, capsys):
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="7")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert len(_record_lines(tmp_path)) == 3
@@ -570,6 +577,7 @@ def test_repair_crash_with_unknown_sid_falls_back_to_continue(shell, tmp_path, c
     script = _repair_script(shell, shim, cmdline="--continue")
     env = _repair_env(state, bindir, tmp_path, exits="7 0")
     result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     lines = _record_lines(tmp_path)
@@ -595,3 +603,66 @@ def test_repair_crash_offer_timeout_resumes(shell, tmp_path, capsys):
     assert lines[1].startswith("--resume ")
     assert _OFFER in result.stderr
     assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_loop_is_inert_when_crr_binary_is_absent(shell, tmp_path, capsys):
+    # A shim baked with a nonexistent crr must behave exactly like the
+    # pre-loop wrapper on a crash: one launch, no offer, no resume.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    assert cli.main(["shim", shell, "--crr-bin", "/nonexistent/crr"]) == 0
+    shim = tmp_path / f"crr.{shell}"
+    shim.write_text(capsys.readouterr().out, encoding="utf-8")
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="7")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert len(_record_lines(tmp_path)) == 1
+    assert _OFFER not in result.stderr
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_crash_after_kick_resumes_the_kicked_sid(shell, tmp_path, capsys):
+    # A relaunch flag updates _cur_sid, so a later crash resumes the KICKED
+    # sid (and the relaunch reset the crash cap — decision 2 and 3).
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="143 7 0",
+                      flag="relaunch kicked-sid-xyz")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 3
+    assert lines[1] == "--resume kicked-sid-xyz"
+    assert lines[2] == "--resume kicked-sid-xyz"
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_close_flag_wins_over_clean_exit(shell, tmp_path, capsys):
+    # close is checked before the exit code: a clean exit with a close flag
+    # still closes the shell.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="0", flag="close")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    assert len(_record_lines(tmp_path)) == 1
+    assert "AFTER-MARKER" not in result.stdout

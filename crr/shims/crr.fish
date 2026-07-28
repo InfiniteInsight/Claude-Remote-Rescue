@@ -46,6 +46,10 @@ end
 # --resume, close → deregister + exit this shell, bare crash → offer
 # ([Y/n]; yes/no-tty resume, ≤2 attempts), clean exit → back to prompt.
 function claude
+    # Give-up cap for consecutive crash resumes; overridable, never inline.
+    # fish has no timeout var (blocking read), so this is the only named
+    # constant here.
+    set -q _CRR_MAX_RESUMES; or set -l _CRR_MAX_RESUMES 2
     # [lesson: flag files] A stale flag from a prior action must never act
     # on this launch.
     _crr repair-check --pid $fish_pid --clear >/dev/null
@@ -107,7 +111,7 @@ function claude
     set -l _code $status
 
     set -l _crashes 0
-    while true
+    while test -x "$_CRR_BIN"
         # Command substitution splits on newlines only — split the single
         # flag line on spaces ourselves. Absent = no output = empty list.
         # Read, then clear: two calls by design (re-arm window accepted).
@@ -130,7 +134,7 @@ function claude
         if test $_code -eq 0
             break
         end
-        if test $_crashes -ge 2
+        if test $_crashes -ge $_CRR_MAX_RESUMES
             break
         end
         set -l _ans ""

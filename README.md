@@ -25,16 +25,17 @@ Honest calibration — what is and isn't verified:
 
 - **Verified:** the Linux CI matrix (ubuntu, Python 3.11/3.12), the
   `node --check` page-JS gate, and the import-linter layering contract all
-  pass. Business logic is covered by unit tests with fakes.
+  pass. Business logic is covered by unit tests with fakes. `kick` and
+  `close` (they signal live processes) and the shim repair loop (the
+  `claude()` wrapper's post-exit relaunch/close/crash-offer branching) are
+  shipped; the repair loop is also live-verified on Linux/WSL (fish) in
+  isolation.
 - **NOT yet verified:** the macOS-runner tests (`plutil`, `osacompile`,
   `log show`/`pmset`, mac boot-identity) have not run on this batch; any real
   GUI tab spawn (macOS/Linux-desktop/`wt.exe`) and all Windows integration
   are unrun; and the **end-to-end hardware acceptance** — kill the tmux
   server, reboot, watch every conversation revive and the dashboard return
   over the tailnet — has not been run. These are the next milestone.
-- **Deliberately not shipped:** `kick` and `close` (they signal live
-  processes and need the shim repair loop; held until revival is proven on
-  real hardware).
 
 This is a ground-up OSS rewrite of a private Windows/WSL tool that
 survived two real outages in production (a Windows-Update reboot and a WSL
