@@ -284,8 +284,8 @@ def test_bash_shim_records_last_cmd(tmp_path, capsys):
 # with a timed read (bash/zsh — fish blocks and relies on the no-tty rule).
 # ---------------------------------------------------------------------------
 
-_REPAIR_SHELLS = ["fish", "bash"]
-_TIMED_SHELLS = ["bash"]
+_REPAIR_SHELLS = ["fish", "bash", "zsh"]
+_TIMED_SHELLS = ["bash", "zsh"]
 
 
 def _fake_claude_repair_bindir(tmp_path) -> Path:
