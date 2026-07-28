@@ -41,9 +41,19 @@ fi
 
 # claude() wrapper: inject + journal a --session-id on fresh launches
 # (sid_source=injected); on resume/continue, journal the resumed session
-# (guessed/verified sid) so it is revivable, args untouched; clear the
-# claude field on clean exit (a crash leaves it set for the reviver).
+# (guessed/verified sid) so it is revivable, args untouched. After each
+# exit the repair loop consumes the relaunch/close flag: kick → silent
+# --resume, close → deregister + exit this shell, bare crash → offer
+# ([Y/n]; yes/timeout/no-tty resume, ≤2 attempts), clean exit → prompt.
 claude() {
+  # Offer timeout (seconds) for the crash prompt; overridable, never inline.
+  : "${_CRR_OFFER_TIMEOUT:=30}"
+  # Give-up cap for consecutive crash resumes; overridable, never inline.
+  : "${_CRR_MAX_RESUMES:=2}"
+  # [lesson: flag files] A stale flag from a prior action must never act on
+  # this launch.
+  _crr repair-check --pid "$$" --clear >/dev/null
+
   # Element-wise flag detection: match whole arguments, never a substring
   # of prompt text (a prompt like "explain -r" is a fresh launch).
   local _arg _resuming=
@@ -53,6 +63,9 @@ claude() {
         _resuming=1; break ;;
     esac
   done
+  # The conversation the repair loop resumes: injected sid on a fresh
+  # launch, explicit sid on a resume, sid of each consumed relaunch flag.
+  local _cur_sid=
   if [ -n "$_resuming" ]; then
     # Extract an explicit resume sid if given (-r <sid>, --resume <sid|=sid>,
     # --session-id <sid|=sid>); a '-'-prefixed value is another flag, not the
@@ -72,6 +85,7 @@ claude() {
     done
     if [ -n "$_sid" ]; then
       _crr claude-resume --pid "$$" --cwd "$PWD" --session-id "$_sid" >/dev/null
+      _cur_sid="$_sid"
     else
       _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
     fi
@@ -80,10 +94,52 @@ claude() {
     local _crr_sid
     _crr_sid="$(_crr claude-launch --pid "$$")"
     if [ -n "$_crr_sid" ]; then
+      _cur_sid="$_crr_sid"
       command claude --session-id "$_crr_sid" "$@"
     else
       command claude "$@"
     fi
   fi
+  local _code=$?
+
+  local _crashes=0 _flagline _kind _fsid _ans
+  while [ -x "$_CRR_BIN" ]; do
+    # Read, then clear: two calls by design (re-arm window accepted).
+    _flagline="$(_crr repair-check --pid "$$")"
+    _crr repair-check --pid "$$" --clear >/dev/null
+    _kind= _fsid=
+    [ -n "$_flagline" ] && read -r _kind _fsid <<< "$_flagline"
+    # A bare "relaunch" (no sid) fails the -n test and safely falls
+    # through to the absent branches below.
+    if [ "$_kind" = relaunch ] && [ -n "$_fsid" ]; then
+      _cur_sid="$_fsid"
+      _crashes=0
+      command claude --resume "$_fsid"
+      _code=$?
+      continue
+    fi
+    if [ "$_kind" = close ]; then
+      _crr claude-exit --pid "$$"
+      exit
+    fi
+    # Unknown kind or no flag: branch on how claude exited.
+    [ "$_code" -eq 0 ] && break
+    [ "$_crashes" -ge "$_CRR_MAX_RESUMES" ] && break
+    _ans=
+    if [ -t 0 ]; then
+      printf 'crr: claude exited unexpectedly (%s). Resume this conversation? [Y/n] ' "$_code" >&2
+      IFS= read -r -t "$_CRR_OFFER_TIMEOUT" _ans || _ans=
+    fi
+    case "$_ans" in n|N|no|No|NO) break ;; esac
+    _crashes=$((_crashes + 1))
+    if [ -n "$_cur_sid" ]; then
+      command claude --resume "$_cur_sid"
+      _code=$?
+    else
+      _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
+      command claude --continue
+      _code=$?
+    fi
+  done
   _crr claude-exit --pid "$$"
 }

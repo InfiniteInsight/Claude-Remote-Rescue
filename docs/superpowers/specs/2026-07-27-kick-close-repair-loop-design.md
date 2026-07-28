@@ -217,6 +217,49 @@ honour all four):**
    silently discarded. Design the loop as read-then-clear and accept the small
    window (or add a clear-on-read mode later).
 
+## Slice-2b resolved design decisions (recorded autonomously per the handoff)
+
+Decisions the spec left open, resolved before implementation; each picks the
+sensible default aligned with DESIGN.md and the existing shim code:
+
+1. **Terminal states all run `claude-exit`.** Clean exit, explicit "no" at the
+   offer, the give-up cap, and the `close` branch all end with
+   `crr claude-exit --pid <pid>` — exactly the states where the session is
+   over and the card must not linger. Silent relaunch and offer-accepted
+   resume skip it (the journal entry, with its sid, must survive into the
+   next iteration).
+2. **The ≤2-attempt cap guards the *crash* branch only.** The cap exists to
+   stop an unattended auto-resume spin (timeout/no-tty → resume). A
+   `relaunch` flag cannot spin — each one requires a fresh, deliberate
+   `kick` — so flag-driven relaunches neither count toward nor are blocked
+   by the cap, and a successful relaunch resets the crash counter (a kick is
+   operator intervention, the thing the give-up guard waits for). The
+   `close` branch is terminal and exempt, as the spec already states.
+3. **Crash-resume target:** the wrapper tracks the current sid locally
+   (injected sid on fresh launch, explicit sid on resume, sid from each
+   consumed `relaunch` flag). Offer accepted with a known sid →
+   `command claude --resume <sid>`. Sid unknown (e.g. `--continue` or a
+   picker launch that stayed untracked) → journal via
+   `crr claude-resume --pid <pid> --cwd <cwd>` (guessed from the newest
+   transcript, matching the existing resume path) and run
+   `command claude --continue` — after a crash, the crashed conversation is
+   the newest in that cwd.
+4. **TTY handling is uniform:** each shell first tests `test -t 0`; no tty →
+   resume immediately, no prompt. With a tty: bash/zsh use `read -t 30`
+   (timeout → resume), fish uses a blocking `read` (no native timed read —
+   the no-tty guard covers the unattended case). Empty answer (Enter) →
+   resume; only an explicit n/N/no answer declines. The 30-second timeout is
+   a named variable at the top of each shim (`_CRR_OFFER_TIMEOUT`), not a
+   magic number inline; it is shim-local because the dependency-free shims
+   do not read crr config.
+5. **The relaunch loop passes no user args:** resume iterations run exactly
+   `command claude --resume <sid>` (or `--continue` per decision 3) — the
+   original argv already did its job on the first run; replaying prompts or
+   one-shot flags on a resume would be wrong.
+6. **Flag reads are `read` then `clear`, immediately adjacent** (two `crr`
+   calls, hard requirement 4): the wrapper clears the flag before acting on
+   the parsed value, accepting the small re-arm window the spec documents.
+
 ## Contracts / versioning impact
 
 - **No journal schema change** — the flag lives outside the journal.
