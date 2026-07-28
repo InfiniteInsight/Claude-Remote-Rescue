@@ -6,9 +6,12 @@ recycled-pid-kills-bystander bug waiting to happen). Driven by fakes, so
 no platform gating.
 """
 
+import pytest
+
 from crr.core import ops
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
+from crr.core.reviver import revive_crashed
 
 _NOW = "2026-07-24T00:00:00Z"
 _SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -196,45 +199,89 @@ def _seed_parked(store, pid, name):
     store.write(e)
 
 
-def test_detmux_opens_attach_tab_and_clears_bookkeeping(tmp_path):
-    store = JournalStore(tmp_path)
+def test_detmux_archives_and_delists_the_entry(tmp_path):
+    # The reviver owns tmux_session (its reset branch re-parks a cleared
+    # field within one watchdog pass and would later resurrect the
+    # conversation) — successful detmux must take the entry out of crr's
+    # management entirely: archive (reason "detmuxed"), then delist.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tab = FakeTabSpawner()
-    res = ops.detmux(store, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW, tab_spawner=tab)
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW, tab_spawner=tab)
     assert res.ok, res.message
     assert tab.opened == [(["tmux", "attach", "-t", "crr-8a1b2c3d"], None)]
-    assert store.read(42)["tmux_session"] is None
+    with pytest.raises(KeyError):
+        store.read(42)
+    records = archive.scan().records
+    assert len(records) == 1
+    assert records[0]["reason"] == "detmuxed"
+    assert records[0]["entry"]["pid"] == 42
+
+
+def test_detmux_delists_a_claude_less_parked_entry_without_archiving(tmp_path):
+    # pid-reuse shape: an entry can carry a tmux_session with no claude
+    # session attached. Mirrors dismiss's claude-less delist-without-archive.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=None)
+    e = store.read(42)
+    e["tmux_session"] = "crr-8a1b2c3d"
+    store.write(e)
+    tab = FakeTabSpawner()
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW, tab_spawner=tab)
+    assert res.ok, res.message
+    with pytest.raises(KeyError):
+        store.read(42)
+    assert archive.scan().records == []
+
+
+def test_detmux_leaves_the_reviver_nothing_to_repark(tmp_path):
+    # Locks the finding's regression: after a successful detmux, the
+    # reviver must find nothing to re-park or resurrect for this session.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tab = FakeTabSpawner()
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW, tab_spawner=tab)
+    assert res.ok, res.message
+
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+        max_strikes=3, now=_NOW,
+    )
+    assert outcome.revived == []
+    assert tmux.created == []
 
 
 def test_detmux_refuses_missing_entry(tmp_path):
-    res = ops.detmux(JournalStore(tmp_path), FakeTmux(), 999, _NOW,
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    res = ops.detmux(store, archive, FakeTmux(), 999, _NOW,
                      tab_spawner=FakeTabSpawner())
     assert not res.ok and "no session" in res.message
 
 
 def test_detmux_refuses_unparked_session(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=_claude())
-    res = ops.detmux(store, FakeTmux(), 42, _NOW, tab_spawner=FakeTabSpawner())
+    res = ops.detmux(store, archive, FakeTmux(), 42, _NOW, tab_spawner=FakeTabSpawner())
     assert not res.ok and "not tmux-parked" in res.message
 
 
 def test_detmux_refuses_when_tmux_session_is_gone(tmp_path):
     # Liveness comes from tmux, never the stored field (reviver lesson);
     # a stale field refuses and mutates nothing.
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
-    res = ops.detmux(store, FakeTmux(live=set()), 42, _NOW,
+    res = ops.detmux(store, archive, FakeTmux(live=set()), 42, _NOW,
                      tab_spawner=FakeTabSpawner())
     assert not res.ok and "gone" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
 
 
 def test_detmux_requires_a_tab_spawner(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     for tab in (None, FakeTabSpawner(available=False)):
-        res = ops.detmux(store, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW,
+        res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW,
                          tab_spawner=tab)
         assert not res.ok and "no terminal tab spawner" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
@@ -243,9 +290,9 @@ def test_detmux_requires_a_tab_spawner(tmp_path):
 def test_detmux_spawn_failure_keeps_bookkeeping(tmp_path):
     # The tab IS the operation: a spawn failure fails the op and the card
     # must keep offering the button.
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
-    res = ops.detmux(store, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW,
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), 42, _NOW,
                      tab_spawner=FakeTabSpawner(fail=True))
     assert not res.ok and "failed to open a tab" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"

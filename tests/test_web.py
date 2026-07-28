@@ -223,12 +223,13 @@ def test_post_detmux_is_accepted_and_dispatched():
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
-        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab"
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it"
     resp = _post({"op": "detmux", "pid": 42}, action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("detmux", 42)
     assert json.loads(resp.body) == {
-        "ok": True, "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab",
+        "ok": True,
+        "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it",
     }
 
 

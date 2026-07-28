@@ -87,6 +87,7 @@ ARCHIVE_REASONS = (
     "superseded-on-launch",
     "gave-up",
     "dismissed",
+    "detmuxed",
 )
 
 

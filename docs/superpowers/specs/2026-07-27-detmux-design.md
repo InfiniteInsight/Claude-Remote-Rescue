@@ -18,7 +18,7 @@ card stops presenting the session as tmux-parked.
 One new classifier-independent op, `ops.detmux`:
 
 ```
-def detmux(store, tmux, pid, now, *, tab_spawner) -> OpResult
+def detmux(store, archive, tmux, pid, now, *, tab_spawner) -> OpResult
 ```
 
 1. Read the journal entry (missing/corrupt → `no session <pid>`).
@@ -39,17 +39,34 @@ def detmux(store, tmux, pid, now, *, tab_spawner) -> OpResult
    `["tmux", "attach", "-t", name]` argv. A spawn failure → op fails,
    **bookkeeping untouched** (nothing happened; the card must keep offering
    the button).
-6. Success → `entry["tmux_session"] = None`, `updated = now`, write, and
-   `OpResult(True, "de-tmuxed <pid>: attached <name> in a tab")`.
+6. Success → archive the entry (reason `"detmuxed"`) when it carries a
+   claude session (mirroring `dismiss`), then **delist it**
+   (`store.remove(pid)`), and
+   `OpResult(True, "de-tmuxed <pid>: attached <name> in a tab; crr no longer manages it")`.
+
+**Why delist rather than just clear the field** (revised after the final
+whole-branch review): the `tmux_session` field is *owned by the reviver* —
+its reset branch re-writes `tmux_session = name` on the next pass whenever
+the tmux session is live, so a cleared field is re-parked within one
+watchdog interval (~30 s) and the De-tmux button reappears; worse, when the
+user later exits claude in the attached tab, the reviver would respawn the
+conversation as a fresh detached revival. A re-homed session must leave the
+reviver's domain entirely. Delisting (with an archive record for
+provenance) is the only honest "crr stops managing this" that needs no
+journal-schema bump: the card disappears, the reviver can neither re-park
+nor resurrect, the tmux session keeps hosting the process under the user's
+control, and the tmux session ends naturally when claude exits in the tab.
+The trade-off is explicit and intended: re-homing ends crr's rescue net
+for that conversation — the user took manual ownership.
 
 What "drop the tmux wrapper" honestly means here: crr stops tracking the
-session as tmux-parked; the tmux server keeps hosting the process until
-claude exits inside it (at which point the tmux session ends and the tab
-closes with it). Physically re-parenting a process out of tmux is not
-possible; killing + respawning claude in a plain tab was considered and
-rejected (it races two claudes on one conversation or drops the running
-one — and the handoff prescribes the attach shape). CLI-only (no button)
-was rejected because #10 *is* the dashboard button.
+session; the tmux server keeps hosting the process until claude exits
+inside it (at which point the tmux session ends and the tab closes with
+it). Physically re-parenting a process out of tmux is not possible;
+killing + respawning claude in a plain tab was considered and rejected (it
+races two claudes on one conversation or drops the running one — and the
+handoff prescribes the attach shape). CLI-only (no button) was rejected
+because #10 *is* the dashboard button.
 
 `detmux` mutates the journal, so both surfaces run it under the mutation
 lock, like every other mutating op.
@@ -83,11 +100,13 @@ lock, like every other mutating op.
 
 ## Testing
 
-- `test_ops.py`: detmux happy path (bookkeeping cleared, tab argv =
-  `tmux attach -t <name>`); refusals: no entry / no `tmux_session` / name
-  not live in tmux / spawner missing / spawner unavailable; spawn raises →
-  failure AND `tmux_session` preserved. Fakes already exist (FakeTmux,
-  FakeTab patterns in test_ops.py).
+- `test_ops.py`: detmux happy path (tab argv = `tmux attach -t <name>`,
+  entry archived with reason `detmuxed`, entry delisted — so the reviver
+  can never re-park or resurrect it); a claude-less parked entry (pid-reuse
+  shape) delists without an archive record; refusals: no entry / no
+  `tmux_session` / name not live in tmux / spawner missing / spawner
+  unavailable; spawn raises → failure AND the entry fully preserved. Fakes
+  already exist (FakeTmux, FakeTab patterns in test_ops.py).
 - `test_contracts.py`: v3 card round-trip, wrong-version rejection,
   `tmux_session` nullable-string typing.
 - `test_status.py`: card carries `tmux_session` from the entry.

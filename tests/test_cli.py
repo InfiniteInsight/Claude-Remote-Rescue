@@ -778,8 +778,11 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
 
     rc = cli.main(["detmux", "42"])
     assert rc == 0
-    assert store.read(42)["tmux_session"] is None
-    assert "de-tmuxed" in capsys.readouterr().out
+    with pytest.raises(KeyError):
+        store.read(42)
+    out = capsys.readouterr().out
+    assert "de-tmuxed" in out
+    assert "crr no longer manages it" in out
 
 
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):

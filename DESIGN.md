@@ -55,7 +55,7 @@ the audit could only verify it by reading.
                ▼
 ┌─ crr core (Python) ────────────────────┐
 │ journal store · classifier · reviver   │
-│ kick/close/reopen/dismiss/remove       │
+│ kick/close/reopen/dismiss/remove/detmux│
 │ diagnose · web server (stdlib http)    │
 └──┬────────┬─────────┬────────┬─────────┘
    ▼        ▼         ▼        ▼
@@ -162,8 +162,11 @@ not re-revived forever.
 `kick` (restart claude in place, same conversation), `close` (remote
 equivalent of typing exit), `reopen`/`restore` (single-session revival),
 `dismiss` (clean up without restoring; archives crashed entries),
-`remove` (pure delist, touches nothing). Semantics as proven in ccresume;
-failure statuses must propagate to the web layer (**[lesson]** a
+`remove` (pure delist, touches nothing), `detmux` (re-home a revived tmux
+session into a visible tab; archives + delists on success — the reviver
+owns `tmux_session`, so re-homing must leave its domain entirely).
+Semantics as proven in ccresume; failure statuses must propagate to the
+web layer (**[lesson]** a
 swallowed exit code turned hard failures into green checkmarks).
 
 ### Web dashboard

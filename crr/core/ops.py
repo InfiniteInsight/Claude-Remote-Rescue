@@ -172,6 +172,7 @@ def kick(
 
 def detmux(
     store: JournalStore,
+    archive: ArchiveStore,
     tmux: TmuxSpawner,
     pid: int,
     now: str,
@@ -180,12 +181,20 @@ def detmux(
 ) -> OpResult:
     """Re-home a revived (detached-tmux) session into a visible tab.
 
-    Opens a tab attached to the stored ``tmux_session`` name and clears
-    that bookkeeping on success. Liveness comes from tmux itself, never
-    the stored field (reviver lesson). Unlike reopen — where the tab is a
-    best-effort convenience on an already-durable revival — the tab IS
-    this operation: no spawner is a refusal, and a spawn failure leaves
-    the bookkeeping untouched so the card keeps offering the button.
+    Opens a tab attached to the stored ``tmux_session`` name, then takes
+    the entry out of crr's management entirely (archive + delist) rather
+    than merely clearing the field. ``tmux_session`` is owned by the
+    reviver: its reset branch would re-park a cleared field within one
+    watchdog pass, and would later resurrect the conversation once the
+    user exits claude in the attached tab. Delisting removes the entry
+    from the reviver's domain for good; archiving (mirroring ``dismiss``)
+    keeps provenance for any entry that still carries a claude session.
+
+    Liveness comes from tmux itself, never the stored field (reviver
+    lesson). Unlike reopen — where the tab is a best-effort convenience on
+    an already-durable revival — the tab IS this operation: no spawner is
+    a refusal, and a spawn failure leaves the bookkeeping untouched so the
+    card keeps offering the button.
     """
     try:
         entry = store.read(pid)
@@ -202,10 +211,10 @@ def detmux(
         tab_spawner.open_tab(attach_argv(name))
     except Exception as exc:  # adapter subprocess/osascript failure
         return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
-    entry["tmux_session"] = None
-    entry["updated"] = now
-    store.write(entry)
-    return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab")
+    if entry.get("claude") is not None:
+        archive.archive(entry, "detmuxed", now)
+    store.remove(pid)
+    return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab; crr no longer manages it")
 
 
 def _open_tab(tab_spawner: TabSpawner | None, name: str) -> str:
