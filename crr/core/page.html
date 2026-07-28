@@ -246,6 +246,9 @@ function renderCard(s, uncertain, groupColor) {
     addBtn("Kick", "kick", false);
     addBtn("Close", "close", true);
   }
+  if (s.tmux_session) {          // tmux-parked (revived): offer re-homing
+    addBtn("De-tmux", "detmux", false);
+  }
   addBtn("Remove", "remove", true);
   card.appendChild(actions);
   return card;

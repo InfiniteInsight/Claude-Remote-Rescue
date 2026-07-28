@@ -247,6 +247,11 @@ def test_options_preflight_is_rejected():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
+def test_page_version_is_8():
+    """Explicit version check: v8 introduces De-tmux button on tmux-parked cards."""
+    assert web.PAGE_VERSION == 8
+
+
 def test_page_scripts_pass_node_check(tmp_path):
     import shutil
     import subprocess
