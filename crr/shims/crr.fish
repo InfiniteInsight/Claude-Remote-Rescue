@@ -135,7 +135,10 @@ function claude
         end
         set -l _ans ""
         if test -t 0
-            printf 'crr: claude exited unexpectedly (%s). Resume this conversation? [Y/n] ' $_code >&2
+            # Newline-terminated: fish's read repaints its own `read>` prompt
+            # on the current line, which would erase a same-line question
+            # (found in the live smoke test; bash/zsh read doesn't repaint).
+            printf 'crr: claude exited unexpectedly (%s). Resume this conversation? [Y/n]\n' $_code >&2
             # fish has no timed read — block; the no-tty guard above covers
             # the unattended case.
             read _ans
