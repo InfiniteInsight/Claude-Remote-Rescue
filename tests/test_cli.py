@@ -725,6 +725,63 @@ def test_close_reports_no_session(tmp_path, monkeypatch, capsys):
     assert "no session" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="detmux requires tmux")
+def test_detmux_reports_no_session(tmp_path, monkeypatch, capsys):
+    # tmux is present (RealTmux.available() gate passes), so the store
+    # lookup is what fails — exercising the CLI wiring (parser ->
+    # mutation_lock -> ops.detmux) without touching real tmux state.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["detmux", "424242"])
+    assert rc == 1
+    assert "no session" in capsys.readouterr().err
+
+
+def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
+    # End-to-end through `crr detmux` with a fake tmux + fake (always-
+    # available) tab spawner standing in for the real adapters — pins the
+    # CLI wiring (parser -> mutation_lock -> ops.detmux with the journaled
+    # store) reaching a "live" tmux session and clearing its bookkeeping,
+    # without spawning any real tmux server (real-tmux semantics are
+    # already covered by Task 1's ops-level tests).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    name = "crr-detmuxtest"
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return {name}
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+        def open_tab(self, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+
+    rc = cli.main(["detmux", "42"])
+    assert rc == 0
+    assert store.read(42)["tmux_session"] is None
+    assert "de-tmuxed" in capsys.readouterr().out
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)

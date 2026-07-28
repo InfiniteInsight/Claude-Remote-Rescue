@@ -90,7 +90,7 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
-ACTIONS = ("reopen", "dismiss", "remove", "kick", "close")
+ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "detmux")
 
 
 def _plain(status: int, text: str) -> Response:

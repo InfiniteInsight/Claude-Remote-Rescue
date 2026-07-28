@@ -113,6 +113,10 @@ def _build_parser() -> argparse.ArgumentParser:
     close.add_argument("pid", type=int)
     close.set_defaults(func=_cmd_close)
 
+    dtm = sub.add_parser("detmux", help="re-home a revived tmux session into a visible tab")
+    dtm.add_argument("pid", type=int)
+    dtm.set_defaults(func=_cmd_detmux)
+
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
     diag.set_defaults(func=_cmd_diagnose)
@@ -683,6 +687,20 @@ def _cmd_close(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def _cmd_detmux(args: argparse.Namespace) -> int:
+    config = _load_config()
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr detmux: tmux was not found", file=sys.stderr)
+        return 2
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        res = ops.detmux(JournalStore(sd), tmux_spawner, args.pid, _now(),
+                         tab_spawner=_tab_spawner(config))
+    print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if res.ok else 1
+
+
 def make_web_handler(
     sessions_provider: Callable[[], dict],
     allowed_hosts: set[str],
@@ -842,6 +860,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "kick":
                 res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
+            elif op == "detmux":
+                res = ops.detmux(store, tmux_spawner, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message

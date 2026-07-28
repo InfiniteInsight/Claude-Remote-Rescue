@@ -196,6 +196,11 @@ def test_actions_include_kick_and_close():
     assert "close" in web.ACTIONS
 
 
+def test_actions_include_detmux():
+    from crr.core import web
+    assert "detmux" in web.ACTIONS
+
+
 def test_post_kick_is_accepted_and_dispatched():
     from crr.core import web
     seen = {}
@@ -212,6 +217,19 @@ def test_post_kick_is_accepted_and_dispatched():
     )
     assert resp.status == 200
     assert seen == {"op": "kick", "pid": 5}
+
+
+def test_post_detmux_is_accepted_and_dispatched():
+    seen = {}
+    def act(op, pid):
+        seen["call"] = (op, pid)
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab"
+    resp = _post({"op": "detmux", "pid": 42}, action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("detmux", 42)
+    assert json.loads(resp.body) == {
+        "ok": True, "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab",
+    }
 
 
 def test_post_to_non_action_path_is_404():
