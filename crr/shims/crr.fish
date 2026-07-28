@@ -41,9 +41,15 @@ end
 
 # claude() wrapper: inject + journal a --session-id on fresh launches
 # (sid_source=injected); on resume/continue, journal the resumed session
-# (guessed/verified sid) so it is revivable, args untouched; clear the
-# claude field on clean exit (a crash leaves it set for the reviver).
+# (guessed/verified sid) so it is revivable, args untouched. After each
+# exit the repair loop consumes the relaunch/close flag: kick → silent
+# --resume, close → deregister + exit this shell, bare crash → offer
+# ([Y/n]; yes/no-tty resume, ≤2 attempts), clean exit → back to prompt.
 function claude
+    # [lesson: flag files] A stale flag from a prior action must never act
+    # on this launch.
+    _crr repair-check --pid $fish_pid --clear >/dev/null
+
     # Element-wise flag detection: whole arguments only, never a substring
     # of prompt text (a prompt like "explain -r" is a fresh launch).
     set -l _resuming 0
@@ -54,6 +60,9 @@ function claude
                 break
         end
     end
+    # The conversation the repair loop resumes: injected sid on a fresh
+    # launch, explicit sid on a resume, sid of each consumed relaunch flag.
+    set -l _cur_sid ""
     if test $_resuming -eq 1
         # Extract an explicit resume sid if given (-r <sid>, --resume <sid|=sid>,
         # --session-id <sid|=sid>); a '-'-prefixed value is another flag, not the
@@ -81,6 +90,7 @@ function claude
         end
         if test -n "$_sid"
             _crr claude-resume --pid $fish_pid --cwd $PWD --session-id $_sid >/dev/null
+            set _cur_sid $_sid
         else
             _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
         end
@@ -88,10 +98,60 @@ function claude
     else
         set -l _crr_sid (_crr claude-launch --pid $fish_pid)
         if test -n "$_crr_sid"
+            set _cur_sid $_crr_sid
             command claude --session-id $_crr_sid $argv
         else
             command claude $argv
         end
+    end
+    set -l _code $status
+
+    set -l _crashes 0
+    while true
+        # Command substitution splits on newlines only — split the single
+        # flag line on spaces ourselves. Absent = no output = empty list.
+        # Read, then clear: two calls by design (re-arm window accepted).
+        set -l _flag (_crr repair-check --pid $fish_pid | string split ' ')
+        _crr repair-check --pid $fish_pid --clear >/dev/null
+        # Quoted out-of-range index expands empty, so a bare "relaunch"
+        # (no sid) safely falls through to the absent branches below.
+        if test "$_flag[1]" = relaunch; and test -n "$_flag[2]"
+            set _cur_sid $_flag[2]
+            set _crashes 0
+            command claude --resume $_flag[2]
+            set _code $status
+            continue
+        end
+        if test "$_flag[1]" = close
+            _crr claude-exit --pid $fish_pid
+            exit
+        end
+        # Unknown kind or no flag: branch on how claude exited.
+        if test $_code -eq 0
+            break
+        end
+        if test $_crashes -ge 2
+            break
+        end
+        set -l _ans ""
+        if test -t 0
+            printf 'crr: claude exited unexpectedly (%s). Resume this conversation? [Y/n] ' $_code >&2
+            # fish has no timed read — block; the no-tty guard above covers
+            # the unattended case.
+            read _ans
+        end
+        switch $_ans
+            case n N no No NO
+                break
+        end
+        set _crashes (math $_crashes + 1)
+        if test -n "$_cur_sid"
+            command claude --resume $_cur_sid
+        else
+            _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
+            command claude --continue
+        end
+        set _code $status
     end
     _crr claude-exit --pid $fish_pid
 end

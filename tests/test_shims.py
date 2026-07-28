@@ -19,6 +19,7 @@ adapter is Linux-only in Phase 1) and to shells that are installed.
 import json
 import os
 import platform
+import pty
 import shutil
 import subprocess
 import sys
@@ -273,3 +274,324 @@ def test_bash_shim_records_last_cmd(tmp_path, capsys):
     assert result.returncode == 0, result.stderr
     entry = json.loads(result.stdout)
     assert entry["last_cmd"] != ""
+
+
+# ---------------------------------------------------------------------------
+# Repair loop (Slice 2b) — the claude() wrapper's post-exit flag branching.
+# Each test runs a real shell; the offer-path tests drive a pty. Gated per
+# installed shell like everything above. _REPAIR_SHELLS grows as each shell's
+# loop is implemented (fish → bash → zsh); _TIMED_SHELLS lists the shells
+# with a timed read (bash/zsh — fish blocks and relies on the no-tty rule).
+# ---------------------------------------------------------------------------
+
+_REPAIR_SHELLS = ["fish"]
+_TIMED_SHELLS: list = []
+
+
+def _fake_claude_repair_bindir(tmp_path) -> Path:
+    """A fake `claude` for repair-loop tests.
+
+    Appends each call's argv (space-joined, one line) to CRR_TEST_RECORD,
+    exits with the n-th code of CRR_TEST_EXITS (last repeats), and on the
+    FIRST call only, arms CRR_TEST_FLAG (raw flag-file content) for its
+    parent — the wrapper's shell — mid-run, i.e. after the wrapper's
+    stale-flag clear, exactly when a real kick/close would land.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "claude"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$CRR_TEST_RECORD"\n'
+        "n=0\n"
+        '[ -f "$CRR_TEST_COUNT" ] && n=$(cat "$CRR_TEST_COUNT")\n'
+        'n=$((n+1)); echo "$n" > "$CRR_TEST_COUNT"\n'
+        'if [ "$n" -eq 1 ] && [ -n "$CRR_TEST_FLAG" ]; then\n'
+        '  mkdir -p "$XDG_STATE_HOME/crr/relaunch"\n'
+        '  printf %s "$CRR_TEST_FLAG" > "$XDG_STATE_HOME/crr/relaunch/$PPID"\n'
+        "fi\n"
+        "codes=($CRR_TEST_EXITS)\n"
+        "idx=$((n-1))\n"
+        '[ "$idx" -ge "${#codes[@]}" ] && idx=$((${#codes[@]} - 1))\n'
+        'exit "${codes[$idx]}"\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return bindir
+
+
+def _repair_env(state_dir, bindir, tmp_path, exits, flag=None, extra=None):
+    env = {
+        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "HOME": str(state_dir),
+        "XDG_STATE_HOME": str(state_dir),
+        "CRR_TEST_RECORD": str(tmp_path / "record"),
+        "CRR_TEST_COUNT": str(tmp_path / "count"),
+        "CRR_TEST_EXITS": exits,
+    }
+    if flag is not None:
+        env["CRR_TEST_FLAG"] = flag
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _repair_script(shell, shim, cmdline="go", pre="", marker=True):
+    """Shell script: source the shim, record the shell pid, run claude.
+    AFTER-MARKER proves the shell survived (close must NOT print it)."""
+    pid = _SHELLS[shell]["pid"]
+    lines = [f'source "{shim}"', f'echo {pid} > "$XDG_STATE_HOME/shellpid"']
+    if pre:
+        lines.append(pre)
+    lines.append(f"claude {cmdline}")
+    if marker:
+        lines.append("echo AFTER-MARKER")
+    return "\n".join(lines) + "\n"
+
+
+def _run_pty(argv, env, input_bytes, timeout=30):
+    """Run argv with stdin on a pty slave (so `test -t 0` is true), with
+    input_bytes pre-buffered in the pty. stdout/stderr stay pipes."""
+    master, slave = pty.openpty()
+    try:
+        if input_bytes:
+            os.write(master, input_bytes)
+        proc = subprocess.Popen(
+            argv, env=env, stdin=slave,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        os.close(slave)
+        slave = -1
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    finally:
+        if slave != -1:
+            os.close(slave)
+        os.close(master)
+
+
+def _record_lines(tmp_path):
+    rec = tmp_path / "record"
+    return rec.read_text(encoding="utf-8").splitlines() if rec.exists() else []
+
+
+_OFFER = "Resume this conversation?"
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_stale_flag_cleared_at_wrapper_start(shell, tmp_path, capsys):
+    # A flag armed BEFORE the wrapper starts must never act on this launch.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    pid = _SHELLS[shell]["pid"]
+    pre = (
+        'mkdir -p "$XDG_STATE_HOME/crr/relaunch"\n'
+        f'printf "relaunch stale-sid" > "$XDG_STATE_HOME/crr/relaunch/{pid}"'
+    )
+    script = _repair_script(shell, shim, pre=pre)
+    env = _repair_env(state, bindir, tmp_path, exits="0")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert len(_record_lines(tmp_path)) == 1  # never resumed the stale sid
+    assert "AFTER-MARKER" in result.stdout
+    recorded = (state / "shellpid").read_text().strip()
+    assert not (state / "crr" / "relaunch" / recorded).exists()
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_relaunch_flag_resumes_silently(shell, tmp_path, capsys):
+    # kick: claude dies 143 with a relaunch flag → silent `--resume <sid>`.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="143 0",
+                      flag="relaunch test-sid-123")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 2
+    assert lines[1] == "--resume test-sid-123"
+    assert _OFFER not in result.stderr  # silent — no offer on a kick
+    assert "AFTER-MARKER" in result.stdout  # shell survives a kick
+    recorded = (state / "shellpid").read_text().strip()
+    assert not (state / "crr" / "relaunch" / recorded).exists()  # consumed
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_close_flag_exits_the_shell(shell, tmp_path, capsys):
+    # close: claude dies 143 with a close flag → claude-exit, then the
+    # wrapper exits the whole shell (AFTER-MARKER unreachable) and the exit
+    # hook deregisters the journal entry.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="143", flag="close")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert len(_record_lines(tmp_path)) == 1  # close never relaunches
+    assert "AFTER-MARKER" not in result.stdout
+    recorded = (state / "shellpid").read_text().strip()
+    assert not (state / "crr" / "tabs" / f"{recorded}.json").exists()
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_unknown_flag_kind_treated_as_absent(shell, tmp_path, capsys):
+    # Hard requirement 1: a stale/foreign kind (e.g. Slice-1 bare sid) must
+    # fall through to normal exit handling, never act.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="0", flag="defer xyz")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert len(_record_lines(tmp_path)) == 1
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_relaunch_without_sid_treated_as_absent(shell, tmp_path, capsys):
+    # Hard requirement 2: never `claude --resume` with an empty argument.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="0", flag="relaunch")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert len(_record_lines(tmp_path)) == 1
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_crash_without_tty_resumes_with_known_sid(shell, tmp_path, capsys):
+    # Bare crash, stdin not a tty → resume immediately, no prompt, using the
+    # sid injected at launch.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="7 0")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 2
+    first = lines[0].split()
+    sid = first[first.index("--session-id") + 1]
+    assert lines[1] == f"--resume {sid}"
+    assert _OFFER not in result.stderr  # no tty → no prompt
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_crash_resume_capped_at_two_attempts(shell, tmp_path, capsys):
+    # A session that keeps dying gives up in place: initial run + 2 resumes.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="7")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert len(_record_lines(tmp_path)) == 3
+    assert "AFTER-MARKER" in result.stdout  # gave up, shell back at prompt
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_crash_offer_explicit_no_declines(shell, tmp_path, capsys):
+    # With a tty, an explicit `n` at the offer stops the loop.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="7")
+    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"n\n")
+    assert len(_record_lines(tmp_path)) == 1  # declined — no resume
+    assert _OFFER in result.stderr
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_crash_offer_yes_resumes(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="7 0")
+    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"y\n")
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 2
+    assert lines[1].startswith("--resume ")
+    assert _OFFER in result.stderr
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_repair_crash_with_unknown_sid_falls_back_to_continue(shell, tmp_path, capsys):
+    # `claude --continue` with no transcript stays untracked (no _cur_sid);
+    # a crash then resumes via `--continue` (decision 3), not `--resume `.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim, cmdline="--continue")
+    env = _repair_env(state, bindir, tmp_path, exits="7 0")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 2
+    assert lines[1] == "--continue"
+    assert "AFTER-MARKER" in result.stdout
+
+
+@pytest.mark.parametrize("shell", _TIMED_SHELLS)
+def test_repair_crash_offer_timeout_resumes(shell, tmp_path, capsys):
+    # bash/zsh timed read: no answer within $_CRR_OFFER_TIMEOUT → resume.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim)
+    env = _repair_env(state, bindir, tmp_path, exits="7 0",
+                      extra={"_CRR_OFFER_TIMEOUT": "1"})
+    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"")
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 2
+    assert lines[1].startswith("--resume ")
+    assert _OFFER in result.stderr
+    assert "AFTER-MARKER" in result.stdout
