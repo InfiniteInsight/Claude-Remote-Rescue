@@ -229,3 +229,23 @@ def test_gave_up_archive_record_is_not_re_revived(tmp_path):
     outcome = _run(store, tmux, archive=archive)
     assert outcome.revived == []
     assert tmux.created == []
+
+
+def test_detmuxed_archive_record_is_not_re_revived(tmp_path):
+    # A detmuxed record is also terminal: the user took manual ownership by
+    # attaching a tab. Once that tab closes (claude exits, the tmux session
+    # ends), the name drops out of `live` — without this skip, the archive
+    # loop's fallthrough to 'revive' would spawn a fresh detached session
+    # and `claude --resume` the very conversation the user just closed,
+    # exactly the resurrection ops.detmux's delist is meant to prevent.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(), tmux_session="crr-8a1b2c3d",
+    )
+    archive.archive(entry, "detmuxed", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())  # the attached tab's tmux session is gone
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []

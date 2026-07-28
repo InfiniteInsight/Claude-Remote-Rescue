@@ -196,6 +196,11 @@ def test_actions_include_kick_and_close():
     assert "close" in web.ACTIONS
 
 
+def test_actions_include_detmux():
+    from crr.core import web
+    assert "detmux" in web.ACTIONS
+
+
 def test_post_kick_is_accepted_and_dispatched():
     from crr.core import web
     seen = {}
@@ -214,6 +219,20 @@ def test_post_kick_is_accepted_and_dispatched():
     assert seen == {"op": "kick", "pid": 5}
 
 
+def test_post_detmux_is_accepted_and_dispatched():
+    seen = {}
+    def act(op, pid):
+        seen["call"] = (op, pid)
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it"
+    resp = _post({"op": "detmux", "pid": 42}, action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("detmux", 42)
+    assert json.loads(resp.body) == {
+        "ok": True,
+        "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it",
+    }
+
+
 def test_post_to_non_action_path_is_404():
     resp = _handle(method="POST", path="/api/other", body=b"{}", headers=_JSON)
     assert resp.status == 404
@@ -228,6 +247,11 @@ def test_options_preflight_is_rejected():
 # --------------------------------------------------------------------------
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
+
+def test_page_version_is_8():
+    """Explicit version check: v8 introduces De-tmux button on tmux-parked cards."""
+    assert web.PAGE_VERSION == 8
+
 
 def test_page_scripts_pass_node_check(tmp_path):
     import shutil

@@ -6,8 +6,8 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close), diagnose, gc, the web dashboard, the
-systemd watchdog, and the shim-facing hooks.
+(reopen/dismiss/remove/kick/close/detmux), diagnose, gc, the web dashboard,
+the systemd watchdog, and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -112,6 +112,10 @@ def _build_parser() -> argparse.ArgumentParser:
     close = sub.add_parser("close", help="end a live session (remote exit); no revival")
     close.add_argument("pid", type=int)
     close.set_defaults(func=_cmd_close)
+
+    dtm = sub.add_parser("detmux", help="re-home a revived tmux session into a visible tab")
+    dtm.add_argument("pid", type=int)
+    dtm.set_defaults(func=_cmd_detmux)
 
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
@@ -339,7 +343,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         scan.entries, boot, probe, tail_facts=_tail_facts_extractor(config)
     )
     # Validate our own output before emitting it (the P7 validator doubles
-    # as a debug guard — the server will run the same check).
+    # as a debug guard — both surfaces validate their own output; the web
+    # provider below runs the same check independently on its payload).
     contracts.validate_sessions_payload(payload)
 
     # Corrupt files are surfaced on stderr, never silently dropped.
@@ -683,6 +688,20 @@ def _cmd_close(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def _cmd_detmux(args: argparse.Namespace) -> int:
+    config = _load_config()
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr detmux: tmux was not found", file=sys.stderr)
+        return 2
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, args.pid, _now(),
+                         tab_spawner=_tab_spawner(config))
+    print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if res.ok else 1
+
+
 def make_web_handler(
     sessions_provider: Callable[[], dict],
     allowed_hosts: set[str],
@@ -823,7 +842,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
     extract = _tail_facts_extractor(config)
 
     def provider() -> dict:
-        return status.assemble_sessions(store.scan().entries, boot, probe, tail_facts=extract)
+        payload = status.assemble_sessions(store.scan().entries, boot, probe, tail_facts=extract)
+        contracts.validate_sessions_payload(payload)
+        return payload
 
     def action_provider(op: str, pid: int) -> tuple[bool, str]:
         # Same classifier-gated ops the CLI uses — one implementation — and
@@ -842,6 +863,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "kick":
                 res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
+            elif op == "detmux":
+                res = ops.detmux(store, archive, tmux_spawner, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message

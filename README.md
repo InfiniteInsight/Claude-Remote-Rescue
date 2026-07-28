@@ -99,6 +99,9 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr reopen --pid N` | Revive one specific crashed session now |
 | `crr dismiss --pid N` | Clean up a crashed session without reviving (archives it) |
 | `crr remove --pid N` | Delist a session, touch nothing else |
+| `crr kick <pid>` | Restart claude in place on the same conversation |
+| `crr close <pid>` | End a live session (remote exit); no revival |
+| `crr detmux <pid>` | Re-home a revived tmux session into a visible tab |
 | `crr diagnose [--json]` | Explain why the previous boot / sessions may have died |
 | `crr gc` | Drop archive records past the retention window |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |

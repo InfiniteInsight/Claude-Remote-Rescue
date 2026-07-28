@@ -122,9 +122,13 @@ def revive_crashed(
             store.write(updated)
             revived.append(pid)
 
-    # 2. Archived records awaiting revival (skip the terminal 'gave-up' ones).
+    # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'
+    #    is abandoned for good, and 'detmuxed' has been re-homed to a visible
+    #    tab under the user's manual ownership — reviving it here would
+    #    resurrect the conversation the moment the user exits claude in that
+    #    tab, exactly what detmux's delist is meant to prevent).
     for record in archive.scan().records:
-        if record["reason"] == "gave-up":
+        if record["reason"] in ("gave-up", "detmuxed"):
             continue
         entry = record["entry"]
         action, updated, name = _decide(entry, live, max_strikes, now)
