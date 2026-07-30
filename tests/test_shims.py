@@ -227,8 +227,12 @@ def test_wrapper_passes_resume_through_untouched(shell, tmp_path, capsys):
     assert "--resume" in argv and "abc123" in argv
 
 
+_RESUME_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
 @pytest.mark.parametrize("shell", list(_SHELLS))
-@pytest.mark.parametrize("cmdline", ["--resume abc123", "-r abc123", "--resume=abc123"])
+@pytest.mark.parametrize("cmdline", [f"--resume {_RESUME_SID}", f"-r {_RESUME_SID}",
+                                     f"--resume={_RESUME_SID}"])
 def test_wrapper_journals_an_explicit_resume_sid(shell, cmdline, tmp_path, capsys):
     # A resumed session must be journaled so it is revivable. With no
     # transcript under the test HOME, an explicit sid is confidence 'guessed'
@@ -237,7 +241,7 @@ def test_wrapper_journals_an_explicit_resume_sid(shell, cmdline, tmp_path, capsy
         pytest.skip(f"{shell} not installed")
     claude = _resume_journal(shell, tmp_path, capsys, cmdline)
     assert claude is not None, f"{shell}: resume left the session untracked"
-    assert claude["session_id"] == "abc123"
+    assert claude["session_id"] == _RESUME_SID
     assert claude["sid_source"] == "guessed"
 
 

@@ -65,7 +65,13 @@ def test_archive_rejects_claude_less_entry(tmp_path):
 def test_read_missing_sid_raises_keyerror(tmp_path):
     store = ArchiveStore(tmp_path)
     with pytest.raises(KeyError):
-        store.read("no-such-sid")
+        store.read("00000000-0000-4000-8000-000000000000")
+
+
+def test_path_for_rejects_separators(tmp_path):
+    store = ArchiveStore(tmp_path)
+    with pytest.raises(contracts.ContractError):
+        store.path_for("../tabs/99")
 
 
 def test_remove_is_idempotent(tmp_path):

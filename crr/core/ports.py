@@ -12,7 +12,7 @@ way: adapters import core to implement these, never the reverse.
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, Sequence, runtime_checkable
 
 
 @runtime_checkable
@@ -117,3 +117,21 @@ class TabSpawner(Protocol):
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
         """Open a visible tab running ``argv`` (optionally ``cd`` to cwd)."""
         ...
+
+
+class DiagnosticsSource(Protocol):
+    """Platform "why did it die" source (journald / log+pmset / winevent).
+
+    Implemented by adapter *modules* (crr.adapters.diagnostics*), not
+    classes. ``collect(config)`` returns
+    ``(boots, prev_boot_errors, host_events, degraded)`` and degrades
+    per-source rather than raising. ``config`` is typed ``Any`` here to
+    avoid widening this module's imports; the real type passed at every
+    call site is ``crr.core.config.Config``.
+    """
+
+    SOURCE_NAME: str
+
+    def available(self) -> bool: ...
+
+    def collect(self, config: Any) -> tuple[list, list, list, list]: ...

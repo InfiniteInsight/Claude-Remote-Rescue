@@ -134,10 +134,12 @@ reboot-recycled pid gets an unrelated process killed.
   origin travels with it. `sid_source` is `injected` (wrapper generated
   it — certain), `guessed` (derived from newest-transcript heuristics for
   picker/`--continue` resumes — uncertain), or `verified` (a guess later
-  confirmed against the live transcript). The wrapper re-verifies guessed
-  sids after launch and upgrades them; `status --json` carries
-  `sid_source` so the dashboard's duplicate detection can weight
-  `guessed` claims accordingly instead of presenting them as truth.
+  confirmed against the live transcript). Guessed sids are re-verified
+  against their transcript on every status assembly and every revive
+  sweep, and upgraded to `verified` once the transcript confirms them;
+  `status --json` carries `sid_source` so the dashboard's duplicate
+  detection can weight `guessed` claims accordingly instead of presenting
+  them as truth.
   ccresume shipped without this and two tabs journaled the same sid in
   production (2026-07-21) — the laundering is observed, not theoretical.
 
@@ -160,11 +162,17 @@ not re-revived forever.
 ### Session operations (all classifier-gated, pid-keyed)
 
 `kick` (restart claude in place, same conversation), `close` (remote
-equivalent of typing exit), `reopen`/`restore` (single-session revival),
-`dismiss` (clean up without restoring; archives crashed entries),
-`remove` (pure delist, touches nothing), `detmux` (re-home a revived tmux
-session into a visible tab; archives + delists on success — the reviver
-owns `tmux_session`, so re-homing must leave its domain entirely).
+equivalent of typing exit), `reopen`/`restore` (single-session revival —
+CRASHED spawns/notes-already-running as before; GHOST is the mobile
+rescue path: close-flag the orphaned wrapper + kill claude's group(s) +
+archive the entry with reason `ghost-restored` + delist + spawn into
+detached tmux, kill-and-preserve strictly before spawn so a spawn failure
+can never lose the conversation; LIVE refuses — kick/close are the ops for
+a running claude), `dismiss` (clean up without restoring; archives crashed
+entries), `remove` (pure delist, touches nothing), `detmux` (re-home a
+revived tmux session into a visible tab; archives + delists on success —
+the reviver owns `tmux_session`, so re-homing must leave its domain
+entirely).
 Semantics as proven in ccresume; failure statuses must propagate to the
 web layer (**[lesson]** a
 swallowed exit code turned hard failures into green checkmarks).
@@ -173,7 +181,7 @@ swallowed exit code turned hard failures into green checkmarks).
 
 Port of ccresume's single-file stdlib server and page, including:
 
-- Session cards: state badges (ghost/crashed/idle/duplicate), identity
+- Session cards: state badges (ghost/crashed/duplicate), identity
   tag `#pid · sid8`, duplicate group tinting, last-message line,
   contextual action buttons, indicator key, lazy diagnostics panel.
 - **[lesson: page self-heal]** `PAGE_VERSION` + `/api/version` polling +
@@ -249,10 +257,14 @@ resume flags. Same shape as ccresume's, extended per-platform.
 **Requirement (audit P5 — Injectable priors):** every constant that encodes
 a judgment call is named config with a versioned default — never a magic
 number in logic. The audit's caught set becomes the floor: zombie strike
-count, close/reopen grace windows, diagnose lookback window / event cap /
+count, close grace window, diagnose lookback window / event cap /
 line cap / interop timeout, dashboard poll and version-check intervals,
-last-prompt display cap, watcher backoff count and cooldown. New timing or
-threshold decisions join this list at introduction time, not at audit time.
+last-prompt display cap. New timing or threshold decisions join this list
+at introduction time, not at audit time. ccresume's watcher backoff/cooldown
+and reopen tab-registration grace have no crr counterpart — the reviver's
+strike-based give-up guard and the tmux-first reopen replaced those
+mechanisms — so those knobs deliberately do not exist here (a knob wired to
+nothing is worse than a magic number).
 
 **Requirement (audit P3 — Confidence + provenance, applied to config):**
 `crr config --effective` prints every key with its value AND its origin

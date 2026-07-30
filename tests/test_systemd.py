@@ -88,6 +88,14 @@ def test_enable_commands_enable_timer_web_and_linger():
     assert any(c[0] == "loginctl" and "enable-linger" in c for c in cmds)
 
 
+def test_disable_commands_mirror_enable():
+    assert systemd.disable_commands() == [
+        ["systemctl", "--user", "disable", "--now", systemd.TIMER_NAME],
+        ["systemctl", "--user", "disable", "--now", systemd.WEB_SERVICE_NAME],
+        ["systemctl", "--user", "daemon-reload"],
+    ]
+
+
 @pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd-analyze not available")
 def test_generated_units_pass_systemd_analyze_verify(tmp_path):
     # The systemd analogue of the node --check page gate: verify the real

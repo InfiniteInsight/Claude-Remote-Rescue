@@ -49,6 +49,31 @@ No tag or release has been cut yet. This section describes everything on
 - `crr doctor` — an install-health checklist.
 - `crr status [--json]` and last-prompt extraction so dashboard cards show
   the most recent human prompt per session.
+- Dashboard poll/version-check cadence (`dashboard_poll_seconds`,
+  `version_check_seconds`) is now sourced from `crr.core.config` instead of
+  being hardcoded in `page.html` (`PAGE_VERSION` 9 → 10).
+- `crr reopen` gained a `restore` alias (`crr restore --pid N`), matching
+  DESIGN's "reopen/restore" naming for the op.
+- `crr reopen`/`restore` now rescues GHOST sessions too, not just CRASHED
+  ones — the mobile Restore path a phone-only dashboard user otherwise
+  lacked (Close on a ghost destroyed revival data). It close-flags the
+  orphaned wrapper, kills claude's process group(s), archives the entry
+  with a new reason (`ghost-restored`) before ever attempting a spawn, and
+  revives it into detached tmux; a dashboard ghost card now shows a
+  "Restore" button alongside Kick/Close (`PAGE_VERSION` 10 → 11).
+- `crr systemd`, `crr launchd`, and `crr schtasks` gained `--uninstall`
+  (mutually exclusive with `--install`) to reverse the watchdog/dashboard
+  service installation.
+- `crr.core.ports.DiagnosticsSource` — the de-facto `SOURCE_NAME`/
+  `available`/`collect` contract already shared by the three diagnostics
+  adapters (journald/macOS/Windows) is now a declared core port.
+- `crr status` and the web dashboard's session provider re-verify guessed
+  session ids at status-assembly time, not only on the watchdog's revive
+  sweep, taking the mutation lock only when an upgrade is actually
+  available to write (poll path stays lock-free otherwise).
+- `CONFIG_DEFAULTS_VERSION` bumped to 2: dropped the consumer-less
+  `watcher_backoff_count`, `watcher_cooldown_seconds`, and
+  `reopen_grace_seconds` keys (no crr mechanism reads them).
 
 ### Changed
 
@@ -56,6 +81,26 @@ No tag or release has been cut yet. This section describes everything on
   shim's resume offer.** Without the crr shim, a nonzero `claude` exit returns silently to the shell prompt; with it, the `claude()` wrapper prompts to resume. Only an explicit `n`/`no`
   declines; anything else — including no answer at all — a non-tty stdin skips the prompt entirely in all three shells, and bash/zsh additionally time out an unanswered prompt after 30 seconds via `read -t` (fish has no timed read) —
   resumes automatically, capped at 2 consecutive crash-resumes.
+
+### Fixed
+
+- The watchdog's revive sweep no longer resurrects a `dismiss`ed session:
+  the terminal-reasons skip set now includes `dismissed` alongside
+  `gave-up`/`detmuxed` (the two `superseded-*` reasons stay revivable).
+- `crr systemd|launchd|schtasks --install` now propagates installer
+  command failures instead of unconditionally printing success and
+  exiting 0; `schtasks --install` also refuses to run when
+  `schtasks.exe` isn't on PATH rather than silently no-op'ing.
+- `crr kick`/`crr close` now target only the shell's claude-prefixed
+  child process groups (ancestry + argv0-basename match), so an
+  unrelated background job (e.g. `make &`) is no longer swept into a
+  remote Kick/Close signal; the relaunch/close flag is now cleared only
+  when zero group kills land, so a partial kill no longer masks a
+  still-live claude behind a false "handled" flag.
+- `crr detmux` (and its dashboard button) are now classifier-gated to
+  CRASHED sessions like every other destructive op — a live/ghost card
+  can carry a stale `tmux_session` field, and previously the op had no
+  gate at all. (PAGE_VERSION 9)
 
 ### Security
 
@@ -69,4 +114,11 @@ No tag or release has been cut yet. This section describes everything on
 - Zero runtime dependencies: the web server is stdlib-only and the shell
   shims are dependency-free, by design (`pyproject.toml`
   `dependencies = []`) — a supply-chain guarantee, not an incidental state.
+- Session ids are pinned to the UUID shape claude always issues them in
+  (`contracts.valid_session_id`), enforced at the journal/session-card
+  contract, `ArchiveStore.path_for`, `derive_resume_sid`, and
+  `claude-launch`'s explicit `--session-id`. Closes a path-traversal
+  (`ArchiveStore.path_for` building `f"{session_id}.json"` from an
+  unvalidated sid) and a transcript-glob-injection hole reachable via a
+  user-typed `claude -r '<sid>'`.
 

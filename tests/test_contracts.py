@@ -141,6 +141,33 @@ def test_journal_claude_missing_key_rejected():
         contracts.validate_journal_entry(e)
 
 
+def test_journal_rejects_path_traversal_sid():
+    """[bug 2026-07-29] sid '../tabs/99' escaped the archive dir on write."""
+    entry = _journal_entry()
+    entry["claude"] = {"session_id": "../tabs/99", "sid_source": "guessed",
+                       "started": "2026-07-30T00:00:00+00:00"}
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(entry)
+
+
+def test_journal_rejects_glob_sid():
+    entry = _journal_entry()
+    entry["claude"] = {"session_id": "*", "sid_source": "guessed",
+                       "started": "2026-07-30T00:00:00+00:00"}
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(entry)
+
+
+def test_valid_session_id_accepts_uuid_rejects_junk():
+    assert contracts.valid_session_id("2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55")
+    for bad in ("", "abc", "../x", "2f5c9a10", None, 42,
+                "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55/../x",
+                # `match` alone would let a trailing newline sneak through
+                # `$`; the shape pin must reject it (fullmatch, not match).
+                "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55\n"):
+        assert not contracts.valid_session_id(bad)
+
+
 def test_journal_claude_may_be_null():
     # A shell registers at start, before any claude launches: claude=null
     # is the honest "no rescuable session yet" state.
@@ -333,6 +360,23 @@ def test_archive_detmuxed_reason_accepted():
     r = _archive_record()
     r["reason"] = "detmuxed"
     contracts.validate_archive_record(r)  # must not raise
+
+
+def test_ghost_restored_is_a_valid_archive_reason():
+    # [user request 2026-07-30] ops.reopen's GHOST branch archives with this
+    # new reason before ever spawning, so a ghost's revival data survives
+    # every later failure.
+    r = _archive_record()
+    r["reason"] = "ghost-restored"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_archive_contract_version_still_1_and_v1_records_validate():
+    # Extending ARCHIVE_REASONS changes no key/type in the stored shape, so
+    # it does not bump ARCHIVE_CONTRACT_VERSION — every v1 record already on
+    # disk (any reason) stays valid without a migration.
+    assert contracts.ARCHIVE_CONTRACT_VERSION == 1
+    contracts.validate_archive_record(_archive_record())  # stored v1 stays valid
 
 
 def test_archive_missing_key_rejected():

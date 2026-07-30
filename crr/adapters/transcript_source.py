@@ -39,7 +39,9 @@ def list_transcripts(cwd: str, home: Path | None = None) -> list[dict]:
 
     Empty when the project dir is absent (unknown cwd, or Claude's encoding
     differs), so the resume path degrades to an untracked passthrough rather
-    than raising. Used to guess/verify a resume sid, never on the poll path.
+    than raising. Used to guess/verify a resume sid; also consulted from
+    status assembly's lock-free pre-scan (``_guessed_upgradable``), but only
+    while a `guessed` entry remains unconfirmed — cheap in the common case.
     """
     home = home or Path.home()
     project = (home / ".claude" / "projects" / _project_dir_name(cwd))

@@ -249,3 +249,42 @@ def test_detmuxed_archive_record_is_not_re_revived(tmp_path):
     outcome = _run(store, tmux, archive=archive)
     assert outcome.revived == []
     assert tmux.created == []
+
+
+def test_ghost_restored_archive_records_are_revival_candidates(tmp_path):
+    # [user request 2026-07-30] ops.reopen's GHOST branch preserves a ghost
+    # card's conversation to the archive as "ghost-restored" *before*
+    # attempting the spawn — a spawn failure there must not strand the
+    # conversation: the watchdog's next revive pass has to pick it up. The
+    # skip tuple stays (gave-up, detmuxed, dismissed); ghost-restored is not
+    # in it.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(), tmux_session="crr-8a1b2c3d",
+    )
+    archive.archive(entry, "ghost-restored", _NOW)
+    tmux = FakeTmux(live=set())  # the tmux spawn never landed
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == [99]
+    assert tmux.created and tmux.created[0][0] == "crr-8a1b2c3d"
+    assert archive.read(_claude()["session_id"])["reason"] == "ghost-restored"
+
+
+def test_dismissed_archive_record_is_not_re_revived(tmp_path):
+    # [bug 2026-07-29] ops.dismiss archives with reason "dismissed" — the
+    # user's explicit "clean up without restoring". Without this skip, the
+    # archive loop's fallthrough to 'revive' would resurrect the very
+    # conversation the user just dismissed, un-doing their choice.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "dismissed", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []

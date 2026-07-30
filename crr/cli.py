@@ -35,7 +35,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, ops, resume, reviver, status, web
+from crr.core import contracts, ops, ports, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -101,7 +101,10 @@ def _build_parser() -> argparse.ArgumentParser:
     dis.add_argument("--pid", type=int, required=True)
     dis.set_defaults(func=_cmd_dismiss)
 
-    reo = sub.add_parser("reopen", help="revive one specific crashed session now")
+    reo = sub.add_parser(
+        "reopen", aliases=["restore"],
+        help="revive one crashed or ghost session now (alias: restore)",
+    )
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
 
@@ -134,6 +137,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sysd.add_argument("--install", action="store_true",
                       help="write units to ~/.config/systemd/user and enable the timer + web + linger")
+    sysd.add_argument("--uninstall", action="store_true",
+                      help="disable/remove the watchdog + dashboard integration")
     sysd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the units (default: this crr binary)")
     sysd.add_argument("--port", type=int, default=8377,
@@ -146,6 +151,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     lncd.add_argument("--install", action="store_true",
                       help="write agents to ~/Library/LaunchAgents and launchctl-load them")
+    lncd.add_argument("--uninstall", action="store_true",
+                      help="disable/remove the watchdog + dashboard integration")
     lncd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the agents (default: this crr binary)")
     lncd.add_argument("--port", type=int, default=8377,
@@ -158,6 +165,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sch.add_argument("--install", action="store_true",
                      help="run schtasks.exe to create the tasks (WSL host only)")
+    sch.add_argument("--uninstall", action="store_true",
+                     help="disable/remove the watchdog + dashboard integration")
     sch.add_argument("--crr-bin", default=None,
                      help="crr path inside WSL to bake into the tasks (default: this crr binary)")
     sch.add_argument("--port", type=int, default=8377,
@@ -330,13 +339,19 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     config = _load_config()
-    store = JournalStore(state_dir.state_dir())
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
     try:
         boot = boot_identity.detect()
     except NotImplementedError as exc:
         print(f"crr status: {exc}", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+
+    now = _now()
+    if _guessed_upgradable(store, now):
+        with mutation_lock(sd):
+            _verify_guessed_sids(store, now)
 
     scan = store.scan()
     payload = status.assemble_sessions(
@@ -472,6 +487,12 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
     # never `guessed`. Print it (for the shim to pass to claude) even if the
     # shell was never registered, so claude still launches identifiably.
     sid = args.session_id or str(uuid.uuid4())
+    if not contracts.valid_session_id(sid):
+        # A user-typed --session-id may be junk (audit 2026-07-29): keep the
+        # wrapper's contract of always printing a sid for claude to use, but
+        # never journal it — claude itself will reject a non-UUID sid.
+        print(sid)
+        return 0
     _attach_claude_session(state_dir.state_dir(), args.pid, sid, "injected")
     print(sid)
     return 0
@@ -528,9 +549,11 @@ def _cmd_repair_check(args: argparse.Namespace) -> int:
 def _verify_guessed_sids(store: JournalStore, now: str) -> None:
     """Upgrade guessed→verified where a transcript now confirms the sid.
 
-    The re-verification runs here (the periodic, mutation-locked revive
-    sweep), never on the read-only poll path. Each guessed entry is checked
-    against its cwd's live transcript activity; unconfirmed guesses are left
+    Called from the periodic, mutation-locked revive sweep and — guarded by
+    `_guessed_upgradable`'s lock-free pre-scan — from status assembly (CLI
+    and web), so the mutation lock is only ever taken here when an upgrade
+    is actually about to be written. Each guessed entry is checked against
+    its cwd's live transcript activity; unconfirmed guesses are left
     guessed (silence never confirms).
     """
     by_cwd: dict[str, list] = {}  # one transcript glob+stat per unique cwd
@@ -544,6 +567,25 @@ def _verify_guessed_sids(store: JournalStore, now: str) -> None:
         updated = resume.verify_guessed(entry, by_cwd[cwd], now)
         if updated is not None:
             store.write(updated)
+
+
+def _guessed_upgradable(store: JournalStore, now: str) -> bool:
+    """Lock-free pre-scan: would _verify_guessed_sids write anything?
+
+    Keeps the poll path lock-free in the common case; the mutation lock is
+    taken only when an upgrade is actually available to write.
+    """
+    by_cwd: dict[str, list] = {}
+    for entry in store.scan().entries:
+        claude = entry.get("claude")
+        if not claude or claude.get("sid_source") != "guessed":
+            continue
+        cwd = entry["cwd"]
+        if cwd not in by_cwd:
+            by_cwd[cwd] = transcript_source.list_transcripts(cwd)
+        if resume.verify_guessed(entry, by_cwd[cwd], now) is not None:
+            return True
+    return False
 
 
 def _cmd_revive(_args: argparse.Namespace) -> int:
@@ -644,9 +686,13 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         print("crr reopen: tmux is required for revival but was not found", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
+    flags = FlagStore(sd)
     with mutation_lock(sd):
-        res = ops.reopen(JournalStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
+        res = ops.reopen(JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
+                         boot, probe, args.pid, _now(),
+                         grace=config.get("close_grace_seconds"),
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
@@ -689,14 +735,20 @@ def _cmd_close(args: argparse.Namespace) -> int:
 
 
 def _cmd_detmux(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr detmux: {exc}", file=sys.stderr)
+        return 2
     config = _load_config()
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     if not tmux_spawner.available():
         print("crr detmux: tmux was not found", file=sys.stderr)
         return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     with mutation_lock(sd):
-        res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, args.pid, _now(),
+        res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
@@ -708,6 +760,8 @@ def make_web_handler(
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
+    poll_seconds: int | None = None,
+    version_check_seconds: int | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -727,6 +781,8 @@ def make_web_handler(
                 diagnostics_provider=diagnostics_provider,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
+                poll_seconds=poll_seconds,
+                version_check_seconds=version_check_seconds,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -764,7 +820,7 @@ def _select_diag_source():
     return diag_source  # journald (native Linux, or WSL with systemd)
 
 
-def gather_diagnostics(config: cfg.Config, source=None) -> dict:
+def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | None" = None) -> dict:
     """Query the platform diagnostics source, degrading (never aborting).
 
     Timeout-guarded and lazy (never on the poll path). The per-source
@@ -842,6 +898,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     extract = _tail_facts_extractor(config)
 
     def provider() -> dict:
+        now = _now()
+        if _guessed_upgradable(store, now):
+            with mutation_lock(sd):
+                _verify_guessed_sids(store, now)
         payload = status.assemble_sessions(store.scan().entries, boot, probe, tail_facts=extract)
         contracts.validate_sessions_payload(payload)
         return payload
@@ -856,7 +916,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "dismiss":
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
-                res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+                res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                                  pid, _now(), grace=config.get("close_grace_seconds"),
+                                  tab_spawner=tab)
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))
@@ -864,7 +926,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
             elif op == "detmux":
-                res = ops.detmux(store, archive, tmux_spawner, pid, _now(), tab_spawner=tab)
+                res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message
@@ -877,7 +939,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
     allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
     handler = make_web_handler(
-        provider, allowed, (".ts.net",), action_provider, diagnostics_provider
+        provider, allowed, (".ts.net",), action_provider, diagnostics_provider,
+        poll_seconds=config.get("dashboard_poll_seconds"),
+        version_check_seconds=config.get("version_check_seconds"),
     )
 
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
@@ -893,6 +957,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
 
 def _cmd_systemd(args: argparse.Namespace) -> int:
+    if args.install and args.uninstall:
+        print("crr systemd: --install and --uninstall are mutually exclusive", file=sys.stderr)
+        return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     path, missing = systemd.resolve_service_path(crr_bin)
@@ -913,11 +980,25 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    if args.uninstall:
+        ud = systemd.unit_dir(Path.home())
+        ok = _run_commands(systemd.disable_commands(), "systemd")
+        for name in (systemd.SERVICE_NAME, systemd.TIMER_NAME, systemd.WEB_SERVICE_NAME):
+            (ud / name).unlink(missing_ok=True)
+        if not ok:
+            print("crr systemd: unit files removed, but disabling FAILED (see above)",
+                  file=sys.stderr)
+            return 1
+        print(f"uninstalled watchdog + dashboard units from {ud}")
+        return 0
+
     if args.install:
         ud = systemd.unit_dir(Path.home())
         systemd.write_units(ud, units)
-        for cmd in systemd.enable_commands():
-            subprocess.run(cmd, check=False)
+        if not _run_commands(systemd.enable_commands(), "systemd"):
+            print(f"crr systemd: units written to {ud} but enabling FAILED (see above); "
+                  "the watchdog/dashboard are NOT running", file=sys.stderr)
+            return 1
         print(f"installed watchdog + dashboard units to {ud} and enabled them")
         return 0
 
@@ -933,6 +1014,9 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
 
 
 def _cmd_launchd(args: argparse.Namespace) -> int:
+    if args.install and args.uninstall:
+        print("crr launchd: --install and --uninstall are mutually exclusive", file=sys.stderr)
+        return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     path, missing = launchd.resolve_service_path(crr_bin)
@@ -951,11 +1035,27 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    if args.uninstall:
+        ad = launchd.agent_dir(Path.home())
+        # Unload FIRST, then remove the plists — launchctl needs the plist
+        # present on disk to unload it.
+        ok = _run_commands(launchd.disable_commands(ad), "launchd")
+        for name in (launchd.REVIVE_PLIST, launchd.WEB_PLIST):
+            (ad / name).unlink(missing_ok=True)
+        if not ok:
+            print("crr launchd: agent files removed, but unloading FAILED (see above)",
+                  file=sys.stderr)
+            return 1
+        print(f"uninstalled watchdog + dashboard agents from {ad}")
+        return 0
+
     if args.install:
         ad = launchd.agent_dir(Path.home())
         launchd.write_agents(ad, agents)
-        for cmd in launchd.enable_commands(ad):
-            subprocess.run(cmd, check=False)
+        if not _run_commands(launchd.enable_commands(ad), "launchd"):
+            print(f"crr launchd: agents written to {ad} but loading FAILED (see above); "
+                  "the watchdog/dashboard are NOT running", file=sys.stderr)
+            return 1
         print(f"installed watchdog + dashboard agents to {ad} and loaded them")
         return 0
 
@@ -972,6 +1072,9 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
 
 
 def _cmd_schtasks(args: argparse.Namespace) -> int:
+    if args.install and args.uninstall:
+        print("crr schtasks: --install and --uninstall are mutually exclusive", file=sys.stderr)
+        return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     distro = os.environ.get("WSL_DISTRO_NAME")
@@ -981,9 +1084,25 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
         scheduled_task.create_web_task_command(crr_bin, args.port, distro),
     ]
 
+    if args.uninstall:
+        if shutil.which("schtasks.exe") is None:
+            print("crr schtasks: schtasks.exe not found — not a Windows/WSL host; "
+                  "nothing was removed", file=sys.stderr)
+            return 2
+        if not _run_commands(scheduled_task.delete_task_commands(), "schtasks"):
+            print("crr schtasks: task removal FAILED (see above)", file=sys.stderr)
+            return 1
+        print("removed watchdog + dashboard Scheduled Tasks")
+        return 0
+
     if args.install:
-        for cmd in cmds:
-            subprocess.run(cmd, check=False)  # schtasks.exe; no-op off Windows/WSL
+        if shutil.which("schtasks.exe") is None:
+            print("crr schtasks: schtasks.exe not found — not a Windows/WSL host; "
+                  "nothing was created", file=sys.stderr)
+            return 2
+        if not _run_commands(cmds, "schtasks"):
+            print("crr schtasks: task creation FAILED (see above)", file=sys.stderr)
+            return 1
         print("created watchdog + dashboard Scheduled Tasks")
         return 0
 
@@ -1000,6 +1119,27 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
 def _quote(part: str) -> str:
     """Quote a schtasks argv part for display when it contains spaces."""
     return f'"{part}"' if " " in part else part
+
+
+def _run_commands(cmds: list[list[str]], label: str) -> bool:
+    """Run each argv; surface every failure on stderr. True iff all exited 0.
+
+    [lesson] a swallowed exit code turned hard failures into green
+    checkmarks — install/uninstall must report what actually happened.
+    """
+    ok = True
+    for cmd in cmds:
+        shown = " ".join(cmd)
+        try:
+            result = subprocess.run(cmd, check=False)
+        except OSError as exc:
+            print(f"crr {label}: {shown} failed to run: {exc}", file=sys.stderr)
+            ok = False
+            continue
+        if result.returncode != 0:
+            print(f"crr {label}: {shown} exited {result.returncode}", file=sys.stderr)
+            ok = False
+    return ok
 
 
 def _cmd_config(args: argparse.Namespace) -> int:

@@ -16,28 +16,52 @@ def _t(sid, mtime):
     return {"session_id": sid, "mtime": mtime}
 
 
+# All crr-written sids are UUIDs (injected uuid4 / transcript filename
+# stems), so fixtures use UUID literals throughout.
+_AAA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+_BBB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+_ZZZ = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+_OLD = "11111111-1111-4111-8111-111111111111"
+_NEWEST = "22222222-2222-4222-8222-222222222222"
+_MID = "33333333-3333-4333-8333-333333333333"
+
+
 # --- derive_resume_sid ----------------------------------------------------
 
 def test_explicit_sid_with_a_transcript_is_verified():
-    ts = [_t("aaa", 10.0), _t("bbb", 20.0)]
-    assert resume.derive_resume_sid("bbb", ts) == ("bbb", "verified")
+    ts = [_t(_AAA, 10.0), _t(_BBB, 20.0)]
+    assert resume.derive_resume_sid(_BBB, ts) == (_BBB, "verified")
 
 
 def test_explicit_sid_without_a_transcript_is_only_guessed():
     # The user named it, but nothing confirms it yet — an honest guess-strength
     # claim, not verified.
-    assert resume.derive_resume_sid("zzz", [_t("aaa", 10.0)]) == ("zzz", "guessed")
+    assert resume.derive_resume_sid(_ZZZ, [_t(_AAA, 10.0)]) == (_ZZZ, "guessed")
 
 
 def test_no_explicit_sid_picks_the_newest_transcript_as_guessed():
-    ts = [_t("old", 10.0), _t("newest", 30.0), _t("mid", 20.0)]
-    assert resume.derive_resume_sid(None, ts) == ("newest", "guessed")
+    ts = [_t(_OLD, 10.0), _t(_NEWEST, 30.0), _t(_MID, 20.0)]
+    assert resume.derive_resume_sid(None, ts) == (_NEWEST, "guessed")
 
 
 def test_no_explicit_sid_and_no_transcripts_yields_none():
     # Nothing to journal — the shim passes claude through untracked, as today.
     assert resume.derive_resume_sid(None, []) is None
     assert resume.derive_resume_sid("", []) is None
+
+
+def test_derive_rejects_non_uuid_explicit_sid_without_guessing():
+    """A junk --resume arg must yield None (untracked), NEVER a confident
+    guess of a different session."""
+    transcripts = [{"session_id": "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55", "mtime": 5.0}]
+    assert resume.derive_resume_sid("../tabs/99", transcripts) is None
+
+
+def test_derive_ignores_non_uuid_transcript_stems():
+    transcripts = [{"session_id": "not-a-uuid", "mtime": 9.0},
+                   {"session_id": "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55", "mtime": 5.0}]
+    sid, source = resume.derive_resume_sid(None, transcripts)
+    assert sid == "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55" and source == "guessed"
 
 
 # --- verify_guessed -------------------------------------------------------

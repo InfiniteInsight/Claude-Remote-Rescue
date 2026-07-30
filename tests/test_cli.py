@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -154,6 +155,176 @@ def test_schtasks_print_emits_both_tasks_and_runs_nothing(tmp_path, monkeypatch,
     assert "wsl.exe" in out and "/usr/bin/crr" in out
     assert "web --port 8378" in out
     assert "schtasks --install" in out  # printed install guidance
+
+
+def test_systemd_install_failure_propagates(tmp_path, monkeypatch, capsys):
+    """[bug 2026-07-29 / DESIGN lesson] a failed systemctl must not print the
+    success line nor exit 0 — a swallowed exit code is a green checkmark."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=1)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    out, err = capsys.readouterr()
+    assert rc != 0
+    assert "installed watchdog" not in out          # no success claim
+    assert "exited 1" in err or "failed" in err     # failure surfaced
+    assert calls                                     # commands were attempted
+
+
+def test_systemd_install_success_still_reports(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, returncode=0))
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert "installed watchdog" in capsys.readouterr().out
+
+
+def test_launchd_install_failure_propagates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, returncode=1))
+    rc = cli.main(["launchd", "--install", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+    assert "installed watchdog" not in capsys.readouterr().out
+
+
+def test_schtasks_install_refuses_without_schtasks_exe(monkeypatch, capsys):
+    """Off Windows/WSL the old code 'created' tasks it never created."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("refusal must not run schtasks")))
+    rc = cli.main(["schtasks", "--install", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+    assert "created watchdog" not in capsys.readouterr().out
+
+
+def test_restore_is_an_alias_for_reopen(monkeypatch):
+    """DESIGN names the op 'reopen/restore'; both must parse."""
+    seen = {}
+
+    def fake_reopen(args):
+        seen["pid"] = args.pid
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_reopen", fake_reopen)
+    assert cli.main(["restore", "--pid", "424242"]) == 0
+    assert seen["pid"] == 424242
+    # The primary name must still route the same way (aliases=[...] must not
+    # have displaced "reopen" itself).
+    assert cli.main(["reopen", "--pid", "111111"]) == 0
+    assert seen["pid"] == 111111
+
+
+def test_systemd_install_and_uninstall_together_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run anything")))
+    rc = cli.main(["systemd", "--install", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 2
+
+
+def test_systemd_uninstall_disables_and_removes_units(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ud = tmp_path / ".config" / "systemd" / "user"
+    ud.mkdir(parents=True)
+    for name in (cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME, cli.systemd.WEB_SERVICE_NAME):
+        (ud / name).write_text("x")
+    ran = []
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    rc = cli.main(["systemd", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert ["systemctl", "--user", "disable", "--now", cli.systemd.TIMER_NAME] in ran
+    assert not any((ud / n).exists() for n in
+                   (cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME, cli.systemd.WEB_SERVICE_NAME))
+
+
+def test_systemd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    assert cli.main(["systemd", "--uninstall", "--crr-bin", "/usr/bin/crr"]) != 0
+
+
+def test_launchd_install_and_uninstall_together_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run anything")))
+    rc = cli.main(["launchd", "--install", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 2
+
+
+def test_launchd_uninstall_unloads_before_removing_plists(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ad = tmp_path / "Library" / "LaunchAgents"
+    ad.mkdir(parents=True)
+    (ad / cli.launchd.REVIVE_PLIST).write_text("x")
+    (ad / cli.launchd.WEB_PLIST).write_text("x")
+    seen_at_unload = {}
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ["launchctl", "unload"]:
+            # The plist named in the unload command must still exist —
+            # launchctl needs it present to unload.
+            plist_path = Path(cmd[-1])
+            seen_at_unload[str(plist_path)] = plist_path.exists()
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["launchd", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert seen_at_unload[str(ad / cli.launchd.REVIVE_PLIST)] is True
+    assert seen_at_unload[str(ad / cli.launchd.WEB_PLIST)] is True
+    assert not (ad / cli.launchd.REVIVE_PLIST).exists()
+    assert not (ad / cli.launchd.WEB_PLIST).exists()
+
+
+def test_launchd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    assert cli.main(["launchd", "--uninstall", "--crr-bin", "/usr/bin/crr"]) != 0
+
+
+def test_schtasks_install_and_uninstall_together_errors(monkeypatch, capsys):
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run anything")))
+    rc = cli.main(["schtasks", "--install", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 2
+
+
+def test_schtasks_uninstall_refuses_without_schtasks_exe(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("refusal must not run schtasks")))
+    rc = cli.main(["schtasks", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+    assert "removed watchdog" not in capsys.readouterr().out
+
+
+def test_schtasks_uninstall_deletes_tasks(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/mnt/c/Windows/System32/schtasks.exe")
+    ran = []
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    rc = cli.main(["schtasks", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert ran == cli.scheduled_task.delete_task_commands()
+    assert "removed watchdog" in capsys.readouterr().out
+
+
+def test_schtasks_uninstall_failure_propagates(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/mnt/c/Windows/System32/schtasks.exe")
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    rc = cli.main(["schtasks", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
 
 
 def test_tab_spawner_is_none_on_headless_non_wsl_linux(monkeypatch):
@@ -450,6 +621,20 @@ def test_claude_launch_honors_explicit_session_id(tmp_path, monkeypatch, capsys)
     assert store.read(4242)["claude"]["session_id"] == given
 
 
+def test_claude_launch_rejects_non_uuid_explicit_session_id(tmp_path, monkeypatch, capsys):
+    # A user-typed `claude -r '../tabs/99'` (or similar junk) forwarded here
+    # as --session-id must never be journaled (audit 2026-07-29: path
+    # traversal via ArchiveStore.path_for). The wrapper's contract of always
+    # printing a sid for claude to use is kept; just nothing is journaled.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    rc = cli.main(["claude-launch", "--pid", "4242", "--session-id", "../tabs/99"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "../tabs/99"
+    assert store.read(4242)["claude"] is None  # never journaled
+
+
 def test_claude_launch_missing_entry_still_prints_a_sid(tmp_path, monkeypatch, capsys):
     # Shell wasn't registered: best-effort, claude must still get a sid.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
@@ -493,12 +678,13 @@ def test_claude_resume_verifies_an_explicit_sid_with_a_transcript(tmp_path, monk
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
-    _write_transcript_file(tmp_path / "home", "/home/u/proj", "sid-explicit")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
     rc = cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
-                   "--session-id", "sid-explicit"])
+                   "--session-id", sid])
     assert rc == 0
     claude = store.read(4242)["claude"]
-    assert claude["session_id"] == "sid-explicit"
+    assert claude["session_id"] == sid
     assert claude["sid_source"] == "verified"  # its transcript exists
 
 
@@ -507,12 +693,14 @@ def test_claude_resume_guesses_newest_transcript_without_explicit_sid(tmp_path, 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
-    _write_transcript_file(tmp_path / "home", "/home/u/proj", "older", mtime=1000)
-    _write_transcript_file(tmp_path / "home", "/home/u/proj", "newest", mtime=5000)
+    older = "11111111-aaaa-4aaa-8aaa-111111111111"
+    newest = "22222222-bbbb-4bbb-8bbb-222222222222"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", older, mtime=1000)
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", newest, mtime=5000)
     rc = cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj"])
     assert rc == 0
     claude = store.read(4242)["claude"]
-    assert claude["session_id"] == "newest"
+    assert claude["session_id"] == newest
     assert claude["sid_source"] == "guessed"
 
 
@@ -526,6 +714,9 @@ def test_claude_resume_leaves_untracked_when_no_sid_and_no_transcript(tmp_path, 
     assert store.read(4242)["claude"] is None  # nothing to guess -> untracked
 
 
+_G1_SID = "11112222-3333-4444-5555-666677778888"
+
+
 def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkeypatch):
     # The revive-sweep helper upgrades a guessed sid to verified once its
     # transcript shows activity after the session started.
@@ -534,12 +725,12 @@ def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkey
     entry = new_entry(
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-25T12:00:00+00:00",
-        claude={"session_id": "g1", "sid_source": "guessed",
+        claude={"session_id": _G1_SID, "sid_source": "guessed",
                 "started": "2026-07-25T12:00:00+00:00"},
     )
     store.write(entry)
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
-    _write_transcript_file(tmp_path / "home", "/home/u/proj", "g1", mtime=started + 60)
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", _G1_SID, mtime=started + 60)
 
     cli._verify_guessed_sids(store, "2026-07-25T12:05:00+00:00")
     assert store.read(7)["claude"]["sid_source"] == "verified"
@@ -551,14 +742,64 @@ def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
     entry = new_entry(
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-25T12:00:00+00:00",
-        claude={"session_id": "g1", "sid_source": "guessed",
+        claude={"session_id": _G1_SID, "sid_source": "guessed",
                 "started": "2026-07-25T12:00:00+00:00"},
     )
     store.write(entry)
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
-    _write_transcript_file(tmp_path / "home", "/home/u/proj", "g1", mtime=started - 30)  # pre-launch
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", _G1_SID, mtime=started - 30)  # pre-launch
     cli._verify_guessed_sids(store, "2026-07-25T12:05:00+00:00")
     assert store.read(7)["claude"]["sid_source"] == "guessed"  # unconfirmed stays guessed
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
+def test_status_upgrades_guessed_sid_when_transcript_confirms(tmp_path, monkeypatch, capsys):
+    # [audit P3] "stays guessed until a watchdog pass" — status itself must
+    # upgrade, so a dashboard without the watchdog still converges.
+    sid = "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-30T00:00:00+00:00",
+        claude={"session_id": sid, "sid_source": "guessed",
+                "started": "2026-07-30T00:00:00+00:00"},
+    ))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.transcript_source, "list_transcripts",
+                         lambda cwd, home=None: [{"session_id": sid, "mtime": 1e12}])
+
+    rc = cli.main(["status", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["sid_source"] == "verified"
+    assert store.read(7)["claude"]["sid_source"] == "verified"  # upgrade is durable, not just in-payload
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
+def test_status_stays_lock_free_when_no_guess_is_upgradable(tmp_path, monkeypatch, capsys):
+    # The whole point of the pre-scan: when nothing is upgradeable (no
+    # guessed entries, or a guess the transcript doesn't yet confirm), the
+    # poll path never takes the mutation lock.
+    sid = "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-30T00:00:00+00:00",
+        claude={"session_id": sid, "sid_source": "guessed",
+                "started": "2026-07-30T00:00:00+00:00"},
+    ))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.transcript_source, "list_transcripts",
+                         lambda cwd, home=None: [{"session_id": sid, "mtime": 0}])  # pre-launch, unconfirmed
+
+    def _boom(*a, **k):
+        raise AssertionError("poll path must stay lock-free when nothing is upgradable")
+    monkeypatch.setattr(cli, "mutation_lock", _boom)
+
+    rc = cli.main(["status", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["sid_source"] == "guessed"
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
@@ -589,16 +830,16 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="an-old-boot-that-cannot-match",  # boot mismatch => crashed
         now="2026-07-25T12:00:00+00:00",
-        claude={"session_id": "g1", "sid_source": "guessed",
+        claude={"session_id": _G1_SID, "sid_source": "guessed",
                 "started": "2026-07-25T12:00:00+00:00"},
     ))
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
-    _write_transcript_file(tmp_path / "home", "/home/u/proj", "g1", mtime=started + 60)
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", _G1_SID, mtime=started + 60)
 
     assert cli.main(["revive"]) == 0
     entry = store.read(7)
     assert entry["claude"]["sid_source"] == "verified"  # upgrade survived revive's write
-    assert entry["tmux_session"] == "crr-g1"            # and it was actually revived
+    assert entry["tmux_session"] == f"crr-{_G1_SID[:8]}"  # and it was actually revived
 
 
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
@@ -725,7 +966,10 @@ def test_close_reports_no_session(tmp_path, monkeypatch, capsys):
     assert "no session" in capsys.readouterr().out
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="detmux requires tmux")
+@pytest.mark.skipif(
+    shutil.which("tmux") is None or platform.system() not in ("Linux", "Darwin"),
+    reason="detmux needs tmux + Linux/macOS boot adapter",
+)
 def test_detmux_reports_no_session(tmp_path, monkeypatch, capsys):
     # tmux is present (RealTmux.available() gate passes), so the store
     # lookup is what fails — exercising the CLI wiring (parser ->
@@ -736,6 +980,7 @@ def test_detmux_reports_no_session(tmp_path, monkeypatch, capsys):
     assert "no session" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="detmux classifies (needs Linux or macOS boot adapter)")
 def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
     # End-to-end through `crr detmux` with a fake tmux + fake (always-
     # available) tab spawner standing in for the real adapters — pins the

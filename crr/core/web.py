@@ -26,10 +26,14 @@ import re
 from importlib import resources
 from typing import Any, Callable, Mapping, NamedTuple
 
+from crr.core import config as cfg
+
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 8  # v8: De-tmux button on tmux-parked cards
+PAGE_VERSION = 11  # v11: Restore button on ghost cards (reopen handles ghosts)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
+_POLL_PLACEHOLDER = "@POLL_MS@"
+_VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
 
@@ -64,9 +68,21 @@ def load_page() -> str:
     return resources.files("crr.core").joinpath("page.html").read_text(encoding="utf-8")
 
 
-def render_page(version: int = PAGE_VERSION) -> str:
-    """Serve-time substitution of the single version source into the page."""
-    return load_page().replace(_VERSION_PLACEHOLDER, str(version))
+def render_page(
+    version: int = PAGE_VERSION,
+    *,
+    poll_seconds: int | None = None,
+    version_check_seconds: int | None = None,
+) -> str:
+    """Serve-time substitution of version + configured intervals into the page."""
+    poll = cfg.DEFAULTS["dashboard_poll_seconds"] if poll_seconds is None else poll_seconds
+    vchk = cfg.DEFAULTS["version_check_seconds"] if version_check_seconds is None else version_check_seconds
+    return (
+        load_page()
+        .replace(_VERSION_PLACEHOLDER, str(version))
+        .replace(_POLL_PLACEHOLDER, str(int(poll) * 1000))
+        .replace(_VERSION_MS_PLACEHOLDER, str(int(vchk) * 1000))
+    )
 
 
 def extract_scripts(html: str) -> list[str]:
@@ -113,6 +129,8 @@ def handle_request(
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     page_version: int = PAGE_VERSION,
+    poll_seconds: int | None = None,
+    version_check_seconds: int | None = None,
 ) -> Response:
     # Host allowlist first — before any routing or work (DNS-rebinding defense).
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
@@ -120,7 +138,10 @@ def handle_request(
 
     if method == "GET":
         if path == "/":
-            return _resp(200, "text/html; charset=utf-8", render_page(page_version).encode("utf-8"))
+            page = render_page(
+                page_version, poll_seconds=poll_seconds, version_check_seconds=version_check_seconds
+            )
+            return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
         if path == "/api/sessions":
             return _json(200, sessions_provider())
         if path == "/api/version":

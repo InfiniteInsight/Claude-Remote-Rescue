@@ -4,7 +4,7 @@ Two sources of revival candidates:
 
 - **Active journal entries** that classify ``crashed`` and still carry a
   claude session id (the shell died mid-session — claude-exit never ran).
-- **Archived records** (reason ``superseded-on-register``): sessions
+- **Archived records** (reasons ``superseded-on-register``, ``superseded-on-launch``, ``ghost-restored``): sessions
   preserved when a reboot/pid-reuse would otherwise have clobbered their
   revival data. Reviving from the archive is what makes reboot recovery
   survive pid reuse — the data lives under the session id, not the pid.
@@ -123,12 +123,16 @@ def revive_crashed(
             revived.append(pid)
 
     # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'
-    #    is abandoned for good, and 'detmuxed' has been re-homed to a visible
+    #    is abandoned for good, 'detmuxed' has been re-homed to a visible
     #    tab under the user's manual ownership — reviving it here would
     #    resurrect the conversation the moment the user exits claude in that
-    #    tab, exactly what detmux's delist is meant to prevent).
+    #    tab, exactly what detmux's delist is meant to prevent — and
+    #    'dismissed' is the user's explicit "clean up without restoring";
+    #    reviving it would un-dismiss their decision. The two 'superseded-*'
+    #    reasons stay revivable on purpose: their archives exist to preserve
+    #    revival data.)
     for record in archive.scan().records:
-        if record["reason"] in ("gave-up", "detmuxed"):
+        if record["reason"] in ("gave-up", "detmuxed", "dismissed"):
             continue
         entry = record["entry"]
         action, updated, name = _decide(entry, live, max_strikes, now)
