@@ -139,8 +139,8 @@
 "use strict";
 // Baked at serve time; compared against /api/version to self-heal a cached page.
 var PAGE_VERSION = "@PAGE_VERSION@";
-var POLL_MS = 5000;
-var VERSION_MS = 30000;
+var POLL_MS = @POLL_MS@;
+var VERSION_MS = @VERSION_MS@;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 

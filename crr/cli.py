@@ -720,6 +720,8 @@ def make_web_handler(
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
+    poll_seconds: int | None = None,
+    version_check_seconds: int | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -739,6 +741,8 @@ def make_web_handler(
                 diagnostics_provider=diagnostics_provider,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
+                poll_seconds=poll_seconds,
+                version_check_seconds=version_check_seconds,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -889,7 +893,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
     allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
     handler = make_web_handler(
-        provider, allowed, (".ts.net",), action_provider, diagnostics_provider
+        provider, allowed, (".ts.net",), action_provider, diagnostics_provider,
+        poll_seconds=config.get("dashboard_poll_seconds"),
+        version_check_seconds=config.get("version_check_seconds"),
     )
 
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.

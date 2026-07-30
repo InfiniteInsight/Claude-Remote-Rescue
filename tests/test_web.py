@@ -245,12 +245,39 @@ def test_options_preflight_is_rejected():
 
 
 # --------------------------------------------------------------------------
+# Poll/version intervals: config, not magic numbers (audit P5).
+# --------------------------------------------------------------------------
+
+def test_render_page_substitutes_poll_intervals_from_defaults():
+    """[audit P5] page intervals must be config, not magic numbers."""
+    page = web.render_page()
+    assert "@POLL_MS@" not in page and "@VERSION_MS@" not in page
+    assert "var POLL_MS = 5000;" in page          # 5 s default * 1000
+    assert "var VERSION_MS = 30000;" in page      # 30 s default * 1000
+
+
+def test_render_page_honors_configured_intervals():
+    page = web.render_page(poll_seconds=7, version_check_seconds=60)
+    assert "var POLL_MS = 7000;" in page
+    assert "var VERSION_MS = 60000;" in page
+
+
+def test_handle_request_serves_configured_intervals():
+    resp = web.handle_request(
+        "GET", "/", {"Host": "127.0.0.1"},
+        sessions_provider=lambda: {}, allowed_hosts={"127.0.0.1"},
+        allowed_suffixes=(), poll_seconds=7, version_check_seconds=60,
+    )
+    assert b"var POLL_MS = 7000;" in resp.body
+
+
+# --------------------------------------------------------------------------
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_9():
-    """Explicit version check: v9 gates De-tmux to crashed cards only."""
-    assert web.PAGE_VERSION == 9
+def test_page_version_is_10():
+    """Explicit version check: v10 injects poll/version intervals from config."""
+    assert web.PAGE_VERSION == 10
 
 
 def test_page_scripts_pass_node_check(tmp_path):
