@@ -155,3 +155,16 @@ def enable_commands() -> list[list[str]]:
         ["systemctl", "--user", "enable", "--now", WEB_SERVICE_NAME],
         ["loginctl", "enable-linger"],
     ]
+
+
+def disable_commands() -> list[list[str]]:
+    """The commands that deactivate the watchdog + dashboard (data, not run).
+
+    Mirror of enable_commands; linger is left alone (other services may
+    rely on it — enabling it was additive, so removal is the user's call).
+    """
+    return [
+        ["systemctl", "--user", "disable", "--now", TIMER_NAME],
+        ["systemctl", "--user", "disable", "--now", WEB_SERVICE_NAME],
+        ["systemctl", "--user", "daemon-reload"],
+    ]

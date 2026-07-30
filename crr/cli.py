@@ -101,7 +101,10 @@ def _build_parser() -> argparse.ArgumentParser:
     dis.add_argument("--pid", type=int, required=True)
     dis.set_defaults(func=_cmd_dismiss)
 
-    reo = sub.add_parser("reopen", help="revive one specific crashed session now")
+    reo = sub.add_parser(
+        "reopen", aliases=["restore"],
+        help="revive one specific crashed session now (alias: restore)",
+    )
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
 
@@ -134,6 +137,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sysd.add_argument("--install", action="store_true",
                       help="write units to ~/.config/systemd/user and enable the timer + web + linger")
+    sysd.add_argument("--uninstall", action="store_true",
+                      help="disable/remove the watchdog + dashboard integration")
     sysd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the units (default: this crr binary)")
     sysd.add_argument("--port", type=int, default=8377,
@@ -146,6 +151,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     lncd.add_argument("--install", action="store_true",
                       help="write agents to ~/Library/LaunchAgents and launchctl-load them")
+    lncd.add_argument("--uninstall", action="store_true",
+                      help="disable/remove the watchdog + dashboard integration")
     lncd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the agents (default: this crr binary)")
     lncd.add_argument("--port", type=int, default=8377,
@@ -158,6 +165,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sch.add_argument("--install", action="store_true",
                      help="run schtasks.exe to create the tasks (WSL host only)")
+    sch.add_argument("--uninstall", action="store_true",
+                     help="disable/remove the watchdog + dashboard integration")
     sch.add_argument("--crr-bin", default=None,
                      help="crr path inside WSL to bake into the tasks (default: this crr binary)")
     sch.add_argument("--port", type=int, default=8377,
@@ -942,6 +951,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
 
 def _cmd_systemd(args: argparse.Namespace) -> int:
+    if args.install and args.uninstall:
+        print("crr systemd: --install and --uninstall are mutually exclusive", file=sys.stderr)
+        return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     path, missing = systemd.resolve_service_path(crr_bin)
@@ -961,6 +973,18 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
             f"{', '.join(missing)}; revived sessions will fail on exec until these resolve",
             file=sys.stderr,
         )
+
+    if args.uninstall:
+        ud = systemd.unit_dir(Path.home())
+        ok = _run_commands(systemd.disable_commands(), "systemd")
+        for name in (systemd.SERVICE_NAME, systemd.TIMER_NAME, systemd.WEB_SERVICE_NAME):
+            (ud / name).unlink(missing_ok=True)
+        if not ok:
+            print("crr systemd: unit files removed, but disabling FAILED (see above)",
+                  file=sys.stderr)
+            return 1
+        print(f"uninstalled watchdog + dashboard units from {ud}")
+        return 0
 
     if args.install:
         ud = systemd.unit_dir(Path.home())
@@ -984,6 +1008,9 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
 
 
 def _cmd_launchd(args: argparse.Namespace) -> int:
+    if args.install and args.uninstall:
+        print("crr launchd: --install and --uninstall are mutually exclusive", file=sys.stderr)
+        return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     path, missing = launchd.resolve_service_path(crr_bin)
@@ -1001,6 +1028,20 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
             f"{', '.join(missing)}; revived sessions will fail on exec until these resolve",
             file=sys.stderr,
         )
+
+    if args.uninstall:
+        ad = launchd.agent_dir(Path.home())
+        # Unload FIRST, then remove the plists — launchctl needs the plist
+        # present on disk to unload it.
+        ok = _run_commands(launchd.disable_commands(ad), "launchd")
+        for name in (launchd.REVIVE_PLIST, launchd.WEB_PLIST):
+            (ad / name).unlink(missing_ok=True)
+        if not ok:
+            print("crr launchd: agent files removed, but unloading FAILED (see above)",
+                  file=sys.stderr)
+            return 1
+        print(f"uninstalled watchdog + dashboard agents from {ad}")
+        return 0
 
     if args.install:
         ad = launchd.agent_dir(Path.home())
@@ -1025,6 +1066,9 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
 
 
 def _cmd_schtasks(args: argparse.Namespace) -> int:
+    if args.install and args.uninstall:
+        print("crr schtasks: --install and --uninstall are mutually exclusive", file=sys.stderr)
+        return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
     distro = os.environ.get("WSL_DISTRO_NAME")
@@ -1033,6 +1077,17 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
         scheduled_task.create_revive_task_command(crr_bin, interval, distro),
         scheduled_task.create_web_task_command(crr_bin, args.port, distro),
     ]
+
+    if args.uninstall:
+        if shutil.which("schtasks.exe") is None:
+            print("crr schtasks: schtasks.exe not found — not a Windows/WSL host; "
+                  "nothing was removed", file=sys.stderr)
+            return 2
+        if not _run_commands(scheduled_task.delete_task_commands(), "schtasks"):
+            print("crr schtasks: task removal FAILED (see above)", file=sys.stderr)
+            return 1
+        print("removed watchdog + dashboard Scheduled Tasks")
+        return 0
 
     if args.install:
         if shutil.which("schtasks.exe") is None:

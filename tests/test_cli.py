@@ -204,6 +204,129 @@ def test_schtasks_install_refuses_without_schtasks_exe(monkeypatch, capsys):
     assert "created watchdog" not in capsys.readouterr().out
 
 
+def test_restore_is_an_alias_for_reopen(monkeypatch):
+    """DESIGN names the op 'reopen/restore'; both must parse."""
+    seen = {}
+
+    def fake_reopen(args):
+        seen["pid"] = args.pid
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_reopen", fake_reopen)
+    assert cli.main(["restore", "--pid", "424242"]) == 0
+    assert seen["pid"] == 424242
+    # The primary name must still route the same way (aliases=[...] must not
+    # have displaced "reopen" itself).
+    assert cli.main(["reopen", "--pid", "111111"]) == 0
+    assert seen["pid"] == 111111
+
+
+def test_systemd_install_and_uninstall_together_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run anything")))
+    rc = cli.main(["systemd", "--install", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 2
+
+
+def test_systemd_uninstall_disables_and_removes_units(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ud = tmp_path / ".config" / "systemd" / "user"
+    ud.mkdir(parents=True)
+    for name in (cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME, cli.systemd.WEB_SERVICE_NAME):
+        (ud / name).write_text("x")
+    ran = []
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    rc = cli.main(["systemd", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert ["systemctl", "--user", "disable", "--now", cli.systemd.TIMER_NAME] in ran
+    assert not any((ud / n).exists() for n in
+                   (cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME, cli.systemd.WEB_SERVICE_NAME))
+
+
+def test_systemd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    assert cli.main(["systemd", "--uninstall", "--crr-bin", "/usr/bin/crr"]) != 0
+
+
+def test_launchd_install_and_uninstall_together_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run anything")))
+    rc = cli.main(["launchd", "--install", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 2
+
+
+def test_launchd_uninstall_unloads_before_removing_plists(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ad = tmp_path / "Library" / "LaunchAgents"
+    ad.mkdir(parents=True)
+    (ad / cli.launchd.REVIVE_PLIST).write_text("x")
+    (ad / cli.launchd.WEB_PLIST).write_text("x")
+    seen_at_unload = {}
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ["launchctl", "unload"]:
+            # The plist named in the unload command must still exist —
+            # launchctl needs it present to unload.
+            plist_path = Path(cmd[-1])
+            seen_at_unload[str(plist_path)] = plist_path.exists()
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["launchd", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert seen_at_unload[str(ad / cli.launchd.REVIVE_PLIST)] is True
+    assert seen_at_unload[str(ad / cli.launchd.WEB_PLIST)] is True
+    assert not (ad / cli.launchd.REVIVE_PLIST).exists()
+    assert not (ad / cli.launchd.WEB_PLIST).exists()
+
+
+def test_launchd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    assert cli.main(["launchd", "--uninstall", "--crr-bin", "/usr/bin/crr"]) != 0
+
+
+def test_schtasks_install_and_uninstall_together_errors(monkeypatch, capsys):
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run anything")))
+    rc = cli.main(["schtasks", "--install", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 2
+
+
+def test_schtasks_uninstall_refuses_without_schtasks_exe(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("refusal must not run schtasks")))
+    rc = cli.main(["schtasks", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+    assert "removed watchdog" not in capsys.readouterr().out
+
+
+def test_schtasks_uninstall_deletes_tasks(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/mnt/c/Windows/System32/schtasks.exe")
+    ran = []
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    rc = cli.main(["schtasks", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert ran == cli.scheduled_task.delete_task_commands()
+    assert "removed watchdog" in capsys.readouterr().out
+
+
+def test_schtasks_uninstall_failure_propagates(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/mnt/c/Windows/System32/schtasks.exe")
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    rc = cli.main(["schtasks", "--uninstall", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+
+
 def test_tab_spawner_is_none_on_headless_non_wsl_linux(monkeypatch):
     # Non-WSL Linux with no display has no tabs (Phase 3 desktop needs one),
     # so reopen degrades to detached-tmux rather than erroring.

@@ -101,6 +101,14 @@ def test_enable_commands_load_both_agents(tmp_path):
     assert ["launchctl", "load", "-w", web] in cmds
 
 
+def test_disable_commands_unload_both_agents(tmp_path):
+    cmds = launchd.disable_commands(tmp_path)
+    assert cmds == [
+        ["launchctl", "unload", "-w", str(tmp_path / launchd.REVIVE_PLIST)],
+        ["launchctl", "unload", "-w", str(tmp_path / launchd.WEB_PLIST)],
+    ]
+
+
 @pytest.mark.skipif(shutil.which("plutil") is None, reason="plutil not available (non-macOS)")
 def test_generated_plists_pass_plutil_lint(tmp_path):
     # macOS real-tool gate: plutil must accept the generated plists. Uses a

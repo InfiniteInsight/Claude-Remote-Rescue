@@ -138,3 +138,16 @@ def enable_commands(target_dir: Path) -> list[list[str]]:
         ["launchctl", "load", "-w", str(target_dir / REVIVE_PLIST)],
         ["launchctl", "load", "-w", str(target_dir / WEB_PLIST)],
     ]
+
+
+def disable_commands(target_dir: Path) -> list[list[str]]:
+    """The commands that unload both agents (data, not run).
+
+    Callers must unload BEFORE removing the plist files — launchctl needs
+    the plist present on disk to unload it.
+    """
+    target_dir = Path(target_dir)
+    return [
+        ["launchctl", "unload", "-w", str(target_dir / REVIVE_PLIST)],
+        ["launchctl", "unload", "-w", str(target_dir / WEB_PLIST)],
+    ]
