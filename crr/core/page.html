@@ -246,6 +246,9 @@ function renderCard(s, uncertain, groupColor) {
       addBtn("De-tmux", "detmux", false);
     }
   } else {                       // live or ghost: a running claude to act on
+    if (s.state === "ghost") {   // orphaned shell: offer mobile rescue
+      addBtn("Restore", "reopen", false);
+    }
     addBtn("Kick", "kick", false);
     addBtn("Close", "close", true);
   }

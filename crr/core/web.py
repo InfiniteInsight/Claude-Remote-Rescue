@@ -30,7 +30,7 @@ from crr.core import config as cfg
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 10  # v10: poll/version intervals injected from config
+PAGE_VERSION = 11  # v11: Restore button on ghost cards (reopen handles ghosts)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

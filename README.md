@@ -96,7 +96,7 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | --- | --- |
 | `crr status [--json]` | List journaled sessions and their state (live / ghost / crashed) |
 | `crr revive` | Revive crashed claude sessions into detached tmux (the watchdog runs this) |
-| `crr reopen --pid N` (alias `crr restore --pid N`) | Revive one specific crashed session now |
+| `crr reopen --pid N` (alias `crr restore --pid N`) | Revive one specific crashed or ghost session now (ghost: closes the orphaned shell and archives the conversation for revival) |
 | `crr dismiss --pid N` | Clean up a crashed session without reviving (archives it) |
 | `crr remove --pid N` | Delist a session, touch nothing else |
 | `crr kick <pid>` | Restart claude in place on the same conversation |

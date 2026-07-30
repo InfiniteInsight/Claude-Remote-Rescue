@@ -686,9 +686,13 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         print("crr reopen: tmux is required for revival but was not found", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
+    flags = FlagStore(sd)
     with mutation_lock(sd):
-        res = ops.reopen(JournalStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
+        res = ops.reopen(JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
+                         boot, probe, args.pid, _now(),
+                         grace=config.get("close_grace_seconds"),
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
@@ -912,7 +916,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "dismiss":
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
-                res = ops.reopen(store, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+                res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                                  pid, _now(), grace=config.get("close_grace_seconds"),
+                                  tab_spawner=tab)
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))

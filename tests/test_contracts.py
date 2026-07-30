@@ -362,6 +362,23 @@ def test_archive_detmuxed_reason_accepted():
     contracts.validate_archive_record(r)  # must not raise
 
 
+def test_ghost_restored_is_a_valid_archive_reason():
+    # [user request 2026-07-30] ops.reopen's GHOST branch archives with this
+    # new reason before ever spawning, so a ghost's revival data survives
+    # every later failure.
+    r = _archive_record()
+    r["reason"] = "ghost-restored"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_archive_contract_version_still_1_and_v1_records_validate():
+    # Extending ARCHIVE_REASONS changes no key/type in the stored shape, so
+    # it does not bump ARCHIVE_CONTRACT_VERSION — every v1 record already on
+    # disk (any reason) stays valid without a migration.
+    assert contracts.ARCHIVE_CONTRACT_VERSION == 1
+    contracts.validate_archive_record(_archive_record())  # stored v1 stays valid
+
+
 def test_archive_missing_key_rejected():
     r = _archive_record()
     del r["archived_at"]

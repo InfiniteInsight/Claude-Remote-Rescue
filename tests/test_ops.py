@@ -48,14 +48,17 @@ class FakeProbe:
 
 
 class FakeTmux:
-    def __init__(self, live=()):
+    def __init__(self, live=(), fail_spawn=False):
         self._live = set(live)
         self.created = []
+        self._fail_spawn = fail_spawn
 
     def list_sessions(self):
         return set(self._live)
 
     def new_detached_session(self, name, cwd, argv):
+        if self._fail_spawn:
+            raise RuntimeError("tmux new-session boom")
         self.created.append((name, cwd, list(argv)))
         self._live.add(name)
 
@@ -109,12 +112,22 @@ def test_dismiss_missing_session(tmp_path):
 
 
 # --- reopen ---------------------------------------------------------------
+#
+# Signature (Task 11): reopen(store, archive, tmux, controller, flags, boot,
+# probe, pid, now, *, grace, tab_spawner=None) — CRASHED tests below pass an
+# idle FakeController/FakeFlags (grace/kill accounting only matters on the
+# GHOST branch, further down).
+
+def _idle_ctrl_flags():
+    return FakeController(groups=[]), FakeFlags()
+
 
 def test_reopen_spawns_for_crashed_claude(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux = FakeTmux()
-    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
     assert res.ok
     name = f"crr-{_SID[:8]}"
     assert tmux.created and tmux.created[0][0] == name
@@ -122,34 +135,64 @@ def test_reopen_spawns_for_crashed_claude(tmp_path):
 
 
 def test_reopen_refuses_claude_less(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=None)
-    assert not ops.reopen(store, FakeTmux(), FakeBoot(), FakeProbe(), 42, _NOW).ok
-
-
-def test_reopen_refuses_live(tmp_path):
-    store = JournalStore(tmp_path)
-    _seed(store, 42, boot="same-boot", claude=_claude())
-    res = ops.reopen(store, FakeTmux(), FakeBoot("same-boot"), FakeProbe(alive=True, tty=True), 42, _NOW)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
     assert not res.ok
 
 
+def test_reopen_live_refused(tmp_path):
+    """LIVE has a running claude to act on — kick/close are the ops for
+    that, not reopen (which would race a spawn against the live shell)."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW, grace=0.1)
+    assert not res.ok
+    assert "is live" in res.message
+    assert ctrl.terminated == []
+    assert flags.armed == {}
+    with pytest.raises(KeyError):
+        archive.read(_SID)
+    assert store.read(42)  # untouched
+
+
 def test_reopen_already_running_does_not_respawn(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux = FakeTmux(live={f"crr-{_SID[:8]}"})
-    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
     assert res.ok
     assert tmux.created == []  # already up
+
+
+def test_reopen_crashed_path_unchanged(tmp_path):
+    """CRASHED keeps its no-flag, no-archive shape: only GHOST touches
+    flags/controller/archive."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    assert res.ok
+    assert ctrl.terminated == []
+    assert flags.armed == {}
+    assert archive.scan().records == []
+    assert store.read(42)["tmux_session"] == f"crr-{_SID[:8]}"
 
 
 # --- reopen + visible tab (macOS tab-spawn) -------------------------------
 
 def test_reopen_opens_a_visible_tab_attaching_to_the_revived_session(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux, tab = FakeTmux(), FakeTabSpawner()
-    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, tab_spawner=tab)
     name = f"crr-{_SID[:8]}"
     assert res.ok
     assert tmux.created  # revived detached first (durable)
@@ -158,11 +201,13 @@ def test_reopen_opens_a_visible_tab_attaching_to_the_revived_session(tmp_path):
 
 
 def test_reopen_opens_a_tab_even_when_already_running(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
     name = f"crr-{_SID[:8]}"
     tmux, tab = FakeTmux(live={name}), FakeTabSpawner()
-    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, tab_spawner=tab)
     assert res.ok
     assert tmux.created == []                 # not respawned
     assert tab.opened[0][0] == ["tmux", "attach", "-t", name]  # but a tab is opened
@@ -172,22 +217,111 @@ def test_reopen_tab_failure_does_not_fail_the_op(tmp_path):
     # Revival is primary and already durable; a tab failure is surfaced in
     # the message but must not turn a successful revival into a failure
     # (DESIGN's swallowed-exit-code lesson, inverted — no false failure).
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux, tab = FakeTmux(), FakeTabSpawner(fail=True)
-    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, tab_spawner=tab)
     assert res.ok
     assert "tab" in res.message.lower() and "fail" in res.message.lower()
     assert store.read(42)["tmux_session"] == f"crr-{_SID[:8]}"  # revival persisted
 
 
 def test_reopen_unavailable_spawner_stays_detached(tmp_path):
-    store = JournalStore(tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux, tab = FakeTmux(), FakeTabSpawner(available=False)
-    res = ops.reopen(store, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, tab_spawner=tab)
     assert res.ok
     assert tab.opened == []  # never consulted an unavailable spawner
+
+
+# --- reopen (GHOST) — user request 2026-07-30 mobile rescue path ----------
+
+def _ghost(store, pid):
+    # same boot + alive + no controlling tty -> classify ghost
+    _seed(store, pid, boot="B", claude=_claude())
+    return FakeBoot("B"), FakeProbe(alive=True, tty=False)
+
+
+def test_reopen_ghost_kills_flags_archives_and_spawns(tmp_path):
+    """[user request 2026-07-30] a ghost's conversation must be rescuable
+    from the dashboard: close-flag the orphan wrapper, kill claude's group,
+    preserve to archive as ghost-restored, revive into detached tmux."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    assert res.ok, res.message
+    assert flags.read(42) == ("close", None)          # armed and retained
+    assert ctrl.terminated == [(200, 0.1)]
+    rec = archive.read(_SID)
+    assert rec["reason"] == "ghost-restored"
+    assert rec["entry"]["tmux_session"] == f"crr-{_SID[:8]}"
+    with pytest.raises(KeyError):
+        store.read(42)                                # delisted
+    assert tmux.created == [(f"crr-{_SID[:8]}", "/p42", ["claude", "--resume", _SID])]
+
+
+def test_reopen_ghost_without_claude_group_spawns_without_flag(tmp_path):
+    # groups=[] -> claude is already dead: no flag armed, still archived +
+    # delisted + spawned (never arm a flag without a landing kill).
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    ctrl, flags, tmux = FakeController(groups=[]), FakeFlags(), FakeTmux()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    assert res.ok, res.message
+    assert flags.read(42) is None
+    assert archive.read(_SID)["reason"] == "ghost-restored"
+    with pytest.raises(KeyError):
+        store.read(42)
+    assert tmux.created
+
+
+def test_reopen_ghost_kill_failure_leaves_everything_untouched(tmp_path):
+    # groups=[200], terminate raises OSError -> not ok, flag cleared,
+    # entry still present, nothing archived, nothing spawned.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    ctrl = FakeController(groups=[200], raise_for={200: OSError("nope")})
+    flags, tmux = FakeFlags(), FakeTmux()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    assert not res.ok
+    assert flags.read(42) is None            # rolled back: no kill landed
+    assert store.read(42)                    # entry untouched
+    with pytest.raises(KeyError):
+        archive.read(_SID)                   # nothing archived
+    assert tmux.created == []                # nothing spawned
+
+
+def test_reopen_ghost_spawn_failure_still_preserves(tmp_path):
+    # tmux.new_detached_session raises -> res.ok is True (preservation
+    # succeeded), message mentions the watchdog will revive; archive record
+    # exists.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    tmux = FakeTmux(fail_spawn=True)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    assert res.ok is True
+    assert "watchdog" in res.message.lower()
+    assert archive.read(_SID)["reason"] == "ghost-restored"
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+def test_reopen_ghost_already_running_does_not_respawn(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    name = f"crr-{_SID[:8]}"
+    ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux(live={name})
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    assert res.ok, res.message
+    assert tmux.created == []  # already up, not respawned
+    assert archive.read(_SID)["reason"] == "ghost-restored"
 
 
 # --- detmux ----------------------------------------------------------------
@@ -347,6 +481,8 @@ class FakeFlags:
         self.armed[pid] = ("close", None)
     def clear(self, pid):
         self.armed.pop(pid, None)
+    def read(self, pid):
+        return self.armed.get(pid)
 
 
 def _live(store, pid):

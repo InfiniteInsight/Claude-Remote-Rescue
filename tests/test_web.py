@@ -275,9 +275,9 @@ def test_handle_request_serves_configured_intervals():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_10():
-    """Explicit version check: v10 injects poll/version intervals from config."""
-    assert web.PAGE_VERSION == 10
+def test_page_version_is_11():
+    """Explicit version check: v11 adds the ghost-card Restore button."""
+    assert web.PAGE_VERSION == 11
 
 
 def test_page_scripts_pass_node_check(tmp_path):

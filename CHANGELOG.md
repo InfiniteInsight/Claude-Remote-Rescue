@@ -54,6 +54,13 @@ No tag or release has been cut yet. This section describes everything on
   being hardcoded in `page.html` (`PAGE_VERSION` 9 → 10).
 - `crr reopen` gained a `restore` alias (`crr restore --pid N`), matching
   DESIGN's "reopen/restore" naming for the op.
+- `crr reopen`/`restore` now rescues GHOST sessions too, not just CRASHED
+  ones — the mobile Restore path a phone-only dashboard user otherwise
+  lacked (Close on a ghost destroyed revival data). It close-flags the
+  orphaned wrapper, kills claude's process group(s), archives the entry
+  with a new reason (`ghost-restored`) before ever attempting a spawn, and
+  revives it into detached tmux; a dashboard ghost card now shows a
+  "Restore" button alongside Kick/Close (`PAGE_VERSION` 10 → 11).
 - `crr systemd`, `crr launchd`, and `crr schtasks` gained `--uninstall`
   (mutually exclusive with `--install`) to reverse the watchdog/dashboard
   service installation.

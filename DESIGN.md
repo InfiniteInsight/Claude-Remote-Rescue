@@ -162,11 +162,17 @@ not re-revived forever.
 ### Session operations (all classifier-gated, pid-keyed)
 
 `kick` (restart claude in place, same conversation), `close` (remote
-equivalent of typing exit), `reopen`/`restore` (single-session revival),
-`dismiss` (clean up without restoring; archives crashed entries),
-`remove` (pure delist, touches nothing), `detmux` (re-home a revived tmux
-session into a visible tab; archives + delists on success — the reviver
-owns `tmux_session`, so re-homing must leave its domain entirely).
+equivalent of typing exit), `reopen`/`restore` (single-session revival —
+CRASHED spawns/notes-already-running as before; GHOST is the mobile
+rescue path: close-flag the orphaned wrapper + kill claude's group(s) +
+archive the entry with reason `ghost-restored` + delist + spawn into
+detached tmux, kill-and-preserve strictly before spawn so a spawn failure
+can never lose the conversation; LIVE refuses — kick/close are the ops for
+a running claude), `dismiss` (clean up without restoring; archives crashed
+entries), `remove` (pure delist, touches nothing), `detmux` (re-home a
+revived tmux session into a visible tab; archives + delists on success —
+the reviver owns `tmux_session`, so re-homing must leave its domain
+entirely).
 Semantics as proven in ccresume; failure statuses must propagate to the
 web layer (**[lesson]** a
 swallowed exit code turned hard failures into green checkmarks).
