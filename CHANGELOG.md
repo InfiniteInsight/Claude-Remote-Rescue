@@ -49,6 +49,24 @@ No tag or release has been cut yet. This section describes everything on
 - `crr doctor` — an install-health checklist.
 - `crr status [--json]` and last-prompt extraction so dashboard cards show
   the most recent human prompt per session.
+- Dashboard poll/version-check cadence (`dashboard_poll_seconds`,
+  `version_check_seconds`) is now sourced from `crr.core.config` instead of
+  being hardcoded in `page.html` (`PAGE_VERSION` 9 → 10).
+- `crr reopen` gained a `restore` alias (`crr restore --pid N`), matching
+  DESIGN's "reopen/restore" naming for the op.
+- `crr systemd`, `crr launchd`, and `crr schtasks` gained `--uninstall`
+  (mutually exclusive with `--install`) to reverse the watchdog/dashboard
+  service installation.
+- `crr.core.ports.DiagnosticsSource` — the de-facto `SOURCE_NAME`/
+  `available`/`collect` contract already shared by the three diagnostics
+  adapters (journald/macOS/Windows) is now a declared core port.
+- `crr status` and the web dashboard's session provider re-verify guessed
+  session ids at status-assembly time, not only on the watchdog's revive
+  sweep, taking the mutation lock only when an upgrade is actually
+  available to write (poll path stays lock-free otherwise).
+- `CONFIG_DEFAULTS_VERSION` bumped to 2: dropped the consumer-less
+  `watcher_backoff_count`, `watcher_cooldown_seconds`, and
+  `reopen_grace_seconds` keys (no crr mechanism reads them).
 
 ### Changed
 
@@ -56,6 +74,26 @@ No tag or release has been cut yet. This section describes everything on
   shim's resume offer.** Without the crr shim, a nonzero `claude` exit returns silently to the shell prompt; with it, the `claude()` wrapper prompts to resume. Only an explicit `n`/`no`
   declines; anything else — including no answer at all — a non-tty stdin skips the prompt entirely in all three shells, and bash/zsh additionally time out an unanswered prompt after 30 seconds via `read -t` (fish has no timed read) —
   resumes automatically, capped at 2 consecutive crash-resumes.
+
+### Fixed
+
+- The watchdog's revive sweep no longer resurrects a `dismiss`ed session:
+  the terminal-reasons skip set now includes `dismissed` alongside
+  `gave-up`/`detmuxed` (the two `superseded-*` reasons stay revivable).
+- `crr systemd|launchd|schtasks --install` now propagates installer
+  command failures instead of unconditionally printing success and
+  exiting 0; `schtasks --install` also refuses to run when
+  `schtasks.exe` isn't on PATH rather than silently no-op'ing.
+- `crr kick`/`crr close` now target only the shell's claude-prefixed
+  child process groups (ancestry + argv0-basename match), so an
+  unrelated background job (e.g. `make &`) is no longer swept into a
+  remote Kick/Close signal; the relaunch/close flag is now cleared only
+  when zero group kills land, so a partial kill no longer masks a
+  still-live claude behind a false "handled" flag.
+- `crr detmux` (and its dashboard button) are now classifier-gated to
+  CRASHED sessions like every other destructive op — a live/ghost card
+  can carry a stale `tmux_session` field, and previously the op had no
+  gate at all.
 
 ### Security
 

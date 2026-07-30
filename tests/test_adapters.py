@@ -6,6 +6,7 @@ a real terminal" rule, both extracted as pure helpers so they need no
 platform gating.
 """
 
+import inspect
 import os
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from crr.adapters import diagnostics, diagnostics_macos, diagnostics_windows
 from crr.adapters import process_probe, state_dir, tmux
 from crr.adapters import process_probe as pp  # short alias used below
 
@@ -219,3 +221,17 @@ def test_child_groups_selects_only_claude_children():
         (600, 200, 200, "node"),                      # grandchild, same group
     ]
     assert pp._child_groups(rows, 100) == [200, 400, 500]
+
+
+# --- DiagnosticsSource port conformance -----------------------------------
+
+def test_all_diagnostics_sources_satisfy_the_port():
+    """DESIGN: diagnostics is an adapter interface. The de-facto contract
+    (SOURCE_NAME / available / collect) is now a declared core port."""
+    from crr.core.ports import DiagnosticsSource
+    for module in (diagnostics, diagnostics_macos, diagnostics_windows):
+        assert isinstance(module.SOURCE_NAME, str) and module.SOURCE_NAME
+        assert callable(module.available)
+        assert callable(module.collect)
+        sig = inspect.signature(module.collect)
+        assert len(sig.parameters) == 1   # collect(config)

@@ -11,10 +11,8 @@ vs ``default``) so a consumer can always distinguish an explicit choice
 from an assumed one — defaults drive kill decisions, and an invisible
 default is an invisible prior. It backs ``crr config --effective``.
 
-TOML file loading is intentionally not here yet; ``Config`` takes an
-``overrides`` mapping so the priors and their origins are usable now,
-with the file loader layered on in a later increment without changing
-this contract.
+TOML loading lives here too (``load_toml_overrides``); ``Config`` still
+takes a plain overrides mapping so tests need no files.
 """
 
 from __future__ import annotations

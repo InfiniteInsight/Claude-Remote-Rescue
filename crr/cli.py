@@ -35,7 +35,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, ops, resume, reviver, status, web
+from crr.core import contracts, ops, ports, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -816,7 +816,7 @@ def _select_diag_source():
     return diag_source  # journald (native Linux, or WSL with systemd)
 
 
-def gather_diagnostics(config: cfg.Config, source=None) -> dict:
+def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | None" = None) -> dict:
     """Query the platform diagnostics source, degrading (never aborting).
 
     Timeout-guarded and lazy (never on the poll path). The per-source

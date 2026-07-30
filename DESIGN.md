@@ -175,7 +175,7 @@ swallowed exit code turned hard failures into green checkmarks).
 
 Port of ccresume's single-file stdlib server and page, including:
 
-- Session cards: state badges (ghost/crashed/idle/duplicate), identity
+- Session cards: state badges (ghost/crashed/duplicate), identity
   tag `#pid · sid8`, duplicate group tinting, last-message line,
   contextual action buttons, indicator key, lazy diagnostics panel.
 - **[lesson: page self-heal]** `PAGE_VERSION` + `/api/version` polling +

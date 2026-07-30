@@ -96,7 +96,7 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | --- | --- |
 | `crr status [--json]` | List journaled sessions and their state (live / ghost / crashed) |
 | `crr revive` | Revive crashed claude sessions into detached tmux (the watchdog runs this) |
-| `crr reopen --pid N` | Revive one specific crashed session now |
+| `crr reopen --pid N` (alias `crr restore --pid N`) | Revive one specific crashed session now |
 | `crr dismiss --pid N` | Clean up a crashed session without reviving (archives it) |
 | `crr remove --pid N` | Delist a session, touch nothing else |
 | `crr kick <pid>` | Restart claude in place on the same conversation |
@@ -105,10 +105,13 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr diagnose [--json]` | Explain why the previous boot / sessions may have died |
 | `crr gc` | Drop archive records past the retention window |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |
-| `crr systemd [--install]` | Print (or install) the Linux watchdog timer + dashboard service |
-| `crr launchd [--install]` | Print (or install) the macOS launchd user agents (watchdog + dashboard) |
+| `crr systemd [--install\|--uninstall]` | Print (or install/uninstall) the Linux watchdog timer + dashboard service |
+| `crr launchd [--install\|--uninstall]` | Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard) |
+| `crr schtasks [--install\|--uninstall]` | Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard) |
 | `crr config --effective` | Every config key with its value and origin (`configured` / `default`) |
 | `crr doctor` | Install-health checklist |
+| `crr shim <shell>` | Print the shell shim to source from your rc file (fish/bash/zsh) |
+| `crr repair-check --pid N` | [shim] Read/clear a session's relaunch/close flag |
 
 Targets: headless Linux (now), macOS / Linux-desktop / Windows-WSL (later).
 Shells: zsh, bash, fish.
