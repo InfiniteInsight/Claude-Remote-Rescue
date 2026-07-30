@@ -330,13 +330,19 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     config = _load_config()
-    store = JournalStore(state_dir.state_dir())
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
     try:
         boot = boot_identity.detect()
     except NotImplementedError as exc:
         print(f"crr status: {exc}", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+
+    now = _now()
+    if _guessed_upgradable(store, now):
+        with mutation_lock(sd):
+            _verify_guessed_sids(store, now)
 
     scan = store.scan()
     payload = status.assemble_sessions(
@@ -534,9 +540,11 @@ def _cmd_repair_check(args: argparse.Namespace) -> int:
 def _verify_guessed_sids(store: JournalStore, now: str) -> None:
     """Upgrade guessed→verified where a transcript now confirms the sid.
 
-    The re-verification runs here (the periodic, mutation-locked revive
-    sweep), never on the read-only poll path. Each guessed entry is checked
-    against its cwd's live transcript activity; unconfirmed guesses are left
+    Called from the periodic, mutation-locked revive sweep and — guarded by
+    `_guessed_upgradable`'s lock-free pre-scan — from status assembly (CLI
+    and web), so the mutation lock is only ever taken here when an upgrade
+    is actually about to be written. Each guessed entry is checked against
+    its cwd's live transcript activity; unconfirmed guesses are left
     guessed (silence never confirms).
     """
     by_cwd: dict[str, list] = {}  # one transcript glob+stat per unique cwd
@@ -550,6 +558,25 @@ def _verify_guessed_sids(store: JournalStore, now: str) -> None:
         updated = resume.verify_guessed(entry, by_cwd[cwd], now)
         if updated is not None:
             store.write(updated)
+
+
+def _guessed_upgradable(store: JournalStore, now: str) -> bool:
+    """Lock-free pre-scan: would _verify_guessed_sids write anything?
+
+    Keeps the poll path lock-free in the common case; the mutation lock is
+    taken only when an upgrade is actually available to write.
+    """
+    by_cwd: dict[str, list] = {}
+    for entry in store.scan().entries:
+        claude = entry.get("claude")
+        if not claude or claude.get("sid_source") != "guessed":
+            continue
+        cwd = entry["cwd"]
+        if cwd not in by_cwd:
+            by_cwd[cwd] = transcript_source.list_transcripts(cwd)
+        if resume.verify_guessed(entry, by_cwd[cwd], now) is not None:
+            return True
+    return False
 
 
 def _cmd_revive(_args: argparse.Namespace) -> int:
@@ -858,6 +885,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     extract = _tail_facts_extractor(config)
 
     def provider() -> dict:
+        now = _now()
+        if _guessed_upgradable(store, now):
+            with mutation_lock(sd):
+                _verify_guessed_sids(store, now)
         payload = status.assemble_sessions(store.scan().entries, boot, probe, tail_facts=extract)
         contracts.validate_sessions_payload(payload)
         return payload

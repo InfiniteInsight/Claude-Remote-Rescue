@@ -134,10 +134,12 @@ reboot-recycled pid gets an unrelated process killed.
   origin travels with it. `sid_source` is `injected` (wrapper generated
   it — certain), `guessed` (derived from newest-transcript heuristics for
   picker/`--continue` resumes — uncertain), or `verified` (a guess later
-  confirmed against the live transcript). The wrapper re-verifies guessed
-  sids after launch and upgrades them; `status --json` carries
-  `sid_source` so the dashboard's duplicate detection can weight
-  `guessed` claims accordingly instead of presenting them as truth.
+  confirmed against the live transcript). Guessed sids are re-verified
+  against their transcript on every status assembly and every revive
+  sweep, and upgraded to `verified` once the transcript confirms them;
+  `status --json` carries `sid_source` so the dashboard's duplicate
+  detection can weight `guessed` claims accordingly instead of presenting
+  them as truth.
   ccresume shipped without this and two tabs journaled the same sid in
   production (2026-07-21) — the laundering is observed, not theoretical.
 

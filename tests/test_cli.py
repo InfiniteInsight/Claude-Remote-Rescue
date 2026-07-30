@@ -630,6 +630,56 @@ def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
+def test_status_upgrades_guessed_sid_when_transcript_confirms(tmp_path, monkeypatch, capsys):
+    # [audit P3] "stays guessed until a watchdog pass" — status itself must
+    # upgrade, so a dashboard without the watchdog still converges.
+    sid = "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-30T00:00:00+00:00",
+        claude={"session_id": sid, "sid_source": "guessed",
+                "started": "2026-07-30T00:00:00+00:00"},
+    ))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.transcript_source, "list_transcripts",
+                         lambda cwd, home=None: [{"session_id": sid, "mtime": 1e12}])
+
+    rc = cli.main(["status", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["sid_source"] == "verified"
+    assert store.read(7)["claude"]["sid_source"] == "verified"  # upgrade is durable, not just in-payload
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
+def test_status_stays_lock_free_when_no_guess_is_upgradable(tmp_path, monkeypatch, capsys):
+    # The whole point of the pre-scan: when nothing is upgradeable (no
+    # guessed entries, or a guess the transcript doesn't yet confirm), the
+    # poll path never takes the mutation lock.
+    sid = "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="b", now="2026-07-30T00:00:00+00:00",
+        claude={"session_id": sid, "sid_source": "guessed",
+                "started": "2026-07-30T00:00:00+00:00"},
+    ))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.transcript_source, "list_transcripts",
+                         lambda cwd, home=None: [{"session_id": sid, "mtime": 0}])  # pre-launch, unconfirmed
+
+    def _boom(*a, **k):
+        raise AssertionError("poll path must stay lock-free when nothing is upgradable")
+    monkeypatch.setattr(cli, "mutation_lock", _boom)
+
+    rc = cli.main(["status", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["sid_source"] == "guessed"
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
 def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_path, monkeypatch):
     # End-to-end through `crr revive`: the guessed->verified upgrade must
     # survive revive's own store.write of the same entry — pins the re-scan
