@@ -249,3 +249,21 @@ def test_detmuxed_archive_record_is_not_re_revived(tmp_path):
     outcome = _run(store, tmux, archive=archive)
     assert outcome.revived == []
     assert tmux.created == []
+
+
+def test_dismissed_archive_record_is_not_re_revived(tmp_path):
+    # [bug 2026-07-29] ops.dismiss archives with reason "dismissed" — the
+    # user's explicit "clean up without restoring". Without this skip, the
+    # archive loop's fallthrough to 'revive' would resurrect the very
+    # conversation the user just dismissed, un-doing their choice.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "dismissed", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []
