@@ -1042,6 +1042,112 @@ git commit -m "feat(ports): declare DiagnosticsSource; fix doc drift (README/DES
 
 ---
 
+### Task 11: Ghost sessions get a mobile Restore path (user request 2026-07-30)
+
+**Files:**
+- Modify: `crr/core/ops.py` (`reopen` gains a GHOST branch + signature change; small `_signal_groups` helper shared with kick/close), `crr/core/contracts.py` (`ARCHIVE_REASONS` += `"ghost-restored"`), `crr/cli.py` (`_cmd_reopen`, web `action_provider` reopen branch), `crr/core/page.html` (ghost cards gain a Restore button), `crr/core/web.py` (`PAGE_VERSION` 10 → 11), `DESIGN.md` (session-ops paragraph), `README.md` (reopen/restore row: "crashed or ghost"), `CHANGELOG.md`
+- Test: `tests/test_ops.py`, `tests/test_contracts.py`, `tests/test_reviver.py`, `tests/test_web.py` (only if it pins ACTIONS/buttons)
+
+**Why:** From the dashboard, a GHOST session (orphaned shell, window closed, no controlling terminal) offers only Kick/Close/Remove. Close on a ghost DESTROYS revival data (the wrapper's close branch runs claude-exit → claude=None → deregister). There is no mobile way to rescue the conversation into tmux; the desktop restore prompt only exists via the local wrapper. `ops.reopen` hard-refuses non-CRASHED.
+
+**Design (decided):** Extend `reopen` (op name unchanged — already in web ACTIONS, already aliased as `restore`) to dispatch on state:
+- CRASHED → existing path, unchanged.
+- GHOST → (1) require `claude` non-None (existing guard covers it); (2) find claude groups via `controller.claude_groups(pid)`; if groups exist: `flags.arm_close(pid)` then terminate each with the Task-3 landed/errors accounting — if NO kill lands, clear the flag and fail with the entry untouched (flag-files lesson: a flag survives only when a kill lands). The close flag makes the orphaned wrapper exit its shell instead of silently auto-resuming (the no-tty→resume rule would otherwise spawn a duplicate claude on the same sid). If no groups: claude is already dead — no flag, nothing to kill (never arm a flag without a landing kill). (3) archive the entry with NEW reason `"ghost-restored"` and `tmux_session` set to `session_name(entry)` — BEFORE any spawn, so revival data survives every later failure; (4) `store.remove(pid)` (the ghost card disappears; the wrapper's own claude-exit/deregister become harmless no-ops); (5) spawn the detached tmux `claude --resume <sid>` unless `session_name` is already live — kill-first ordering avoids two claudes sharing a sid; a spawn failure is reported honestly BUT the op still succeeds at preservation: the `"ghost-restored"` archive record is a reviver candidate (NOT in the skip tuple), so the watchdog revives it within one pass — say so in the message; (6) best-effort visible tab via `_open_tab`.
+- LIVE → refuse: `f"session {pid} is live — use kick or close"`.
+
+**Contract decision (record in commit body):** `ARCHIVE_REASONS` gains `"ghost-restored"` with NO `ARCHIVE_CONTRACT_VERSION` bump: the validator requires `record["v"] == ARCHIVE_CONTRACT_VERSION` for EVERY stored record, so a bump would invalidate all existing v1 archives on disk; extending the reason vocabulary changes no key/type in the stored shape, and old records remain fully valid. Pin that with an explicit test.
+
+**Interfaces:**
+- Consumes: `_signal_groups`-style landed/errors accounting from Task 3's kick/close bodies; `FlagStore.arm_close/clear`; `session_name`/`revival_argv`/`attach_argv`.
+- Produces: `ops.reopen(store, archive, tmux, controller, flags, boot, probe, pid, now, *, grace, tab_spawner=None)` — archive/controller/flags/grace are new; BOTH call sites updated (`_cmd_reopen` builds controller+flags and passes `grace=config.get("close_grace_seconds")`; web `action_provider` reopen branch likewise). Extract the duplicated kill loop from `kick`/`close` into `_signal_groups(controller, groups, grace) -> tuple[int, list[str]]` and reuse it in the ghost branch (three copies would be verbatim duplication).
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/test_ops.py` (reuse existing fakes; FakeController/FakeFlags/FakeBoot/FakeProbe conventions are established):
+
+```python
+def test_reopen_ghost_kills_flags_archives_and_spawns(...):
+    """[user request 2026-07-30] a ghost's conversation must be rescuable
+    from the dashboard: close-flag the orphan wrapper, kill claude's group,
+    preserve to archive as ghost-restored, revive into detached tmux."""
+    # entry classifies GHOST (same boot, pid alive, no tty), claude set, groups=[200]
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, PID, NOW, grace=0.1)
+    assert res.ok
+    assert flags.read(PID) == ("close", None)          # armed and retained
+    rec = archive.read(SID)
+    assert rec["reason"] == "ghost-restored"
+    assert rec["entry"]["tmux_session"] == f"crr-{SID[:8]}"
+    assert store_has_no_entry(PID)                      # delisted
+    assert tmux.spawned == [(f"crr-{SID[:8]}", CWD, ["claude", "--resume", SID])]
+
+def test_reopen_ghost_without_claude_group_spawns_without_flag(...):
+    # groups=[] -> no flag armed, still archived + delisted + spawned
+    assert flags.read(PID) is None
+
+def test_reopen_ghost_kill_failure_leaves_everything_untouched(...):
+    # groups=[200], terminate raises OSError -> not ok, flag cleared,
+    # entry still present, nothing archived, nothing spawned
+
+def test_reopen_ghost_spawn_failure_still_preserves(...):
+    # tmux.new_detached_session raises -> res.ok is True (preservation succeeded),
+    # message mentions the watchdog will revive; archive record exists
+
+def test_reopen_live_refused(...):
+    # live entry -> not ok, "is live" in message, nothing killed/archived
+
+def test_reopen_crashed_path_unchanged(...):
+    # existing crashed tests keep passing with the new signature (update them);
+    # crashed path must not arm any flag nor touch the archive
+```
+
+`tests/test_contracts.py`:
+
+```python
+def test_ghost_restored_is_a_valid_archive_reason():
+    record = _valid_record()
+    record["reason"] = "ghost-restored"
+    contracts.validate_archive_record(record)   # no raise
+
+def test_archive_contract_version_still_1_and_v1_records_validate():
+    assert contracts.ARCHIVE_CONTRACT_VERSION == 1
+    contracts.validate_archive_record(_valid_record())  # stored v1 stays valid
+```
+
+`tests/test_reviver.py`:
+
+```python
+def test_ghost_restored_archive_records_are_revival_candidates(...):
+    # archive a record with reason "ghost-restored", its tmux session NOT live
+    # -> revive_crashed spawns it (skip tuple stays (gave-up, detmuxed, dismissed))
+```
+
+- [ ] **Step 2: Run, watch each fail for the right reason** (signature TypeError first; after test-side signature updates, the behavioral assertions must be the failures; the contracts test fails with ContractError on the unknown reason).
+
+- [ ] **Step 3: Implement** — contracts reason; `_signal_groups` extraction (kick/close bodies shrink to use it — behavior identical, keep their tests green); the reopen ghost branch per the Design paragraph; call sites; page.html:
+
+```javascript
+  } else {                       // live or ghost: a running claude to act on
+    if (s.state === "ghost") {   // orphaned shell: offer mobile rescue
+      addBtn("Restore", "reopen", false);
+    }
+    addBtn("Kick", "kick", false);
+    addBtn("Close", "close", true);
+  }
+```
+
+`PAGE_VERSION = 11  # v11: Restore button on ghost cards (reopen handles ghosts)`. DESIGN.md session-operations list: note reopen/restore covers crashed AND ghost (ghost = close-flag + kill + archive `ghost-restored` + tmux revive). README table row for reopen/restore updated. CHANGELOG Added entry.
+
+- [ ] **Step 4: Full local gates** — `.venv/bin/pytest -q && .venv/bin/lint-imports` (includes node gate).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crr/core/ops.py crr/core/contracts.py crr/cli.py crr/core/page.html crr/core/web.py DESIGN.md README.md CHANGELOG.md tests/
+git commit -m "feat(reopen): ghost sessions restorable from the dashboard (ghost-restored archive flow)"
+```
+
+---
+
 ## Out of scope (deliberately, report to user)
 
 - **Docs site** (ROADMAP Phase 5) and **restore-prompt UX parity** (Phase 3) — roadmap features, not defects.
