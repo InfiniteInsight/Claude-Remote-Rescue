@@ -100,7 +100,7 @@ No tag or release has been cut yet. This section describes everything on
 - `crr detmux` (and its dashboard button) are now classifier-gated to
   CRASHED sessions like every other destructive op — a live/ghost card
   can carry a stale `tmux_session` field, and previously the op had no
-  gate at all. (PAGE_VERSION 11)
+  gate at all. (PAGE_VERSION 9)
 
 ### Security
 
