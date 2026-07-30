@@ -472,6 +472,12 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
     # never `guessed`. Print it (for the shim to pass to claude) even if the
     # shell was never registered, so claude still launches identifiably.
     sid = args.session_id or str(uuid.uuid4())
+    if not contracts.valid_session_id(sid):
+        # A user-typed --session-id may be junk (audit 2026-07-29): keep the
+        # wrapper's contract of always printing a sid for claude to use, but
+        # never journal it — claude itself will reject a non-UUID sid.
+        print(sid)
+        return 0
     _attach_claude_session(state_dir.state_dir(), args.pid, sid, "injected")
     print(sid)
     return 0

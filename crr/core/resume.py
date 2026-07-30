@@ -26,21 +26,29 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
+from crr.core import contracts
+
 _Transcripts = Sequence[Mapping[str, Any]]
 
 
 def derive_resume_sid(explicit_sid: str | None, transcripts: _Transcripts):
     """Return ``(session_id, sid_source)`` for a resume launch, or None.
 
-    None means there is nothing to journal (no explicit sid and no transcript
-    to guess from) — the wrapper then passes claude through untracked.
+    None means there is nothing to journal — either no explicit sid and no
+    transcript to guess from, or an explicit sid that is not a claude UUID
+    (audit 2026-07-29: a junk ``--resume`` arg must pass through untracked,
+    NEVER fall back to guessing a different session). The wrapper then
+    passes claude through untracked.
     """
     if explicit_sid:
+        if not contracts.valid_session_id(explicit_sid):
+            return None
         known = {t["session_id"] for t in transcripts}
         return explicit_sid, ("verified" if explicit_sid in known else "guessed")
-    if not transcripts:
+    candidates = [t for t in transcripts if contracts.valid_session_id(t["session_id"])]
+    if not candidates:
         return None
-    newest = max(transcripts, key=lambda t: t["mtime"])
+    newest = max(candidates, key=lambda t: t["mtime"])
     return newest["session_id"], "guessed"
 
 

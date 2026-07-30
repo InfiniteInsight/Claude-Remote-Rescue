@@ -69,4 +69,11 @@ No tag or release has been cut yet. This section describes everything on
 - Zero runtime dependencies: the web server is stdlib-only and the shell
   shims are dependency-free, by design (`pyproject.toml`
   `dependencies = []`) — a supply-chain guarantee, not an incidental state.
+- Session ids are pinned to the UUID shape claude always issues them in
+  (`contracts.valid_session_id`), enforced at the journal/session-card
+  contract, `ArchiveStore.path_for`, `derive_resume_sid`, and
+  `claude-launch`'s explicit `--session-id`. Closes a path-traversal
+  (`ArchiveStore.path_for` building `f"{session_id}.json"` from an
+  unvalidated sid) and a transcript-glob-injection hole reachable via a
+  user-typed `claude -r '<sid>'`.
 

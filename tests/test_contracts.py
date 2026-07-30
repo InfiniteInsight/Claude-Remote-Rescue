@@ -141,6 +141,33 @@ def test_journal_claude_missing_key_rejected():
         contracts.validate_journal_entry(e)
 
 
+def test_journal_rejects_path_traversal_sid():
+    """[bug 2026-07-29] sid '../tabs/99' escaped the archive dir on write."""
+    entry = _journal_entry()
+    entry["claude"] = {"session_id": "../tabs/99", "sid_source": "guessed",
+                       "started": "2026-07-30T00:00:00+00:00"}
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(entry)
+
+
+def test_journal_rejects_glob_sid():
+    entry = _journal_entry()
+    entry["claude"] = {"session_id": "*", "sid_source": "guessed",
+                       "started": "2026-07-30T00:00:00+00:00"}
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(entry)
+
+
+def test_valid_session_id_accepts_uuid_rejects_junk():
+    assert contracts.valid_session_id("2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55")
+    for bad in ("", "abc", "../x", "2f5c9a10", None, 42,
+                "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55/../x",
+                # `match` alone would let a trailing newline sneak through
+                # `$`; the shape pin must reject it (fullmatch, not match).
+                "2f5c9a10-3e4b-4d6c-9f2a-1b7e8c0d4a55\n"):
+        assert not contracts.valid_session_id(bad)
+
+
 def test_journal_claude_may_be_null():
     # A shell registers at start, before any claude launches: claude=null
     # is the honest "no rescuable session yet" state.

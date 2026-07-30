@@ -48,6 +48,11 @@ class ArchiveStore:
         return self._state_dir / "archive"
 
     def path_for(self, session_id: str) -> Path:
+        # Belt-and-braces under the contract: write() already validates via
+        # validate_archive_record, but any other caller (read/remove) must
+        # not be able to walk this f-string out of the archive dir.
+        if not contracts.valid_session_id(session_id):
+            raise contracts.ContractError(f"archive session_id is not a UUID: {session_id!r}")
         return self.archive_dir / f"{session_id}.json"
 
     def archive(self, entry: Mapping[str, Any], reason: str, now: str) -> dict[str, Any]:

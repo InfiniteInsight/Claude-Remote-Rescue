@@ -12,6 +12,7 @@ Pure stdlib, no imports from adapters or cli (this is core).
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping
 
 # --------------------------------------------------------------------------
@@ -96,6 +97,28 @@ class ContractError(ValueError):
 
 
 # --------------------------------------------------------------------------
+# Session-id shape (audit 2026-07-29 — path-traversal + glob injection).
+# --------------------------------------------------------------------------
+
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def valid_session_id(sid: Any) -> bool:
+    """True iff ``sid`` is a claude session UUID. Everything crr journals is
+    one (injected uuid4 / transcript filename stems), so anything else
+    reaching a path or glob is an injection, not a session.
+
+    ``fullmatch`` (not ``match``) is deliberate: ``$`` in a plain ``match``
+    also matches just before a trailing newline, so ``match`` alone would
+    accept ``"<uuid>\\n"`` — a shape-pin regex with that hole would defeat
+    the point of this task.
+    """
+    return isinstance(sid, str) and bool(_SESSION_ID_RE.fullmatch(sid))
+
+
+# --------------------------------------------------------------------------
 # Small internal helpers (kept private; the public surface is the
 # validators + constants only).
 # --------------------------------------------------------------------------
@@ -164,6 +187,8 @@ def validate_journal_entry(entry: Any) -> None:
         claude = _require_mapping(entry["claude"], "journal 'claude'")
         _require_exact_keys(claude, JOURNAL_CLAUDE_KEYS, "journal 'claude'")
         _require_type(claude["session_id"], str, "journal 'claude.session_id'")
+        if not valid_session_id(claude["session_id"]):
+            raise ContractError("journal 'claude.session_id' must be a UUID")
         _require_enum(claude["sid_source"], SID_SOURCES, "journal 'claude.sid_source'")
         _require_type(claude["started"], str, "journal 'claude.started'")
 
@@ -183,6 +208,8 @@ def validate_session_card(card: Any) -> None:
     _require_enum(card["shell"], SHELLS, "session 'shell'")
     _require_enum(card["host"], HOSTS, "session 'host'")
     _require_type(card["session_id"], str, "session 'session_id'")
+    if not valid_session_id(card["session_id"]):
+        raise ContractError("session 'session_id' must be a UUID")
     _require_enum(card["sid_source"], SID_SOURCES, "session 'sid_source'")
     _require_type(card["sid8"], str, "session 'sid8'")
     _require_type(card["last_prompt"], str, "session 'last_prompt'")
