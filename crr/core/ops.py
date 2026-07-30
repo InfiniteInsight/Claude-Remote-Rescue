@@ -110,10 +110,12 @@ def close(
     grace: float,
 ) -> OpResult:
     """End a LIVE/GHOST session (remote `exit`): arm the close flag, then
-    SIGTERM the claude group (escalating to SIGKILL after the grace window).
+    SIGTERM each claude group (escalating to SIGKILL after the grace window).
     The wrapper (repair loop) sees the close flag and exits the shell, so the
-    terminal closes and the card clears. The flag survives only if the kill
-    lands (rolled back on signal failure)."""
+    terminal closes and the card clears. The flag survives whenever at least
+    one group kill lands — a partial failure across several claude groups
+    must not roll back a flag whose claude is already gone; it is rolled
+    back only when every kill fails."""
     try:
         entry = store.read(pid)
     except (KeyError, contracts.ContractError):
@@ -125,13 +127,18 @@ def close(
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
     flags.arm_close(pid)
-    try:
-        for pgid in groups:
+    landed, errors = 0, []
+    for pgid in groups:
+        try:
             controller.terminate_group(pgid, grace)
-    except OSError as exc:
-        flags.clear(pid)  # the kill did not land -> the flag must not linger
-        return OpResult(False, f"close {pid} failed to signal: {exc}")
-    return OpResult(True, f"closed {pid}")
+            landed += 1
+        except OSError as exc:
+            errors.append(str(exc))
+    if landed == 0:
+        flags.clear(pid)  # no kill landed -> the flag must not linger
+        return OpResult(False, f"close {pid} failed to signal: {'; '.join(errors)}")
+    suffix = f" ({len(errors)} claude group(s) failed to signal: {'; '.join(errors)})" if errors else ""
+    return OpResult(True, f"closed {pid}{suffix}")
 
 
 def kick(
@@ -145,9 +152,11 @@ def kick(
     grace: float,
 ) -> OpResult:
     """Restart claude in place on the same conversation: arm the relaunch
-    flag, then SIGTERM/grace/SIGKILL the claude group. The flag survives only
-    if the kill lands (rolled back on signal failure), so the shim resumes a
-    real kick and never a failed one."""
+    flag, then SIGTERM/grace/SIGKILL each claude group. The flag survives
+    whenever at least one group kill lands — a partial failure across
+    several claude groups must not roll back a flag whose claude is already
+    gone; it is rolled back only when every kill fails, so the shim never
+    resumes a kick that did not happen."""
     try:
         entry = store.read(pid)
     except (KeyError, contracts.ContractError):
@@ -161,13 +170,18 @@ def kick(
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
     flags.arm_relaunch(pid, entry["claude"]["session_id"])
-    try:
-        for pgid in groups:
+    landed, errors = 0, []
+    for pgid in groups:
+        try:
             controller.terminate_group(pgid, grace)
-    except OSError as exc:
-        flags.clear(pid)  # the kill did not land -> the flag must not linger
-        return OpResult(False, f"kick {pid} failed to signal: {exc}")
-    return OpResult(True, f"kicked {pid} (resuming the same conversation)")
+            landed += 1
+        except OSError as exc:
+            errors.append(str(exc))
+    if landed == 0:
+        flags.clear(pid)  # no kill landed -> the flag must not linger
+        return OpResult(False, f"kick {pid} failed to signal: {'; '.join(errors)}")
+    suffix = f" ({len(errors)} claude group(s) failed to signal: {'; '.join(errors)})" if errors else ""
+    return OpResult(True, f"kicked {pid} (resuming the same conversation){suffix}")
 
 
 def detmux(

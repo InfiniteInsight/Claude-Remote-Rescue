@@ -95,30 +95,45 @@ class PsProcessProbe:
 
 
 def _ps_snapshot_argv() -> list[str]:
-    # -A all processes; bare `=` headers -> no header line, just the columns.
-    return ["ps", "-A", "-o", "pid=,ppid=,pgid="]
+    # -A all processes; bare `=` headers -> no header line. args last so the
+    # first three columns parse as ints and the remainder is the command line.
+    return ["ps", "-A", "-o", "pid=,ppid=,pgid=,args="]
 
 
-def _parse_ps_rows(stdout: str) -> list[tuple[int, int, int]]:
-    rows: list[tuple[int, int, int]] = []
+def _parse_ps_rows(stdout: str) -> list[tuple[int, int, int, str]]:
+    rows: list[tuple[int, int, int, str]] = []
     for line in stdout.splitlines():
-        parts = line.split()
-        if len(parts) != 3:
+        parts = line.split(None, 3)
+        if len(parts) < 4:
             continue
         try:
-            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+            pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
         except ValueError:
             continue
+        argv0 = parts[3].split(None, 1)[0] if parts[3].strip() else ""
+        rows.append((pid, ppid, pgid, argv0))
     return rows
 
 
-def _child_groups(rows: list[tuple[int, int, int]], shell_pid: int) -> list[int]:
-    shell_pgid = next((pgid for pid, _ppid, pgid in rows if pid == shell_pid), None)
+def _is_claude_argv0(argv0: str) -> bool:
+    """argv0 basename starts with 'claude' (claude, claude-fake, /path/claude).
+
+    Scoped by ancestry (direct child of the journaled shell) — this is the
+    claude-selection the port name promises, NOT a global cmdline pattern
+    kill ([lesson: kill-by-ancestry] still holds).
+    """
+    base = argv0.rsplit("/", 1)[-1].lstrip("-")  # login shells prefix '-'
+    return base.startswith("claude")
+
+
+def _child_groups(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list[int]:
+    shell_pgid = next((pgid for pid, _ppid, pgid, _a in rows if pid == shell_pid), None)
     if shell_pgid is None:
         return []
     groups: list[int] = []
-    for _pid, ppid, pgid in rows:
-        if ppid == shell_pid and pgid != shell_pgid and pgid not in groups and pgid > 0:
+    for _pid, ppid, pgid, argv0 in rows:
+        if (ppid == shell_pid and pgid != shell_pgid and pgid > 0
+                and pgid not in groups and _is_claude_argv0(argv0)):
             groups.append(pgid)
     return groups
 

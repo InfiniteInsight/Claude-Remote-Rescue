@@ -301,10 +301,11 @@ def test_detmux_spawn_failure_keeps_bookkeeping(tmp_path):
 # --- kick / close -----------------------------------------------------------
 
 class FakeController:
-    def __init__(self, groups):
+    def __init__(self, groups, raise_for=None):
         self.groups = groups
         self.terminated = []          # (pgid, grace) per call
-        self.raise_on_terminate = False
+        self.raise_on_terminate = False   # legacy: raise OSError for every pgid
+        self.raise_for = dict(raise_for or {})  # pgid -> exception, per-pgid failure
 
     def claude_groups(self, shell_pid):
         return list(self.groups)
@@ -312,6 +313,8 @@ class FakeController:
     def terminate_group(self, pgid, grace_seconds):
         if self.raise_on_terminate:
             raise OSError("no such process group")
+        if pgid in self.raise_for:
+            raise self.raise_for[pgid]
         self.terminated.append((pgid, grace_seconds))
 
 
@@ -360,6 +363,29 @@ def test_close_rolls_the_flag_back_when_the_signal_fails(tmp_path):
     assert 10 not in flags.armed          # flag survives only if the kill landed
 
 
+def test_close_keeps_flag_when_any_group_kill_lands(tmp_path):
+    """[bug 2026-07-29] one landed kill + one OSError used to clear the flag —
+    the wrapper then showed the crash prompt instead of silently closing."""
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl = FakeController(groups=[200, 300], raise_for={300: OSError("gone")})
+    flags = FakeFlags()
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=0.1)
+    assert res.ok is True
+    assert 10 in flags.armed              # flag survives: a kill landed
+    assert ctrl.terminated == [(200, 0.1)]
+
+
+def test_close_clears_flag_when_no_kill_lands(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl = FakeController(groups=[200], raise_for={200: OSError("nope")})
+    flags = FakeFlags()
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=0.1)
+    assert res.ok is False
+    assert 10 not in flags.armed          # nothing landed: flag rolled back
+
+
 def test_close_refuses_a_crashed_session(tmp_path):
     store = JournalStore(tmp_path)
     boot, probe = _crashed(store, 10)
@@ -399,6 +425,29 @@ def test_kick_rolls_the_flag_back_when_the_signal_fails(tmp_path):
     res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is False
     assert 10 not in flags.armed          # flag survives only if the kill landed
+
+
+def test_kick_keeps_flag_when_any_group_kill_lands(tmp_path):
+    """[bug 2026-07-29] one landed kill + one OSError used to clear the flag —
+    the wrapper then showed the crash prompt instead of silently resuming."""
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl = FakeController(groups=[200, 300], raise_for={300: OSError("gone")})
+    flags = FakeFlags()
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=0.1)
+    assert res.ok is True
+    assert flags.armed.get(10) == ("relaunch", _SID)   # flag survives: a kill landed
+    assert ctrl.terminated == [(200, 0.1)]
+
+
+def test_kick_clears_flag_when_no_kill_lands(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl = FakeController(groups=[200], raise_for={200: OSError("nope")})
+    flags = FakeFlags()
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=0.1)
+    assert res.ok is False
+    assert 10 not in flags.armed          # nothing landed: flag rolled back
 
 
 def test_kick_refuses_a_crashed_session(tmp_path):

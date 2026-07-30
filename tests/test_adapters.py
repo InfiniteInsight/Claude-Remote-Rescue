@@ -150,36 +150,72 @@ def test_realtmux_creates_word_form_detached_session(tmp_path, monkeypatch):
 
 # --- process controller pure builders (pure) ------------------------------
 
-def test_parse_ps_rows_reads_pid_ppid_pgid():
-    out = " 100 1 100\n 200 100 200\n 201 200 200\n"
-    assert pp._parse_ps_rows(out) == [(100, 1, 100), (200, 100, 200), (201, 200, 200)]
+def test_parse_ps_rows_reads_pid_ppid_pgid_argv0():
+    out = " 100 1 100 -fish\n 200 100 200 claude\n 201 200 200 node\n"
+    assert pp._parse_ps_rows(out) == [
+        (100, 1, 100, "-fish"),
+        (200, 100, 200, "claude"),
+        (201, 200, 200, "node"),
+    ]
 
 
 def test_parse_ps_rows_skips_malformed_lines():
-    out = "100 1 100\ngarbage\n\n200 100 200\n"
-    assert pp._parse_ps_rows(out) == [(100, 1, 100), (200, 100, 200)]
+    out = "100 1 100 claude\ngarbage\n\n200 100 200 node\n"
+    assert pp._parse_ps_rows(out) == [(100, 1, 100, "claude"), (200, 100, 200, "node")]
+
+
+def test_parse_ps_rows_with_args_column():
+    out = "  100   1  100 -fish\n  200 100  200 claude --resume abc\n  bad line\n"
+    assert pp._parse_ps_rows(out) == [
+        (100, 1, 100, "-fish"),
+        (200, 100, 200, "claude"),
+    ]
+
+
+def test_ps_snapshot_argv_includes_args():
+    assert pp._ps_snapshot_argv() == ["ps", "-A", "-o", "pid=,ppid=,pgid=,args="]
 
 
 def test_child_groups_returns_the_claude_group_not_the_shell_group():
     # shell pid 100 in its own group 100; its child 200 leads group 200
     # (claude under job control); 201 is claude's own child, same group 200.
-    rows = [(100, 1, 100), (200, 100, 200), (201, 200, 200), (999, 1, 999)]
+    rows = [
+        (100, 1, 100, "-fish"),
+        (200, 100, 200, "claude"),
+        (201, 200, 200, "node"),
+        (999, 1, 999, "claude"),
+    ]
     assert pp._child_groups(rows, shell_pid=100) == [200]
 
 
 def test_child_groups_excludes_a_child_that_shares_the_shell_group():
     # Safety: a child in the SHELL's own group is never returned — signalling
     # it would kill the shell. Job-control-off is treated as "nothing to kick".
-    rows = [(100, 1, 100), (200, 100, 100)]
+    rows = [(100, 1, 100, "-fish"), (200, 100, 100, "claude")]
     assert pp._child_groups(rows, shell_pid=100) == []
 
 
 def test_child_groups_empty_when_shell_absent_or_childless():
-    assert pp._child_groups([(100, 1, 100)], shell_pid=100) == []
-    assert pp._child_groups([(200, 100, 200)], shell_pid=100) == []
+    assert pp._child_groups([(100, 1, 100, "-fish")], shell_pid=100) == []
+    assert pp._child_groups([(200, 100, 200, "claude")], shell_pid=100) == []
 
 
 def test_child_groups_excludes_nonpositive_pgid():
     # pgid 0 would make os.killpg target the caller's own group — never return it.
-    rows = [(100, 1, 100), (200, 100, 0)]
+    rows = [(100, 1, 100, "-fish"), (200, 100, 0, "claude")]
     assert pp._child_groups(rows, shell_pid=100) == []
+
+
+def test_child_groups_selects_only_claude_children():
+    """[bug 2026-07-29] kick killed every child group — a `make &` bg job died
+    with the claude it was never part of. Selection is ancestry + argv0 basename
+    prefix 'claude', never a global pattern."""
+    rows = [
+        (100, 1, 100, "-fish"),                       # the shell itself
+        (200, 100, 200, "claude"),                    # claude child -> selected
+        (300, 100, 300, "make"),                      # bg build -> NOT selected
+        (400, 100, 400, "/usr/local/bin/claude"),     # abs path claude -> selected
+        (500, 100, 500, "claude-fake"),               # test fake -> selected (prefix)
+        (600, 200, 200, "node"),                      # grandchild, same group
+    ]
+    assert pp._child_groups(rows, 100) == [200, 400, 500]
