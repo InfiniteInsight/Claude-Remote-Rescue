@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -154,6 +155,53 @@ def test_schtasks_print_emits_both_tasks_and_runs_nothing(tmp_path, monkeypatch,
     assert "wsl.exe" in out and "/usr/bin/crr" in out
     assert "web --port 8378" in out
     assert "schtasks --install" in out  # printed install guidance
+
+
+def test_systemd_install_failure_propagates(tmp_path, monkeypatch, capsys):
+    """[bug 2026-07-29 / DESIGN lesson] a failed systemctl must not print the
+    success line nor exit 0 — a swallowed exit code is a green checkmark."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=1)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    out, err = capsys.readouterr()
+    assert rc != 0
+    assert "installed watchdog" not in out          # no success claim
+    assert "exited 1" in err or "failed" in err     # failure surfaced
+    assert calls                                     # commands were attempted
+
+
+def test_systemd_install_success_still_reports(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, returncode=0))
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    assert rc == 0
+    assert "installed watchdog" in capsys.readouterr().out
+
+
+def test_launchd_install_failure_propagates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, returncode=1))
+    rc = cli.main(["launchd", "--install", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+    assert "installed watchdog" not in capsys.readouterr().out
+
+
+def test_schtasks_install_refuses_without_schtasks_exe(monkeypatch, capsys):
+    """Off Windows/WSL the old code 'created' tasks it never created."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("refusal must not run schtasks")))
+    rc = cli.main(["schtasks", "--install", "--crr-bin", "/usr/bin/crr"])
+    assert rc != 0
+    assert "created watchdog" not in capsys.readouterr().out
 
 
 def test_tab_spawner_is_none_on_headless_non_wsl_linux(monkeypatch):

@@ -916,8 +916,10 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     if args.install:
         ud = systemd.unit_dir(Path.home())
         systemd.write_units(ud, units)
-        for cmd in systemd.enable_commands():
-            subprocess.run(cmd, check=False)
+        if not _run_commands(systemd.enable_commands(), "systemd"):
+            print(f"crr systemd: units written to {ud} but enabling FAILED (see above); "
+                  "the watchdog/dashboard are NOT running", file=sys.stderr)
+            return 1
         print(f"installed watchdog + dashboard units to {ud} and enabled them")
         return 0
 
@@ -954,8 +956,10 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     if args.install:
         ad = launchd.agent_dir(Path.home())
         launchd.write_agents(ad, agents)
-        for cmd in launchd.enable_commands(ad):
-            subprocess.run(cmd, check=False)
+        if not _run_commands(launchd.enable_commands(ad), "launchd"):
+            print(f"crr launchd: agents written to {ad} but loading FAILED (see above); "
+                  "the watchdog/dashboard are NOT running", file=sys.stderr)
+            return 1
         print(f"installed watchdog + dashboard agents to {ad} and loaded them")
         return 0
 
@@ -982,8 +986,13 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
     ]
 
     if args.install:
-        for cmd in cmds:
-            subprocess.run(cmd, check=False)  # schtasks.exe; no-op off Windows/WSL
+        if shutil.which("schtasks.exe") is None:
+            print("crr schtasks: schtasks.exe not found — not a Windows/WSL host; "
+                  "nothing was created", file=sys.stderr)
+            return 2
+        if not _run_commands(cmds, "schtasks"):
+            print("crr schtasks: task creation FAILED (see above)", file=sys.stderr)
+            return 1
         print("created watchdog + dashboard Scheduled Tasks")
         return 0
 
@@ -1000,6 +1009,27 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
 def _quote(part: str) -> str:
     """Quote a schtasks argv part for display when it contains spaces."""
     return f'"{part}"' if " " in part else part
+
+
+def _run_commands(cmds: list[list[str]], label: str) -> bool:
+    """Run each argv; surface every failure on stderr. True iff all exited 0.
+
+    [lesson] a swallowed exit code turned hard failures into green
+    checkmarks — install/uninstall must report what actually happened.
+    """
+    ok = True
+    for cmd in cmds:
+        shown = " ".join(cmd)
+        try:
+            result = subprocess.run(cmd, check=False)
+        except OSError as exc:
+            print(f"crr {label}: {shown} failed to run: {exc}", file=sys.stderr)
+            ok = False
+            continue
+        if result.returncode != 0:
+            print(f"crr {label}: {shown} exited {result.returncode}", file=sys.stderr)
+            ok = False
+    return ok
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
