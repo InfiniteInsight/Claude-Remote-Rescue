@@ -4,7 +4,7 @@ Two sources of revival candidates:
 
 - **Active journal entries** that classify ``crashed`` and still carry a
   claude session id (the shell died mid-session — claude-exit never ran).
-- **Archived records** (reason ``superseded-on-register``): sessions
+- **Archived records** (reasons ``superseded-on-register``, ``superseded-on-launch``, ``ghost-restored``): sessions
   preserved when a reboot/pid-reuse would otherwise have clobbered their
   revival data. Reviving from the archive is what makes reboot recovery
   survive pid reuse — the data lives under the session id, not the pid.

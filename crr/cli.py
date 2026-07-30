@@ -103,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     reo = sub.add_parser(
         "reopen", aliases=["restore"],
-        help="revive one specific crashed session now (alias: restore)",
+        help="revive one crashed or ghost session now (alias: restore)",
     )
     reo.add_argument("--pid", type=int, required=True)
     reo.set_defaults(func=_cmd_reopen)
