@@ -242,12 +242,12 @@ function renderCard(s, uncertain, groupColor) {
   if (s.state === "crashed") {
     addBtn("Reopen", "reopen", false);
     addBtn("Dismiss", "dismiss", false);
+    if (s.tmux_session) {        // revived into tmux: offer re-homing
+      addBtn("De-tmux", "detmux", false);
+    }
   } else {                       // live or ghost: a running claude to act on
     addBtn("Kick", "kick", false);
     addBtn("Close", "close", true);
-  }
-  if (s.tmux_session) {          // tmux-parked (revived): offer re-homing
-    addBtn("De-tmux", "detmux", false);
   }
   addBtn("Remove", "remove", true);
   card.appendChild(actions);

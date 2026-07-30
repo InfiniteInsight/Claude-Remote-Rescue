@@ -689,14 +689,20 @@ def _cmd_close(args: argparse.Namespace) -> int:
 
 
 def _cmd_detmux(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr detmux: {exc}", file=sys.stderr)
+        return 2
     config = _load_config()
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     if not tmux_spawner.available():
         print("crr detmux: tmux was not found", file=sys.stderr)
         return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     with mutation_lock(sd):
-        res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, args.pid, _now(),
+        res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
@@ -864,7 +870,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
             elif op == "detmux":
-                res = ops.detmux(store, archive, tmux_spawner, pid, _now(), tab_spawner=tab)
+                res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message

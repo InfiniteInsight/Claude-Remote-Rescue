@@ -773,7 +773,10 @@ def test_close_reports_no_session(tmp_path, monkeypatch, capsys):
     assert "no session" in capsys.readouterr().out
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="detmux requires tmux")
+@pytest.mark.skipif(
+    shutil.which("tmux") is None or platform.system() not in ("Linux", "Darwin"),
+    reason="detmux needs tmux + Linux/macOS boot adapter",
+)
 def test_detmux_reports_no_session(tmp_path, monkeypatch, capsys):
     # tmux is present (RealTmux.available() gate passes), so the store
     # lookup is what fails — exercising the CLI wiring (parser ->
@@ -784,6 +787,7 @@ def test_detmux_reports_no_session(tmp_path, monkeypatch, capsys):
     assert "no session" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="detmux classifies (needs Linux or macOS boot adapter)")
 def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
     # End-to-end through `crr detmux` with a fake tmux + fake (always-
     # available) tab spawner standing in for the real adapters — pins the

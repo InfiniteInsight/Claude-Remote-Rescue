@@ -188,12 +188,20 @@ def detmux(
     store: JournalStore,
     archive: ArchiveStore,
     tmux: TmuxSpawner,
+    boot: BootIdentity,
+    probe: ProcessProbe,
     pid: int,
     now: str,
     *,
     tab_spawner: TabSpawner | None,
 ) -> OpResult:
     """Re-home a revived (detached-tmux) session into a visible tab.
+
+    Classifier-gated like every other session op here (DESIGN: all session
+    ops are classifier-gated) — a card can carry ``tmux_session`` while
+    being LIVE (same-boot pid preservation across a same-boot restart), and
+    detmux must refuse that rather than archive+delist a live shell out of
+    crr's management.
 
     Opens a tab attached to the stored ``tmux_session`` name, then takes
     the entry out of crr's management entirely (archive + delist) rather
@@ -204,16 +212,20 @@ def detmux(
     from the reviver's domain for good; archiving (mirroring ``dismiss``)
     keeps provenance for any entry that still carries a claude session.
 
-    Liveness comes from tmux itself, never the stored field (reviver
-    lesson). Unlike reopen — where the tab is a best-effort convenience on
-    an already-durable revival — the tab IS this operation: no spawner is
-    a refusal, and a spawn failure leaves the bookkeeping untouched so the
-    card keeps offering the button.
+    Liveness of the tmux session itself comes from tmux, never the stored
+    field (reviver lesson). Unlike reopen — where the tab is a best-effort
+    convenience on an already-durable revival — the tab IS this operation:
+    no spawner is a refusal, and a spawn failure leaves the bookkeeping
+    untouched so the card keeps offering the button.
     """
     try:
         entry = store.read(pid)
     except (KeyError, contracts.ContractError):
         return OpResult(False, f"no session {pid}")
+    state = classify(entry, boot, probe)
+    if state != CRASHED:
+        return OpResult(False, f"session {pid} is {state}, not crashed — refusing "
+                               "(detmux re-homes revived sessions only)")
     name = entry.get("tmux_session")
     if not name:
         return OpResult(False, f"session {pid} is not tmux-parked")

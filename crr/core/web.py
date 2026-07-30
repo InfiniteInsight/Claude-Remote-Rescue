@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, NamedTuple
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 8  # v8: De-tmux button on tmux-parked cards
+PAGE_VERSION = 9  # v9: De-tmux gated to crashed cards; detmux classifier-gated
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
