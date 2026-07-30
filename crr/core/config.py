@@ -25,7 +25,9 @@ from typing import Any, Mapping
 
 # Bump when a default value changes meaning, so a consumer pinning
 # behavior can detect the shift.
-CONFIG_DEFAULTS_VERSION = 1
+# v2: dropped watcher_backoff_count / watcher_cooldown_seconds / reopen_grace_seconds
+# (no crr mechanism consumes them; see DESIGN)
+CONFIG_DEFAULTS_VERSION = 2
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -33,11 +35,8 @@ DEFAULTS: dict[str, Any] = {
     # watchdog / revival
     "zombie_strikes": 3,             # strikes before a re-dying session is archived
     "watchdog_interval_seconds": 30, # how often the systemd timer sweeps for revivals
-    "watcher_backoff_count": 5,      # consecutive revival attempts before backing off
-    "watcher_cooldown_seconds": 60,
     # session operations
     "close_grace_seconds": 5,     # wait after a polite close before force
-    "reopen_grace_seconds": 5,    # wait for a revived tab to register
     # diagnostics
     "diagnose_lookback_boots": 1,  # how many prior boots to inspect
     "diagnose_event_cap": 50,      # max events returned per source

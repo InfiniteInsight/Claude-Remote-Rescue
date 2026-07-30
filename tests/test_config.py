@@ -29,7 +29,6 @@ def test_audit_floor_priors_are_present():
     floor = {
         "zombie_strikes",
         "close_grace_seconds",
-        "reopen_grace_seconds",
         "diagnose_lookback_boots",
         "diagnose_event_cap",
         "diagnose_line_cap",
@@ -37,13 +36,21 @@ def test_audit_floor_priors_are_present():
         "dashboard_poll_seconds",
         "version_check_seconds",
         "last_prompt_display_cap",
-        "watcher_backoff_count",
-        "watcher_cooldown_seconds",
         "watchdog_interval_seconds",
         "archive_retention_days",
         "host_allowlist_extras",
     }
     assert floor <= set(cfg.DEFAULTS)
+
+
+def test_vestigial_keys_are_gone_and_version_bumped():
+    """[audit 2026-07-29] these keys had zero consumers — a knob wired to
+    nothing is an invisible lie, not a prior."""
+    for gone in ("reopen_grace_seconds", "watcher_backoff_count", "watcher_cooldown_seconds"):
+        assert gone not in cfg.DEFAULTS
+        with pytest.raises(cfg.ConfigError):
+            cfg.Config({gone: 1})   # now an unknown key: loud, not silent
+    assert cfg.CONFIG_DEFAULTS_VERSION == 2
 
 
 def test_terminal_prior_defaults_to_auto():

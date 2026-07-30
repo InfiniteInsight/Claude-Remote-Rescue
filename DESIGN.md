@@ -249,10 +249,14 @@ resume flags. Same shape as ccresume's, extended per-platform.
 **Requirement (audit P5 — Injectable priors):** every constant that encodes
 a judgment call is named config with a versioned default — never a magic
 number in logic. The audit's caught set becomes the floor: zombie strike
-count, close/reopen grace windows, diagnose lookback window / event cap /
+count, close grace window, diagnose lookback window / event cap /
 line cap / interop timeout, dashboard poll and version-check intervals,
-last-prompt display cap, watcher backoff count and cooldown. New timing or
-threshold decisions join this list at introduction time, not at audit time.
+last-prompt display cap. New timing or threshold decisions join this list
+at introduction time, not at audit time. ccresume's watcher backoff/cooldown
+and reopen tab-registration grace have no crr counterpart — the reviver's
+strike-based give-up guard and the tmux-first reopen replaced those
+mechanisms — so those knobs deliberately do not exist here (a knob wired to
+nothing is worse than a magic number).
 
 **Requirement (audit P3 — Confidence + provenance, applied to config):**
 `crr config --effective` prints every key with its value AND its origin
