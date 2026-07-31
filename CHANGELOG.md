@@ -26,7 +26,18 @@ No tag or release has been cut yet. This section describes everything on
   shim-side repair loop (`crr repair-check`) that each `claude()` wrapper
   consumes after every claude exit to branch on kick/close/crash.
 - `crr detmux` — re-home a revived (tmux-parked) session into a visible
-  terminal tab, with a matching dashboard button.
+  terminal tab, with a matching dashboard button (labeled `Untrack` on the
+  dashboard — the tab still runs tmux underneath, so the button no longer
+  claims otherwise; the op/API name stays `detmux`).
+- `crr untmux` — the genuinely tmux-free counterpart: kills the parked
+  tmux session and relaunches `claude --resume <sid>` directly in a
+  visible tab, no wrapper left behind. Same classifier/parked/live gates
+  as `detmux`, plus a spawner-availability refusal that runs *before* the
+  kill so a missing spawner never destroys a live tmux session. Archives
+  successes with reason `untmuxed` (terminal — not revived by the
+  watchdog). Dashboard button: `Un-tmux`, confirm-gated (a second click)
+  since it kills and relaunches. (PAGE_VERSION 12; confirm-gate state
+  hardened at 13)
 - Web dashboard (`crr web`), a stdlib-only HTTP server bound to loopback by
   default (meant to be exposed via `tailscale serve`), with sortable/
   groupable/filterable session cards, confidence-weighted duplicate
@@ -74,6 +85,23 @@ No tag or release has been cut yet. This section describes everything on
 - `CONFIG_DEFAULTS_VERSION` bumped to 2: dropped the consumer-less
   `watcher_backoff_count`, `watcher_cooldown_seconds`, and
   `reopen_grace_seconds` keys (no crr mechanism reads them).
+- Restore-prompt UX (Phase 3): `crr rescued` lists prior-boot
+  conversations the reviver already parked in live tmux, awaiting
+  re-homing; `crr rescue-check` — a shim-facing (`[shim]`) hook called
+  once per interactive shell start (the bash/zsh/fish shims all call it)
+  — offers to re-home that same set into visible terminal tabs, once per
+  boot. A typed empty line (Enter) defaults to yes; an unattended
+  timeout always defaults to "not now" — it never auto-spawns tabs.
+  Headless hosts (no tab spawner) degrade to a one-line notice instead
+  of a prompt. New config key
+  `rescue_prompt_timeout_seconds` (default 15).
+- Docs site (`docs/site/`): a static, dependency-free HTML5 + CSS site —
+  no JavaScript, no CDN/webfonts/analytics, dark-scheme aware via
+  `prefers-color-scheme`, works from `file://` and GitHub Pages —
+  covering the mission, how-it-works pipeline, the restore-prompt UX, the
+  install flow, the user-facing `crr` command table, dashboard screenshot and
+  button set, the security model, and the project's honest calibration
+  line. Linked from the README; not yet published to GitHub Pages.
 
 ### Changed
 
@@ -101,6 +129,46 @@ No tag or release has been cut yet. This section describes everything on
   CRASHED sessions like every other destructive op — a live/ghost card
   can carry a stale `tmux_session` field, and previously the op had no
   gate at all. (PAGE_VERSION 9)
+- `crr systemd` now bakes `wt.exe`/`wsl.exe`'s resolved dirs into the
+  service PATH on WSL: neither lives in `SERVICE_BINARIES` + system dirs,
+  so the deployed `crr-web.service` couldn't resolve them and the
+  dashboard's tab spawner reported "no terminal tab spawner is available
+  on this host" for both De-tmux and Reopen even though an interactive
+  shell (which inherits the Windows-appended PATH) resolved both fine.
+  `resolve_service_path` takes an `extra_binaries` param for this so
+  `SERVICE_BINARIES` — and non-WSL Linux's PATH/warnings — stay
+  unchanged. The same service-doesn't-inherit-the-shell gap also applied
+  to `WSL_DISTRO_NAME` (read at request time to target `wsl.exe
+  --distribution <name>`), so it's now baked into the unit the same way
+  `XDG_STATE_HOME` already was — a multi-distro host would otherwise
+  silently open the tab in the default distro instead of this one. The
+  "not found on PATH" warning also no longer claims wt.exe/wsl.exe going
+  missing will make "revived sessions fail on exec" — that's true only
+  for the original `SERVICE_BINARIES`; a missing tab-spawn extra gets its
+  own, accurate warning. Reopen's tab-open fallback also no longer
+  returns a silent `""` when no spawner is available: it now names the
+  reason and gives the `tmux attach -t <name>` command, so a revival that
+  landed but couldn't open a visible tab doesn't look like it did
+  nothing.
+- `crr systemd --install` no longer fails the whole install when only
+  `loginctl enable-linger` exits nonzero (live evidence, WSL2: this
+  reliably fails with a benign dbus quirk while the timer/web services
+  come up fine, since the user manager starts with the session anyway) —
+  the exit-code-honesty fix above was over-claiming failure in the other
+  direction. `daemon-reload`/`enable --now` failures still hard-fail the
+  install (exit 1, no success line); a linger-only failure now exits 0,
+  prints the success line, and warns on stderr instead. The split lives
+  in the adapter (`systemd.critical_enable_commands()` +
+  `systemd.linger_command()`); `systemd.enable_commands()` is unchanged
+  for `crr systemd` print mode.
+- `crr rescue-check`'s once-per-boot prompt was check-then-act
+  (`already_prompted`/`mark_prompted`): two interactive shells starting
+  together (e.g. a terminal app restoring several tabs) could both pass
+  the exists() check before either wrote the marker, so both could
+  prompt and both detmux the same rescued sessions. Closed via an atomic
+  marker claim (`rescue.claim_prompt`, an `os.open(O_CREAT|O_EXCL)`
+  claim taken before either visible outcome) so at most one shell ever
+  prompts even when several start at once.
 
 ### Security
 

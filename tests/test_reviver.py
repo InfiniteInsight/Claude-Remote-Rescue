@@ -251,6 +251,28 @@ def test_detmuxed_archive_record_is_not_re_revived(tmp_path):
     assert tmux.created == []
 
 
+def test_untmuxed_archive_record_is_not_re_revived(tmp_path):
+    # [user request 2026-07-31] An untmuxed record is also terminal: the
+    # user took manual ownership of a bare `claude --resume` in a visible
+    # tab, with no crr-managed wrapper left behind. Without this skip, the
+    # archive loop's fallthrough to 'revive' would spawn a fresh detached
+    # tmux session for a conversation the user deliberately took out of
+    # tmux — exactly the resurrection ops.untmux's delist is meant to
+    # prevent, and it would make its "crr no longer manages it" message a
+    # lie.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(), tmux_session="crr-8a1b2c3d",
+    )
+    archive.archive(entry, "untmuxed", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())  # the killed tmux session is gone
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []
+
+
 def test_ghost_restored_archive_records_are_revival_candidates(tmp_path):
     # [user request 2026-07-30] ops.reopen's GHOST branch preserves a ghost
     # card's conversation to the archive as "ghost-restored" *before*

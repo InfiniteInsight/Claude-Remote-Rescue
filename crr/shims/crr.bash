@@ -27,6 +27,11 @@ _crr_host() {
 # Register this shell at start.
 _crr register --pid "$$" --cwd "$PWD" --shell bash --host "$(_crr_host)" >/dev/null
 
+# Phase-3 restore prompt: once per boot, offer to re-home rescued sessions.
+if [[ $- == *i* && -x "$_CRR_BIN" ]]; then
+    "$_CRR_BIN" rescue-check 2>/dev/null
+fi
+
 # preexec approximation: record the command about to run, plus current cwd.
 # Skip the shim's own helpers and completion so we don't journal noise.
 _crr_preexec() {

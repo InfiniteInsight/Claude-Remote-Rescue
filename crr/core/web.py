@@ -30,7 +30,7 @@ from crr.core import config as cfg
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 11  # v11: Restore button on ghost cards (reopen handles ghosts)
+PAGE_VERSION = 13  # v13: confirm-gate state hoisted module-level (survives re-render, resets on fire)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -106,7 +106,7 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
-ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "detmux")
+ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "detmux", "untmux")
 
 
 def _plain(status: int, text: str) -> Response:

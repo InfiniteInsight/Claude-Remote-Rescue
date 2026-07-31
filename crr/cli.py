@@ -6,8 +6,8 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close/detmux), diagnose, gc, the web dashboard,
-the systemd watchdog, and the shim-facing hooks.
+(reopen/dismiss/remove/kick/close/detmux/untmux), diagnose, gc, the web
+dashboard, the systemd watchdog, and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import platform
+import select
 import shutil
 import socket
 import subprocess
@@ -35,7 +36,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, ops, ports, resume, reviver, status, web
+from crr.core import contracts, ops, ports, rescue, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -119,6 +120,24 @@ def _build_parser() -> argparse.ArgumentParser:
     dtm = sub.add_parser("detmux", help="re-home a revived tmux session into a visible tab")
     dtm.add_argument("pid", type=int)
     dtm.set_defaults(func=_cmd_detmux)
+
+    utm = sub.add_parser(
+        "untmux", help="kill a parked tmux session and relaunch claude --resume in a visible tab"
+    )
+    utm.add_argument("pid", type=int)
+    utm.set_defaults(func=_cmd_untmux)
+
+    rescued = sub.add_parser(
+        "rescued",
+        help="list conversations rescued from a previous boot (awaiting re-home)",
+    )
+    rescued.set_defaults(func=_cmd_rescued)
+
+    resc_chk = sub.add_parser(
+        "rescue-check",
+        help="[shim] once per boot, offer to re-home rescued conversations",
+    )
+    resc_chk.set_defaults(func=_cmd_rescue_check)
 
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
@@ -754,6 +773,163 @@ def _cmd_detmux(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def _cmd_untmux(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr untmux: {exc}", file=sys.stderr)
+        return 2
+    config = _load_config()
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr untmux: tmux was not found", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
+                         tab_spawner=_tab_spawner(config))
+    print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if res.ok else 1
+
+
+def _cmd_rescued(_args: argparse.Namespace) -> int:
+    """List prior-boot conversations the reviver parked in live tmux,
+    awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
+    config = _load_config()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr rescued: {exc}", file=sys.stderr)
+        return 2
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    store = JournalStore(state_dir.state_dir())
+    scan = store.scan()
+    found = rescue.rescued_sessions(scan.entries, boot.current(), live)
+    # Corrupt files are surfaced on stderr, never silently dropped (mirrors
+    # _cmd_status/_cmd_revive/_cmd_gc).
+    for name, reason in scan.problems:
+        print(f"crr rescued: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    if not found:
+        print("no rescued sessions")
+        return 0
+    for e in found:
+        sid8 = e["claude"]["session_id"][:8]
+        print(f"#{e['pid']} · {sid8} {e['cwd']} → {e['tmux_session']}")
+    print("attach: tmux attach -t <name> · dashboard: Reopen/Untrack")
+    return 0
+
+
+def _cmd_rescue_check(args: argparse.Namespace) -> int:
+    """[shim] Once per boot, on an interactive shell's first start, offer
+    to re-home conversations `crr.core.rescue` found parked from a
+    previous boot's crash into visible terminal tabs (Phase-3
+    restore-prompt UX). Silent when there's nothing to offer, when this
+    boot's marker already exists, or when stdin/stdout aren't a tty (the
+    marker is deliberately NOT written in that case, so a later
+    interactive shell in the same boot still gets offered). A timeout —
+    an unattended prompt — is always treated as "not now"; only a typed
+    empty line (Enter) defaults to yes. Headless (no tab spawner) degrades
+    to a one-line notice instead of a prompt.
+
+    Once-per-boot is enforced by `rescue.claim_prompt` — an atomic
+    O_CREAT|O_EXCL marker claim taken AFTER candidates are found but
+    BEFORE either visible outcome (the [Y/n] prompt or the headless
+    notice) is printed. This closes a Task-3 review finding: two
+    interactive shells starting together (e.g. a terminal app restoring
+    several tabs) both used to pass the old check-then-act
+    already_prompted() exists() check before either wrote the marker, so
+    both could prompt and both detmux the same sessions. Now the winner
+    claims first; a losing shell (claim_prompt returns False) exits
+    silently without printing anything, and a mid-prompt Ctrl-C/crash no
+    longer re-arms the prompt for the next shell (the marker is already
+    down) — `crr rescued` remains the recovery path regardless.
+
+    Called by the shims (crr.bash/zsh/fish) on every new interactive
+    shell's startup, so the entire body is guarded: any unexpected
+    exception must never break the shell it's sourced into — it exits 0
+    silently rather than propagating.
+    """
+    try:
+        return _rescue_check(args)
+    except Exception:
+        return 0
+
+
+def _rescue_check(_args: argparse.Namespace) -> int:
+    # Cheapest check first: a non-interactive caller (script sourcing the
+    # shim, non-tty redirect) never gets a marker written, so it costs
+    # nothing to bail before touching tmux/the journal/boot identity.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return 0
+    config = _load_config()
+    sd = state_dir.state_dir()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError:
+        return 0
+    boot_id = boot.current()
+    if rescue.already_prompted(sd, boot_id):
+        return 0
+
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    store = JournalStore(sd)
+    found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
+    if not found:
+        return 0
+
+    # Atomic once-per-boot claim, taken BEFORE either visible outcome
+    # below (prompt or headless notice) — the winner proceeds; a losing
+    # shell (a concurrent shell already claimed this boot) exits silently
+    # without printing anything (see claim_prompt's docstring).
+    if not rescue.claim_prompt(sd, boot_id):
+        return 0
+
+    n = len(found)
+    tab = _tab_spawner(config)
+    if tab is None or not tab.available():
+        print(f"crr: {n} conversation(s) rescued from the last reboot — "
+              "'crr rescued' lists them; attach with: tmux attach -t <name>")
+        return 0
+
+    print(f"crr: {n} conversation(s) rescued from the last reboot. "
+          "Open them in terminal tabs? [Y/n] ", end="", flush=True)
+    timeout = config.get("rescue_prompt_timeout_seconds")
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        line = sys.stdin.readline() if ready else ""  # "" on timeout, or EOF with stdin closed
+    except KeyboardInterrupt:
+        # Ctrl-C at an unattended-or-not prompt must decline like a
+        # timeout, not propagate (outer `except Exception` in
+        # _cmd_rescue_check doesn't catch KeyboardInterrupt — a bare
+        # widen there would silence the traceback). The claim above
+        # already happened before this prompt was printed, so there is
+        # no marker write left to skip here.
+        print()
+        print("not now — 'crr rescued' lists them")
+        return 0
+    if not line:
+        print()  # nothing was typed/echoed by a terminal -> start the decline on its own line
+    answer = line.strip().lower() if line else None
+
+    if answer in ("", "y"):
+        probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+        with mutation_lock(sd):
+            for e in found:
+                res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe,
+                                 e["pid"], _now(), tab_spawner=tab)
+                # All three shims invoke `crr rescue-check 2>/dev/null`, so
+                # stderr is silenced here — the user already consented (typed
+                # Y) and must see failures, not just successes. Both outcomes
+                # go to stdout unconditionally.
+                print(res.message)
+    else:  # 'n'/'N', any other input, timeout, or EOF -> decline
+        print("not now — 'crr rescued' lists them")
+    return 0
+
+
 def make_web_handler(
     sessions_provider: Callable[[], dict],
     allowed_hosts: set[str],
@@ -927,6 +1103,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
                                 grace=config.get("close_grace_seconds"))
             elif op == "detmux":
                 res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+            elif op == "untmux":
+                res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message
@@ -962,21 +1140,44 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
         return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
-    path, missing = systemd.resolve_service_path(crr_bin)
+    # WSL tab-spawning (Untrack/Un-tmux/Reopen) shells out to wt.exe/wsl.exe, which
+    # live under Windows dirs a service's PATH never inherits ([lesson:
+    # interop PATH]) — baked as extras here, not in systemd.py, so native
+    # Linux never warns about a "missing" wt.exe.
+    is_wsl = host.is_wsl()
+    extras = ("wt.exe", "wsl.exe") if is_wsl else ()
+    path, missing = systemd.resolve_service_path(crr_bin, extra_binaries=extras)
     # XDG_STATE_HOME baked so the service watches the SAME state dir the shims
     # write to (state_dir() is <XDG_STATE_HOME>/crr; bake its parent).
     state_home = str(state_dir.state_dir().parent)
+    # Same reason as XDG_STATE_HOME: the service won't see this install-time
+    # shell's WSL_DISTRO_NAME either, and the tab spawner needs it to target
+    # the right distro instead of silently falling back to the default one.
+    wsl_distro = os.environ.get("WSL_DISTRO_NAME", "") if is_wsl else ""
     interval = config.get("watchdog_interval_seconds")
     units = {
         systemd.SERVICE_NAME: systemd.revive_service_unit(crr_bin, path, state_home),
         systemd.TIMER_NAME: systemd.revive_timer_unit(interval),
-        systemd.WEB_SERVICE_NAME: systemd.web_service_unit(crr_bin, path, state_home, args.port),
+        systemd.WEB_SERVICE_NAME: systemd.web_service_unit(
+            crr_bin, path, state_home, args.port, wsl_distro
+        ),
     }
 
-    if missing:
+    # extras (wt.exe/wsl.exe) only degrade tab spawning, never revival —
+    # reused verbatim, the revival wording below would overclaim for them.
+    critical_missing = [m for m in missing if m not in extras]
+    tab_missing = [m for m in missing if m in extras]
+    if critical_missing:
         print(
             "crr systemd: WARNING — not found on PATH: "
-            f"{', '.join(missing)}; revived sessions will fail on exec until these resolve",
+            f"{', '.join(critical_missing)}; revived sessions will fail on exec until these resolve",
+            file=sys.stderr,
+        )
+    if tab_missing:
+        print(
+            "crr systemd: WARNING — not found on PATH: "
+            f"{', '.join(tab_missing)}; Untrack/Un-tmux/Reopen tab spawning will be unavailable "
+            "until these resolve",
             file=sys.stderr,
         )
 
@@ -995,10 +1196,26 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     if args.install:
         ud = systemd.unit_dir(Path.home())
         systemd.write_units(ud, units)
-        if not _run_commands(systemd.enable_commands(), "systemd"):
+        if not _run_commands(systemd.critical_enable_commands(), "systemd"):
             print(f"crr systemd: units written to {ud} but enabling FAILED (see above); "
                   "the watchdog/dashboard are NOT running", file=sys.stderr)
             return 1
+        # linger is judged separately: on WSL2 `loginctl enable-linger`
+        # reliably exits 1 (a benign dbus quirk) even though the services
+        # run fine, since the user manager starts with the session anyway —
+        # failing it here would over-claim total install failure the same
+        # way the exit-code-honesty fix over-claimed success before it.
+        linger_cmd = systemd.linger_command()
+        try:
+            linger_ok = subprocess.run(linger_cmd, check=False).returncode == 0
+        except OSError:
+            linger_ok = False
+        if not linger_ok:
+            print(
+                "crr systemd: warning — could not enable linger (common on WSL2); "
+                "services will stop at logout unless linger is enabled another way",
+                file=sys.stderr,
+            )
         print(f"installed watchdog + dashboard units to {ud} and enabled them")
         return 0
 

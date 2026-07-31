@@ -40,11 +40,20 @@ _SYSTEM_PATH_DIRS = (
 )
 
 
-def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
-    """Return (PATH string, list of unresolved SERVICE_BINARIES names).
+def resolve_service_path(
+    crr_bin: str, extra_binaries: tuple[str, ...] = ()
+) -> tuple[str, list[str]]:
+    """Return (PATH string, list of unresolved binary names).
 
-    Dirs are ordered: crr's own dir, then the dirs of each resolved service
-    binary, then existing system dirs — deduped, order-preserving.
+    Dirs are ordered: crr's own dir, then the dirs of each resolved binary
+    (SERVICE_BINARIES followed by any caller-supplied ``extra_binaries``),
+    then existing system dirs — deduped, order-preserving.
+
+    ``extra_binaries`` exists for host-specific extras a caller wants baked
+    in without touching SERVICE_BINARIES itself — e.g. the CLI passes
+    ``("wt.exe", "wsl.exe")`` on WSL, since a service's PATH does not
+    inherit the interactive shell's Windows-appended entries and the tab
+    spawner shells out to them directly ([lesson: interop PATH]).
     """
     dirs: list[str] = []
 
@@ -54,7 +63,7 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
 
     add(os.path.dirname(os.path.abspath(crr_bin)))
     missing: list[str] = []
-    for name in SERVICE_BINARIES:
+    for name in (*SERVICE_BINARIES, *extra_binaries):
         found = shutil.which(name)
         if found:
             add(os.path.dirname(os.path.abspath(found)))
@@ -103,13 +112,23 @@ def revive_timer_unit(interval_seconds: int) -> str:
     )
 
 
-def web_service_unit(crr_bin: str, path: str, state_home: str, port: int) -> str:
+def web_service_unit(
+    crr_bin: str, path: str, state_home: str, port: int, wsl_distro: str = ""
+) -> str:
     """A long-running dashboard service (loopback; tailnet-served).
 
     Type=simple + Restart so the dashboard stays up across crashes, and
     WantedBy=default.target + linger so it survives logout and comes back
     at (re)boot — the ROADMAP's "dashboard reachable after reboot".
+
+    ``wsl_distro``, when given, bakes ``WSL_DISTRO_NAME`` the same way
+    ``XDG_STATE_HOME`` is baked above: the service does not inherit the
+    interactive shell's exported vars, and cli.py's tab-spawner selection
+    reads ``os.environ.get("WSL_DISTRO_NAME")`` at request time to target
+    ``wsl.exe --distribution <name>`` — unbaked, a multi-distro host would
+    silently open the tab in the *default* distro instead of this one.
     """
+    distro_line = f"Environment=WSL_DISTRO_NAME={wsl_distro}\n" if wsl_distro else ""
     return (
         "[Unit]\n"
         "Description=Claude-Remote-Rescue dashboard (loopback; tailnet-served)\n"
@@ -118,6 +137,7 @@ def web_service_unit(crr_bin: str, path: str, state_home: str, port: int) -> str
         "Type=simple\n"
         f"Environment=PATH={path}\n"
         f"Environment=XDG_STATE_HOME={state_home}\n"
+        f"{distro_line}"
         f"ExecStart={crr_bin} web --port {port}\n"
         "Restart=on-failure\n"
         "RestartSec=2\n"
@@ -143,18 +163,40 @@ def write_units(target_dir: Path, units: dict[str, str]) -> list[Path]:
     return paths
 
 
-def enable_commands() -> list[list[str]]:
-    """The commands that activate the watchdog + dashboard (data, not run).
+def critical_enable_commands() -> list[list[str]]:
+    """The enable commands whose failure means the install genuinely failed.
 
-    linger lets the user manager run the timer and the dashboard without an
-    active login — essential on a headless box reached only by SSH.
+    Split from linger ([Task 7], live evidence 2026-07-31): on WSL2,
+    `loginctl enable-linger` reliably exits 1 (a benign dbus quirk) even
+    though the services run fine — the user manager starts with the
+    session regardless. Only these three (data-writing, real service
+    activation) are load-bearing for "is the watchdog/dashboard running".
     """
     return [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", TIMER_NAME],
         ["systemctl", "--user", "enable", "--now", WEB_SERVICE_NAME],
-        ["loginctl", "enable-linger"],
     ]
+
+
+def linger_command() -> list[str]:
+    """The linger-enable command, run and judged separately from the above.
+
+    linger lets the user manager run the timer and the dashboard without an
+    active login — essential on a headless box reached only by SSH. Its
+    failure is downgraded to a warning by the caller (see
+    critical_enable_commands' docstring) rather than failing the install.
+    """
+    return ["loginctl", "enable-linger"]
+
+
+def enable_commands() -> list[list[str]]:
+    """The full activation sequence (data, not run) — print-mode output.
+
+    Unchanged by the critical/linger split: still all four commands, in the
+    same order, for `crr systemd` (no --install) to display verbatim.
+    """
+    return critical_enable_commands() + [linger_command()]
 
 
 def disable_commands() -> list[list[str]]:

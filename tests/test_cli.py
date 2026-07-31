@@ -11,8 +11,10 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,8 +127,105 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert "ExecStart=/opt/crr/bin/crr revive" in out
     # XDG_STATE_HOME baked as the parent of the resolved state dir.
     assert f"Environment=XDG_STATE_HOME={tmp_path / 'state'}" in out
+    # [Task 7] print mode must still list linger (enable_commands(), not the
+    # critical-only split) — pinned at the CLI boundary, not just algebraically
+    # in test_systemd.py, so a future cli.py swap to critical_enable_commands()
+    # here would be caught.
+    assert "loginctl enable-linger" in out
     # Print mode must not touch the user's systemd dir.
     assert not (tmp_path / ".config" / "systemd").exists()
+
+
+def test_systemd_print_bakes_wt_exe_dir_into_path_on_wsl(tmp_path, monkeypatch, capsys):
+    # [live bug, 2026-07-31] wt.exe/wsl.exe live under Windows dirs that the
+    # baked SERVICE_BINARIES loop never sees, so the deployed service PATH
+    # could not resolve them and the dashboard's tab spawner reported
+    # unavailable. On WSL, the unit's PATH must include their dirs.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+
+    def fake_which(name):
+        if name == "wt.exe":
+            return "/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps/wt.exe"
+        if name == "wsl.exe":
+            return "/mnt/c/windows/system32/wsl.exe"
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(cli.systemd.shutil, "which", fake_which)
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps" in out
+    assert "/mnt/c/windows/system32" in out
+
+
+def test_systemd_print_does_not_consult_wt_exe_when_not_wsl(tmp_path, monkeypatch, capsys):
+    # Non-WSL Linux must not warn about (or even look for) wt.exe/wsl.exe —
+    # the extras are caller-supplied, SERVICE_BINARIES itself is untouched.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    consulted = []
+
+    def fake_which(name):
+        consulted.append(name)
+        return f"/usr/bin/{name}" if name in cli.systemd.SERVICE_BINARIES else None
+
+    monkeypatch.setattr(cli.systemd.shutil, "which", fake_which)
+    rc = cli.main(["systemd"])
+    assert rc == 0
+    assert "wt.exe" not in consulted and "wsl.exe" not in consulted
+
+
+def test_systemd_print_bakes_wsl_distro_name_when_wsl(tmp_path, monkeypatch, capsys):
+    # A systemd user service does not inherit the interactive shell's
+    # WSL_DISTRO_NAME any more than XDG_STATE_HOME — without baking it,
+    # WindowsTerminalSpawner (read at request time via os.environ) would
+    # open tabs in the host's default distro instead of this one.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Environment=WSL_DISTRO_NAME=Ubuntu" in out
+
+
+def test_systemd_print_warns_accurately_when_only_tab_spawn_binaries_missing(
+    tmp_path, monkeypatch, capsys
+):
+    # wt.exe/wsl.exe missing only degrades tab spawning (Untrack/Un-tmux/Reopen),
+    # never revival — the pre-existing "revived sessions will fail on exec"
+    # wording would overclaim if reused verbatim for these extras.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+
+    def fake_which(name):
+        return None if name in ("wt.exe", "wsl.exe") else f"/usr/bin/{name}"
+
+    monkeypatch.setattr(cli.systemd.shutil, "which", fake_which)
+    rc = cli.main(["systemd"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "wt.exe" in err and "wsl.exe" in err
+    assert "revived sessions will fail on exec" not in err
+    assert "tab" in err.lower()
+
+
+def test_systemd_print_omits_wsl_distro_name_when_not_wsl(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")  # e.g. stale env from another host
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WSL_DISTRO_NAME" not in out
 
 
 def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
@@ -183,6 +282,56 @@ def test_systemd_install_success_still_reports(tmp_path, monkeypatch, capsys):
     rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
     assert rc == 0
     assert "installed watchdog" in capsys.readouterr().out
+
+
+def test_systemd_install_linger_failure_is_a_warning_not_a_failure(tmp_path, monkeypatch, capsys):
+    """[Task 7, live evidence 2026-07-31] on WSL2 `loginctl enable-linger`
+    reliably exits 1 (benign dbus quirk) while daemon-reload/enable succeed
+    and the services really do run. Only linger failing must NOT fail the
+    install — it must warn on stderr and still report success."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        rc = 1 if cmd == cli.systemd.linger_command() else 0
+        return subprocess.CompletedProcess(cmd, returncode=rc)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "installed watchdog" in out
+    assert (
+        "crr systemd: warning — could not enable linger (common on WSL2); "
+        "services will stop at logout unless linger is enabled another way"
+    ) in err
+    # Exactly one line, and NOT the generic _run_commands-style "exited 1" —
+    # the whole point of bypassing _run_commands for linger.
+    assert "exited 1" not in err
+    assert err.count("could not enable linger") == 1
+    assert cli.systemd.linger_command() in calls
+
+
+def test_systemd_install_enable_failure_still_fails_even_if_linger_would_succeed(
+    tmp_path, monkeypatch, capsys
+):
+    """A real enable failure (not linger) must still hard-fail the install —
+    the linger carve-out must not swallow other failures."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        rc = 1 if cmd[:2] == ["systemctl", "--user"] and "enable" in cmd else 0
+        return subprocess.CompletedProcess(cmd, returncode=rc)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    out, err = capsys.readouterr()
+    assert rc != 0
+    assert "installed watchdog" not in out
+    assert "NOT running" in err
+    # The linger carve-out must not mask/mention this failure.
+    assert "could not enable linger" not in err
 
 
 def test_launchd_install_failure_propagates(tmp_path, monkeypatch, capsys):
@@ -1028,6 +1177,420 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "de-tmuxed" in out
     assert "crr no longer manages it" in out
+
+
+@pytest.mark.skipif(
+    shutil.which("tmux") is None or platform.system() not in ("Linux", "Darwin"),
+    reason="untmux needs tmux + Linux/macOS boot adapter",
+)
+def test_untmux_reports_no_session(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["untmux", "424242"])
+    assert rc == 1
+    assert "no session" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="untmux classifies (needs Linux or macOS boot adapter)")
+def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
+    # Mirrors test_detmux_attaches_a_session_via_cli: fake tmux + fake
+    # (always-available) tab spawner stand in for the real adapters, so this
+    # pins the CLI wiring (parser -> mutation_lock -> ops.untmux with the
+    # journaled store) without touching real tmux state.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    name = "crr-untmuxtest"
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return {name}
+
+        def kill_session(self, session_name):
+            pass
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+        def open_tab(self, argv, cwd=None):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+
+    rc = cli.main(["untmux", "42"])
+    assert rc == 0
+    with pytest.raises(KeyError):
+        store.read(42)
+    out = capsys.readouterr().out
+    assert "un-tmuxed" in out
+    assert "crr no longer manages it" in out
+
+
+class _FakeBoot:
+    """Stands in for boot_identity.detect() so `rescued` tests aren't
+    gated to a real Linux/macOS boot adapter (mirrors the fake-tmux
+    technique used by test_detmux_attaches_a_session_via_cli)."""
+
+    def current(self):
+        return "current-boot"
+
+
+class _FakeTmuxRescued:
+    def __init__(self, *a, **k):
+        pass
+
+    def available(self):
+        return True
+
+    def list_sessions(self):
+        return {"crr-8a1b2c3d"}
+
+
+def test_rescued_lists_prior_boot_parked_sessions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(  # prior-boot entry parked in a live tmux session
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d",
+    ))
+
+    rc = cli.main(["rescued"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"#42 · 8a1b2c3d {tmp_path} → crr-8a1b2c3d" in out
+    assert "attach: tmux attach -t <name> · dashboard: Reopen/Untrack" in out
+
+
+def test_rescued_reports_none(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+
+    rc = cli.main(["rescued"])
+    assert rc == 0
+    assert "no rescued sessions" in capsys.readouterr().out
+
+
+def _rescue_check_setup(monkeypatch, tmp_path, found):
+    """Common wiring for `crr rescue-check` tests: fake boot + fake tmux
+    (SAFETY: never the real adapters — this machine runs production crr
+    with live sessions) and a monkeypatched rescue.rescued_sessions that
+    ignores its (journal/boot/live-tmux) inputs and returns `found`
+    directly, so tests don't need real journal fixtures."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+    monkeypatch.setattr(cli.rescue, "rescued_sessions", lambda *a, **k: found)
+
+
+def test_rescue_check_silent_when_marker_exists(tmp_path, monkeypatch, capsys):
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    cli.rescue.claim_prompt(tmp_path, "current-boot")  # already prompted this boot
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(a))
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
+    assert calls == []
+
+
+def test_rescue_check_silent_when_not_a_tty(tmp_path, monkeypatch, capsys):
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
+    # a later interactive shell must still be offered -> marker NOT written
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is False
+
+
+def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys):
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: None)
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 conversation(s) rescued from the last reboot" in out
+    assert "'crr rescued' lists them" in out
+    assert "tmux attach -t <name>" in out
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+    rc2 = cli.main(["rescue-check"])
+    out2 = capsys.readouterr().out
+    assert rc2 == 0
+    assert out2 == ""  # once-per-boot: second call is silent
+
+
+def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypatch, capsys):
+    """The headless-notice outcome must ALSO claim before it becomes
+    visible (brief: "decide deliberately where the claim happens for the
+    notice outcome too... claim before printing it") — not just the
+    interactive [Y/n] prompt. Force the claim to lose and assert the
+    notice text never reaches stdout, discriminating this from an
+    implementation that prints the notice first and claims/marks after."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: None)
+    monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
+
+
+def test_rescue_check_yes_opens_tabs_and_marks(tmp_path, monkeypatch, capsys):
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
+
+    calls = []
+
+    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+        calls.append(pid)
+        return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
+
+    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [42, 43]
+    assert "#42 de-tmuxed" in out and "#43 de-tmuxed" in out
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch, capsys):
+    """All three shims invoke `crr rescue-check 2>/dev/null`, so anything
+    written to stderr from this consent path is thrown away — a user who
+    just typed 'y' would never see a detmux failure. Both success and
+    failure messages from the post-consent loop must land on stdout."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
+
+    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+        if pid == 42:
+            return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
+        return SimpleNamespace(ok=False, message=f"crr: #{pid} de-tmux failed")
+
+    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "#42 de-tmuxed" in out
+    assert "#43 de-tmux failed" in out
+    assert err == ""
+
+
+def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
+    # The decided-and-recorded half of the yes/no split: a typed EMPTY
+    # line (just pressing Enter) is yes -- distinct from a TIMEOUT, which
+    # is always "not now" (see test_rescue_check_timeout_declines). An
+    # implementation that only accepts a literal "y" would pass every
+    # other test here but fail this one.
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "\n")  # Enter, no text
+
+    calls = []
+
+    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+        calls.append(pid)
+        return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
+
+    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    assert calls == [42]
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
+    # stdin closed mid-read (readline returns "") is a decline, same as a
+    # timeout -- not an accident of "" also meaning Enter, since a real
+    # EOF never reaches the strip()/lower() step that "\n" does.
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "")  # EOF
+
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not now" in out
+    assert calls == []
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))
+
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not now" in out
+    assert "'crr rescued' lists them" in out
+    assert calls == []
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys):
+    # Ctrl-C while waiting at the [Y/n] prompt must behave like a timeout
+    # (decline), not propagate — a shim hook that lets a KeyboardInterrupt
+    # escape breaks the "never break the shell" guarantee. The marker was
+    # already written by claim_prompt BEFORE this prompt was printed (the
+    # winner claims before prompting), so the once-per-boot invariant holds
+    # even though the interrupt unwinds past the detmux/decline branch.
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    def _raise_keyboard_interrupt(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.select, "select", _raise_keyboard_interrupt)
+
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["rescue-check"])  # must not raise
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not now" in out
+    assert "'crr rescued' lists them" in out
+    assert calls == []
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_loser_of_race_is_silent(tmp_path, monkeypatch, capsys):
+    """Task-3 review's two-shell race: this shell loses the atomic claim
+    (a concurrent shell already claimed this boot's prompt) — it must
+    print nothing and never call detmux, matching the marker-exists case
+    but reached via claim_prompt returning False rather than a pre-check."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
+
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
+    assert calls == []
+
+
+def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monkeypatch, capsys):
+    """Winner claims BEFORE printing/waiting on the [Y/n] prompt: pin this
+    ordering by blowing up the prompt machinery (select.select) AFTER a
+    successful claim — the marker must still be durable (no re-arming the
+    prompt for the next shell) and the blanket exception guard in
+    _cmd_rescue_check must still return rc 0."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli.select, "select", _boom)
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):

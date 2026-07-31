@@ -11,6 +11,8 @@ also tells you *why* things died (journald — translated to plain English).
 
 Not affiliated with Anthropic. MIT licensed.
 
+Docs: [docs/site/](docs/site/) — servable via GitHub Pages.
+
 ## Status
 
 **Phases 1–4 code is on `main` (v0.1.0).** Headless Linux (Phase 1) plus the
@@ -101,7 +103,9 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr remove --pid N` | Delist a session, touch nothing else |
 | `crr kick <pid>` | Restart claude in place on the same conversation |
 | `crr close <pid>` | End a live session (remote exit); no revival |
-| `crr detmux <pid>` | Re-home a revived tmux session into a visible tab |
+| `crr detmux <pid>` | Re-home a revived tmux session into a visible tab (dashboard button: `Untrack` — the tab still runs tmux underneath) |
+| `crr untmux <pid>` | Kill a parked tmux session and relaunch `claude --resume` directly in a visible tab, no tmux wrapper left behind (dashboard button: `Un-tmux`, confirm-gated) |
+| `crr rescued` | List conversations the reviver already parked in tmux from a previous boot, awaiting re-home |
 | `crr diagnose [--json]` | Explain why the previous boot / sessions may have died |
 | `crr gc` | Drop archive records past the retention window |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |
@@ -112,6 +116,7 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr doctor` | Install-health checklist |
 | `crr shim <shell>` | Print the shell shim to source from your rc file (fish/bash/zsh) |
 | `crr repair-check --pid N` | [shim] Read/clear a session's relaunch/close flag |
+| `crr rescue-check` | [shim] Once per boot, offer to re-home rescued conversations into visible tabs |
 
 Targets: headless Linux (now), macOS / Linux-desktop / Windows-WSL (later).
 Shells: zsh, bash, fish.

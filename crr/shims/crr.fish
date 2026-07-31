@@ -30,6 +30,12 @@ end
 # Register this shell at start.
 _crr register --pid $fish_pid --cwd $PWD --shell fish --host (_crr_host) >/dev/null
 
+# Phase-3 restore prompt: once per boot, offer to re-home rescued sessions.
+# stdout stays attached (the [Y/n] prompt); stderr never leaks into the prompt.
+if status is-interactive; and test -x "$_CRR_BIN"
+    "$_CRR_BIN" rescue-check 2>/dev/null
+end
+
 # fish's native event hooks — preexec before each command, exit on teardown.
 function _crr_preexec --on-event fish_preexec
     _crr last-cmd --pid $fish_pid --cmd "$argv" --cwd $PWD >/dev/null

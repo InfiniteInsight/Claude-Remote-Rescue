@@ -96,6 +96,12 @@ class TmuxSpawner(Protocol):
         """Create a detached session ``name`` in ``cwd`` running ``argv``."""
         ...
 
+    def kill_session(self, name: str) -> None:
+        """Kill the tmux session ``name``. Raises on failure (e.g. the
+        underlying ``tmux kill-session`` exiting nonzero) — callers that
+        must not lose bookkeeping on a failed kill catch this themselves."""
+        ...
+
 
 @runtime_checkable
 class TabSpawner(Protocol):

@@ -58,3 +58,41 @@ crr.core       pure core (stdlib only) — imports neither adapters nor cli.
 
 See DESIGN.md for the full rationale and the `[lesson]` markers that each
 rule was paid for.
+
+## Tracking (recursive-spine convention)
+
+Work state lives in GitHub issues and milestones, not in prose files.
+- What's in flight: `gh issue list --assignee @me`
+- Deferred work: `gh issue list --label deferred`
+- Branches: `<prefix>/<issue>-<slug>`; PRs say `Closes #N`.
+- Deferral requires a filed issue. Handover files its debts before closing.
+Dialect and modules for this repo: [docs/tracking-dialect.md](docs/tracking-dialect.md)
+
+## Plumb-line declaration (principles revision 1)
+
+Bootstrapped 2026-07-31; this repo was *derived from* a plumb-line audit, so
+the declaration codifies what the code already does.
+
+- **Layers (P2):** `crr.cli → crr.adapters → crr.core`, one-way down;
+  enforced by `.importlinter` + CI; verified by planted-violation test.
+- **Source truth (P1):** `crr.core` — no platform, adapter, or mock logic
+  may enter it.
+- **Composition root (exception):** `crr/cli.py`.
+- **Provenance (P3):** `claude.session_id` + `sid_source`
+  (`injected|guessed|verified`) journal → status → dashboard; archive
+  `reason` lineage.
+- **Non-real data:** test fakes only; production absence is expressed as
+  honest nulls (`degraded` source lists, "no journaled sessions").
+- **Priors (P5):** `crr/core/config.py` DEFAULTS (versioned;
+  `crr config --effective` reports origins).
+- **Contracts (P7):** journal v1 · sessions v3 · diagnostics v2 · archive v1
+  · `PAGE_VERSION` · `CONFIG_DEFAULTS_VERSION`.
+- **Golden baseline:** `planned` — contract validators currently serve as
+  behavioral pins; no frozen derived-output baseline yet.
+- **Guards:** `.claude/guards/` branch guard (+ CLI shim; bundled hook
+  shipped without one) and pre-commit gate, wired via `.git/hooks/pre-commit`
+  (local; re-wire after fresh clone); the gate runs `pytest -q` and
+  `lint-imports` as two separate single-command invocations (no shell
+  operators — each is `shlex`-split and run on its own).
+- **Runtime provenance primitive:** offered and declined — `sid_source` is
+  this repo's hand-rolled, contract-validated implementation of P3.

@@ -26,6 +26,11 @@ _crr_host() {
 # Register this shell at start.
 _crr register --pid "$$" --cwd "$PWD" --shell zsh --host "$(_crr_host)" >/dev/null
 
+# Phase-3 restore prompt: once per boot, offer to re-home rescued sessions.
+if [[ -o interactive && -x "$_CRR_BIN" ]]; then
+    "$_CRR_BIN" rescue-check 2>/dev/null
+fi
+
 # zsh has native preexec / zshexit hooks — no DEBUG-trap gymnastics.
 _crr_preexec() { _crr last-cmd --pid "$$" --cmd "$1" --cwd "$PWD" >/dev/null; }
 _crr_deregister() { _crr deregister --pid "$$" >/dev/null; }
