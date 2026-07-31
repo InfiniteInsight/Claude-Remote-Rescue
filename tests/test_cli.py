@@ -1030,6 +1030,55 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
     assert "crr no longer manages it" in out
 
 
+class _FakeBoot:
+    """Stands in for boot_identity.detect() so `rescued` tests aren't
+    gated to a real Linux/macOS boot adapter (mirrors the fake-tmux
+    technique used by test_detmux_attaches_a_session_via_cli)."""
+
+    def current(self):
+        return "current-boot"
+
+
+class _FakeTmuxRescued:
+    def __init__(self, *a, **k):
+        pass
+
+    def available(self):
+        return True
+
+    def list_sessions(self):
+        return {"crr-8a1b2c3d"}
+
+
+def test_rescued_lists_prior_boot_parked_sessions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(  # prior-boot entry parked in a live tmux session
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d",
+    ))
+
+    rc = cli.main(["rescued"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"#42 · 8a1b2c3d {tmp_path} → crr-8a1b2c3d" in out
+    assert "attach: tmux attach -t <name> · dashboard: Reopen/De-tmux" in out
+
+
+def test_rescued_reports_none(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+
+    rc = cli.main(["rescued"])
+    assert rc == 0
+    assert "no rescued sessions" in capsys.readouterr().out
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)

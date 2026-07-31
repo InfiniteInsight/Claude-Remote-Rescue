@@ -35,7 +35,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, ops, ports, resume, reviver, status, web
+from crr.core import contracts, ops, ports, rescue, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -119,6 +119,12 @@ def _build_parser() -> argparse.ArgumentParser:
     dtm = sub.add_parser("detmux", help="re-home a revived tmux session into a visible tab")
     dtm.add_argument("pid", type=int)
     dtm.set_defaults(func=_cmd_detmux)
+
+    rescued = sub.add_parser(
+        "rescued",
+        help="list conversations rescued from a previous boot (awaiting re-home)",
+    )
+    rescued.set_defaults(func=_cmd_rescued)
 
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
@@ -752,6 +758,34 @@ def _cmd_detmux(args: argparse.Namespace) -> int:
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
+
+
+def _cmd_rescued(_args: argparse.Namespace) -> int:
+    """List prior-boot conversations the reviver parked in live tmux,
+    awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
+    config = _load_config()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr rescued: {exc}", file=sys.stderr)
+        return 2
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    store = JournalStore(state_dir.state_dir())
+    scan = store.scan()
+    found = rescue.rescued_sessions(scan.entries, boot.current(), live)
+    # Corrupt files are surfaced on stderr, never silently dropped (mirrors
+    # _cmd_status/_cmd_revive/_cmd_gc).
+    for name, reason in scan.problems:
+        print(f"crr rescued: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    if not found:
+        print("no rescued sessions")
+        return 0
+    for e in found:
+        sid8 = e["claude"]["session_id"][:8]
+        print(f"#{e['pid']} · {sid8} {e['cwd']} → {e['tmux_session']}")
+    print("attach: tmux attach -t <name> · dashboard: Reopen/De-tmux")
+    return 0
 
 
 def make_web_handler(

@@ -55,6 +55,8 @@ DEFAULTS: dict[str, Any] = {
     # (a named prior, not a magic default).
     "terminal": "auto",
     "wt_profile": "",  # Windows Terminal profile for a WSL reopen ("" = default)
+    # restore prompt
+    "rescue_prompt_timeout_seconds": 15,  # [Y/n] wait before defaulting to "not now"
 }
 
 

@@ -24,6 +24,11 @@ def test_close_grace_seconds_default():
     assert Config().get("close_grace_seconds") == 5
 
 
+def test_rescue_prompt_timeout_seconds_default():
+    from crr.core.config import Config
+    assert Config().get("rescue_prompt_timeout_seconds") == 15
+
+
 def test_audit_floor_priors_are_present():
     # The DESIGN "config floor" — these MUST exist as named keys.
     floor = {
@@ -39,6 +44,7 @@ def test_audit_floor_priors_are_present():
         "watchdog_interval_seconds",
         "archive_retention_days",
         "host_allowlist_extras",
+        "rescue_prompt_timeout_seconds",
     }
     assert floor <= set(cfg.DEFAULTS)
 
