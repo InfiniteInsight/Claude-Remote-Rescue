@@ -317,6 +317,22 @@ def test_site_commands_match_cli_surface():
 
 ---
 
+### Task 5: WSL tab-spawn binaries in the service PATH (live bug, 2026-07-31)
+
+**Files:**
+- Modify: `crr/adapters/systemd.py` (`resolve_service_path` gains `extra_binaries`), `crr/cli.py` (`_cmd_systemd` passes `("wt.exe", "wsl.exe")` when `host.is_wsl()`), `crr/core/ops.py` (`_open_tab` honesty), `CHANGELOG.md`
+- Test: `tests/test_systemd.py`, `tests/test_cli.py`, `tests/test_ops.py`
+
+**Live evidence:** interactive shell resolves `wt.exe` (`/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps/wt.exe`) and `wsl.exe` (`/mnt/c/windows/system32/wsl.exe`); the deployed `crr-web.service` PATH contains neither → `WindowsTerminalSpawner.available()` is False inside the service → dashboard De-tmux refuses ("no terminal tab spawner is available on this host") and Reopen silently skips its tab. `[lesson: interop PATH]` recurring: the service PATH must resolve every binary the service calls, and tab spawning calls wt.exe/wsl.exe.
+
+- [ ] **Step 1: Failing tests.** `tests/test_systemd.py`: `resolve_service_path(crr_bin, extra_binaries=("wt.exe",))` with a fake `shutil.which` mapping includes the extra binary's dir in the PATH string, and an unresolvable extra lands in `missing`. `tests/test_cli.py`: with `cli.host.is_wsl` monkeypatched True and a fake which, `crr systemd` (print mode) bakes the wt.exe dir into the emitted unit PATH; with `is_wsl` False, wt.exe is not consulted. `tests/test_ops.py`: `_open_tab(None, name)` (and an unavailable spawner) returns a message suffix containing `tmux attach -t <name>` instead of `""` — Reopen's response must say why no tab appeared.
+- [ ] **Step 2: Watch them fail** (TypeError on the new kwarg; empty-string suffix).
+- [ ] **Step 3: Implement.** `resolve_service_path(crr_bin, extra_binaries=())`: iterate `(*SERVICE_BINARIES, *extra_binaries)` in the existing loop. `_cmd_systemd`: `extras = ("wt.exe", "wsl.exe") if host.is_wsl() else ()`; pass through. `_open_tab`: unavailable spawner → `f" (no tab spawner on this host — attach with: tmux attach -t {name})"`. CHANGELOG Fixed entry.
+- [ ] **Step 4: Full gates; commit** — `fix(systemd): bake WSL tab-spawn binaries (wt.exe/wsl.exe) into the service PATH`.
+- [ ] **Step 5 (controller, post-merge): redeploy** — `crr systemd --install` + restart `crr-web.service`, then verify the service PATH resolves wt.exe and the dashboard De-tmux/Reopen actually spawn a tab.
+
+---
+
 ## Out of scope (record for the report)
 
 - Publishing the site (enabling GitHub Pages) and any announcement — human-gated per the runbook.
