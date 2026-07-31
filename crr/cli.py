@@ -853,8 +853,19 @@ def _rescue_check(_args: argparse.Namespace) -> int:
     print(f"crr: {n} conversation(s) rescued from the last reboot. "
           "Open them in terminal tabs? [Y/n] ", end="", flush=True)
     timeout = config.get("rescue_prompt_timeout_seconds")
-    ready, _, _ = select.select([sys.stdin], [], [], timeout)
-    line = sys.stdin.readline() if ready else ""  # "" on timeout, or EOF with stdin closed
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        line = sys.stdin.readline() if ready else ""  # "" on timeout, or EOF with stdin closed
+    except KeyboardInterrupt:
+        # Ctrl-C at an unattended-or-not prompt must decline like a
+        # timeout, not escape the marker write below (outer `except
+        # Exception` in _cmd_rescue_check doesn't catch this — a bare
+        # widen there would silence the traceback but still skip
+        # mark_prompted, re-arming the prompt for the next shell).
+        print()
+        print("not now — 'crr rescued' lists them")
+        rescue.mark_prompted(sd, boot_id)
+        return 0
     if not line:
         print()  # nothing was typed/echoed by a terminal -> start the decline on its own line
     answer = line.strip().lower() if line else None

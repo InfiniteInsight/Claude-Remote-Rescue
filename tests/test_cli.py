@@ -1345,6 +1345,39 @@ def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
+def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys):
+    # Ctrl-C while waiting at the [Y/n] prompt must behave like a timeout
+    # (decline + marker written), not propagate — a shim hook that lets a
+    # KeyboardInterrupt escape both breaks the "never break the shell"
+    # guarantee AND, because it would unwind past mark_prompted, breaks
+    # the once-per-boot invariant (next shell prompts again).
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    def _raise_keyboard_interrupt(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.select, "select", _raise_keyboard_interrupt)
+
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["rescue-check"])  # must not raise
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not now" in out
+    assert "'crr rescued' lists them" in out
+    assert calls == []
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
