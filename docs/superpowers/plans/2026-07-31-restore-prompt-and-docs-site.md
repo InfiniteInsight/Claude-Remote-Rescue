@@ -374,6 +374,21 @@ def test_site_commands_match_cli_surface():
 
 ---
 
+### Task 8: Atomic prompt claim + doc wording refresh (Task-3 review findings)
+
+**Files:**
+- Modify: `crr/core/rescue.py` (atomic claim), `crr/cli.py` (`_cmd_rescue_check` uses it), `CHANGELOG.md` + `DESIGN.md` (drop the now-stale "shim wiring pending a later task" phrasing — Task 3 landed it)
+- Test: `tests/test_rescue.py`, `tests/test_cli.py`
+
+**Why:** Task-3 review: `already_prompted()`/`mark_prompted()` is check-then-act — two interactive shells starting together (terminal app restoring several tabs) can BOTH prompt and BOTH detmux the same sessions. Fix with an atomic claim.
+
+**Decided design:** add `rescue.claim_prompt(state_dir, boot_id) -> bool` — attempts `os.open(marker_path, O_CREAT | O_EXCL)`; True = this process won the claim (marker now exists; do the stale-marker sweep here too), False (`FileExistsError`) = another shell already claimed. `_cmd_rescue_check` flow changes: after the tty gate and rescued-sessions check, call `claim_prompt` INSTEAD of `already_prompted` + later `mark_prompted` — the winner claims BEFORE prompting (a mid-prompt Ctrl-C/kill no longer re-prompts next shell; `crr rescued` remains the recovery path), losers exit silently. The not-a-tty early-exit still happens BEFORE any claim (unchanged semantics: a non-tty shell never consumes the prompt). `already_prompted` stays for the fast-path pre-check (cheap exists() before scanning the journal) and tests; `mark_prompted` becomes unused by cli — remove it and its direct tests, moving the stale-sweep coverage onto `claim_prompt` (update Task-1's tests accordingly).
+
+- [ ] **Step 1: failing tests** — `claim_prompt` returns True once and False for the second caller (two sequential calls; plus a threaded race test: N threads, exactly one True); winner-claims-before-prompt pinned in test_cli (simulate prompt raising after claim → marker still exists, rc 0); stale sweep moved to claim path; doc greps: CHANGELOG/DESIGN no longer say wiring is pending.
+- [ ] **Step 2: watch fail. Step 3: implement. Step 4: full gates; commit** — `fix(rescue): atomic once-per-boot prompt claim (close the two-shell race)`.
+
+---
+
 ## Out of scope (record for the report)
 
 - Publishing the site (enabling GitHub Pages) and any announcement — human-gated per the runbook.
