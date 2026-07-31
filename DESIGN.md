@@ -177,6 +177,28 @@ Semantics as proven in ccresume; failure statuses must propagate to the
 web layer (**[lesson]** a
 swallowed exit code turned hard failures into green checkmarks).
 
+### Restore-prompt UX (Phase 3)
+
+`crr.core.rescue` names the prompt's candidate set precisely: prior-boot
+journal entries the reviver already parked in currently-live tmux
+(`rescued_sessions`), distinct from crashed/ghost entries that still need
+`reopen`/`detmux` to even reach tmux. `crr rescue-check` is the
+shim-facing (`[shim]`) hook meant to run once per new interactive
+shell — the actual shim wiring is a later task; today it's callable and
+tested but nothing invokes it yet. It offers that set once per boot,
+gated by a marker file (`rescue.already_prompted`/`mark_prompted`) so at
+most one shell ever prompts; the marker is deliberately withheld when
+stdin/stdout aren't a tty, so a later interactive shell still gets asked.
+The `[Y/n]` prompt waits up to `rescue_prompt_timeout_seconds` (default
+15) on `select.select`; a typed empty line (Enter) defaults to yes, but a
+**timeout defaults to "not now"** — an unattended prompt must never
+auto-spawn N terminal tabs. A host with no tab spawner (headless SSH,
+displayless Linux) degrades the prompt to a one-line notice pointing at
+`crr rescued`/`tmux attach`, matching how `reopen`/`detmux` themselves
+degrade to detached tmux without a spawner. The whole command is wrapped
+in a blanket exception guard, matching every other shim hook: it must
+never break the shell it's sourced into.
+
 ### Web dashboard
 
 Port of ccresume's single-file stdlib server and page, including:

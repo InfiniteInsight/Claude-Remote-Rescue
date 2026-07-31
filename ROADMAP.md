@@ -45,7 +45,15 @@ green on CI macos.
 ## Phase 3 — Linux desktop terminals
 
 - Spawn adapters: gnome-terminal, konsole, kitty, wezterm; detection +
-  config override; restore-prompt UX parity with ccresume.
+  config override.
+- **Built** (unit-tested; live-verified pending): restore-prompt UX —
+  `crr rescue-check`, run once per boot from the shims, offers to
+  re-home prior-boot conversations the reviver parked in tmux into
+  visible tabs (`crr.core.rescue` + `crr rescued`/`crr rescue-check`).
+  Headless hosts degrade to a notice; an unattended timeout always
+  declines. Covered by CLI-level tests with every adapter (tmux, tab
+  spawner, boot identity) faked — not yet exercised against a real
+  post-reboot shell.
 
 **Acceptance:** the Phase-2 window-close/reopen/reboot scenarios pass on
 at least two of the four terminals on a real desktop.

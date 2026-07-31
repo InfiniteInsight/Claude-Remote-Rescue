@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import platform
+import select
 import shutil
 import socket
 import subprocess
@@ -125,6 +126,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="list conversations rescued from a previous boot (awaiting re-home)",
     )
     rescued.set_defaults(func=_cmd_rescued)
+
+    resc_chk = sub.add_parser(
+        "rescue-check",
+        help="[shim] once per boot, offer to re-home rescued conversations",
+    )
+    resc_chk.set_defaults(func=_cmd_rescue_check)
 
     diag = sub.add_parser("diagnose", help="explain why the previous boot / sessions may have died")
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
@@ -785,6 +792,83 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
         sid8 = e["claude"]["session_id"][:8]
         print(f"#{e['pid']} · {sid8} {e['cwd']} → {e['tmux_session']}")
     print("attach: tmux attach -t <name> · dashboard: Reopen/De-tmux")
+    return 0
+
+
+def _cmd_rescue_check(args: argparse.Namespace) -> int:
+    """[shim] Once per boot, on an interactive shell's first start, offer
+    to re-home conversations `crr.core.rescue` found parked from a
+    previous boot's crash into visible terminal tabs (Phase-3
+    restore-prompt UX). Silent when there's nothing to offer, when this
+    boot's marker already exists, or when stdin/stdout aren't a tty (the
+    marker is deliberately NOT written in that case, so a later
+    interactive shell in the same boot still gets offered). A timeout —
+    an unattended prompt — is always treated as "not now"; only a typed
+    empty line (Enter) defaults to yes. Headless (no tab spawner) degrades
+    to a one-line notice instead of a prompt.
+
+    Meant to be called by the shims on every new interactive shell
+    (that wiring is a later task; this hook is callable and tested but
+    nothing invokes it yet), so the entire body is guarded: any
+    unexpected exception must never break the shell it's sourced into —
+    it exits 0 silently rather than propagating.
+    """
+    try:
+        return _rescue_check(args)
+    except Exception:
+        return 0
+
+
+def _rescue_check(_args: argparse.Namespace) -> int:
+    # Cheapest check first: a non-interactive caller (script sourcing the
+    # shim, non-tty redirect) never gets a marker written, so it costs
+    # nothing to bail before touching tmux/the journal/boot identity.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return 0
+    config = _load_config()
+    sd = state_dir.state_dir()
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError:
+        return 0
+    boot_id = boot.current()
+    if rescue.already_prompted(sd, boot_id):
+        return 0
+
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    store = JournalStore(sd)
+    found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
+    if not found:
+        return 0
+
+    n = len(found)
+    tab = _tab_spawner(config)
+    if tab is None or not tab.available():
+        print(f"crr: {n} conversation(s) rescued from the last reboot — "
+              "'crr rescued' lists them; attach with: tmux attach -t <name>")
+        rescue.mark_prompted(sd, boot_id)
+        return 0
+
+    print(f"crr: {n} conversation(s) rescued from the last reboot. "
+          "Open them in terminal tabs? [Y/n] ", end="", flush=True)
+    timeout = config.get("rescue_prompt_timeout_seconds")
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    line = sys.stdin.readline() if ready else ""  # "" on timeout, or EOF with stdin closed
+    if not line:
+        print()  # nothing was typed/echoed by a terminal -> start the decline on its own line
+    answer = line.strip().lower() if line else None
+
+    if answer in ("", "y"):
+        probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+        with mutation_lock(sd):
+            for e in found:
+                res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe,
+                                 e["pid"], _now(), tab_spawner=tab)
+                print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    else:  # 'n'/'N', any other input, timeout, or EOF -> decline
+        print("not now — 'crr rescued' lists them")
+    rescue.mark_prompted(sd, boot_id)
     return 0
 
 
