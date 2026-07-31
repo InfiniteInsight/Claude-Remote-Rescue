@@ -129,6 +129,98 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert not (tmp_path / ".config" / "systemd").exists()
 
 
+def test_systemd_print_bakes_wt_exe_dir_into_path_on_wsl(tmp_path, monkeypatch, capsys):
+    # [live bug, 2026-07-31] wt.exe/wsl.exe live under Windows dirs that the
+    # baked SERVICE_BINARIES loop never sees, so the deployed service PATH
+    # could not resolve them and the dashboard's tab spawner reported
+    # unavailable. On WSL, the unit's PATH must include their dirs.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+
+    def fake_which(name):
+        if name == "wt.exe":
+            return "/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps/wt.exe"
+        if name == "wsl.exe":
+            return "/mnt/c/windows/system32/wsl.exe"
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(cli.systemd.shutil, "which", fake_which)
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps" in out
+    assert "/mnt/c/windows/system32" in out
+
+
+def test_systemd_print_does_not_consult_wt_exe_when_not_wsl(tmp_path, monkeypatch, capsys):
+    # Non-WSL Linux must not warn about (or even look for) wt.exe/wsl.exe —
+    # the extras are caller-supplied, SERVICE_BINARIES itself is untouched.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    consulted = []
+
+    def fake_which(name):
+        consulted.append(name)
+        return f"/usr/bin/{name}" if name in cli.systemd.SERVICE_BINARIES else None
+
+    monkeypatch.setattr(cli.systemd.shutil, "which", fake_which)
+    rc = cli.main(["systemd"])
+    assert rc == 0
+    assert "wt.exe" not in consulted and "wsl.exe" not in consulted
+
+
+def test_systemd_print_bakes_wsl_distro_name_when_wsl(tmp_path, monkeypatch, capsys):
+    # A systemd user service does not inherit the interactive shell's
+    # WSL_DISTRO_NAME any more than XDG_STATE_HOME — without baking it,
+    # WindowsTerminalSpawner (read at request time via os.environ) would
+    # open tabs in the host's default distro instead of this one.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Environment=WSL_DISTRO_NAME=Ubuntu" in out
+
+
+def test_systemd_print_warns_accurately_when_only_tab_spawn_binaries_missing(
+    tmp_path, monkeypatch, capsys
+):
+    # wt.exe/wsl.exe missing only degrades tab spawning (De-tmux/Reopen),
+    # never revival — the pre-existing "revived sessions will fail on exec"
+    # wording would overclaim if reused verbatim for these extras.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+
+    def fake_which(name):
+        return None if name in ("wt.exe", "wsl.exe") else f"/usr/bin/{name}"
+
+    monkeypatch.setattr(cli.systemd.shutil, "which", fake_which)
+    rc = cli.main(["systemd"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "wt.exe" in err and "wsl.exe" in err
+    assert "revived sessions will fail on exec" not in err
+    assert "tab" in err.lower()
+
+
+def test_systemd_print_omits_wsl_distro_name_when_not_wsl(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")  # e.g. stale env from another host
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WSL_DISTRO_NAME" not in out
+
+
 def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")

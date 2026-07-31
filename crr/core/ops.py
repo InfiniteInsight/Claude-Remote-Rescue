@@ -354,7 +354,10 @@ def _open_tab(tab_spawner: TabSpawner | None, name: str) -> str:
     failure here is convenience-only — reported, never fatal.
     """
     if tab_spawner is None or not tab_spawner.available():
-        return ""
+        # Honesty: revival already landed (durable) — say why no tab
+        # appeared instead of looking like the whole op did nothing, and
+        # give the manual fallback ([live bug, 2026-07-31]).
+        return f" (no tab spawner on this host — attach with: tmux attach -t {name})"
     try:
         tab_spawner.open_tab(attach_argv(name))
         return " (opened in a new tab)"

@@ -996,21 +996,44 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
         return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
-    path, missing = systemd.resolve_service_path(crr_bin)
+    # WSL tab-spawning (De-tmux/Reopen) shells out to wt.exe/wsl.exe, which
+    # live under Windows dirs a service's PATH never inherits ([lesson:
+    # interop PATH]) — baked as extras here, not in systemd.py, so native
+    # Linux never warns about a "missing" wt.exe.
+    is_wsl = host.is_wsl()
+    extras = ("wt.exe", "wsl.exe") if is_wsl else ()
+    path, missing = systemd.resolve_service_path(crr_bin, extra_binaries=extras)
     # XDG_STATE_HOME baked so the service watches the SAME state dir the shims
     # write to (state_dir() is <XDG_STATE_HOME>/crr; bake its parent).
     state_home = str(state_dir.state_dir().parent)
+    # Same reason as XDG_STATE_HOME: the service won't see this install-time
+    # shell's WSL_DISTRO_NAME either, and the tab spawner needs it to target
+    # the right distro instead of silently falling back to the default one.
+    wsl_distro = os.environ.get("WSL_DISTRO_NAME", "") if is_wsl else ""
     interval = config.get("watchdog_interval_seconds")
     units = {
         systemd.SERVICE_NAME: systemd.revive_service_unit(crr_bin, path, state_home),
         systemd.TIMER_NAME: systemd.revive_timer_unit(interval),
-        systemd.WEB_SERVICE_NAME: systemd.web_service_unit(crr_bin, path, state_home, args.port),
+        systemd.WEB_SERVICE_NAME: systemd.web_service_unit(
+            crr_bin, path, state_home, args.port, wsl_distro
+        ),
     }
 
-    if missing:
+    # extras (wt.exe/wsl.exe) only degrade tab spawning, never revival —
+    # reused verbatim, the revival wording below would overclaim for them.
+    critical_missing = [m for m in missing if m not in extras]
+    tab_missing = [m for m in missing if m in extras]
+    if critical_missing:
         print(
             "crr systemd: WARNING — not found on PATH: "
-            f"{', '.join(missing)}; revived sessions will fail on exec until these resolve",
+            f"{', '.join(critical_missing)}; revived sessions will fail on exec until these resolve",
+            file=sys.stderr,
+        )
+    if tab_missing:
+        print(
+            "crr systemd: WARNING — not found on PATH: "
+            f"{', '.join(tab_missing)}; De-tmux/Reopen tab spawning will be unavailable "
+            "until these resolve",
             file=sys.stderr,
         )
 

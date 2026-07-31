@@ -57,6 +57,42 @@ def test_resolve_service_path_reports_missing_binaries(monkeypatch):
     assert set(missing) == set(systemd.SERVICE_BINARIES)
 
 
+def test_resolve_service_path_includes_extra_binaries_dir(monkeypatch):
+    # [live bug, 2026-07-31] WSL tab spawning shells out to wt.exe/wsl.exe,
+    # which live under Windows dirs the baked SERVICE_BINARIES loop never
+    # sees — a caller-supplied extra must land in the PATH just like the
+    # fixed binaries do.
+    def fake_which(name):
+        if name == "wt.exe":
+            return "/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps/wt.exe"
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(systemd.shutil, "which", fake_which)
+    path, missing = systemd.resolve_service_path(
+        "/opt/crr/bin/crr", extra_binaries=("wt.exe",)
+    )
+    assert "/mnt/c/Users/Infin/AppData/Local/Microsoft/WindowsApps" in path.split(":")
+    assert missing == []
+
+
+def test_resolve_service_path_reports_unresolved_extra_binaries(monkeypatch):
+    def fake_which(name):
+        return f"/usr/bin/{name}" if name in systemd.SERVICE_BINARIES else None
+
+    monkeypatch.setattr(systemd.shutil, "which", fake_which)
+    _, missing = systemd.resolve_service_path(
+        "/opt/crr/bin/crr", extra_binaries=("wt.exe", "wsl.exe")
+    )
+    assert set(missing) == {"wt.exe", "wsl.exe"}
+
+
+def test_resolve_service_path_extra_binaries_defaults_to_empty():
+    # Non-WSL callers pass nothing; SERVICE_BINARIES-only behavior unchanged.
+    path, missing = systemd.resolve_service_path("/opt/crr/bin/crr")
+    assert isinstance(missing, list)
+    assert "wt.exe" not in path
+
+
 def test_web_service_unit_runs_crr_web_and_stays_up():
     unit = systemd.web_service_unit(
         crr_bin="/opt/crr/bin/crr",
@@ -68,6 +104,26 @@ def test_web_service_unit_runs_crr_web_and_stays_up():
     assert "Restart=on-failure" in unit
     assert "WantedBy=default.target" in unit  # comes back at (re)boot with linger
     assert "Environment=XDG_STATE_HOME=/home/u/.local/state" in unit
+    # No WSL_DISTRO_NAME baked when not given — non-WSL hosts stay unaffected.
+    assert "WSL_DISTRO_NAME" not in unit
+
+
+def test_web_service_unit_bakes_wsl_distro_name_when_given():
+    # [live bug, 2026-07-31] WindowsTerminalSpawner reads WSL_DISTRO_NAME
+    # from os.environ at call time (cli.py's _select_tab_spawner) to pass
+    # `wsl.exe --distribution <name>` — but a systemd user service does not
+    # inherit the interactive shell's exported vars any more than it
+    # inherits XDG_STATE_HOME, so on a multi-distro host the tab would
+    # silently open in the *default* distro instead of this one unless it
+    # is baked into the unit the same way.
+    unit = systemd.web_service_unit(
+        crr_bin="/opt/crr/bin/crr",
+        path="/opt/crr/bin:/usr/bin",
+        state_home="/home/u/.local/state",
+        port=8377,
+        wsl_distro="Ubuntu",
+    )
+    assert "Environment=WSL_DISTRO_NAME=Ubuntu" in unit
 
 
 def test_write_units_writes_all_named_files(tmp_path):

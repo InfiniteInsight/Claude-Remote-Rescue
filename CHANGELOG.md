@@ -101,6 +101,27 @@ No tag or release has been cut yet. This section describes everything on
   CRASHED sessions like every other destructive op — a live/ghost card
   can carry a stale `tmux_session` field, and previously the op had no
   gate at all. (PAGE_VERSION 9)
+- `crr systemd` now bakes `wt.exe`/`wsl.exe`'s resolved dirs into the
+  service PATH on WSL: neither lives in `SERVICE_BINARIES` + system dirs,
+  so the deployed `crr-web.service` couldn't resolve them and the
+  dashboard's tab spawner reported "no terminal tab spawner is available
+  on this host" for both De-tmux and Reopen even though an interactive
+  shell (which inherits the Windows-appended PATH) resolved both fine.
+  `resolve_service_path` takes an `extra_binaries` param for this so
+  `SERVICE_BINARIES` — and non-WSL Linux's PATH/warnings — stay
+  unchanged. The same service-doesn't-inherit-the-shell gap also applied
+  to `WSL_DISTRO_NAME` (read at request time to target `wsl.exe
+  --distribution <name>`), so it's now baked into the unit the same way
+  `XDG_STATE_HOME` already was — a multi-distro host would otherwise
+  silently open the tab in the default distro instead of this one. The
+  "not found on PATH" warning also no longer claims wt.exe/wsl.exe going
+  missing will make "revived sessions fail on exec" — that's true only
+  for the original `SERVICE_BINARIES`; a missing tab-spawn extra gets its
+  own, accurate warning. Reopen's tab-open fallback also no longer
+  returns a silent `""` when no spawner is available: it now names the
+  reason and gives the `tmux attach -t <name>` command, so a revival that
+  landed but couldn't open a visible tab doesn't look like it did
+  nothing.
 
 ### Security
 

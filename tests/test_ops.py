@@ -237,6 +237,22 @@ def test_reopen_unavailable_spawner_stays_detached(tmp_path):
                      grace=0.1, tab_spawner=tab)
     assert res.ok
     assert tab.opened == []  # never consulted an unavailable spawner
+    # [live bug, 2026-07-31] "did nothing" honesty: an unavailable spawner
+    # must say why no tab appeared and how to attach manually.
+    name = f"crr-{_SID[:8]}"
+    assert f"tmux attach -t {name}" in res.message
+
+
+# --- _open_tab (honesty when no spawner is available) ----------------------
+
+def test_open_tab_no_spawner_gives_the_attach_command():
+    msg = ops._open_tab(None, "crr-8a1b2c3d")
+    assert msg == " (no tab spawner on this host — attach with: tmux attach -t crr-8a1b2c3d)"
+
+
+def test_open_tab_unavailable_spawner_gives_the_attach_command():
+    msg = ops._open_tab(FakeTabSpawner(available=False), "crr-8a1b2c3d")
+    assert "tmux attach -t crr-8a1b2c3d" in msg
 
 
 # --- reopen (GHOST) — user request 2026-07-30 mobile rescue path ----------
