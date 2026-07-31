@@ -3,11 +3,16 @@
 A "rescued" session is a journal entry from a PREVIOUS boot whose
 conversation the reviver parked in a currently-live tmux session: crashed
 shell, revived claude, awaiting re-homing (Phase-3 restore prompt / `crr
-rescued`). These tests pin the pure selection rule and the marker
-roundtrip/stale-cleanup behavior independent of any adapter.
+rescued`). These tests pin the pure selection rule and the atomic
+claim/stale-cleanup behavior independent of any adapter.
 """
 
+import threading
+from pathlib import Path
+
 from crr.core import rescue
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _entry(pid, boot, claude, tmux):
@@ -44,10 +49,50 @@ def test_rescued_sessions_selects_prior_boot_tmux_parked_only():
     assert [e["pid"] for e in out] == [2]
 
 
-def test_marker_roundtrip_and_stale_cleanup(tmp_path):
+def test_claim_prompt_wins_once_and_stale_cleanup(tmp_path):
+    """claim_prompt is the atomic replacement for the old check-then-act
+    already_prompted()+mark_prompted() pair (Task-8 fix: two interactive
+    shells starting together could both pass the exists() check and both
+    prompt/detmux). A second sequential call for the SAME boot loses;
+    the stale-marker sweep — moved here from the removed mark_prompted —
+    still runs on a win."""
     assert not rescue.already_prompted(tmp_path, "boot-1")
-    rescue.mark_prompted(tmp_path, "boot-1")
+    assert rescue.claim_prompt(tmp_path, "boot-1") is True
     assert rescue.already_prompted(tmp_path, "boot-1")
-    rescue.mark_prompted(tmp_path, "boot-2")  # new boot
+    assert rescue.claim_prompt(tmp_path, "boot-1") is False  # already claimed
+
+    assert rescue.claim_prompt(tmp_path, "boot-2") is True  # new boot
     assert rescue.already_prompted(tmp_path, "boot-2")
-    assert not rescue.already_prompted(tmp_path, "boot-1")  # stale marker removed
+    assert not rescue.already_prompted(tmp_path, "boot-1")  # stale marker swept
+
+
+def test_claim_prompt_race_exactly_one_winner(tmp_path):
+    """The race Task-3 review flagged: N threads (standing in for N shells
+    starting together) all call claim_prompt for the same boot_id — the
+    O_CREAT|O_EXCL claim must let exactly one through."""
+    n = 32
+    results: list[bool] = [False] * n
+    barrier = threading.Barrier(n)
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        results[i] = rescue.claim_prompt(tmp_path, "boot-race")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(results) == 1
+
+
+def test_docs_no_longer_say_shim_wiring_is_pending():
+    """Task 3 landed the shim wiring (crr.bash/zsh/fish all call `crr
+    rescue-check` on interactive startup) — CHANGELOG.md and DESIGN.md must
+    not still claim it's a future task."""
+    changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    design = (_REPO_ROOT / "DESIGN.md").read_text(encoding="utf-8")
+    for name, text in (("CHANGELOG.md", changelog), ("DESIGN.md", design)):
+        assert "pending a later task" not in text, name
+        assert "nothing invokes it yet" not in text, name

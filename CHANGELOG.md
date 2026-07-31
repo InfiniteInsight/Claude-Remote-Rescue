@@ -86,10 +86,11 @@ No tag or release has been cut yet. This section describes everything on
   `reopen_grace_seconds` keys (no crr mechanism reads them).
 - Restore-prompt UX (Phase 3): `crr rescued` lists prior-boot
   conversations the reviver already parked in live tmux, awaiting
-  re-homing; `crr rescue-check` — a shim-facing (`[shim]`) hook meant to
-  be called once per interactive shell start, wiring pending a later
-  task — offers to re-home that same set into visible terminal tabs,
-  once per boot (marker-gated). A typed empty line (Enter) defaults to
+  re-homing; `crr rescue-check` — a shim-facing (`[shim]`) hook called
+  once per interactive shell start (the bash/zsh/fish shims all call it)
+  — offers to re-home that same set into visible terminal tabs, once per
+  boot, via an atomic marker claim so at most one shell ever prompts even
+  when several start at once. A typed empty line (Enter) defaults to
   yes; an unattended timeout always defaults to "not now" — it never
   auto-spawns tabs. Headless hosts (no tab spawner) degrade to a one-line
   notice instead of a prompt. New config key

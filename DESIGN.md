@@ -183,21 +183,26 @@ swallowed exit code turned hard failures into green checkmarks).
 journal entries the reviver already parked in currently-live tmux
 (`rescued_sessions`), distinct from crashed/ghost entries that still need
 `reopen`/`detmux` to even reach tmux. `crr rescue-check` is the
-shim-facing (`[shim]`) hook meant to run once per new interactive
-shell — the actual shim wiring is a later task; today it's callable and
-tested but nothing invokes it yet. It offers that set once per boot,
-gated by a marker file (`rescue.already_prompted`/`mark_prompted`) so at
-most one shell ever prompts; the marker is deliberately withheld when
-stdin/stdout aren't a tty, so a later interactive shell still gets asked.
-The `[Y/n]` prompt waits up to `rescue_prompt_timeout_seconds` (default
-15) on `select.select`; a typed empty line (Enter) defaults to yes, but a
-**timeout defaults to "not now"** — an unattended prompt must never
-auto-spawn N terminal tabs. A host with no tab spawner (headless SSH,
-displayless Linux) degrades the prompt to a one-line notice pointing at
-`crr rescued`/`tmux attach`, matching how `reopen`/`detmux` themselves
-degrade to detached tmux without a spawner. The whole command is wrapped
-in a blanket exception guard, matching every other shim hook: it must
-never break the shell it's sourced into.
+shim-facing (`[shim]`) hook that runs once per new interactive shell —
+`crr.bash`/`crr.zsh`/`crr.fish` all call it on startup. It offers that
+set once per boot, gated by an atomic marker claim
+(`rescue.claim_prompt`, O_CREAT|O_EXCL) taken before either visible
+outcome (the prompt or the headless notice) is printed, so at most one
+shell ever prompts — even when several interactive shells start at once
+(a terminal app restoring several tabs). `rescue.already_prompted`
+remains a cheap pre-check (a plain `exists()`) so a hot shell-start skips
+the journal/tmux scan once the boot is already handled; the marker is
+deliberately withheld when stdin/stdout aren't a tty, so a later
+interactive shell still gets asked. The `[Y/n]` prompt waits up to
+`rescue_prompt_timeout_seconds` (default 15) on `select.select`; a typed
+empty line (Enter) defaults to yes, but a **timeout defaults to "not
+now"** — an unattended prompt must never auto-spawn N terminal tabs. A
+host with no tab spawner (headless SSH, displayless Linux) degrades the
+prompt to a one-line notice pointing at `crr rescued`/`tmux attach`,
+matching how `reopen`/`detmux` themselves degrade to detached tmux
+without a spawner. The whole command is wrapped in a blanket exception
+guard, matching every other shim hook: it must never break the shell
+it's sourced into.
 
 ### Web dashboard
 

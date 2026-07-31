@@ -833,11 +833,23 @@ def _cmd_rescue_check(args: argparse.Namespace) -> int:
     empty line (Enter) defaults to yes. Headless (no tab spawner) degrades
     to a one-line notice instead of a prompt.
 
-    Meant to be called by the shims on every new interactive shell
-    (that wiring is a later task; this hook is callable and tested but
-    nothing invokes it yet), so the entire body is guarded: any
-    unexpected exception must never break the shell it's sourced into —
-    it exits 0 silently rather than propagating.
+    Once-per-boot is enforced by `rescue.claim_prompt` — an atomic
+    O_CREAT|O_EXCL marker claim taken AFTER candidates are found but
+    BEFORE either visible outcome (the [Y/n] prompt or the headless
+    notice) is printed. This closes a Task-3 review finding: two
+    interactive shells starting together (e.g. a terminal app restoring
+    several tabs) both used to pass the old check-then-act
+    already_prompted() exists() check before either wrote the marker, so
+    both could prompt and both detmux the same sessions. Now the winner
+    claims first; a losing shell (claim_prompt returns False) exits
+    silently without printing anything, and a mid-prompt Ctrl-C/crash no
+    longer re-arms the prompt for the next shell (the marker is already
+    down) — `crr rescued` remains the recovery path regardless.
+
+    Called by the shims (crr.bash/zsh/fish) on every new interactive
+    shell's startup, so the entire body is guarded: any unexpected
+    exception must never break the shell it's sourced into — it exits 0
+    silently rather than propagating.
     """
     try:
         return _rescue_check(args)
@@ -868,12 +880,18 @@ def _rescue_check(_args: argparse.Namespace) -> int:
     if not found:
         return 0
 
+    # Atomic once-per-boot claim, taken BEFORE either visible outcome
+    # below (prompt or headless notice) — the winner proceeds; a losing
+    # shell (a concurrent shell already claimed this boot) exits silently
+    # without printing anything (see claim_prompt's docstring).
+    if not rescue.claim_prompt(sd, boot_id):
+        return 0
+
     n = len(found)
     tab = _tab_spawner(config)
     if tab is None or not tab.available():
         print(f"crr: {n} conversation(s) rescued from the last reboot — "
               "'crr rescued' lists them; attach with: tmux attach -t <name>")
-        rescue.mark_prompted(sd, boot_id)
         return 0
 
     print(f"crr: {n} conversation(s) rescued from the last reboot. "
@@ -884,13 +902,13 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         line = sys.stdin.readline() if ready else ""  # "" on timeout, or EOF with stdin closed
     except KeyboardInterrupt:
         # Ctrl-C at an unattended-or-not prompt must decline like a
-        # timeout, not escape the marker write below (outer `except
-        # Exception` in _cmd_rescue_check doesn't catch this — a bare
-        # widen there would silence the traceback but still skip
-        # mark_prompted, re-arming the prompt for the next shell).
+        # timeout, not propagate (outer `except Exception` in
+        # _cmd_rescue_check doesn't catch KeyboardInterrupt — a bare
+        # widen there would silence the traceback). The claim above
+        # already happened before this prompt was printed, so there is
+        # no marker write left to skip here.
         print()
         print("not now — 'crr rescued' lists them")
-        rescue.mark_prompted(sd, boot_id)
         return 0
     if not line:
         print()  # nothing was typed/echoed by a terminal -> start the decline on its own line
@@ -905,7 +923,6 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 print(res.message, file=sys.stdout if res.ok else sys.stderr)
     else:  # 'n'/'N', any other input, timeout, or EOF -> decline
         print("not now — 'crr rescued' lists them")
-    rescue.mark_prompted(sd, boot_id)
     return 0
 
 

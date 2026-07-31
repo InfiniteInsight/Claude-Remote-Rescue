@@ -1306,7 +1306,7 @@ def test_rescue_check_silent_when_marker_exists(tmp_path, monkeypatch, capsys):
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    cli.rescue.mark_prompted(tmp_path, "current-boot")  # already prompted this boot
+    cli.rescue.claim_prompt(tmp_path, "current-boot")  # already prompted this boot
     calls = []
     monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(a))
 
@@ -1348,6 +1348,25 @@ def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys)
     out2 = capsys.readouterr().out
     assert rc2 == 0
     assert out2 == ""  # once-per-boot: second call is silent
+
+
+def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypatch, capsys):
+    """The headless-notice outcome must ALSO claim before it becomes
+    visible (brief: "decide deliberately where the claim happens for the
+    notice outcome too... claim before printing it") — not just the
+    interactive [Y/n] prompt. Force the claim to lose and assert the
+    notice text never reaches stdout, discriminating this from an
+    implementation that prints the notice first and claims/marks after."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: None)
+    monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
 
 
 def test_rescue_check_yes_opens_tabs_and_marks(tmp_path, monkeypatch, capsys):
@@ -1464,10 +1483,11 @@ def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
 
 def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys):
     # Ctrl-C while waiting at the [Y/n] prompt must behave like a timeout
-    # (decline + marker written), not propagate — a shim hook that lets a
-    # KeyboardInterrupt escape both breaks the "never break the shell"
-    # guarantee AND, because it would unwind past mark_prompted, breaks
-    # the once-per-boot invariant (next shell prompts again).
+    # (decline), not propagate — a shim hook that lets a KeyboardInterrupt
+    # escape breaks the "never break the shell" guarantee. The marker was
+    # already written by claim_prompt BEFORE this prompt was printed (the
+    # winner claims before prompting), so the once-per-boot invariant holds
+    # even though the interrupt unwinds past the detmux/decline branch.
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -1492,6 +1512,52 @@ def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys)
     assert "not now" in out
     assert "'crr rescued' lists them" in out
     assert calls == []
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_loser_of_race_is_silent(tmp_path, monkeypatch, capsys):
+    """Task-3 review's two-shell race: this shell loses the atomic claim
+    (a concurrent shell already claimed this boot's prompt) — it must
+    print nothing and never call detmux, matching the marker-exists case
+    but reached via claim_prompt returning False rather than a pre-check."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
+
+    calls = []
+    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
+    assert calls == []
+
+
+def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monkeypatch, capsys):
+    """Winner claims BEFORE printing/waiting on the [Y/n] prompt: pin this
+    ordering by blowing up the prompt machinery (select.select) AFTER a
+    successful claim — the marker must still be durable (no re-arming the
+    prompt for the next shell) and the blanket exception guard in
+    _cmd_rescue_check must still return rc 0."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli.select, "select", _boom)
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
