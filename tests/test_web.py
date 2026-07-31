@@ -294,16 +294,28 @@ def test_handle_request_serves_configured_intervals():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_12():
-    """Explicit version check: v12 renames De-tmux to Untrack (op/API name
-    stays detmux) and adds a real Un-tmux button."""
-    assert web.PAGE_VERSION == 12
+def test_page_version_is_13():
+    """Explicit version check: v13 hoists the confirm-gate arm state
+    (added in v12's Un-tmux button) to module level -- it now survives
+    render()'s full card rebuild on a poll tick, and resets on the firing
+    click so a failed/incomplete op can never leave a stale armed button
+    that a later ordinary click fires without reconfirming."""
+    assert web.PAGE_VERSION == 13
 
 
 def test_page_untrack_label_present_de_tmux_label_gone():
     page = web.render_page()
     assert "Untrack" in page
     assert "De-tmux" not in page
+
+
+def test_page_confirm_gate_state_is_module_level():
+    # Review fix regression guard: the confirm-arm state must be hoisted to
+    # module level (survives render()'s full card rebuild on a poll tick)
+    # rather than living only in a per-button closure that a poll landing
+    # mid-arm-window would silently discard.
+    page = web.render_page()
+    assert "var confirmArmed" in page
 
 
 def test_page_scripts_pass_node_check(tmp_path):

@@ -30,7 +30,7 @@ from crr.core import config as cfg
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 12  # v12: De-tmux renamed Untrack; real Un-tmux button
+PAGE_VERSION = 13  # v13: confirm-gate state hoisted module-level (survives re-render, resets on fire)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

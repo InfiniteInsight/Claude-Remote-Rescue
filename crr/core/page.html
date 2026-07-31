@@ -147,6 +147,13 @@ function el(tag, cls) { var e = document.createElement(tag); if (cls) e.classNam
 // View state (filter/sort/group), persisted across polls so a poll keeps the view.
 var filterKey = "all", sortKey = "updated", groupKey = "none", lastSessions = [];
 
+// The single confirm-gated button currently armed (first click), or null.
+// Module-level (not a per-button closure) so it survives render()'s full
+// card rebuild on the next poll tick instead of silently discarding the
+// armed state mid-window; renderCard reads it to restore the "Confirm
+// ...?" label across a rebuild. {pid, op} — matched by both fields.
+var confirmArmed = null;
+
 function passesFilter(s) {
   if (filterKey === "crashed") return s.state === "crashed";
   if (filterKey === "active") return s.state !== "crashed";
@@ -235,20 +242,28 @@ function renderCard(s, uncertain, groupColor) {
   var actions = el("div", "actions");
   function addBtn(label, op, danger, confirm) {
     var b = el("button", danger ? "danger" : "");
-    b.textContent = label;
-    var pending = false;
-    var resetTimer = null;
+    var isArmed = function () {
+      return !!confirmArmed && confirmArmed.pid === s.pid && confirmArmed.op === op;
+    };
+    b.textContent = isArmed() ? ("Confirm " + label + "?") : label;
     b.addEventListener("click", function () {
-      if (confirm && !pending) {
-        pending = true;
-        b.textContent = "Confirm " + label + "?";
-        resetTimer = setTimeout(function () {
-          pending = false;
-          b.textContent = label;
-        }, 4000);
-        return;
+      if (confirm) {
+        if (!isArmed()) {
+          confirmArmed = { pid: s.pid, op: op };
+          b.textContent = "Confirm " + label + "?";
+          setTimeout(function () {
+            if (isArmed()) { confirmArmed = null; }
+            b.textContent = label;  // harmless if this button was since rebuilt
+          }, 4000);
+          return;
+        }
+        // Firing the confirmed second click: reset the arm state FIRST, so
+        // a failed/incomplete op (or a poll that never lands) never leaves
+        // a stale armed button that a later ordinary click could fire
+        // without reconfirming.
+        confirmArmed = null;
+        b.textContent = label;
       }
-      if (resetTimer) { clearTimeout(resetTimer); }
       action(op, s.pid, b);
     });
     actions.appendChild(b);
