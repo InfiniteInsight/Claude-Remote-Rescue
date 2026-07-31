@@ -73,8 +73,8 @@ OOM death) replay successfully on the new stack.
 - Packaging: pipx / Homebrew formula / AUR; install doctor (`crr doctor`).
 - **Built** (publish pending): the static, dependency-free docs site
   (`docs/site/` — hand-written HTML5 + CSS, zero external requests, dark-
-  scheme aware, no JavaScript), covering the install flow, full command
-  surface, dashboard screenshot, security model, and the honest
-  calibration line. Not yet published to GitHub Pages. Screenshots,
-  security-model writeup (SECURITY.md), and CONTRIBUTING remain.
+  scheme aware, no JavaScript), covering the install flow, the user-facing
+  command surface, dashboard screenshot, security model, and the honest
+  calibration line. What remains is human-gated: enabling Pages
+  publishing (below) and the public announcement.
 - Public announcement.

@@ -1398,6 +1398,38 @@ def test_rescue_check_yes_opens_tabs_and_marks(tmp_path, monkeypatch, capsys):
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
+def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch, capsys):
+    """All three shims invoke `crr rescue-check 2>/dev/null`, so anything
+    written to stderr from this consent path is thrown away — a user who
+    just typed 'y' would never see a detmux failure. Both success and
+    failure messages from the post-consent loop must land on stdout."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
+
+    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+        if pid == 42:
+            return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
+        return SimpleNamespace(ok=False, message=f"crr: #{pid} de-tmux failed")
+
+    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "#42 de-tmuxed" in out
+    assert "#43 de-tmux failed" in out
+    assert err == ""
+
+
 def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
     # The decided-and-recorded half of the yes/no split: a typed EMPTY
     # line (just pressing Enter) is yes -- distinct from a TIMEOUT, which

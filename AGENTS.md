@@ -91,6 +91,8 @@ the declaration codifies what the code already does.
   behavioral pins; no frozen derived-output baseline yet.
 - **Guards:** `.claude/guards/` branch guard (+ CLI shim; bundled hook
   shipped without one) and pre-commit gate, wired via `.git/hooks/pre-commit`
-  (local; re-wire after fresh clone), gate cmd `pytest -q && lint-imports`.
+  (local; re-wire after fresh clone); the gate runs `pytest -q` and
+  `lint-imports` as two separate single-command invocations (no shell
+  operators — each is `shlex`-split and run on its own).
 - **Runtime provenance primitive:** offered and declined — `sid_source` is
   this repo's hand-rolled, contract-validated implementation of P3.

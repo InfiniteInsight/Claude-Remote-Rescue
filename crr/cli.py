@@ -920,7 +920,11 @@ def _rescue_check(_args: argparse.Namespace) -> int:
             for e in found:
                 res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe,
                                  e["pid"], _now(), tab_spawner=tab)
-                print(res.message, file=sys.stdout if res.ok else sys.stderr)
+                # All three shims invoke `crr rescue-check 2>/dev/null`, so
+                # stderr is silenced here — the user already consented (typed
+                # Y) and must see failures, not just successes. Both outcomes
+                # go to stdout unconditionally.
+                print(res.message)
     else:  # 'n'/'N', any other input, timeout, or EOF -> decline
         print("not now — 'crr rescued' lists them")
     return 0

@@ -36,7 +36,8 @@ No tag or release has been cut yet. This section describes everything on
   kill so a missing spawner never destroys a live tmux session. Archives
   successes with reason `untmuxed` (terminal — not revived by the
   watchdog). Dashboard button: `Un-tmux`, confirm-gated (a second click)
-  since it kills and relaunches. (PAGE_VERSION 12)
+  since it kills and relaunches. (PAGE_VERSION 12; confirm-gate state
+  hardened at 13)
 - Web dashboard (`crr web`), a stdlib-only HTTP server bound to loopback by
   default (meant to be exposed via `tailscale serve`), with sortable/
   groupable/filterable session cards, confidence-weighted duplicate
@@ -89,17 +90,16 @@ No tag or release has been cut yet. This section describes everything on
   re-homing; `crr rescue-check` — a shim-facing (`[shim]`) hook called
   once per interactive shell start (the bash/zsh/fish shims all call it)
   — offers to re-home that same set into visible terminal tabs, once per
-  boot, via an atomic marker claim so at most one shell ever prompts even
-  when several start at once. A typed empty line (Enter) defaults to
-  yes; an unattended timeout always defaults to "not now" — it never
-  auto-spawns tabs. Headless hosts (no tab spawner) degrade to a one-line
-  notice instead of a prompt. New config key
+  boot. A typed empty line (Enter) defaults to yes; an unattended
+  timeout always defaults to "not now" — it never auto-spawns tabs.
+  Headless hosts (no tab spawner) degrade to a one-line notice instead
+  of a prompt. New config key
   `rescue_prompt_timeout_seconds` (default 15).
 - Docs site (`docs/site/`): a static, dependency-free HTML5 + CSS site —
   no JavaScript, no CDN/webfonts/analytics, dark-scheme aware via
   `prefers-color-scheme`, works from `file://` and GitHub Pages —
   covering the mission, how-it-works pipeline, the restore-prompt UX, the
-  install flow, the full `crr` command table, dashboard screenshot and
+  install flow, the user-facing `crr` command table, dashboard screenshot and
   button set, the security model, and the project's honest calibration
   line. Linked from the README; not yet published to GitHub Pages.
 
@@ -161,6 +161,14 @@ No tag or release has been cut yet. This section describes everything on
   in the adapter (`systemd.critical_enable_commands()` +
   `systemd.linger_command()`); `systemd.enable_commands()` is unchanged
   for `crr systemd` print mode.
+- `crr rescue-check`'s once-per-boot prompt was check-then-act
+  (`already_prompted`/`mark_prompted`): two interactive shells starting
+  together (e.g. a terminal app restoring several tabs) could both pass
+  the exists() check before either wrote the marker, so both could
+  prompt and both detmux the same rescued sessions. Closed via an atomic
+  marker claim (`rescue.claim_prompt`, an `os.open(O_CREAT|O_EXCL)`
+  claim taken before either visible outcome) so at most one shell ever
+  prompts even when several start at once.
 
 ### Security
 
