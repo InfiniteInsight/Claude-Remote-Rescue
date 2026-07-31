@@ -58,3 +58,12 @@ crr.core       pure core (stdlib only) — imports neither adapters nor cli.
 
 See DESIGN.md for the full rationale and the `[lesson]` markers that each
 rule was paid for.
+
+## Tracking (recursive-spine convention)
+
+Work state lives in GitHub issues and milestones, not in prose files.
+- What's in flight: `gh issue list --assignee @me`
+- Deferred work: `gh issue list --label deferred`
+- Branches: `<prefix>/<issue>-<slug>`; PRs say `Closes #N`.
+- Deferral requires a filed issue. Handover files its debts before closing.
+Dialect and modules for this repo: [docs/tracking-dialect.md](docs/tracking-dialect.md)
