@@ -333,6 +333,47 @@ def test_site_commands_match_cli_surface():
 
 ---
 
+### Task 6: Honest button labels + a real Un-tmux (user request 2026-07-31)
+
+**Files:**
+- Modify: `crr/core/page.html` (rename De-tmux button label to `Untrack`; add `Un-tmux` button), `crr/core/web.py` (`ACTIONS` += `"untmux"`; `PAGE_VERSION` 11 → 12), `crr/core/ops.py` (new `untmux` op), `crr/core/ports.py` (`TmuxSpawner.kill_session`), `crr/adapters/tmux.py` (`RealTmux.kill_session`), `crr/core/contracts.py` (`ARCHIVE_REASONS` += `"untmuxed"`, no version bump — same vocabulary-extension rationale as `ghost-restored`), `crr/cli.py` (`untmux` subcommand + web action branch), `CHANGELOG.md`, `README.md` (row)
+- Test: `tests/test_ops.py`, `tests/test_web.py`, `tests/test_adapters.py` (tmux builder), `tests/test_contracts.py`, `tests/test_cli.py`
+
+**Why:** The user reports the `De-tmux` label is dishonest: clicking it opens a tab that still runs tmux (it re-homes + untracks; it never removes the wrapper). Rename the label to `Untrack` (op name/API stays `detmux` — no API break). And add the genuinely-de-tmuxing op the label implied: `untmux`.
+
+**`ops.untmux(store, archive, tmux, boot, probe, pid, now, *, tab_spawner)` (decided design):**
+1. Same gates as `detmux` in the same order: entry read → classify == CRASHED → `tmux_session` set → name in `tmux.list_sessions()` → `tab_spawner` available (refuse BEFORE any destructive step; a missing spawner must not kill the tmux).
+2. `tmux.kill_session(name)` — the parked claude dies; the conversation is durable in its transcript.
+3. Spawn the visible tab running `["claude", "--resume", sid]` word-form with `cwd=entry["cwd"]` (`tab_spawner.open_tab(revival_argv(entry), cwd=entry["cwd"])`).
+4. On spawn success: archive reason `"untmuxed"`, `store.remove(pid)`, message `f"un-tmuxed {pid}: claude --resume in a new tab; crr no longer manages it"`.
+5. On spawn failure AFTER the kill: leave the journal entry untouched (its `tmux_session` field remains; the reviver's next pass re-parks the conversation in tmux — say so in the failure message: `"...tab failed to open: {exc}; the watchdog will re-park it in tmux within a minute"`). Return `ok=False`.
+- `RealTmux.kill_session(name)`: `["tmux", "kill-session", "-t", name]`, `check=True`, timeout — pure builder `_kill_session_cmd(name)` + thin wrapper, mirroring `new_detached_session`.
+- Web: `ACTIONS` += `"untmux"`; action branch mirrors detmux's wiring (boot/probe under the lock). CLI: `crr untmux <pid>` mirroring `_cmd_detmux`.
+- Page (crashed cards): `Untrack` (op `detmux`) and, same condition, `addBtn("Un-tmux", "untmux", true)` — confirm-gated (second click) since it kills and relaunches. `PAGE_VERSION = 12  # v12: De-tmux renamed Untrack; real Un-tmux button`.
+
+- [ ] **Step 1: failing tests** — ops: happy path (kill called, tab spawned with revival argv + cwd, archived `"untmuxed"`, delisted); spawner-missing refusal BEFORE kill (kill_session not called); spawn-failure path (entry retained, ok False, message mentions watchdog); live-session refusal (classifier gate). web: `"untmux"` in ACTIONS; unknown-op regression unchanged. contracts: `"untmuxed"` valid reason, version still 1. adapters: `_kill_session_cmd`. cli: subcommand parses. page: node gate + PAGE_VERSION 12 pin; `Untrack` label string present, `De-tmux` absent.
+- [ ] **Step 2: watch each fail for the right reason.**
+- [ ] **Step 3: implement.**
+- [ ] **Step 4: full gates; commit** — `feat(untmux): real un-tmux op + honest Untrack label (PAGE_VERSION 12)`.
+
+---
+
+### Task 7: linger failure is a warning, not an install failure (WSL calibration)
+
+**Files:**
+- Modify: `crr/cli.py` (`_cmd_systemd` install branch), `CHANGELOG.md`
+- Test: `tests/test_cli.py`
+
+**Why (live evidence 2026-07-31):** on WSL2, `loginctl enable-linger` reliably exits 1 (dbus quirk; services run fine because the user manager starts with the session). Task 2's exit-code fix now makes `crr systemd --install` report total failure ("the watchdog/dashboard are NOT running") when everything except linger succeeded — an over-claim in the other direction.
+
+**Decided behavior:** split the enable commands: run `daemon-reload` + the two `enable --now` commands via `_run_commands` (failure of ANY of these is still a hard failure, exit 1); run `loginctl enable-linger` separately — on nonzero exit print exactly one stderr warning: `crr systemd: warning — could not enable linger (common on WSL2); services will stop at logout unless linger is enabled another way` and do NOT fail the install. `systemd.enable_commands()` keeps returning all four (print-mode output unchanged); add `systemd.critical_enable_commands()` and `systemd.linger_command()` accessors so the split lives in the adapter, not as cli-side list slicing.
+
+- [ ] **Step 1: failing tests** — linger-only failure → exit 0, success line printed, warning on stderr; enable-command failure → still exit 1, no success line; print mode unchanged (all four commands listed).
+- [ ] **Step 2: watch fail** (current code exits 1 on linger failure).
+- [ ] **Step 3: implement; Step 4: full gates; commit** — `fix(systemd): linger failure warns instead of failing the install (WSL2 quirk)`.
+
+---
+
 ## Out of scope (record for the report)
 
 - Publishing the site (enabling GitHub Pages) and any announcement — human-gated per the runbook.
