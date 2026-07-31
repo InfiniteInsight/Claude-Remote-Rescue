@@ -20,6 +20,7 @@ import json
 import os
 import platform
 import pty
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,14 @@ _SHELLS = {
     "bash": {"argv": ["bash", "--norc", "--noprofile", "-c"], "pid": "$$"},
     "zsh": {"argv": ["zsh", "-f", "-c"], "pid": "$$"},
     "fish": {"argv": ["fish", "--no-config", "-c"], "pid": "$fish_pid"},
+}
+
+# Same invocations, plus -i so `status is-interactive` / `$- == *i*` /
+# `-o interactive` read true even with no controlling tty.
+_INTERACTIVE_ARGV = {
+    "bash": ["bash", "--norc", "--noprofile", "-i", "-c"],
+    "zsh": ["zsh", "-f", "-i", "-c"],
+    "fish": ["fish", "--no-config", "-i", "-c"],
 }
 
 pytestmark = pytest.mark.skipif(
@@ -670,3 +679,146 @@ def test_repair_close_flag_wins_over_clean_exit(shell, tmp_path, capsys):
                             capture_output=True, text=True, timeout=30)
     assert len(_record_lines(tmp_path)) == 1
     assert "AFTER-MARKER" not in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Phase-3 restore prompt — `crr rescue-check` invoked from each shim.
+# Contract tests are string-level and ungated (no shell binary needed to
+# generate/inspect the shim text). Behavior tests source a real shim under
+# each installed shell, with a fake `crr` that logs rescue-check calls.
+# ---------------------------------------------------------------------------
+
+# Exact block each shim must emit immediately after its `register` call.
+# stdout is left attached (the [Y/n] prompt must reach the user); only
+# stderr is silenced.
+_RESCUE_CHECK_BLOCK = {
+    "fish": re.compile(
+        r'if status is-interactive; and test -x "\$_CRR_BIN"\n'
+        r'\s*"\$_CRR_BIN" rescue-check 2>/dev/null\n'
+        r'end'
+    ),
+    "bash": re.compile(
+        r'if \[\[ \$- == \*i\* && -x "\$_CRR_BIN" \]\]; then\n'
+        r'\s*"\$_CRR_BIN" rescue-check 2>/dev/null\n'
+        r'fi'
+    ),
+    "zsh": re.compile(
+        r'if \[\[ -o interactive && -x "\$_CRR_BIN" \]\]; then\n'
+        r'\s*"\$_CRR_BIN" rescue-check 2>/dev/null\n'
+        r'fi'
+    ),
+}
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_shim_rescue_check_is_guarded_and_stdout_stays_open(shell, tmp_path, capsys):
+    shim = _make_shim(shell, tmp_path, capsys)
+    text = shim.read_text(encoding="utf-8")
+    assert _RESCUE_CHECK_BLOCK[shell].search(text), text
+
+    line = next(l for l in text.splitlines() if "rescue-check" in l)
+    assert line.rstrip().endswith("2>/dev/null")
+    # Only the stderr redirect — no bare `>/dev/null` swallowing stdout.
+    assert line.count(">/dev/null") == 1
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_shim_rescue_check_placed_right_after_register(shell, tmp_path, capsys):
+    shim = _make_shim(shell, tmp_path, capsys)
+    lines = shim.read_text(encoding="utf-8").splitlines()
+    register_idx = next(i for i, l in enumerate(lines) if " register --pid " in l)
+    rescue_idx = next(i for i, l in enumerate(lines) if "rescue-check" in l)
+    # Allow the one-line comment the brief's snippet adds before the guard,
+    # but nothing else (no other statement) in between.
+    between = lines[register_idx + 1:rescue_idx]
+    assert all(l.strip() == "" or l.strip().startswith("#") or l.strip().startswith("if ")
+               for l in between), lines[register_idx:rescue_idx + 2]
+
+
+def _fake_crr_bin(tmp_path) -> Path:
+    """A fake `crr` binary for the rescue-check hook: logs an invocation
+    whenever it is called with `rescue-check` as the first argument, and
+    no-ops (exit 0, no output) for every other subcommand the shim's own
+    `_crr` helper fires (register/deregister/etc.) while sourcing."""
+    fake = tmp_path / "fake-crr"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        '[ "$1" = "rescue-check" ] && echo called >> "$CRR_TEST_RECORD"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+def _rescue_check_env(state_dir, record) -> dict:
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(state_dir),
+        "XDG_STATE_HOME": str(state_dir),
+        "CRR_TEST_RECORD": str(record),
+    }
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_rescue_check_runs_on_interactive_shell(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    fake_crr = _fake_crr_bin(tmp_path)
+    assert cli.main(["shim", shell, "--crr-bin", str(fake_crr)]) == 0
+    shim = tmp_path / f"crr.{shell}"
+    shim.write_text(capsys.readouterr().out, encoding="utf-8")
+    state = tmp_path / "state"
+    record = tmp_path / "record"
+    script = f'source "{shim}"\n'
+    result = subprocess.run(
+        _INTERACTIVE_ARGV[shell] + [script], env=_rescue_check_env(state, record),
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert record.exists() and "called" in record.read_text(), \
+        f"{shell}: interactive shell never ran rescue-check ({result.stderr})"
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_rescue_check_skipped_on_noninteractive_shell(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    fake_crr = _fake_crr_bin(tmp_path)
+    assert cli.main(["shim", shell, "--crr-bin", str(fake_crr)]) == 0
+    shim = tmp_path / f"crr.{shell}"
+    shim.write_text(capsys.readouterr().out, encoding="utf-8")
+    state = tmp_path / "state"
+    record = tmp_path / "record"
+    script = f'source "{shim}"\n'
+    result = subprocess.run(
+        _SHELLS[shell]["argv"] + [script], env=_rescue_check_env(state, record),
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not record.exists(), f"{shell}: non-interactive shell ran rescue-check"
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_rescue_check_is_silent_no_op_when_crr_binary_is_absent(shell, tmp_path, capsys):
+    # Missing crr = silent no-op, even on an interactive shell where the
+    # `-x` guard would otherwise let the invocation through. Interactive
+    # shells emit their own unrelated stderr noise (no controlling tty:
+    # "no job control", fish's "Could not set up terminal" TERM warning) —
+    # asserted against below, not "stderr is empty".
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    assert cli.main(["shim", shell, "--crr-bin", "/nonexistent/crr"]) == 0
+    shim = tmp_path / f"crr.{shell}"
+    shim.write_text(capsys.readouterr().out, encoding="utf-8")
+    state = tmp_path / "state"
+    script = f'source "{shim}"\n'
+    result = subprocess.run(
+        _INTERACTIVE_ARGV[shell] + [script],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(state),
+             "XDG_STATE_HOME": str(state)},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "/nonexistent/crr" not in result.stderr
+    assert "rescue-check" not in result.stderr
