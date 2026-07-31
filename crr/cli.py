@@ -6,8 +6,8 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close/detmux), diagnose, gc, the web dashboard,
-the systemd watchdog, and the shim-facing hooks.
+(reopen/dismiss/remove/kick/close/detmux/untmux), diagnose, gc, the web
+dashboard, the systemd watchdog, and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -120,6 +120,12 @@ def _build_parser() -> argparse.ArgumentParser:
     dtm = sub.add_parser("detmux", help="re-home a revived tmux session into a visible tab")
     dtm.add_argument("pid", type=int)
     dtm.set_defaults(func=_cmd_detmux)
+
+    utm = sub.add_parser(
+        "untmux", help="kill a parked tmux session and relaunch claude --resume in a visible tab"
+    )
+    utm.add_argument("pid", type=int)
+    utm.set_defaults(func=_cmd_untmux)
 
     rescued = sub.add_parser(
         "rescued",
@@ -767,6 +773,26 @@ def _cmd_detmux(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def _cmd_untmux(args: argparse.Namespace) -> int:
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError as exc:
+        print(f"crr untmux: {exc}", file=sys.stderr)
+        return 2
+    config = _load_config()
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not tmux_spawner.available():
+        print("crr untmux: tmux was not found", file=sys.stderr)
+        return 2
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    sd = state_dir.state_dir()
+    with mutation_lock(sd):
+        res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
+                         tab_spawner=_tab_spawner(config))
+    print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if res.ok else 1
+
+
 def _cmd_rescued(_args: argparse.Namespace) -> int:
     """List prior-boot conversations the reviver parked in live tmux,
     awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
@@ -791,7 +817,7 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
     for e in found:
         sid8 = e["claude"]["session_id"][:8]
         print(f"#{e['pid']} · {sid8} {e['cwd']} → {e['tmux_session']}")
-    print("attach: tmux attach -t <name> · dashboard: Reopen/De-tmux")
+    print("attach: tmux attach -t <name> · dashboard: Reopen/Untrack")
     return 0
 
 
@@ -1056,6 +1082,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
                                 grace=config.get("close_grace_seconds"))
             elif op == "detmux":
                 res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+            elif op == "untmux":
+                res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message
@@ -1091,7 +1119,7 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
         return 2
     config = _load_config()
     crr_bin = _resolve_crr_bin(args.crr_bin)
-    # WSL tab-spawning (De-tmux/Reopen) shells out to wt.exe/wsl.exe, which
+    # WSL tab-spawning (Untrack/Un-tmux/Reopen) shells out to wt.exe/wsl.exe, which
     # live under Windows dirs a service's PATH never inherits ([lesson:
     # interop PATH]) — baked as extras here, not in systemd.py, so native
     # Linux never warns about a "missing" wt.exe.
@@ -1127,7 +1155,7 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     if tab_missing:
         print(
             "crr systemd: WARNING — not found on PATH: "
-            f"{', '.join(tab_missing)}; De-tmux/Reopen tab spawning will be unavailable "
+            f"{', '.join(tab_missing)}; Untrack/Un-tmux/Reopen tab spawning will be unavailable "
             "until these resolve",
             file=sys.stderr,
         )

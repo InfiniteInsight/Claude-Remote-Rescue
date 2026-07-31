@@ -27,6 +27,10 @@ def _new_session_cmd(name: str, cwd: str, argv: Sequence[str]) -> list[str]:
     return ["tmux", "new-session", "-d", "-s", name, "-c", cwd, "--", *argv]
 
 
+def _kill_session_cmd(name: str) -> list[str]:
+    return ["tmux", "kill-session", "-t", name]
+
+
 def _parse_sessions(stdout: str) -> set[str]:
     return {line for line in stdout.splitlines() if line}
 
@@ -55,5 +59,11 @@ class RealTmux:
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:
         subprocess.run(
             _new_session_cmd(name, cwd, argv),
+            capture_output=True, text=True, timeout=self._timeout, check=True,
+        )
+
+    def kill_session(self, name: str) -> None:
+        subprocess.run(
+            _kill_session_cmd(name),
             capture_output=True, text=True, timeout=self._timeout, check=True,
         )

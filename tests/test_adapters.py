@@ -127,6 +127,10 @@ def test_parse_sessions_drops_blank_lines():
     assert tmux._parse_sessions("") == set()
 
 
+def test_kill_session_cmd_targets_the_named_session():
+    assert tmux._kill_session_cmd("crr-abc") == ["tmux", "kill-session", "-t", "crr-abc"]
+
+
 # --- real tmux integration (gated on tmux installed) ---------------------
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")

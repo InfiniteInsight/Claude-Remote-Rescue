@@ -371,6 +371,16 @@ def test_ghost_restored_is_a_valid_archive_reason():
     contracts.validate_archive_record(r)  # must not raise
 
 
+def test_untmuxed_is_a_valid_archive_reason():
+    # [user request 2026-07-31] ops.untmux kills the parked tmux session and
+    # relaunches `claude --resume <sid>` directly in a visible tab; success
+    # archives with this new reason (same vocabulary-extension rationale as
+    # "ghost-restored" — see test_archive_contract_version_still_1_and_v1_records_validate).
+    r = _archive_record()
+    r["reason"] = "untmuxed"
+    contracts.validate_archive_record(r)  # must not raise
+
+
 def test_archive_contract_version_still_1_and_v1_records_validate():
     # Extending ARCHIVE_REASONS changes no key/type in the stored shape, so
     # it does not bump ARCHIVE_CONTRACT_VERSION — every v1 record already on

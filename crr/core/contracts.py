@@ -90,6 +90,7 @@ ARCHIVE_REASONS = (
     "dismissed",
     "detmuxed",
     "ghost-restored",
+    "untmuxed",
 )
 
 

@@ -233,17 +233,34 @@ function renderCard(s, uncertain, groupColor) {
   card.appendChild(prompt);
 
   var actions = el("div", "actions");
-  function addBtn(label, op, danger) {
+  function addBtn(label, op, danger, confirm) {
     var b = el("button", danger ? "danger" : "");
     b.textContent = label;
-    b.addEventListener("click", function () { action(op, s.pid, b); });
+    var pending = false;
+    var resetTimer = null;
+    b.addEventListener("click", function () {
+      if (confirm && !pending) {
+        pending = true;
+        b.textContent = "Confirm " + label + "?";
+        resetTimer = setTimeout(function () {
+          pending = false;
+          b.textContent = label;
+        }, 4000);
+        return;
+      }
+      if (resetTimer) { clearTimeout(resetTimer); }
+      action(op, s.pid, b);
+    });
     actions.appendChild(b);
   }
   if (s.state === "crashed") {
-    addBtn("Reopen", "reopen", false);
-    addBtn("Dismiss", "dismiss", false);
+    addBtn("Reopen", "reopen", false, false);
+    addBtn("Dismiss", "dismiss", false, false);
     if (s.tmux_session) {        // revived into tmux: offer re-homing
-      addBtn("De-tmux", "detmux", false);
+      addBtn("Untrack", "detmux", false, false);
+      // kills the tmux session and relaunches `claude --resume` directly
+      // in a visible tab -- confirm-gated (second click) since it kills.
+      addBtn("Un-tmux", "untmux", true, true);
     }
   } else {                       // live or ghost: a running claude to act on
     if (s.state === "ghost") {   // orphaned shell: offer mobile rescue

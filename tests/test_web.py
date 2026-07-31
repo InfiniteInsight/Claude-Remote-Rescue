@@ -201,6 +201,11 @@ def test_actions_include_detmux():
     assert "detmux" in web.ACTIONS
 
 
+def test_actions_include_untmux():
+    from crr.core import web
+    assert "untmux" in web.ACTIONS
+
+
 def test_post_kick_is_accepted_and_dispatched():
     from crr.core import web
     seen = {}
@@ -230,6 +235,20 @@ def test_post_detmux_is_accepted_and_dispatched():
     assert json.loads(resp.body) == {
         "ok": True,
         "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it",
+    }
+
+
+def test_post_untmux_is_accepted_and_dispatched():
+    seen = {}
+    def act(op, pid):
+        seen["call"] = (op, pid)
+        return True, "un-tmuxed 42: claude --resume in a new tab; crr no longer manages it"
+    resp = _post({"op": "untmux", "pid": 42}, action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("untmux", 42)
+    assert json.loads(resp.body) == {
+        "ok": True,
+        "message": "un-tmuxed 42: claude --resume in a new tab; crr no longer manages it",
     }
 
 
@@ -275,9 +294,16 @@ def test_handle_request_serves_configured_intervals():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_11():
-    """Explicit version check: v11 adds the ghost-card Restore button."""
-    assert web.PAGE_VERSION == 11
+def test_page_version_is_12():
+    """Explicit version check: v12 renames De-tmux to Untrack (op/API name
+    stays detmux) and adds a real Un-tmux button."""
+    assert web.PAGE_VERSION == 12
+
+
+def test_page_untrack_label_present_de_tmux_label_gone():
+    page = web.render_page()
+    assert "Untrack" in page
+    assert "De-tmux" not in page
 
 
 def test_page_scripts_pass_node_check(tmp_path):

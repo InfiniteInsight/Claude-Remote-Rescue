@@ -192,7 +192,7 @@ def test_systemd_print_bakes_wsl_distro_name_when_wsl(tmp_path, monkeypatch, cap
 def test_systemd_print_warns_accurately_when_only_tab_spawn_binaries_missing(
     tmp_path, monkeypatch, capsys
 ):
-    # wt.exe/wsl.exe missing only degrades tab spawning (De-tmux/Reopen),
+    # wt.exe/wsl.exe missing only degrades tab spawning (Untrack/Un-tmux/Reopen),
     # never revival — the pre-existing "revived sessions will fail on exec"
     # wording would overclaim if reused verbatim for these extras.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
@@ -1124,6 +1124,68 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
     assert "crr no longer manages it" in out
 
 
+@pytest.mark.skipif(
+    shutil.which("tmux") is None or platform.system() not in ("Linux", "Darwin"),
+    reason="untmux needs tmux + Linux/macOS boot adapter",
+)
+def test_untmux_reports_no_session(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["untmux", "424242"])
+    assert rc == 1
+    assert "no session" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="untmux classifies (needs Linux or macOS boot adapter)")
+def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
+    # Mirrors test_detmux_attaches_a_session_via_cli: fake tmux + fake
+    # (always-available) tab spawner stand in for the real adapters, so this
+    # pins the CLI wiring (parser -> mutation_lock -> ops.untmux with the
+    # journaled store) without touching real tmux state.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    name = "crr-untmuxtest"
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return {name}
+
+        def kill_session(self, session_name):
+            pass
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+        def open_tab(self, argv, cwd=None):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(),
+    ))
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+
+    rc = cli.main(["untmux", "42"])
+    assert rc == 0
+    with pytest.raises(KeyError):
+        store.read(42)
+    out = capsys.readouterr().out
+    assert "un-tmuxed" in out
+    assert "crr no longer manages it" in out
+
+
 class _FakeBoot:
     """Stands in for boot_identity.detect() so `rescued` tests aren't
     gated to a real Linux/macOS boot adapter (mirrors the fake-tmux
@@ -1160,7 +1222,7 @@ def test_rescued_lists_prior_boot_parked_sessions(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert rc == 0
     assert f"#42 · 8a1b2c3d {tmp_path} → crr-8a1b2c3d" in out
-    assert "attach: tmux attach -t <name> · dashboard: Reopen/De-tmux" in out
+    assert "attach: tmux attach -t <name> · dashboard: Reopen/Untrack" in out
 
 
 def test_rescued_reports_none(tmp_path, monkeypatch, capsys):

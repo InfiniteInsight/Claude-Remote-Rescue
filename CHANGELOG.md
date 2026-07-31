@@ -26,7 +26,17 @@ No tag or release has been cut yet. This section describes everything on
   shim-side repair loop (`crr repair-check`) that each `claude()` wrapper
   consumes after every claude exit to branch on kick/close/crash.
 - `crr detmux` — re-home a revived (tmux-parked) session into a visible
-  terminal tab, with a matching dashboard button.
+  terminal tab, with a matching dashboard button (labeled `Untrack` on the
+  dashboard — the tab still runs tmux underneath, so the button no longer
+  claims otherwise; the op/API name stays `detmux`).
+- `crr untmux` — the genuinely tmux-free counterpart: kills the parked
+  tmux session and relaunches `claude --resume <sid>` directly in a
+  visible tab, no wrapper left behind. Same classifier/parked/live gates
+  as `detmux`, plus a spawner-availability refusal that runs *before* the
+  kill so a missing spawner never destroys a live tmux session. Archives
+  successes with reason `untmuxed` (terminal — not revived by the
+  watchdog). Dashboard button: `Un-tmux`, confirm-gated (a second click)
+  since it kills and relaunches. (PAGE_VERSION 12)
 - Web dashboard (`crr web`), a stdlib-only HTTP server bound to loopback by
   default (meant to be exposed via `tailscale serve`), with sortable/
   groupable/filterable session cards, confidence-weighted duplicate

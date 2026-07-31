@@ -330,6 +330,78 @@ def detmux(
     return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab; crr no longer manages it")
 
 
+def untmux(
+    store: JournalStore,
+    archive: ArchiveStore,
+    tmux: TmuxSpawner,
+    boot: BootIdentity,
+    probe: ProcessProbe,
+    pid: int,
+    now: str,
+    *,
+    tab_spawner: TabSpawner | None,
+) -> OpResult:
+    """Genuinely un-tmux a parked session: kill the tmux wrapper, relaunch
+    ``claude --resume <sid>`` directly in a visible tab.
+
+    The honest counterpart to ``detmux`` (which only re-homes into a tab
+    that still runs tmux underneath — see its docstring). Same gates, same
+    order: entry -> classify == CRASHED -> tmux_session set -> the named
+    session is actually live -> a tab spawner is available. The spawner
+    check runs BEFORE the kill deliberately: a missing spawner must refuse
+    without touching the tmux session at all, exactly like ``detmux``.
+
+    Ordering after the gates, each choice load-bearing:
+
+    1. Kill the tmux session. A kill failure (e.g. the underlying
+       ``tmux kill-session`` erroring) leaves the entry untouched and fails
+       the op — nothing destructive has landed, so there is nothing to
+       recover.
+    2. Spawn the visible tab running ``claude --resume <sid>`` word-form
+       with ``cwd=entry["cwd"]``.
+    3. On spawn success: archive reason ``"untmuxed"`` (terminal — see
+       ``reviver``'s skip tuple), delist the entry. The conversation is now
+       a bare ``claude --resume`` in a tab; crr no longer manages it.
+    4. On spawn failure AFTER the kill: the tmux session is already gone,
+       so leave the journal entry untouched (its ``tmux_session`` field
+       remains) — the next revive pass finds no live session under that
+       name and re-parks the conversation in a fresh detached tmux
+       session, exactly like any other crashed candidate. Say so in the
+       failure message.
+    """
+    try:
+        entry = store.read(pid)
+    except (KeyError, contracts.ContractError):
+        return OpResult(False, f"no session {pid}")
+    state = classify(entry, boot, probe)
+    if state != CRASHED:
+        return OpResult(False, f"session {pid} is {state}, not crashed — refusing "
+                               "(untmux re-homes revived sessions only)")
+    name = entry.get("tmux_session")
+    if not name:
+        return OpResult(False, f"session {pid} is not tmux-parked")
+    if name not in tmux.list_sessions():
+        return OpResult(False, f"tmux session {name} is gone")
+    if tab_spawner is None or not tab_spawner.available():
+        return OpResult(False, "no terminal tab spawner available on this host")
+    try:
+        tmux.kill_session(name)
+    except Exception as exc:  # adapter subprocess failure
+        return OpResult(False, f"untmux {pid} failed to kill tmux session {name}: {exc}")
+    try:
+        tab_spawner.open_tab(revival_argv(entry), cwd=entry["cwd"])
+    except Exception as exc:  # adapter subprocess/osascript failure
+        return OpResult(
+            False,
+            f"untmux {pid}: tmux session killed, but the tab failed to open: {exc}; "
+            "the watchdog will re-park it in tmux within a minute",
+        )
+    if entry.get("claude") is not None:
+        archive.archive(entry, "untmuxed", now)
+    store.remove(pid)
+    return OpResult(True, f"un-tmuxed {pid}: claude --resume in a new tab; crr no longer manages it")
+
+
 def _signal_groups(
     controller: "ProcessController", groups: list[int], grace: float
 ) -> tuple[int, list[str]]:
