@@ -71,5 +71,10 @@ OOM death) replay successfully on the new stack.
 ## Phase 5 — release polish
 
 - Packaging: pipx / Homebrew formula / AUR; install doctor (`crr doctor`).
-- Docs site, screenshots, security-model writeup, CONTRIBUTING.
+- **Built** (publish pending): the static, dependency-free docs site
+  (`docs/site/` — hand-written HTML5 + CSS, zero external requests, dark-
+  scheme aware, no JavaScript), covering the install flow, full command
+  surface, dashboard screenshot, security model, and the honest
+  calibration line. Not yet published to GitHub Pages. Screenshots,
+  security-model writeup (SECURITY.md), and CONTRIBUTING remain.
 - Public announcement.

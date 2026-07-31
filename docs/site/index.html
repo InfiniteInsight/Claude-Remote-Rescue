@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude-Remote-Rescue — keep Claude Code sessions alive, rescue them from your phone</title>
+<meta name="description" content="Keep Claude Code sessions alive and remotely rescuable when terminals, shells, or whole hosts die — controllable from any device on your tailnet.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <h1>Claude-Remote-Rescue</h1>
+  <p class="tagline">
+    Keep Claude Code sessions alive and remotely rescuable when terminals,
+    shells, or whole hosts die — on macOS, Linux (desktop and headless),
+    and Windows/WSL — controllable from any device on your tailnet.
+  </p>
+  <p class="disclaimer">
+    <strong>Not affiliated with Anthropic.</strong> MIT licensed. CLI binary:
+    <code>crr</code>.
+  </p>
+  <p class="hero-links">
+    <a class="primary" href="https://github.com/InfiniteInsight/Claude-Remote-Rescue">View on GitHub</a>
+    <a href="https://github.com/InfiniteInsight/Claude-Remote-Rescue/blob/main/DESIGN.md">Design doc</a>
+    <a href="https://github.com/InfiniteInsight/Claude-Remote-Rescue/blob/main/SECURITY.md">Security model</a>
+    <a href="https://github.com/InfiniteInsight/Claude-Remote-Rescue/blob/main/CHANGELOG.md">Changelog</a>
+  </p>
+</header>
+
+<nav class="toc" aria-label="Section links">
+  <ul>
+    <li><a href="#how-it-works">How it works</a></li>
+    <li><a href="#restore-prompt">Restore prompt</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#commands">Commands</a></li>
+    <li><a href="#dashboard">Dashboard</a></li>
+    <li><a href="#security">Security model</a></li>
+    <li><a href="#status">Status</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<section id="how-it-works">
+  <h2>How it works</h2>
+  <p>
+    When a terminal window closes, a laptop reboots, or a VM runs out of
+    memory mid-conversation, Claude-Remote-Rescue notices, revives each
+    session (<code>claude --resume</code>) into tmux, and gives you a
+    tailnet-only web dashboard to reopen, dismiss, or remove any session
+    from any device. It also tells you <em>why</em> things died (journald
+    on Linux, translated to plain English).
+  </p>
+  <div class="pipeline">
+    <span class="step">shell shim journals a session</span>
+    <span class="arrow">&rarr;</span>
+    <span class="step">classifier reads state</span>
+    <span class="arrow">&rarr;</span>
+    <span class="step">reviver resumes into detached tmux</span>
+    <span class="arrow">&rarr;</span>
+    <span class="step">dashboard controls it from anywhere</span>
+  </div>
+  <h3>The classifier's three states</h3>
+  <div class="states">
+    <span class="badge">live — same boot, pid alive, owns a controlling terminal</span>
+    <span class="badge">ghost — same boot, pid alive, no controlling terminal (a closed window orphaned the shell)</span>
+    <span class="badge">crashed — pid dead, or the boot identity doesn't match</span>
+  </div>
+  <p>
+    Every destructive operation (close, dismiss, reopen) gates on the
+    classifier — never on bare pid existence — so a reboot-recycled pid
+    can never get an unrelated process killed. <code>tmux</code> is the
+    revival substrate on every platform: crashed sessions with a known
+    Claude session id come back as detached tmux sessions running
+    <code>claude --resume</code>, and tab adapters then attach visibly
+    wherever a terminal-spawner exists. On headless hosts there's no tab
+    to spawn, so tmux isn't a fallback — it's just where the session
+    lives.
+  </p>
+</section>
+
+<section id="restore-prompt">
+  <h2>Restore prompt: the once-per-boot offer</h2>
+  <p>
+    After a crash or reboot, the watchdog revives crashed sessions with a
+    known Claude session id into detached tmux automatically — but a
+    revived session parked in tmux still isn't sitting in a visible
+    terminal tab until something re-homes it. <code>crr rescue-check</code> is that something: a
+    shim-facing hook that every interactive shell start runs once per
+    boot (the bash, zsh, and fish shims all call it).
+  </p>
+  <p>
+    It offers to re-home whatever the reviver already parked in tmux from
+    the previous boot with a <code>[Y/n]</code> prompt, gated so at most
+    one shell ever prompts — even when a terminal app restores several
+    tabs at once, thanks to an atomic marker claim taken before either
+    visible outcome (the prompt or the headless notice) is printed. A
+    typed empty line (Enter) defaults to yes; an <strong>unattended
+    timeout always defaults to "not now"</strong> (15 seconds by
+    default) — the prompt never auto-spawns terminal tabs on its own. On
+    a host with no tab spawner (headless SSH, no display), the prompt
+    degrades to a one-line notice pointing at <code>crr rescued</code> or
+    <code>tmux attach</code>, the same way <code>reopen</code> and
+    <code>detmux</code> degrade when no spawner is available. The whole
+    hook is wrapped in a blanket exception guard, like every other shim
+    hook — it must never break the shell it's sourced into.
+  </p>
+  <p>
+    <code>crr rescued</code> lists that same candidate set on demand,
+    without waiting for the next shell start.
+  </p>
+  <p class="fine-print">
+    Maturity: built and covered by CLI-level tests with every adapter
+    (tmux, tab spawner, boot identity) faked — not yet exercised against
+    a real post-reboot shell.
+  </p>
+</section>
+
+<section id="install">
+  <h2>Install (headless Linux)</h2>
+  <p>Requires Python &ge; 3.11 and <code>tmux</code>. Zero runtime dependencies otherwise.</p>
+  <pre><code>pipx install claude-remote-rescue      # or: pip install --user .</code></pre>
+  <ol>
+    <li>
+      <strong>Shell shim</strong> — source it from your rc file so shells
+      journal themselves and <code>claude</code> launches become
+      identifiable:
+      <pre><code>crr shim fish &gt;&gt; ~/.config/fish/config.fish     # or: bash -&gt; ~/.bashrc, zsh -&gt; ~/.zshrc</code></pre>
+    </li>
+    <li>
+      <strong>Watchdog + dashboard</strong> — install the user services
+      (autonomous revival + a dashboard that survives logout/reboot):
+      <pre><code>crr systemd --install       # prints first with no args, so you can inspect</code></pre>
+      macOS uses <code>crr launchd --install</code>; Windows/WSL uses
+      <code>crr schtasks --install</code>. All three accept
+      <code>--uninstall</code> to reverse the install.
+    </li>
+    <li>
+      <strong>Expose the dashboard on your tailnet</strong> (loopback-only by default):
+      <pre><code>tailscale serve --bg 8377</code></pre>
+    </li>
+    <li>
+      <strong>Check the install:</strong>
+      <pre><code>crr doctor</code></pre>
+    </li>
+  </ol>
+  <p>Targets: headless Linux (now), macOS / Linux-desktop / Windows-WSL (later). Shells: zsh, bash, fish.</p>
+</section>
+
+<section id="commands">
+  <h2>Commands</h2>
+  <table>
+    <caption>The full <code>crr</code> command surface. Rows marked [shim] are called by the shell shims, not typed by hand.</caption>
+    <thead>
+      <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>crr status [--json]</code></td><td>List journaled sessions and their state (live / ghost / crashed)</td></tr>
+      <tr><td><code>crr revive</code></td><td>Revive crashed claude sessions into detached tmux (the watchdog runs this)</td></tr>
+      <tr><td><code>crr reopen --pid N</code> (alias <code>crr restore --pid N</code>)</td><td>Revive one specific crashed or ghost session now (ghost: closes the orphaned shell and archives the conversation for revival)</td></tr>
+      <tr><td><code>crr dismiss --pid N</code></td><td>Clean up a crashed session without reviving (archives it)</td></tr>
+      <tr><td><code>crr remove --pid N</code></td><td>Delist a session, touch nothing else</td></tr>
+      <tr><td><code>crr kick &lt;pid&gt;</code></td><td>Restart claude in place on the same conversation</td></tr>
+      <tr><td><code>crr close &lt;pid&gt;</code></td><td>End a live session (remote exit); no revival</td></tr>
+      <tr><td><code>crr detmux &lt;pid&gt;</code></td><td>Re-home a revived tmux session into a visible tab (dashboard button: <code>Untrack</code> — the tab still runs tmux underneath)</td></tr>
+      <tr><td><code>crr untmux &lt;pid&gt;</code></td><td>Kill a parked tmux session and relaunch <code>claude --resume</code> directly in a visible tab, no tmux wrapper left behind (dashboard button: <code>Un-tmux</code>, confirm-gated)</td></tr>
+      <tr><td><code>crr rescued</code></td><td>List conversations the reviver already parked in tmux from a previous boot, awaiting re-home</td></tr>
+      <tr><td><code>crr diagnose [--json]</code></td><td>Explain why the previous boot / sessions may have died</td></tr>
+      <tr><td><code>crr gc</code></td><td>Drop archive records past the retention window</td></tr>
+      <tr><td><code>crr web [--port N]</code></td><td>Serve the dashboard (loopback only)</td></tr>
+      <tr><td><code>crr systemd [--install|--uninstall]</code></td><td>Print (or install/uninstall) the Linux watchdog timer + dashboard service</td></tr>
+      <tr><td><code>crr launchd [--install|--uninstall]</code></td><td>Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard)</td></tr>
+      <tr><td><code>crr schtasks [--install|--uninstall]</code></td><td>Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard)</td></tr>
+      <tr><td><code>crr config --effective</code></td><td>Every config key with its value and origin (<code>configured</code> / <code>default</code>)</td></tr>
+      <tr><td><code>crr doctor</code></td><td>Install-health checklist</td></tr>
+      <tr><td><code>crr shim &lt;shell&gt;</code></td><td>Print the shell shim to source from your rc file (fish/bash/zsh)</td></tr>
+      <tr><td><code>crr repair-check --pid N</code></td><td>[shim] Read/clear a session's relaunch/close flag</td></tr>
+      <tr><td><code>crr rescue-check</code></td><td>[shim] Once per boot, offer to re-home rescued conversations into visible tabs</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="dashboard">
+  <h2>Dashboard</h2>
+  <p>
+    A tailnet-only, loopback-bound web dashboard for reopening,
+    dismissing, or removing any session from any device. Each card
+    carries a state badge (live / ghost / crashed), the
+    <code>#pid&nbsp;&middot;&nbsp;sid8</code> identity, the session id's
+    provenance (<code>injected</code> / <code>guessed</code> /
+    <code>verified</code>), and the last human prompt.
+  </p>
+  <figure>
+    <img src="dashboard.png" alt="The Claude-Remote-Rescue web dashboard, showing five crashed session cards with pid/sid identity, duplicate-group tinting, and a 'Why did sessions die?' panel toggle.">
+    <figcaption>The session dashboard (state legend and five crashed cards shown; two are a confirmed duplicate pair in blue, two more are a guessed-sid "possible duplicate" pair in amber).</figcaption>
+  </figure>
+  <p>Per-card action buttons, depending on the card's state:</p>
+  <p class="buttons">
+    <span class="btn">Reopen</span>
+    <span class="btn">Dismiss</span>
+    <span class="btn">Untrack</span>
+    <span class="btn">Un-tmux (confirm-gated)</span>
+    <span class="btn">Restore (ghost cards)</span>
+    <span class="btn">Kick</span>
+    <span class="btn">Close</span>
+    <span class="btn">Remove</span>
+  </p>
+  <p>
+    Duplicate detection is confidence-weighted: two sessions that share
+    an <code>injected</code>/<code>verified</code> session id are a real
+    duplicate, while a collision involving a <code>guessed</code> id is
+    only a possible duplicate, because two <code>--continue</code> tabs
+    can guess the same newest transcript. A lazy "why did sessions die?"
+    panel leads with a plain-English verdict (out-of-memory, kernel
+    panic, unexpected shutdown, clean reboot, or "looks clean") above the
+    raw journald/WinEvent evidence.
+  </p>
+</section>
+
+<section id="security">
+  <h2>Security model</h2>
+  <p>
+    The dashboard can restart and revive processes, so its security
+    posture is deliberately conservative — full detail lives in
+    <a href="https://github.com/InfiniteInsight/Claude-Remote-Rescue/blob/main/SECURITY.md">SECURITY.md</a>.
+  </p>
+  <ul>
+    <li><strong>Loopback-only bind.</strong> The dashboard binds to <code>127.0.0.1</code>, never <code>0.0.0.0</code>.</li>
+    <li><strong>The tailnet is the auth boundary.</strong> You reach the dashboard via <code>tailscale serve</code> or your own authenticating reverse proxy — crr has no accounts, sessions, or passwords of its own.</li>
+    <li><strong>Host-header allowlist</strong> (DNS-rebinding defense): requests are accepted only when <code>Host</code> exactly matches loopback, this machine's hostname, a <code>*.ts.net</code> tailnet name, or a configured extra.</li>
+    <li><strong>JSON content-type required on POST</strong>, which forces a CORS preflight and neutralizes simple-request CSRF; zero <code>Access-Control-*</code> headers are ever emitted.</li>
+    <li><strong>DOM via <code>textContent</code> only</strong> — untrusted fields (cwd, last-prompt, session ids) are never written with <code>innerHTML</code>.</li>
+    <li><strong>Classifier-gated destructive ops</strong> — close/dismiss/reopen act on a session only after the classifier confirms its state, so a reboot-recycled pid can never get an unrelated process signalled.</li>
+  </ul>
+</section>
+
+<section id="status">
+  <h2>Status</h2>
+  <p>
+    Phases 1&ndash;4 code is on <code>main</code> (v0.1.0): headless Linux,
+    plus the macOS, Linux-desktop, and Windows/WSL platform adapters, are
+    built, along with guessed/verified session-id tracking and the
+    batched status probe. This is a ground-up OSS rewrite of a private
+    Windows/WSL tool that survived two real outages in production (a
+    Windows-Update reboot and a WSL OOM crash) with zero lost
+    conversations.
+  </p>
+  <p>
+    What isn't yet verified: the macOS-runner tests (<code>plutil</code>,
+    <code>osacompile</code>, <code>log show</code>/<code>pmset</code>,
+    mac boot-identity) haven't run on this batch; any real GUI tab spawn
+    (macOS / Linux-desktop / <code>wt.exe</code>) and all Windows
+    integration are unrun; and the end-to-end hardware acceptance test —
+    kill the tmux server, reboot, watch every conversation revive and the
+    dashboard return over the tailnet — has not been run. These are the
+    next milestone.
+  </p>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="inner">
+    <p class="calibration">
+      <strong>Honest calibration:</strong> Linux/WSL is live-verified;
+      macOS/Windows adapters are unit-tested, hardware verification pending.
+    </p>
+    <p class="fine-print">
+      Claude-Remote-Rescue is not affiliated with Anthropic. MIT
+      licensed. Source, issues, and the full CHANGELOG live on
+      <a href="https://github.com/InfiniteInsight/Claude-Remote-Rescue">GitHub</a>.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

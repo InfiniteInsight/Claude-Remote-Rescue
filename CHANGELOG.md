@@ -95,6 +95,13 @@ No tag or release has been cut yet. This section describes everything on
   auto-spawns tabs. Headless hosts (no tab spawner) degrade to a one-line
   notice instead of a prompt. New config key
   `rescue_prompt_timeout_seconds` (default 15).
+- Docs site (`docs/site/`): a static, dependency-free HTML5 + CSS site —
+  no JavaScript, no CDN/webfonts/analytics, dark-scheme aware via
+  `prefers-color-scheme`, works from `file://` and GitHub Pages —
+  covering the mission, how-it-works pipeline, the restore-prompt UX, the
+  install flow, the full `crr` command table, dashboard screenshot and
+  button set, the security model, and the project's honest calibration
+  line. Linked from the README; not yet published to GitHub Pages.
 
 ### Changed
 
