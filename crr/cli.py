@@ -1175,10 +1175,26 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     if args.install:
         ud = systemd.unit_dir(Path.home())
         systemd.write_units(ud, units)
-        if not _run_commands(systemd.enable_commands(), "systemd"):
+        if not _run_commands(systemd.critical_enable_commands(), "systemd"):
             print(f"crr systemd: units written to {ud} but enabling FAILED (see above); "
                   "the watchdog/dashboard are NOT running", file=sys.stderr)
             return 1
+        # linger is judged separately: on WSL2 `loginctl enable-linger`
+        # reliably exits 1 (a benign dbus quirk) even though the services
+        # run fine, since the user manager starts with the session anyway —
+        # failing it here would over-claim total install failure the same
+        # way the exit-code-honesty fix over-claimed success before it.
+        linger_cmd = systemd.linger_command()
+        try:
+            linger_ok = subprocess.run(linger_cmd, check=False).returncode == 0
+        except OSError:
+            linger_ok = False
+        if not linger_ok:
+            print(
+                "crr systemd: warning — could not enable linger (common on WSL2); "
+                "services will stop at logout unless linger is enabled another way",
+                file=sys.stderr,
+            )
         print(f"installed watchdog + dashboard units to {ud} and enabled them")
         return 0
 

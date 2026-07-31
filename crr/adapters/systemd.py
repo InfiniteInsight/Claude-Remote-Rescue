@@ -163,18 +163,40 @@ def write_units(target_dir: Path, units: dict[str, str]) -> list[Path]:
     return paths
 
 
-def enable_commands() -> list[list[str]]:
-    """The commands that activate the watchdog + dashboard (data, not run).
+def critical_enable_commands() -> list[list[str]]:
+    """The enable commands whose failure means the install genuinely failed.
 
-    linger lets the user manager run the timer and the dashboard without an
-    active login — essential on a headless box reached only by SSH.
+    Split from linger ([Task 7], live evidence 2026-07-31): on WSL2,
+    `loginctl enable-linger` reliably exits 1 (a benign dbus quirk) even
+    though the services run fine — the user manager starts with the
+    session regardless. Only these three (data-writing, real service
+    activation) are load-bearing for "is the watchdog/dashboard running".
     """
     return [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", TIMER_NAME],
         ["systemctl", "--user", "enable", "--now", WEB_SERVICE_NAME],
-        ["loginctl", "enable-linger"],
     ]
+
+
+def linger_command() -> list[str]:
+    """The linger-enable command, run and judged separately from the above.
+
+    linger lets the user manager run the timer and the dashboard without an
+    active login — essential on a headless box reached only by SSH. Its
+    failure is downgraded to a warning by the caller (see
+    critical_enable_commands' docstring) rather than failing the install.
+    """
+    return ["loginctl", "enable-linger"]
+
+
+def enable_commands() -> list[list[str]]:
+    """The full activation sequence (data, not run) — print-mode output.
+
+    Unchanged by the critical/linger split: still all four commands, in the
+    same order, for `crr systemd` (no --install) to display verbatim.
+    """
+    return critical_enable_commands() + [linger_command()]
 
 
 def disable_commands() -> list[list[str]]:

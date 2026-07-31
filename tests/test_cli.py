@@ -127,6 +127,11 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert "ExecStart=/opt/crr/bin/crr revive" in out
     # XDG_STATE_HOME baked as the parent of the resolved state dir.
     assert f"Environment=XDG_STATE_HOME={tmp_path / 'state'}" in out
+    # [Task 7] print mode must still list linger (enable_commands(), not the
+    # critical-only split) — pinned at the CLI boundary, not just algebraically
+    # in test_systemd.py, so a future cli.py swap to critical_enable_commands()
+    # here would be caught.
+    assert "loginctl enable-linger" in out
     # Print mode must not touch the user's systemd dir.
     assert not (tmp_path / ".config" / "systemd").exists()
 
@@ -277,6 +282,56 @@ def test_systemd_install_success_still_reports(tmp_path, monkeypatch, capsys):
     rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
     assert rc == 0
     assert "installed watchdog" in capsys.readouterr().out
+
+
+def test_systemd_install_linger_failure_is_a_warning_not_a_failure(tmp_path, monkeypatch, capsys):
+    """[Task 7, live evidence 2026-07-31] on WSL2 `loginctl enable-linger`
+    reliably exits 1 (benign dbus quirk) while daemon-reload/enable succeed
+    and the services really do run. Only linger failing must NOT fail the
+    install — it must warn on stderr and still report success."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        rc = 1 if cmd == cli.systemd.linger_command() else 0
+        return subprocess.CompletedProcess(cmd, returncode=rc)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "installed watchdog" in out
+    assert (
+        "crr systemd: warning — could not enable linger (common on WSL2); "
+        "services will stop at logout unless linger is enabled another way"
+    ) in err
+    # Exactly one line, and NOT the generic _run_commands-style "exited 1" —
+    # the whole point of bypassing _run_commands for linger.
+    assert "exited 1" not in err
+    assert err.count("could not enable linger") == 1
+    assert cli.systemd.linger_command() in calls
+
+
+def test_systemd_install_enable_failure_still_fails_even_if_linger_would_succeed(
+    tmp_path, monkeypatch, capsys
+):
+    """A real enable failure (not linger) must still hard-fail the install —
+    the linger carve-out must not swallow other failures."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        rc = 1 if cmd[:2] == ["systemctl", "--user"] and "enable" in cmd else 0
+        return subprocess.CompletedProcess(cmd, returncode=rc)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["systemd", "--install", "--crr-bin", "/usr/bin/crr"])
+    out, err = capsys.readouterr()
+    assert rc != 0
+    assert "installed watchdog" not in out
+    assert "NOT running" in err
+    # The linger carve-out must not mask/mention this failure.
+    assert "could not enable linger" not in err
 
 
 def test_launchd_install_failure_propagates(tmp_path, monkeypatch, capsys):

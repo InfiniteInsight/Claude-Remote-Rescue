@@ -142,6 +142,17 @@ No tag or release has been cut yet. This section describes everything on
   reason and gives the `tmux attach -t <name>` command, so a revival that
   landed but couldn't open a visible tab doesn't look like it did
   nothing.
+- `crr systemd --install` no longer fails the whole install when only
+  `loginctl enable-linger` exits nonzero (live evidence, WSL2: this
+  reliably fails with a benign dbus quirk while the timer/web services
+  come up fine, since the user manager starts with the session anyway) —
+  the exit-code-honesty fix above was over-claiming failure in the other
+  direction. `daemon-reload`/`enable --now` failures still hard-fail the
+  install (exit 1, no success line); a linger-only failure now exits 0,
+  prints the success line, and warns on stderr instead. The split lives
+  in the adapter (`systemd.critical_enable_commands()` +
+  `systemd.linger_command()`); `systemd.enable_commands()` is unchanged
+  for `crr systemd` print mode.
 
 ### Security
 

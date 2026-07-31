@@ -144,6 +144,28 @@ def test_enable_commands_enable_timer_web_and_linger():
     assert any(c[0] == "loginctl" and "enable-linger" in c for c in cmds)
 
 
+def test_critical_enable_commands_excludes_linger():
+    # [Task 7] linger is split out so the CLI can treat its failure as a
+    # warning (WSL2's dbus quirk) while daemon-reload/enable failures stay
+    # hard failures — critical_enable_commands() must carry only the latter.
+    cmds = systemd.critical_enable_commands()
+    assert ["systemctl", "--user", "daemon-reload"] in cmds
+    assert any("enable" in c and systemd.TIMER_NAME in c for c in cmds)
+    assert any("enable" in c and systemd.WEB_SERVICE_NAME in c for c in cmds)
+    assert not any(c[0] == "loginctl" for c in cmds)
+
+
+def test_linger_command_is_loginctl_enable_linger():
+    assert systemd.linger_command() == ["loginctl", "enable-linger"]
+
+
+def test_enable_commands_is_critical_commands_plus_linger():
+    # print mode (`enable_commands()`) must stay unchanged: all four, linger last.
+    assert systemd.enable_commands() == systemd.critical_enable_commands() + [
+        systemd.linger_command()
+    ]
+
+
 def test_disable_commands_mirror_enable():
     assert systemd.disable_commands() == [
         ["systemctl", "--user", "disable", "--now", systemd.TIMER_NAME],
