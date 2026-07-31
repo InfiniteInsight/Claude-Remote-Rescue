@@ -29,7 +29,7 @@ PRs close their issue (`Closes #N`). In-flight work is a query
 ## Cross-project board
 
 Owner: **InfiniteInsight** (user-level "Spine" Projects board).
-`SPINE_BOARD_NUMBER`: pending — the gh token lacks the `project` scope
-(`gh auth refresh -s project` to grant); membership tracked in the repo issue
-"spine: board membership pending (missing gh project scope)". Record the board
-number here once the board exists and the repo is added.
+`SPINE_BOARD_NUMBER`: **2** (hooked up 2026-07-31 after `gh auth refresh -s project`;
+open issues added via `gh project item-add 2 --owner InfiniteInsight`). For
+whole-repo aggregation, enable the board's auto-add workflow for this repo in
+the board settings: https://github.com/users/InfiniteInsight/projects/2/settings
