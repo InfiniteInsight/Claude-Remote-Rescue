@@ -77,24 +77,26 @@ def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
             yield carry.decode("utf-8", "replace")
 
 
-# A real model id always sits within a few lines of the tail (measured on
-# 3243 live transcripts: p50=3, p99=37 lines back), but ~1 in 3 transcripts
-# carry NO model at all (older Claude Code, or all-<synthetic> tails). So the
-# model search is bounded to this tail window: past it we stop looking for a
-# model, or a model-less transcript would be read in full on every poll. The
-# prompt search stays unbounded — the last human prompt can be genuinely deep.
+# Default tail-window bound for the model search (see crr.core.config's
+# `model_tail_lines` for the empirical p50/p99 justification — that DEFAULTS
+# entry is the injectable prior; this constant only supplies the default
+# argument below for callers that don't have a Config to hand).
 MODEL_TAIL_LINES = 200
 
 
-def read_tail_facts(session_id: str, cap: int, home: Path | None = None) -> dict[str, str]:
+def read_tail_facts(
+    session_id: str, cap: int, home: Path | None = None,
+    model_tail_lines: int = MODEL_TAIL_LINES,
+) -> dict[str, str]:
     """Most recent real prompt + model for ``session_id`` in ONE backward read.
 
     Both facts live near the tail, so a single reverse read fills both and
     early-exits — collapsing what would be two independent reads (each paying
     ``find_transcript``'s cross-project glob and the first 64KB block) into
-    one on the poll path. The model search is bounded to the tail window (see
-    ``MODEL_TAIL_LINES``); the prompt search is not. Missing/absent transcript
-    degrades to honest empty strings, never a fabricated value.
+    one on the poll path. The model search is bounded to ``model_tail_lines``
+    (injectable — see crr.core.config's ``model_tail_lines``); the prompt
+    search is not. Missing/absent transcript degrades to honest empty
+    strings, never a fabricated value.
     """
     facts = {"last_prompt": "", "model": ""}
     path = find_transcript(session_id, home)
@@ -102,7 +104,7 @@ def read_tail_facts(session_id: str, cap: int, home: Path | None = None) -> dict
         return facts
     try:
         for i, line in enumerate(_reversed_lines(path)):
-            in_model_window = i < MODEL_TAIL_LINES
+            in_model_window = i < model_tail_lines
             try:
                 record = json.loads(line)
             except (ValueError, TypeError):

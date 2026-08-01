@@ -69,7 +69,10 @@ def _tail_facts_extractor(config: cfg.Config):
     entry["claude"] is always present here.
     """
     cap = config.get("last_prompt_display_cap")
-    return lambda entry: transcript_source.read_tail_facts(entry["claude"]["session_id"], cap)
+    model_tail_lines = config.get("model_tail_lines")
+    return lambda entry: transcript_source.read_tail_facts(
+        entry["claude"]["session_id"], cap, model_tail_lines=model_tail_lines
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -147,7 +150,8 @@ def _build_parser() -> argparse.ArgumentParser:
     gc.set_defaults(func=_cmd_gc)
 
     w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
-    w.add_argument("--port", type=int, default=8377)
+    w.add_argument("--port", type=int, default=None,
+                   help="dashboard bind port (default: config dashboard_port = 8377)")
     w.set_defaults(func=_cmd_web)
 
     sysd = sub.add_parser(
@@ -160,8 +164,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="disable/remove the watchdog + dashboard integration")
     sysd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the units (default: this crr binary)")
-    sysd.add_argument("--port", type=int, default=8377,
-                      help="dashboard port to bake into crr-web.service (default: 8377)")
+    sysd.add_argument("--port", type=int, default=None,
+                      help="dashboard port to bake into crr-web.service "
+                           "(default: config dashboard_port = 8377)")
     sysd.set_defaults(func=_cmd_systemd)
 
     lncd = sub.add_parser(
@@ -174,8 +179,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="disable/remove the watchdog + dashboard integration")
     lncd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the agents (default: this crr binary)")
-    lncd.add_argument("--port", type=int, default=8377,
-                      help="dashboard port to bake into the web agent (default: 8377)")
+    lncd.add_argument("--port", type=int, default=None,
+                      help="dashboard port to bake into the web agent "
+                           "(default: config dashboard_port = 8377)")
     lncd.set_defaults(func=_cmd_launchd)
 
     sch = sub.add_parser(
@@ -188,8 +194,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="disable/remove the watchdog + dashboard integration")
     sch.add_argument("--crr-bin", default=None,
                      help="crr path inside WSL to bake into the tasks (default: this crr binary)")
-    sch.add_argument("--port", type=int, default=8377,
-                     help="dashboard port to bake into the web task (default: 8377)")
+    sch.add_argument("--port", type=int, default=None,
+                     help="dashboard port to bake into the web task "
+                          "(default: config dashboard_port = 8377)")
     sch.set_defaults(func=_cmd_schtasks)
 
     conf = sub.add_parser("config", help="inspect configuration")
@@ -298,6 +305,7 @@ def _check(label: str, ok: bool, detail: str = "") -> None:
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
     """Install-health checklist. Read-only; never changes anything."""
+    config = _load_config()
     print(f"crr {__version__}")
     print(
         "contracts: journal v"
@@ -348,8 +356,11 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         enabled = ""
         if installed and shutil.which("systemctl"):
             try:
-                r = subprocess.run(["systemctl", "--user", "is-enabled", unit],
-                                   capture_output=True, text=True, timeout=5)
+                r = subprocess.run(
+                    ["systemctl", "--user", "is-enabled", unit],
+                    capture_output=True, text=True,
+                    timeout=config.get("interop_timeout_seconds"),
+                )
                 enabled = r.stdout.strip() or r.stderr.strip()
             except (subprocess.SubprocessError, OSError):
                 enabled = "unknown"
@@ -951,6 +962,10 @@ def make_web_handler(
     diagnostics_provider: Callable[[], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
+    confirm_arm_seconds: int | None = None,
+    notice_seconds: int | None = None,
+    reload_delay_ms: int | None = None,
+    diag_error_display_cap: int | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -972,6 +987,10 @@ def make_web_handler(
                 allowed_suffixes=allowed_suffixes,
                 poll_seconds=poll_seconds,
                 version_check_seconds=version_check_seconds,
+                confirm_arm_seconds=confirm_arm_seconds,
+                notice_seconds=notice_seconds,
+                reload_delay_ms=reload_delay_ms,
+                diag_error_display_cap=diag_error_display_cap,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -1136,11 +1155,16 @@ def _cmd_web(args: argparse.Namespace) -> int:
         provider, allowed, (".ts.net",), action_provider, diagnostics_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
+        confirm_arm_seconds=config.get("confirm_arm_seconds"),
+        notice_seconds=config.get("notice_seconds"),
+        reload_delay_ms=config.get("reload_delay_ms"),
+        diag_error_display_cap=config.get("diag_error_display_cap"),
     )
 
+    port = args.port if args.port is not None else config.get("dashboard_port")
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    print(f"crr web: serving on http://127.0.0.1:{args.port}/ (loopback only)")
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    print(f"crr web: serving on http://127.0.0.1:{port}/ (loopback only)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1171,11 +1195,13 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     # the right distro instead of silently falling back to the default one.
     wsl_distro = os.environ.get("WSL_DISTRO_NAME", "") if is_wsl else ""
     interval = config.get("watchdog_interval_seconds")
+    port = args.port if args.port is not None else config.get("dashboard_port")
     units = {
         systemd.SERVICE_NAME: systemd.revive_service_unit(crr_bin, path, state_home),
         systemd.TIMER_NAME: systemd.revive_timer_unit(interval),
         systemd.WEB_SERVICE_NAME: systemd.web_service_unit(
-            crr_bin, path, state_home, args.port, wsl_distro
+            crr_bin, path, state_home, port, wsl_distro,
+            restart_seconds=config.get("web_restart_seconds"),
         ),
     }
 
@@ -1256,9 +1282,10 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     # State dir is NOT baked: state_dir.resolve("Darwin", …) is env-independent,
     # so the agent resolves the same dir the shims write to via HOME alone.
     interval = config.get("watchdog_interval_seconds")
+    port = args.port if args.port is not None else config.get("dashboard_port")
     agents = {
         launchd.REVIVE_PLIST: launchd.revive_agent_plist(crr_bin, path, interval),
-        launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin, path, args.port),
+        launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin, path, port),
     }
 
     if missing:
@@ -1312,9 +1339,10 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
     crr_bin = _resolve_crr_bin(args.crr_bin)
     distro = os.environ.get("WSL_DISTRO_NAME")
     interval = config.get("watchdog_interval_seconds")
+    port = args.port if args.port is not None else config.get("dashboard_port")
     cmds = [
         scheduled_task.create_revive_task_command(crr_bin, interval, distro),
-        scheduled_task.create_web_task_command(crr_bin, args.port, distro),
+        scheduled_task.create_web_task_command(crr_bin, port, distro),
     ]
 
     if args.uninstall:

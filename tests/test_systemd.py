@@ -108,6 +108,19 @@ def test_web_service_unit_runs_crr_web_and_stays_up():
     assert "WSL_DISTRO_NAME" not in unit
 
 
+def test_web_service_unit_honors_configured_restart_seconds():
+    # F7: RestartSec was baked at 2, unconfigurable — now threaded like the
+    # watchdog interval (default preserved for callers that don't pass it).
+    unit = systemd.web_service_unit(
+        crr_bin="/opt/crr/bin/crr",
+        path="/opt/crr/bin:/usr/bin",
+        state_home="/home/u/.local/state",
+        port=8377,
+        restart_seconds=9,
+    )
+    assert "RestartSec=9" in unit
+
+
 def test_web_service_unit_bakes_wsl_distro_name_when_given():
     # [live bug, 2026-07-31] WindowsTerminalSpawner reads WSL_DISTRO_NAME
     # from os.environ at call time (cli.py's _select_tab_spawner) to pass

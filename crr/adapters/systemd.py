@@ -113,7 +113,8 @@ def revive_timer_unit(interval_seconds: int) -> str:
 
 
 def web_service_unit(
-    crr_bin: str, path: str, state_home: str, port: int, wsl_distro: str = ""
+    crr_bin: str, path: str, state_home: str, port: int, wsl_distro: str = "",
+    *, restart_seconds: int = 2,
 ) -> str:
     """A long-running dashboard service (loopback; tailnet-served).
 
@@ -127,6 +128,11 @@ def web_service_unit(
     reads ``os.environ.get("WSL_DISTRO_NAME")`` at request time to target
     ``wsl.exe --distribution <name>`` — unbaked, a multi-distro host would
     silently open the tab in the *default* distro instead of this one.
+
+    ``restart_seconds`` (audit P5) is the same judgment call as the watchdog
+    interval — a named config default (``web_restart_seconds``), not a
+    baked literal; the default here only covers callers with no Config to
+    hand.
     """
     distro_line = f"Environment=WSL_DISTRO_NAME={wsl_distro}\n" if wsl_distro else ""
     return (
@@ -140,7 +146,7 @@ def web_service_unit(
         f"{distro_line}"
         f"ExecStart={crr_bin} web --port {port}\n"
         "Restart=on-failure\n"
-        "RestartSec=2\n"
+        f"RestartSec={restart_seconds}\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"

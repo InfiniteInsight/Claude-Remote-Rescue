@@ -256,6 +256,124 @@ def test_schtasks_print_emits_both_tasks_and_runs_nothing(tmp_path, monkeypatch,
     assert "schtasks --install" in out  # printed install guidance
 
 
+# --- F6: --port default=None, resolved from config's dashboard_port -------
+
+def test_systemd_print_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd"])  # no --port -> config dashboard_port default (8377)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 8377" in out
+
+
+def test_systemd_print_default_port_honors_config_toml_override(tmp_path, monkeypatch, capsys):
+    sd = tmp_path / "state" / "crr"
+    sd.mkdir(parents=True)
+    (sd / "config.toml").write_text("dashboard_port = 9001\n", encoding="utf-8")
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 9001" in out
+
+
+def test_systemd_print_explicit_port_still_overrides_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd", "--port", "9999"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 9999" in out
+
+
+def test_launchd_print_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["launchd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "8377" in out
+
+
+def test_schtasks_print_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/usr/bin/crr")
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("print must not run schtasks")))
+    rc = cli.main(["schtasks"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 8377" in out
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_web_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            _FakeServer.addr = addr
+
+        def serve_forever(self):
+            raise KeyboardInterrupt()
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    rc = cli.main(["web"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert _FakeServer.addr == ("127.0.0.1", 8377)
+    assert "http://127.0.0.1:8377/" in out
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_web_explicit_port_still_overrides_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            _FakeServer.addr = addr
+
+        def serve_forever(self):
+            raise KeyboardInterrupt()
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    rc = cli.main(["web", "--port", "9123"])
+    assert rc == 0
+    assert _FakeServer.addr == ("127.0.0.1", 9123)
+
+
+def test_doctor_uses_configured_interop_timeout_for_systemctl_check(tmp_path, monkeypatch, capsys):
+    # F5: doctor's systemctl call literal `timeout=5` duplicated
+    # interop_timeout_seconds instead of reading it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text("interop_timeout_seconds = 42\n", encoding="utf-8")
+    monkeypatch.setattr(cli.systemd, "unit_dir", lambda home: tmp_path)
+    (tmp_path / cli.systemd.TIMER_NAME).write_text("", encoding="utf-8")
+    (tmp_path / cli.systemd.WEB_SERVICE_NAME).write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(stdout="enabled\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    assert captured["timeout"] == 42
+
+
 def test_systemd_install_failure_propagates(tmp_path, monkeypatch, capsys):
     """[bug 2026-07-29 / DESIGN lesson] a failed systemctl must not print the
     success line nor exit 0 — a swallowed exit code is a green checkmark."""

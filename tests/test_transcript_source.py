@@ -83,6 +83,18 @@ def test_read_tail_facts_missing_transcript_is_empty(tmp_path):
     }
 
 
+def test_read_tail_facts_honors_configured_model_tail_lines(tmp_path):
+    # F18: the tail window is injectable (crr.core.config's model_tail_lines),
+    # not a bare module constant — a caller can narrow it without touching code.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    near_model = _assistant("recent answer", model="claude-opus-4-8")
+    noise = [_user([{"type": "tool_result", "content": "x"}]) for _ in range(10)]
+    _write_transcript(tmp_path, sid, [near_model, _user("the real prompt"), *noise])
+    facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path, model_tail_lines=5)
+    assert facts["last_prompt"] == "the real prompt"
+    assert facts["model"] == ""  # narrowed window: 11 lines back is now out of range
+
+
 def test_reverse_read_handles_lines_spanning_block_boundary(tmp_path):
     # A prompt padded past the block size must still be read whole.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
