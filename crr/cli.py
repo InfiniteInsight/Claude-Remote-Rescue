@@ -302,7 +302,9 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     print(
         "contracts: journal v"
         f"{contracts.JOURNAL_SCHEMA_VERSION}, sessions v{contracts.SESSIONS_CONTRACT_VERSION}, "
-        f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}"
+        f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}, "
+        f"archive v{contracts.ARCHIVE_CONTRACT_VERSION}, "
+        f"config-defaults v{cfg.CONFIG_DEFAULTS_VERSION}, page v{web.PAGE_VERSION}"
     )
 
     # Platform integration.
@@ -398,9 +400,18 @@ def _print_status_human(payload: dict) -> None:
         print("no journaled sessions")
         return
     for card in sessions:
-        dup = " [dup]" if card["duplicate_group"] else ""
+        if card["duplicate_group"]:
+            # A guessed duplicate is a weaker claim than a verified/injected
+            # one — collapsing both into the same [dup] tag would hide that
+            # difference (audit P3: confidence travels with the data).
+            dup = " [dup? guessed]" if card["sid_source"] == "guessed" else " [dup]"
+        else:
+            dup = ""
+        # injected is the certain norm; only a non-injected sid_source is
+        # worth the extra characters on an otherwise compact line.
+        sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
         model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
-        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}")
+        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}{sid_tag}")
 
 
 def _cmd_register(args: argparse.Namespace) -> int:
@@ -638,6 +649,8 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
         f"gave up {len(outcome.gave_up)}, "
         f"already running {len(outcome.reset)}"
     )
+    if outcome.gave_up:
+        print(f"gave up: {outcome.gave_up}")
     return 0
 
 
@@ -1041,17 +1054,20 @@ def _cmd_gc(_args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     archive = ArchiveStore(sd)
     now = _now()
-    removed = 0
+    removed_sid8s: list[str] = []
     with mutation_lock(sd):
         scan = archive.scan()
         for record in scan.records:
             if is_expired(record, now, retention):
-                archive.remove(record["entry"]["claude"]["session_id"])
-                removed += 1
+                sid = record["entry"]["claude"]["session_id"]
+                archive.remove(sid)
+                removed_sid8s.append(sid[:8])
     for name, reason in scan.problems:
         print(f"crr gc: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
-    print(f"gc: removed {removed} archive record(s) older than {retention} days, "
-          f"kept {len(scan.records) - removed}")
+    print(f"gc: removed {len(removed_sid8s)} archive record(s) older than {retention} days, "
+          f"kept {len(scan.records) - len(removed_sid8s)}")
+    if removed_sid8s:
+        print(f"removed: {removed_sid8s}")
     return 0
 
 
@@ -1364,6 +1380,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         print("usage: crr config --effective", file=sys.stderr)
         return 2
     config = _load_config()
+    print(f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}")
     for key, (value, origin) in sorted(config.effective().items()):
         print(f"{key} = {value!r}  ({origin})")
     return 0

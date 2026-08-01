@@ -536,6 +536,21 @@ def test_doctor_reports_install_health(tmp_path, monkeypatch, capsys):
     assert "crr-revive.timer" in out  # names the watchdog unit to install
 
 
+def test_doctor_prints_all_six_declared_contract_versions(tmp_path, monkeypatch, capsys):
+    # F8: doctor used to print 3 of 6 declared contract versions (omitting
+    # archive, config-defaults, page) — an honesty gap the audit flagged.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"journal v{contracts.JOURNAL_SCHEMA_VERSION}" in out
+    assert f"sessions v{contracts.SESSIONS_CONTRACT_VERSION}" in out
+    assert f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}" in out
+    assert f"archive v{contracts.ARCHIVE_CONTRACT_VERSION}" in out
+    assert f"config-defaults v{cfg.CONFIG_DEFAULTS_VERSION}" in out
+    assert f"page v{cli.web.PAGE_VERSION}" in out
+
+
 def test_config_effective_lists_every_key_with_origin(capsys):
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out
@@ -543,6 +558,16 @@ def test_config_effective_lists_every_key_with_origin(capsys):
     for key in cfg.DEFAULTS:
         assert key in out
     assert "(default)" in out
+
+
+def test_config_effective_prints_defaults_version_header(capsys):
+    # F9: --effective never printed CONFIG_DEFAULTS_VERSION (zero consumers
+    # could tell which default generation they were reading).
+    rc = cli.main(["config", "--effective"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.splitlines()
+    assert lines[0] == f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}"
 
 
 def _live_entry(pid, boot_id):
@@ -597,10 +622,10 @@ def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsy
     assert payload["sessions"][0]["state"] == "crashed"
 
 
-def _human_card(model):
+def _human_card(model, duplicate_group=None, sid_source="injected"):
     return {
         "pid": 42, "sid8": "8a1b2c3d", "state": "live", "cwd": "/home/u/proj",
-        "model": model, "duplicate_group": None,
+        "model": model, "duplicate_group": duplicate_group, "sid_source": sid_source,
     }
 
 
@@ -611,8 +636,40 @@ def test_status_human_shows_model_when_known(capsys):
 
 def test_status_human_omits_model_when_unknown(capsys):
     # No model read yet -> the line is the plain terse form, no trailing gap.
+    # This also pins F13's compactness requirement: an `injected` sid_ource
+    # (the certain norm) adds nothing to the line.
     cli._print_status_human({"sessions": [_human_card("")]})
     assert capsys.readouterr().out == "#42 · 8a1b2c3d [live] /home/u/proj\n"
+
+
+def test_status_human_dup_tag_for_certain_sid(capsys):
+    # F13: verified/injected duplicates print the plain certain tag.
+    card = _human_card("", duplicate_group="8a1b2c3d-...", sid_source="verified")
+    cli._print_status_human({"sessions": [card]})
+    out = capsys.readouterr().out
+    assert "[dup]" in out
+    assert "[dup?" not in out
+    assert "sid:verified" in out  # non-injected sid_source is always surfaced
+
+
+def test_status_human_dup_tag_qualifies_guessed_sid(capsys):
+    # F13: a guessed duplicate must not collapse into the same [dup] tag as
+    # a certain one — sid_source travels with the human line too.
+    card = _human_card("", duplicate_group="8a1b2c3d-...", sid_source="guessed")
+    cli._print_status_human({"sessions": [card]})
+    out = capsys.readouterr().out
+    assert "[dup? guessed]" in out
+    assert "sid:guessed" in out
+
+
+def test_status_human_shows_sid_source_when_not_injected_even_without_dup(capsys):
+    # F13: sid_source is dropped even for non-duplicate guessed/verified
+    # cards today — the dashboard renders the distinction, the CLI doesn't.
+    card = _human_card("", duplicate_group=None, sid_source="guessed")
+    cli._print_status_human({"sessions": [card]})
+    out = capsys.readouterr().out
+    assert "[dup" not in out
+    assert "sid:guessed" in out
 
 
 # --- shim-facing commands: register / last-cmd / deregister --------------
@@ -991,6 +1048,64 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     assert entry["tmux_session"] == f"crr-{_G1_SID[:8]}"  # and it was actually revived
 
 
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_revive_names_gave_up_pids(tmp_path, monkeypatch, capsys):
+    # F14: a terminal outcome (gave up) used to report a bare count while
+    # sibling problem-loops name the file/session responsible.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [4242], []),
+    )
+    rc = cli.main(["revive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gave up: [4242]" in out
+
+
+def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], []),
+    )
+    rc = cli.main(["revive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gave up:" not in out
+
+
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
 
 # --- session ops: remove / dismiss / reopen -----------------------------
@@ -1007,6 +1122,26 @@ def test_gc_removes_expired_archive_records_only(tmp_path, monkeypatch):
     assert cli.main(["gc"]) == 0
     sids = {r["entry"]["claude"]["session_id"] for r in archive.scan().records}
     assert sids == {"22222222-2222-4222-8222-222222222222"}  # only the fresh one remains
+
+
+def test_gc_names_removed_sid8s(tmp_path, monkeypatch, capsys):
+    # F14: gc reported a bare count while sibling problem-loops name files.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive = ArchiveStore(tmp_path)
+    old = _live_entry(pid=1, boot_id="b")
+    old["claude"] = _claude_field("11111111-1111-4111-8111-111111111111")
+    archive.archive(old, "gave-up", "2026-01-01T00:00:00+00:00")
+    assert cli.main(["gc"]) == 0
+    out = capsys.readouterr().out
+    assert "removed: ['11111111']" in out
+
+
+def test_gc_omits_removed_line_when_nothing_removed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    ArchiveStore(tmp_path)  # empty archive dir
+    assert cli.main(["gc"]) == 0
+    out = capsys.readouterr().out
+    assert "removed:" not in out
 
 
 def test_remove_delists_without_archiving(tmp_path, monkeypatch):
