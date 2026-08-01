@@ -434,6 +434,20 @@ def test_doctor_uses_configured_interop_timeout_for_systemctl_check(tmp_path, mo
     assert captured["timeout"] == 42
 
 
+def test_doctor_reports_a_malformed_config_toml_exactly_once(tmp_path, monkeypatch, capsys):
+    # A malformed config.toml must be reported once, not twice: doctor's
+    # own [WARN] config.toml line is the single source of truth here, not
+    # duplicated by a second, independent _load_config() stderr message.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text('zombie_strikes = "not-an-int"\n', encoding="utf-8")
+    rc = cli.main(["doctor"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert err == ""  # no duplicate "crr: ignoring bad config" on stderr
+    assert out.count("zombie_strikes") == 1
+    assert "[WARN] config.toml" in out
+
+
 def test_systemd_install_failure_propagates(tmp_path, monkeypatch, capsys):
     """[bug 2026-07-29 / DESIGN lesson] a failed systemctl must not print the
     success line nor exit 0 — a swallowed exit code is a green checkmark."""

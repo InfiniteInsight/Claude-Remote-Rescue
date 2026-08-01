@@ -313,7 +313,6 @@ def _check(label: str, ok: bool, detail: str = "") -> None:
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
     """Install-health checklist. Read-only; never changes anything."""
-    config = _load_config()
     print(f"crr {__version__}")
     print(
         "contracts: journal v"
@@ -346,15 +345,20 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for name, reason in scan.problems:
         _check(f"journal file {name}", False, reason)
 
-    # Config.
+    # Config. Doctor's own parse attempt doubles as the source of `config`
+    # for the systemctl check below — a second, independent _load_config()
+    # call here would print its own "ignoring bad config" line on top of
+    # this section's structured [WARN], the same fact said twice.
     toml_path = sd / "config.toml"
     if toml_path.is_file():
         try:
-            cfg.Config(cfg.load_toml_overrides(toml_path))
+            config = cfg.Config(cfg.load_toml_overrides(toml_path))
             _check("config.toml", True, str(toml_path))
         except (cfg.ConfigError, ValueError, OSError) as exc:
+            config = cfg.Config()  # same fallback _load_config() would use
             _check("config.toml", False, f"{toml_path}: {exc}")
     else:
+        config = cfg.Config()
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
 
     # systemd units (installed? enabled?).
