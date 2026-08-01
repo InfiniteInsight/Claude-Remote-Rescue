@@ -108,6 +108,7 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr rescued` | List conversations the reviver already parked in tmux from a previous boot, awaiting re-home |
 | `crr diagnose [--json]` | Explain why the previous boot / sessions may have died |
 | `crr gc` | Drop archive records past the retention window |
+| `crr archive --list` | List archived (revival-preserved) sessions: reason, archived-at, sid8, cwd |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |
 | `crr systemd [--install\|--uninstall]` | Print (or install/uninstall) the Linux watchdog timer + dashboard service |
 | `crr launchd [--install\|--uninstall]` | Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard) |

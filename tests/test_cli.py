@@ -1322,6 +1322,58 @@ def test_gc_omits_removed_line_when_nothing_removed(tmp_path, monkeypatch, capsy
     assert "removed:" not in out
 
 
+# --- F15: `crr archive --list` — the human read path archive lineage lacked
+
+def test_archive_list_reports_none_when_empty(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["archive", "--list"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.strip() == "no archived sessions"
+
+
+def test_archive_list_prints_one_line_per_record_sorted_by_archived_at_desc(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive = ArchiveStore(tmp_path)
+    old = _live_entry(pid=1, boot_id="b")
+    old["claude"] = _claude_field("11111111-1111-4111-8111-111111111111")
+    old["cwd"] = "/home/u/old"
+    fresh = _live_entry(pid=2, boot_id="b")
+    fresh["claude"] = _claude_field("22222222-2222-4222-8222-222222222222")
+    fresh["cwd"] = "/home/u/fresh"
+    archive.archive(old, "gave-up", "2026-01-01T00:00:00+00:00")
+    archive.archive(fresh, "dismissed", "2026-06-01T00:00:00+00:00")
+
+    rc = cli.main(["archive", "--list"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.strip().splitlines()
+    assert len(lines) == 2
+    # most-recently-archived first
+    assert lines[0].startswith("dismissed")
+    assert "22222222" in lines[0] and "/home/u/fresh" in lines[0] and "2026-06-01" in lines[0]
+    assert lines[1].startswith("gave-up")
+    assert "11111111" in lines[1] and "/home/u/old" in lines[1] and "2026-01-01" in lines[1]
+
+
+def test_archive_requires_the_list_flag(capsys):
+    rc = cli.main(["archive"])
+    assert rc == 2
+    assert "usage: crr archive --list" in capsys.readouterr().err
+
+
+def test_archive_list_surfaces_scan_problems_on_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "corrupt.json").write_text("not json", encoding="utf-8")
+    rc = cli.main(["archive", "--list"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "corrupt.json" in err
+    assert "no archived sessions" in out
+
+
 def test_remove_delists_without_archiving(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
@@ -1603,6 +1655,40 @@ def test_rescued_reports_none(tmp_path, monkeypatch, capsys):
     assert "no rescued sessions" in capsys.readouterr().out
 
 
+class _FakeTmuxUnknown:
+    """F16: available() but list_sessions() can't determine liveness."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def available(self):
+        return True
+
+    def list_sessions(self):
+        return None
+
+
+def test_rescued_reports_none_when_tmux_liveness_is_unknown(tmp_path, monkeypatch, capsys):
+    # F16: unknown liveness must never be silently treated as "definitely
+    # rescued" — but per spec it degrades to the same "no rescued sessions"
+    # a genuinely-empty tmux server produces (never a prompt on unknown).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxUnknown)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(  # would be rescued if liveness were confirmed
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d",
+    ))
+
+    rc = cli.main(["rescued"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no rescued sessions" in out
+
+
 def _rescue_check_setup(monkeypatch, tmp_path, found):
     """Common wiring for `crr rescue-check` tests: fake boot + fake tmux
     (SAFETY: never the real adapters — this machine runs production crr
@@ -1641,6 +1727,32 @@ def test_rescue_check_silent_when_not_a_tty(tmp_path, monkeypatch, capsys):
     assert out == "" and err == ""
     # a later interactive shell must still be offered -> marker NOT written
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is False
+
+
+def test_rescue_check_silent_when_tmux_liveness_is_unknown(tmp_path, monkeypatch, capsys):
+    # F16: unknown liveness must never surface a prompt (a false "rescued
+    # session" the user can't actually attach to would be worse than
+    # staying silent) — real rescue.rescued_sessions is exercised here
+    # (not mocked) to prove the None->set() conversion happens before it,
+    # since `sid in None` would otherwise raise.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxUnknown)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(  # would be rescued if liveness were confirmed
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d",
+    ))
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == "" and err == ""
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is False  # nothing claimed
 
 
 def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys):

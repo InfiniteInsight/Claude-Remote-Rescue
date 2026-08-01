@@ -42,18 +42,35 @@ class RealTmux:
     def available(self) -> bool:
         return shutil.which("tmux") is not None
 
-    def list_sessions(self) -> set[str]:
+    def list_sessions(self) -> set[str] | None:
+        """Return the live tmux session names, or None if that could not be
+        determined (audit F16 — tri-state, spine: null-result expressibility).
+
+        A timeout or OSError is an unknown state, not an empty one — None.
+        A non-zero exit is genuinely empty (``set()``) only when tmux's own
+        stderr says there is no server to have sessions: "no server running"
+        (a server existed and stopped) or "error connecting to ... (No such
+        file or directory)" (a server was never started on this socket —
+        the common case for a fresh TMUX_TMPDIR, e.g. the RealTmux
+        integration test below). [inspect-and-decide, measured on tmux 3.4]
+        Any OTHER non-zero exit (permission error, corrupted socket, ...) is
+        an unknown state too — never collapse it into "confirmed no
+        sessions", or a transient query failure could accumulate a revive
+        strike or a refusal-worthy op against a session that may still be
+        alive.
+        """
         try:
             result = subprocess.run(
                 _list_sessions_cmd(),
                 capture_output=True, text=True, timeout=self._timeout,
             )
         except (subprocess.TimeoutExpired, OSError):
-            return set()
-        # A non-zero exit means "no server running" (hence no sessions) far
-        # more often than a real error; treat it as empty rather than raising.
+            return None
         if result.returncode != 0:
-            return set()
+            stderr = (result.stderr or "").lower()
+            if "no server running" in stderr or "error connecting to" in stderr:
+                return set()
+            return None
         return _parse_sessions(result.stdout)
 
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:

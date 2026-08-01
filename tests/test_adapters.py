@@ -131,6 +131,72 @@ def test_kill_session_cmd_targets_the_named_session():
     assert tmux._kill_session_cmd("crr-abc") == ["tmux", "kill-session", "-t", "crr-abc"]
 
 
+# --- list_sessions tri-state (F16, spine — null-result expressibility) ---
+#
+# "no sessions" and "could not tell" used to both collapse to set(), which
+# let a transient tmux query failure accumulate a revive strike as if the
+# session were confirmed dead. list_sessions() now distinguishes: a
+# genuine empty (no tmux server at all) returns set(); anything else
+# unreadable returns None so callers can refuse to act rather than guess.
+
+class _Result:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_list_sessions_returns_none_on_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="tmux", timeout=5)
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    assert tmux.RealTmux(timeout_seconds=5).list_sessions() is None
+
+
+def test_list_sessions_returns_none_on_oserror(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("tmux binary vanished mid-call")
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    assert tmux.RealTmux(timeout_seconds=5).list_sessions() is None
+
+
+def test_list_sessions_returns_empty_set_when_no_server_running(monkeypatch):
+    # tmux's own "there is no server" wording after a server existed and
+    # was killed — a genuine, confident empty.
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda *a, **k: _Result(1, stderr="no server running on /tmp/tmux-1000/default\n"),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).list_sessions() == set()
+
+
+def test_list_sessions_returns_empty_set_when_socket_never_existed(monkeypatch):
+    # [inspect-and-decide] measured on this repo's tmux 3.4: a server that
+    # was NEVER started (the common case — e.g. a fresh TMUX_TMPDIR, as the
+    # RealTmux integration test below exercises) produces this message
+    # instead of "no server running". Both mean the same thing: there is no
+    # server, hence genuinely no sessions — not a query failure.
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda *a, **k: _Result(
+            1, stderr="error connecting to /tmp/tmux-1000/default (No such file or directory)\n"
+        ),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).list_sessions() == set()
+
+
+def test_list_sessions_returns_none_on_an_unrecognized_nonzero_exit(monkeypatch):
+    # Anything else nonzero is an unknown state, never silently "empty" —
+    # a permissions error, a corrupted socket, etc. must not read as
+    # "confirmed no sessions" (that would let a transient failure
+    # accumulate a revive strike against a session that may still be alive).
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda *a, **k: _Result(1, stderr="permission denied\n"),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).list_sessions() is None
+
+
 # --- real tmux integration (gated on tmux installed) ---------------------
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")

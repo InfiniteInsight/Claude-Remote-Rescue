@@ -50,13 +50,17 @@ class FakeProbe:
 
 class FakeTmux:
     def __init__(self, live=()):
-        self._live = set(live)
+        # live=None means "liveness is unknown" (F16 tri-state) — distinct
+        # from live=() (genuinely no live sessions).
+        self._live = None if live is None else set(live)
         self.created = []  # list of (name, cwd, argv)
 
     def list_sessions(self):
-        return set(self._live)
+        return None if self._live is None else set(self._live)
 
     def new_detached_session(self, name, cwd, argv):
+        if self._live is None:
+            raise AssertionError("must not spawn while tmux liveness is unknown")
         self.created.append((name, cwd, list(argv)))
         self._live.add(name)
 
@@ -310,3 +314,33 @@ def test_dismissed_archive_record_is_not_re_revived(tmp_path):
     outcome = _run(store, tmux, archive=archive)
     assert outcome.revived == []
     assert tmux.created == []
+
+
+# --- F16: tri-state tmux liveness — never act on "can't tell" ------------
+
+def test_revive_skips_the_entire_pass_when_tmux_liveness_is_unknown(tmp_path):
+    # spine (null-result expressibility): an unconfirmed "not live" must
+    # never accumulate a strike or trigger a give-up archive against a
+    # session that may in fact still be running. A transient tmux query
+    # failure must be indistinguishable in effect from "revive wasn't
+    # called this pass", not from "confirmed nothing to do".
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())  # would ordinarily be revived
+    outcome = _run(store, FakeTmux(live=None))
+    assert outcome == ([], [], [])
+    entry = store.read(42)
+    assert entry["revive_strikes"] == 0          # no strike accrued
+    assert entry["tmux_session"] is None          # untouched
+
+
+def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "superseded-on-register", _NOW)  # a revival candidate
+    outcome = _run(store, FakeTmux(live=None), archive=archive)
+    assert outcome == ([], [], [])
+    assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched

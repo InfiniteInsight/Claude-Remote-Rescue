@@ -88,8 +88,18 @@ class TmuxSpawner(Protocol):
     shim and double-registers the session ([lesson: word-form exec]).
     """
 
-    def list_sessions(self) -> set[str]:
-        """Return the set of currently-live tmux session names."""
+    def list_sessions(self) -> set[str] | None:
+        """Return the set of currently-live tmux session names, or None.
+
+        None means "could not be determined" (audit F16 — a timeout, an
+        OSError, or a query exit that isn't tmux's own confident "there is
+        no server" signal) — distinct from a genuine empty set (no server
+        at all, hence no sessions). Callers must never collapse the two:
+        treating an unknown state as "confirmed no sessions" risks a
+        revive strike, a give-up archive, or a destructive op against a
+        session that may in fact still be alive (spine — null-result
+        expressibility).
+        """
         ...
 
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:

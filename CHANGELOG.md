@@ -102,6 +102,25 @@ No tag or release has been cut yet. This section describes everything on
   install flow, the user-facing `crr` command table, dashboard screenshot and
   button set, the security model, and the project's honest calibration
   line. Linked from the README; not yet published to GitHub Pages.
+- `crr archive --list` — the human read path archive lineage lacked: one
+  line per archived record (`reason`, `archived_at`, `sid8`, `cwd`),
+  newest first, read-only.
+- `/api/diagnostics` (contract v3) now carries `params` — the generating
+  caps/lookback/timeout the selected source actually queried with, per
+  source (journald/log+pmset/winevent+wsl-oom) — so a payload's evidence
+  is regenerable/judgeable later instead of losing that lineage the
+  moment it was collected. Both `crr diagnose` (human) and the dashboard's
+  diagnostics panel now show the payload's `source`/boot-identity
+  provenance up front, before the verdict.
+- New config keys: `dashboard_port` (8377, replacing four repeated
+  `--port 8377` argparse defaults), `web_restart_seconds` (2, the
+  systemd dashboard service's `RestartSec`), `confirm_arm_seconds` (4),
+  `notice_seconds` (3), `reload_delay_ms` (800), and
+  `diag_error_display_cap` (20) — the dashboard's confirm-button arm
+  window, notice-banner duration, stale-page reload delay, and
+  diagnostics error display cap, previously hardcoded in `page.html`
+  (`PAGE_VERSION` 13 → 14) — plus `model_tail_lines` (200), the
+  transcript model-search tail window.
 
 ### Changed
 
@@ -169,6 +188,29 @@ No tag or release has been cut yet. This section describes everything on
   marker claim (`rescue.claim_prompt`, an `os.open(O_CREAT|O_EXCL)`
   claim taken before either visible outcome) so at most one shell ever
   prompts even when several start at once.
+- `RealTmux.list_sessions()` collapsed a query failure (timeout, OSError,
+  an unrecognized nonzero exit) into the same empty set as "genuinely no
+  sessions" — a transient tmux failure could accumulate a revive strike,
+  or refuse an op with the wrong reason, against a session that might
+  still be alive. It now returns `None` for an unknown state (distinct
+  from a confident empty set when tmux itself reports no server); the
+  reviver skips its entire pass on `None` rather than acting on a guess,
+  `crr reopen`/`detmux`/`untmux` refuse with "cannot determine tmux state
+  — is tmux responding?", and `crr rescued`/`rescue-check` degrade to
+  silent/empty rather than ever prompting on an unconfirmed state.
+- `crr doctor` printed only 3 of its 6 declared contract versions
+  (omitting archive/config-defaults/page); `crr config --effective`
+  never printed which `CONFIG_DEFAULTS_VERSION` generation it was
+  reporting. Both now print the full, honest set.
+- `crr status` (human) collapsed a `guessed` duplicate into the same
+  `[dup]` tag as a certain (verified/injected) one, and never showed
+  `sid_source` at all outside a duplicate group — the dashboard already
+  renders this distinction; the CLI now does too (`[dup? guessed]` vs
+  `[dup]`, and a ` sid:guessed`/` sid:verified` suffix whenever the sid
+  isn't the certain `injected` norm).
+- `crr revive`/`crr gc` reported gave-up/removed sessions as bare counts;
+  they now name the pids/sid8s, matching the naming discipline every
+  sibling problem-loop already uses.
 
 ### Security
 

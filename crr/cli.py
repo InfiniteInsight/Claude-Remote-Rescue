@@ -149,6 +149,14 @@ def _build_parser() -> argparse.ArgumentParser:
     gc = sub.add_parser("gc", help="drop archive records past the retention window")
     gc.set_defaults(func=_cmd_gc)
 
+    arch = sub.add_parser("archive", help="inspect archived (revival-preserved) sessions")
+    arch.add_argument(
+        "--list",
+        action="store_true",
+        help="print every archived record (reason, archived_at, sid8, cwd)",
+    )
+    arch.set_defaults(func=_cmd_archive)
+
     w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
     w.add_argument("--port", type=int, default=None,
                    help="dashboard bind port (default: config dashboard_port = 8377)")
@@ -828,6 +836,11 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
         return 2
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    if live is None:
+        # F16 tri-state: an unconfirmed tmux state must never be read as
+        # "definitely rescued" — degrade to the same "no rescued sessions"
+        # an unavailable tmux already produces above, never a guess.
+        live = set()
     store = JournalStore(state_dir.state_dir())
     scan = store.scan()
     found = rescue.rescued_sessions(scan.entries, boot.current(), live)
@@ -899,6 +912,9 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    if live is None:
+        # F16 tri-state: never prompt on an unconfirmed tmux state.
+        live = set()
     store = JournalStore(sd)
     found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
     if not found:
@@ -1122,6 +1138,29 @@ def _cmd_gc(_args: argparse.Namespace) -> int:
           f"kept {len(scan.records) - len(removed_sid8s)}")
     if removed_sid8s:
         print(f"removed: {removed_sid8s}")
+    return 0
+
+
+def _cmd_archive(args: argparse.Namespace) -> int:
+    """F15: archive lineage had no human read path — `crr archive --list`.
+
+    Read-only (no mutation_lock — mirrors config --effective's no-lock
+    reads, not gc's read-modify-write).
+    """
+    if not args.list:
+        print("usage: crr archive --list", file=sys.stderr)
+        return 2
+    sd = state_dir.state_dir()
+    scan = ArchiveStore(sd).scan()
+    for name, reason in scan.problems:
+        print(f"crr archive: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
+    if not scan.records:
+        print("no archived sessions")
+        return 0
+    for record in sorted(scan.records, key=lambda r: r["archived_at"], reverse=True):
+        sid8 = record["entry"]["claude"]["session_id"][:8]
+        cwd = record["entry"]["cwd"]
+        print(f"{record['reason']:<22} {record['archived_at']} {sid8} {cwd}")
     return 0
 
 

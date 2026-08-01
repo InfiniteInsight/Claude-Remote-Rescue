@@ -94,6 +94,14 @@ def revive_crashed(
     now: str,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
+    if live is None:
+        # F16 tri-state: an unknown tmux liveness must never be treated as
+        # "confirmed dead" — that would accumulate a strike (or trigger a
+        # give-up archive) against a session that may in fact still be
+        # alive. Skip the entire pass rather than guess (spine —
+        # null-result expressibility: "can't tell" stays distinguishable
+        # from "nothing to do").
+        return RevivalOutcome([], [], [])
     revived: list[int] = []
     gave_up: list[int] = []
     reset: list[int] = []
