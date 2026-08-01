@@ -53,6 +53,9 @@ def test_filter_lines_is_case_insensitive_and_caps():
     assert diagnostics.filter_lines(text, ("wake",), cap=1) == ["WAKE up"]
 
 
+_PARAMS = {"lookback_boots": 1, "event_cap": 50, "line_cap": 200, "timeout_seconds": 5}
+
+
 def test_build_payload_is_contract_valid():
     payload = diagnostics.build_payload(
         source="journald",
@@ -60,9 +63,20 @@ def test_build_payload_is_contract_valid():
         prev_boot_errors=["oom-killer: killed process 4242"],
         host_events=["reboot"],
         degraded=[],
+        params=_PARAMS,
     )
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "journald"
+
+
+def test_build_payload_records_params_verbatim():
+    # F11: the generating caps/lookback/timeout travel with the payload
+    # (audit P3/P5) instead of being lost the moment collect() returns.
+    payload = diagnostics.build_payload(
+        source="journald", boots=[], prev_boot_errors=[], host_events=[], degraded=[],
+        params=_PARAMS,
+    )
+    assert payload["params"] == _PARAMS
 
 
 def test_build_payload_auto_derives_a_plain_english_summary():
@@ -71,6 +85,7 @@ def test_build_payload_auto_derives_a_plain_english_summary():
     payload = diagnostics.build_payload(
         source="journald", boots=[], prev_boot_errors=[],
         host_events=["Out of memory: Killed process 4242"], degraded=[],
+        params=_PARAMS,
     )
     contracts.validate_diagnostics_payload(payload)
     assert payload["summary"]
@@ -80,6 +95,7 @@ def test_build_payload_auto_derives_a_plain_english_summary():
 def test_build_payload_summary_is_clean_verdict_when_no_events():
     payload = diagnostics.build_payload(
         source="journald", boots=[], prev_boot_errors=[], host_events=[], degraded=[],
+        params=_PARAMS,
     )
     assert len(payload["summary"]) == 1  # explicit "looks clean", never empty
 
@@ -87,7 +103,7 @@ def test_build_payload_summary_is_clean_verdict_when_no_events():
 def test_build_payload_records_degraded_sources():
     payload = diagnostics.build_payload(
         source="journald", boots=[], prev_boot_errors=[], host_events=[],
-        degraded=["host_events"],
+        degraded=["host_events"], params=_PARAMS,
     )
     contracts.validate_diagnostics_payload(payload)
     assert payload["degraded"] == ["host_events"]

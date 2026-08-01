@@ -78,6 +78,7 @@ def _diagnostics_payload():
         "prev_boot_errors": ["oom-killer: killed process 4242"],
         "host_events": ["reboot at 03:14"],
         "degraded": [],
+        "params": {"lookback_boots": 1, "event_cap": 50, "line_cap": 200, "timeout_seconds": 5},
     }
 
 
@@ -318,6 +319,47 @@ def test_diagnostics_summary_is_required_and_must_be_list():
         contracts.validate_diagnostics_payload(p)
     p = _diagnostics_payload()
     p["summary"] = "out of memory"  # a bare string, not a list
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_contract_version_is_3():
+    # F11: v3 adds `params` — the generating caps/lookback/timeout, so a
+    # payload is regenerable/judgeable later instead of losing its lineage.
+    assert contracts.DIAGNOSTICS_CONTRACT_VERSION == 3
+
+
+def test_diagnostics_params_is_required():
+    p = _diagnostics_payload()
+    del p["params"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_params_must_be_a_mapping():
+    p = _diagnostics_payload()
+    p["params"] = ["lookback_boots", 1]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_params_keys_must_be_str():
+    p = _diagnostics_payload()
+    p["params"] = {1: "boots"}
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+
+
+def test_diagnostics_params_values_must_be_str_int_or_float():
+    p = _diagnostics_payload()
+    p["params"] = {"lookback_boots": [1]}
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_diagnostics_payload(p)
+    p = _diagnostics_payload()
+    p["params"] = {"lookback": "1d"}  # macOS-style string value: allowed
+    contracts.validate_diagnostics_payload(p)  # must not raise
+    p = _diagnostics_payload()
+    p["params"] = {"enabled": True}  # bool is an int subclass — reject it
     with pytest.raises(contracts.ContractError):
         contracts.validate_diagnostics_payload(p)
 

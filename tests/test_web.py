@@ -348,6 +348,14 @@ def test_page_untrack_label_present_de_tmux_label_gone():
     assert "De-tmux" not in page
 
 
+def test_page_renders_diagnostics_source_and_boot_provenance():
+    # F12: renderDiag must show the payload's source/boot lineage (via
+    # textContent — untrusted server-derived fields), not just the events.
+    page = web.render_page()
+    assert "d.source" in page  # source is read from the payload
+    assert "d.boots" in page  # boot identity is read from the payload
+
+
 def test_page_confirm_gate_state_is_module_level():
     # Review fix regression guard: the confirm-arm state must be hoisted to
     # module level (survives render()'s full card rebuild on a poll tick)

@@ -40,6 +40,9 @@ def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "journald"
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+    # F11: params carries the generating caps/lookback/timeout even when the
+    # source degraded — the lineage is about what was ASKED, not just answered.
+    assert set(payload["params"]) == {"lookback_boots", "event_cap", "line_cap", "timeout_seconds"}
 
 
 def test_select_diag_source_uses_windows_wsl_source_when_journald_absent(monkeypatch):
@@ -67,6 +70,29 @@ def test_diagnose_selects_macos_source_and_degrades_when_tools_absent(monkeypatc
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "log+pmset"
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+    assert set(payload["params"]) == {"lookback", "event_cap", "timeout_seconds"}
+
+
+def test_diagnostics_params_named_per_source_semantics():
+    # F11: params must record only the config keys the selected source
+    # actually reads — recording e.g. macOS's timeout key for journald
+    # would be a lineage lie, not a lineage.
+    config = cfg.Config()
+    assert cli._diagnostics_params(cli.diag_source, config) == {
+        "lookback_boots": config.get("diagnose_lookback_boots"),
+        "event_cap": config.get("diagnose_event_cap"),
+        "line_cap": config.get("diagnose_line_cap"),
+        "timeout_seconds": config.get("interop_timeout_seconds"),
+    }
+    assert cli._diagnostics_params(cli.diagnostics_macos, config) == {
+        "lookback": config.get("diagnose_macos_lookback"),
+        "event_cap": config.get("diagnose_event_cap"),
+        "timeout_seconds": config.get("diagnose_macos_timeout_seconds"),
+    }
+    assert cli._diagnostics_params(cli.diagnostics_windows, config) == {
+        "event_cap": config.get("diagnose_event_cap"),
+        "timeout_seconds": config.get("interop_timeout_seconds"),
+    }
 
 
 @pytest.mark.skipif(
@@ -80,6 +106,40 @@ def test_diagnose_emits_contract_valid_payload_from_journald(capsys):
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "journald"
     assert isinstance(payload["boots"], list)
+
+
+def _diag_payload(boots):
+    return {
+        "contract": contracts.DIAGNOSTICS_CONTRACT_VERSION,
+        "source": "journald",
+        "summary": ["looks clean — no shutdown/OOM/watchdog signature found."],
+        "boots": boots,
+        "prev_boot_errors": [],
+        "host_events": [],
+        "degraded": [],
+        "params": {"lookback_boots": 1, "event_cap": 50, "line_cap": 200, "timeout_seconds": 5},
+    }
+
+
+def test_diagnose_human_prints_source_and_boot_line(monkeypatch, capsys):
+    # F12: neither consumer rendered the payload's source/boots lineage.
+    boots = [{"index": -1, "boot_id": "b1", "start": "2026-07-23T00:00:00+00:00", "stop": ""}]
+    monkeypatch.setattr(cli, "gather_diagnostics", lambda config: _diag_payload(boots))
+    rc = cli.main(["diagnose"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.splitlines()
+    assert lines[0] == "source: journald"
+    assert lines[1].startswith("boot: b1")
+
+
+def test_diagnose_human_omits_boot_line_when_no_boots(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "gather_diagnostics", lambda config: _diag_payload([]))
+    rc = cli.main(["diagnose"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.splitlines()[0] == "source: journald"
+    assert "boot:" not in out
 
 
 def test_web_server_serves_sessions_and_enforces_host(tmp_path):

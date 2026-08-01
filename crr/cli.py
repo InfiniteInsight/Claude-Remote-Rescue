@@ -1028,6 +1028,34 @@ def _select_diag_source():
     return diag_source  # journald (native Linux, or WSL with systemd)
 
 
+def _diagnostics_params(source, config: cfg.Config) -> dict:
+    """The generating caps/lookback/timeout for ``source`` (audit P3/P5).
+
+    Records only the config keys the selected source's ``collect`` actually
+    reads — recording a sibling source's keys would be a lineage lie, not a
+    lineage. Mirrors ``_select_diag_source``'s branching so the mapping
+    can't silently drift from which source is actually wired.
+    """
+    if source is diagnostics_windows:
+        return {
+            "event_cap": config.get("diagnose_event_cap"),
+            "timeout_seconds": config.get("interop_timeout_seconds"),
+        }
+    if source is diagnostics_macos:
+        return {
+            "lookback": config.get("diagnose_macos_lookback"),
+            "event_cap": config.get("diagnose_event_cap"),
+            "timeout_seconds": config.get("diagnose_macos_timeout_seconds"),
+        }
+    # journald (native Linux, or WSL with systemd) — diag_source's collect().
+    return {
+        "lookback_boots": config.get("diagnose_lookback_boots"),
+        "event_cap": config.get("diagnose_event_cap"),
+        "line_cap": config.get("diagnose_line_cap"),
+        "timeout_seconds": config.get("interop_timeout_seconds"),
+    }
+
+
 def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | None" = None) -> dict:
     """Query the platform diagnostics source, degrading (never aborting).
 
@@ -1041,6 +1069,7 @@ def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | No
     return diag_core.build_payload(
         source=source.SOURCE_NAME, boots=boots, prev_boot_errors=prev,
         host_events=events, degraded=degraded,
+        params=_diagnostics_params(source, config),
     )
 
 
@@ -1049,6 +1078,12 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+    # Source + boot identity first (F12: lineage before the verdict).
+    print(f"source: {payload['source']}")
+    boots = payload["boots"]
+    if boots:
+        b = boots[0]
+        print(f"boot: {b.get('boot_id')} (start {b.get('start')}, stop {b.get('stop') or 'ongoing'})")
     if payload["degraded"]:
         print(f"(degraded sources: {', '.join(payload['degraded'])})", file=sys.stderr)
     # Plain-English verdict first (the "why", before the raw evidence).

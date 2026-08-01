@@ -386,6 +386,17 @@ var diagLoaded = false;
 function renderDiag(d) {
   var panel = document.getElementById("diag-panel");
   panel.textContent = "";
+  // Lineage first (F12): which source answered, and its current boot
+  // identity, so a verdict is never read without knowing where it came
+  // from. Untrusted/server-derived fields -> textContent only.
+  var meta = el("div", "ev");
+  var metaText = "source: " + d.source;
+  if (d.boots && d.boots.length) {
+    var b0 = d.boots[0];
+    metaText += " · boot " + b0.boot_id + " (start " + b0.start + ")";
+  }
+  meta.textContent = metaText;
+  panel.appendChild(meta);
   if (d.degraded && d.degraded.length) {
     var warn = el("div", "ev");
     warn.textContent = "degraded sources: " + d.degraded.join(", ");

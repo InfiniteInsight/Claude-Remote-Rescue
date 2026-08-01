@@ -97,12 +97,18 @@ def build_payload(
     prev_boot_errors: list,
     host_events: list,
     degraded: list,
+    params: dict,
     summary: list | None = None,
 ) -> dict[str, Any]:
     """Assemble and validate the /api/diagnostics payload.
 
     ``summary`` is the plain-English death verdict; when omitted it is derived
     from the events here so every caller gets it without duplicating the call.
+
+    ``params`` is the generating caps/lookback/timeout the selected source
+    actually queried with (audit P3/P5 — lineage travels with the data): a
+    payload without it is unregenerable and unjudgeable later, since the
+    priors it was produced under are gone the moment ``collect()`` returns.
     """
     from crr.core import contracts, explain
 
@@ -116,6 +122,7 @@ def build_payload(
         "prev_boot_errors": prev_boot_errors,
         "host_events": host_events,
         "degraded": degraded,
+        "params": params,
     }
     contracts.validate_diagnostics_payload(payload)
     return payload
