@@ -1819,11 +1819,11 @@ def test_rescue_check_silent_when_tmux_liveness_is_unknown(tmp_path, monkeypatch
     out, err = capsys.readouterr()
     assert rc == 0
     assert out == ""  # never a prompt on unconfirmed liveness
-    # Finding 3 (re-audit): same stderr note as `crr rescued` (item 2). The
-    # interactive shims redirect this command's stderr to /dev/null on
-    # startup, so this stays quiet there; a manual `crr rescue-check` sees
-    # it.
-    assert "crr rescued: tmux state unknown — rescued sessions may be undercounted" in err
+    # Finding 3 (re-audit): same stderr note as `crr rescued` (item 2), under
+    # this command's own name. The interactive shims redirect stderr to
+    # /dev/null on startup, so this stays quiet there; a manual
+    # `crr rescue-check` sees it.
+    assert "crr rescue-check: tmux state unknown — rescued sessions may be undercounted" in err
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is False  # nothing claimed
 
 

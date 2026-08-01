@@ -944,7 +944,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         # startup, so this stays quiet there; a manual `crr rescue-check`
         # still sees it.
         print(
-            "crr rescued: tmux state unknown — rescued sessions may be undercounted",
+            "crr rescue-check: tmux state unknown — rescued sessions may be undercounted",
             file=sys.stderr,
         )
         live = set()
