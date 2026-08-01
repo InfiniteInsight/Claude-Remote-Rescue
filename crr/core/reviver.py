@@ -38,6 +38,7 @@ class RevivalOutcome(NamedTuple):
     revived: list[int]   # pids (re)spawned into tmux this pass
     gave_up: list[int]   # pids abandoned to the archive past the strike limit
     reset: list[int]     # pids whose live session cleared their strikes
+    skipped: bool = False  # True when the whole pass was skipped (tmux liveness unknown)
 
 
 def session_name(entry: Mapping[str, Any]) -> str:
@@ -98,10 +99,11 @@ def revive_crashed(
         # F16 tri-state: an unknown tmux liveness must never be treated as
         # "confirmed dead" — that would accumulate a strike (or trigger a
         # give-up archive) against a session that may in fact still be
-        # alive. Skip the entire pass rather than guess (spine —
-        # null-result expressibility: "can't tell" stays distinguishable
-        # from "nothing to do").
-        return RevivalOutcome([], [], [])
+        # alive. Skip the entire pass rather than guess. The `skipped` flag
+        # is what actually makes "can't tell" distinguishable from "nothing
+        # to do" for a caller — the three empty lists alone read identical
+        # in both cases, so this pass has to say so explicitly.
+        return RevivalOutcome([], [], [], skipped=True)
     revived: list[int] = []
     gave_up: list[int] = []
     reset: list[int] = []

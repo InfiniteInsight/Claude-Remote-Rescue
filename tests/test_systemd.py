@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
+import inspect
+
 from crr.adapters import systemd
+from crr.core.config import DEFAULTS
 
 
 def test_service_unit_bakes_execstart_path_and_state_home():
@@ -119,6 +122,14 @@ def test_web_service_unit_honors_configured_restart_seconds():
         restart_seconds=9,
     )
     assert "RestartSec=9" in unit
+
+
+def test_web_service_unit_restart_seconds_default_is_the_named_config_default():
+    # Finding 5 (re-audit): the literal `2` used to be a second, undeduped
+    # copy of `DEFAULTS["web_restart_seconds"]` — this pins the signature
+    # default to the named config default so they can't drift apart again.
+    default = inspect.signature(systemd.web_service_unit).parameters["restart_seconds"].default
+    assert default == DEFAULTS["web_restart_seconds"]
 
 
 def test_web_service_unit_bakes_wsl_distro_name_when_given():

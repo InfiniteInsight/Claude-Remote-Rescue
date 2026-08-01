@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterator
 
 from crr.core import transcript
+from crr.core.config import DEFAULTS
 
 
 def find_transcript(session_id: str, home: Path | None = None) -> Path | None:
@@ -81,7 +82,7 @@ def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
 # `model_tail_lines` for the empirical p50/p99 justification — that DEFAULTS
 # entry is the injectable prior; this constant only supplies the default
 # argument below for callers that don't have a Config to hand).
-MODEL_TAIL_LINES = 200
+MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
 
 
 def read_tail_facts(

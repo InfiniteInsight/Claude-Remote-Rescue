@@ -95,6 +95,19 @@ def test_diagnostics_params_named_per_source_semantics():
     }
 
 
+def test_diagnostics_params_rejects_an_unrecognized_source():
+    # Finding 4 (re-audit): the old code fell through to journald's params
+    # for ANY source that wasn't macOS/Windows — so a future adapter would
+    # silently inherit journald's lineage claim instead of failing loudly.
+    config = cfg.Config()
+
+    class _FutureSource:
+        SOURCE_NAME = "future-source"
+
+    with pytest.raises(ValueError, match="future-source"):
+        cli._diagnostics_params(_FutureSource(), config)
+
+
 @pytest.mark.skipif(
     platform.system() not in ("Linux", "Darwin") or shutil.which("journalctl") is None,
     reason="needs Linux journald",
@@ -1295,7 +1308,43 @@ def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
     rc = cli.main(["revive"])
     assert rc == 0
     out = capsys.readouterr().out
+    assert "revived 0" in out  # normal-path summary line is still printed
     assert "gave up:" not in out
+
+
+def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypatch, capsys):
+    # Finding 1 (re-audit): a None-liveness pass used to print the exact
+    # same "revived 0, gave up 0, already running 0" summary as a genuine
+    # no-op pass — a success-shaped line lying about an unknown state. Now
+    # RevivalOutcome.skipped surfaces the distinction and the CLI must
+    # honor it: a stderr note instead of the summary, but still exit 0 (a
+    # flapping nonzero oneshot would spam systemd failure state under a
+    # transient fault).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], [], skipped=True),
+    )
+    rc = cli.main(["revive"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == ""  # no success-shaped summary line for a skipped pass
+    assert "crr revive: tmux state unknown — pass skipped (no strikes accrued)" in err
 
 
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
@@ -1698,9 +1747,13 @@ def test_rescued_reports_none_when_tmux_liveness_is_unknown(tmp_path, monkeypatc
     ))
 
     rc = cli.main(["rescued"])
-    out = capsys.readouterr().out
+    out, err = capsys.readouterr()
     assert rc == 0
     assert "no rescued sessions" in out
+    # Finding 2 (re-audit): the None-liveness degrade used to be silent —
+    # mirror the sibling journal-problems stderr pattern instead of
+    # quietly undercounting.
+    assert "crr rescued: tmux state unknown — rescued sessions may be undercounted" in err
 
 
 def _rescue_check_setup(monkeypatch, tmp_path, found):
@@ -1765,7 +1818,12 @@ def test_rescue_check_silent_when_tmux_liveness_is_unknown(tmp_path, monkeypatch
     rc = cli.main(["rescue-check"])
     out, err = capsys.readouterr()
     assert rc == 0
-    assert out == "" and err == ""
+    assert out == ""  # never a prompt on unconfirmed liveness
+    # Finding 3 (re-audit): same stderr note as `crr rescued` (item 2). The
+    # interactive shims redirect this command's stderr to /dev/null on
+    # startup, so this stays quiet there; a manual `crr rescue-check` sees
+    # it.
+    assert "crr rescued: tmux state unknown — rescued sessions may be undercounted" in err
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is False  # nothing claimed
 
 

@@ -671,6 +671,17 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    if outcome.skipped:
+        print(
+            "crr revive: tmux state unknown — pass skipped (no strikes accrued)",
+            file=sys.stderr,
+        )
+        # Exit 0, not nonzero: this runs unattended as a systemd oneshot, and
+        # a transient tmux query failure flapping the unit into failed state
+        # would spam systemd failure alerts for something that resolves
+        # itself next pass. The stderr note above is the honest signal here,
+        # not the exit code.
+        return 0
     print(
         f"revived {len(outcome.revived)}, "
         f"gave up {len(outcome.gave_up)}, "
@@ -847,7 +858,13 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
     if live is None:
         # F16 tri-state: an unconfirmed tmux state must never be read as
         # "definitely rescued" — degrade to the same "no rescued sessions"
-        # an unavailable tmux already produces above, never a guess.
+        # an unavailable tmux already produces above, never a guess. Say so
+        # on stderr (mirrors the sibling journal-problems pattern below) so
+        # the degrade isn't silent undercounting.
+        print(
+            "crr rescued: tmux state unknown — rescued sessions may be undercounted",
+            file=sys.stderr,
+        )
         live = set()
     store = JournalStore(state_dir.state_dir())
     scan = store.scan()
@@ -921,7 +938,15 @@ def _rescue_check(_args: argparse.Namespace) -> int:
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
     if live is None:
-        # F16 tri-state: never prompt on an unconfirmed tmux state.
+        # F16 tri-state: never prompt on an unconfirmed tmux state. Same
+        # stderr note as `crr rescued`'s sibling degrade: the interactive
+        # shims redirect this command's stderr to /dev/null on shell
+        # startup, so this stays quiet there; a manual `crr rescue-check`
+        # still sees it.
+        print(
+            "crr rescued: tmux state unknown — rescued sessions may be undercounted",
+            file=sys.stderr,
+        )
         live = set()
     store = JournalStore(sd)
     found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
@@ -1071,13 +1096,17 @@ def _diagnostics_params(source, config: cfg.Config) -> dict:
             "event_cap": config.get("diagnose_event_cap"),
             "timeout_seconds": config.get("diagnose_macos_timeout_seconds"),
         }
-    # journald (native Linux, or WSL with systemd) — diag_source's collect().
-    return {
-        "lookback_boots": config.get("diagnose_lookback_boots"),
-        "event_cap": config.get("diagnose_event_cap"),
-        "line_cap": config.get("diagnose_line_cap"),
-        "timeout_seconds": config.get("interop_timeout_seconds"),
-    }
+    if source is diag_source:
+        # journald (native Linux, or WSL with systemd) — diag_source's collect().
+        return {
+            "lookback_boots": config.get("diagnose_lookback_boots"),
+            "event_cap": config.get("diagnose_event_cap"),
+            "line_cap": config.get("diagnose_line_cap"),
+            "timeout_seconds": config.get("interop_timeout_seconds"),
+        }
+    # No implicit fallthrough: a future source falling through to
+    # journald's params would silently inherit journald's lineage claim.
+    raise ValueError(f"unknown diagnostics source {getattr(source, 'SOURCE_NAME', source)!r}")
 
 
 def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | None" = None) -> dict:

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from crr.adapters import transcript_source
+from crr.core.config import DEFAULTS
 
 
 def _write_transcript(home: Path, sid: str, records, project="-home-u-proj"):
@@ -75,6 +76,13 @@ def test_read_tail_facts_bounds_the_model_search_to_the_tail(tmp_path):
     facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)
     assert facts["last_prompt"] == "the real prompt"   # prompt still found (unbounded)
     assert facts["model"] == ""                          # model beyond the window -> unknown
+
+
+def test_model_tail_lines_is_the_named_config_default():
+    # Finding 6 (re-audit): the literal `200` used to be a second, undeduped
+    # copy of `DEFAULTS["model_tail_lines"]` — pin them together so they
+    # can't drift apart again.
+    assert transcript_source.MODEL_TAIL_LINES == DEFAULTS["model_tail_lines"]
 
 
 def test_read_tail_facts_missing_transcript_is_empty(tmp_path):

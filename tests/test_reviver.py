@@ -327,7 +327,8 @@ def test_revive_skips_the_entire_pass_when_tmux_liveness_is_unknown(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())  # would ordinarily be revived
     outcome = _run(store, FakeTmux(live=None))
-    assert outcome == ([], [], [])
+    assert outcome == ([], [], [], True)
+    assert outcome.skipped is True
     entry = store.read(42)
     assert entry["revive_strikes"] == 0          # no strike accrued
     assert entry["tmux_session"] is None          # untouched
@@ -342,5 +343,6 @@ def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_
     )
     archive.archive(entry, "superseded-on-register", _NOW)  # a revival candidate
     outcome = _run(store, FakeTmux(live=None), archive=archive)
-    assert outcome == ([], [], [])
+    assert outcome == ([], [], [], True)
+    assert outcome.skipped is True
     assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched

@@ -28,7 +28,7 @@ import shutil
 from pathlib import Path
 
 from crr import __version__
-from crr.core.config import CONFIG_DEFAULTS_VERSION
+from crr.core.config import CONFIG_DEFAULTS_VERSION, DEFAULTS
 
 
 def _stamp() -> str:
@@ -126,7 +126,7 @@ def revive_timer_unit(interval_seconds: int) -> str:
 
 def web_service_unit(
     crr_bin: str, path: str, state_home: str, port: int, wsl_distro: str = "",
-    *, restart_seconds: int = 2,
+    *, restart_seconds: int = DEFAULTS["web_restart_seconds"],
 ) -> str:
     """A long-running dashboard service (loopback; tailnet-served).
 
