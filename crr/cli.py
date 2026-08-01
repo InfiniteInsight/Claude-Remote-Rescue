@@ -302,7 +302,11 @@ def _cmd_shim(args: argparse.Namespace) -> int:
     template = resources.files("crr.shims").joinpath(f"crr.{args.shell}").read_text(
         encoding="utf-8"
     )
-    print(template.replace("@CRR_BIN@", _resolve_crr_bin(args.crr_bin)), end="")
+    rendered = (template
+                .replace("@CRR_BIN@", _resolve_crr_bin(args.crr_bin))
+                .replace("@CRR_VERSION@", __version__)
+                .replace("@CRR_DEFAULTS_V@", str(cfg.CONFIG_DEFAULTS_VERSION)))
+    print(rendered, end="")
     return 0
 
 
