@@ -79,3 +79,18 @@ a malformed config.toml — regression from `e621b56`, caught in self-review).
 Verification: `627 passed, 31 skipped` · `lint-imports: 1 kept, 0 broken` ·
 branch guard blocks code-on-main (exit 1) · every commit passed the
 pre-commit gate (full suite + lint) at commit time.
+
+## Run 2b — scoped re-audit of the remediation diff, and its fixes (2026-08-01)
+
+The builder requested a scoped re-audit (3afca50..2a7f094). It found 6 issues —
+including one dishonesty the remediation itself introduced (the reviver's
+None-liveness skip was invisible at the CLI while a new comment claimed
+distinguishability). All 6 fixed in `dd6e3b0` + `26bf08c` (builder: fix all):
+RevivalOutcome gains a `skipped` field surfaced by `crr revive` on stderr
+(no success-shaped summary on a skipped pass); `crr rescued`/`crr rescue-check`
+note an unknown tmux state on stderr instead of rendering it as empty;
+`_diagnostics_params` raises on an unrecognized source instead of defaulting
+to journald's lineage claim; the two literal fallback defaults
+(`web_restart_seconds`, `model_tail_lines`) now reference `config.DEFAULTS`.
+Post-fix verification: `631 passed, 31 skipped` · lint-imports kept · every
+commit through the pre-commit gate.
