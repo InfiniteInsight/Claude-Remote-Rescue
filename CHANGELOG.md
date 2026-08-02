@@ -112,6 +112,13 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- The dashboard service re-read `page.html` from disk on every request, so a
+  branch checkout under a running service could serve a template whose
+  placeholders the loaded code cannot substitute — one raw `@PLACEHOLDER@` is
+  a JS syntax error and the page renders nothing (live incident, 2026-08-01).
+  The template is now snapshotted once at service startup; a restart is the
+  deliberate deploy step.
+
 - The watchdog's revive sweep no longer resurrects a `dismiss`ed session:
   the terminal-reasons skip set now includes `dismissed` alongside
   `gave-up`/`detmuxed` (the two `superseded-*` reasons stay revivable).

@@ -332,3 +332,46 @@ def test_page_scripts_pass_node_check(tmp_path):
         f.write_text(js, encoding="utf-8")
         result = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
         assert result.returncode == 0, f"block {i} failed node --check:\n{result.stderr}"
+
+
+def test_load_page_snapshots_the_template_once(monkeypatch):
+    """[2026-08-01 incident] the service re-read page.html from disk per
+    request, so a branch checkout under a running service served a template
+    its loaded code could not substitute (raw @PLACEHOLDER@ -> JS syntax
+    error -> blank dashboard). The template is a startup snapshot now."""
+    web._PAGE_CACHE = None  # reset any prior snapshot
+    reads = {"n": 0}
+    real = web._read_page_from_disk
+
+    def counting_read():
+        reads["n"] += 1
+        return real()
+
+    monkeypatch.setattr(web, "_read_page_from_disk", counting_read)
+    first = web.load_page()
+    second = web.load_page()
+    assert first == second
+    assert reads["n"] == 1  # second call served the snapshot, not the disk
+    web._PAGE_CACHE = None  # leave no snapshot for other tests
+
+
+def test_cmd_web_warms_the_page_snapshot_before_serving(monkeypatch):
+    """The snapshot must be taken at service startup, not lazily at first
+    request — otherwise the skew window merely shrinks instead of closing."""
+    import crr.cli as cli
+
+    warmed = {"called": False}
+    monkeypatch.setattr(cli.web, "load_page", lambda: warmed.__setitem__("called", True) or "x")
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            assert warmed["called"], "load_page must be called BEFORE the server exists"
+
+        def serve_forever(self):
+            raise KeyboardInterrupt  # unwind immediately
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
