@@ -64,8 +64,26 @@ def host_allowed(host_header: str, allowed_hosts: set[str], allowed_suffixes: tu
     return any(host.endswith(sfx) for sfx in allowed_suffixes)
 
 
-def load_page() -> str:
+# Template snapshot ([lesson 2026-08-01: template/code skew]): a long-running
+# service used to re-read page.html from disk on every request, so a branch
+# checkout under the running service served a template whose placeholders the
+# loaded code could not substitute — one raw @PLACEHOLDER@ is a JS syntax
+# error and the dashboard renders nothing. The template is now read once and
+# pinned for the process lifetime; the composition root warms it at service
+# startup, so a running service always serves the code+template pair it
+# started with and a restart is the deliberate deploy step.
+_PAGE_CACHE: str | None = None
+
+
+def _read_page_from_disk() -> str:
     return resources.files("crr.core").joinpath("page.html").read_text(encoding="utf-8")
+
+
+def load_page() -> str:
+    global _PAGE_CACHE
+    if _PAGE_CACHE is None:
+        _PAGE_CACHE = _read_page_from_disk()
+    return _PAGE_CACHE
 
 
 def render_page(

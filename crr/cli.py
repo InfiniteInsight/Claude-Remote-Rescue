@@ -1122,6 +1122,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
         version_check_seconds=config.get("version_check_seconds"),
     )
 
+    # Snapshot the page template NOW ([lesson: template/code skew]) — a lazy
+    # first-request read would leave a window where a later checkout still
+    # skews the served page against this process's loaded code.
+    web.load_page()
+
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"crr web: serving on http://127.0.0.1:{args.port}/ (loopback only)")
