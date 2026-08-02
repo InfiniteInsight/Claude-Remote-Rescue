@@ -291,22 +291,69 @@ def test_handle_request_serves_configured_intervals():
 
 
 # --------------------------------------------------------------------------
+# Confirm-arm / notice / stale-reload / diag-error-cap: config, not magic
+# numbers (audit P5, findings F2/F3/F4). Mirrors the poll_seconds pattern.
+# --------------------------------------------------------------------------
+
+def test_render_page_substitutes_timing_and_cap_from_defaults():
+    page = web.render_page()
+    assert "@CONFIRM_ARM_MS@" not in page
+    assert "@NOTICE_MS@" not in page
+    assert "@RELOAD_DELAY_MS@" not in page
+    assert "@DIAG_ERR_CAP@" not in page
+    assert "var CONFIRM_ARM_MS = 4000;" in page   # 4 s default * 1000
+    assert "var NOTICE_MS = 3000;" in page        # 3 s default * 1000
+    assert "var RELOAD_DELAY_MS = 800;" in page   # already ms
+    assert "var DIAG_ERR_CAP = 20;" in page        # a count, not a time
+
+
+def test_render_page_honors_configured_timing_and_cap():
+    page = web.render_page(
+        confirm_arm_seconds=9, notice_seconds=2,
+        reload_delay_ms=500, diag_error_display_cap=5,
+    )
+    assert "var CONFIRM_ARM_MS = 9000;" in page
+    assert "var NOTICE_MS = 2000;" in page
+    assert "var RELOAD_DELAY_MS = 500;" in page
+    assert "var DIAG_ERR_CAP = 5;" in page
+
+
+def test_handle_request_serves_configured_timing_and_cap():
+    resp = web.handle_request(
+        "GET", "/", {"Host": "127.0.0.1"},
+        sessions_provider=lambda: {}, allowed_hosts={"127.0.0.1"},
+        allowed_suffixes=(),
+        confirm_arm_seconds=9, notice_seconds=2,
+        reload_delay_ms=500, diag_error_display_cap=5,
+    )
+    assert b"var CONFIRM_ARM_MS = 9000;" in resp.body
+    assert b"var DIAG_ERR_CAP = 5;" in resp.body
+
+
+# --------------------------------------------------------------------------
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_13():
-    """Explicit version check: v13 hoists the confirm-gate arm state
-    (added in v12's Un-tmux button) to module level -- it now survives
-    render()'s full card rebuild on a poll tick, and resets on the firing
-    click so a failed/incomplete op can never leave a stale armed button
-    that a later ordinary click fires without reconfirming."""
-    assert web.PAGE_VERSION == 13
+def test_page_version_is_14():
+    """Explicit version check: v14 injects page timing/caps (confirm-arm,
+    notice, stale-reload delay, diagnostics error display cap) from config
+    instead of hardcoding them, and (commit 3, no further bump) renders
+    diagnostics source/boot provenance."""
+    assert web.PAGE_VERSION == 14
 
 
 def test_page_untrack_label_present_de_tmux_label_gone():
     page = web.render_page()
     assert "Untrack" in page
     assert "De-tmux" not in page
+
+
+def test_page_renders_diagnostics_source_and_boot_provenance():
+    # F12: renderDiag must show the payload's source/boot lineage (via
+    # textContent — untrusted server-derived fields), not just the events.
+    page = web.render_page()
+    assert "d.source" in page  # source is read from the payload
+    assert "d.boots" in page  # boot identity is read from the payload
 
 
 def test_page_confirm_gate_state_is_module_level():

@@ -30,10 +30,14 @@ from crr.core import config as cfg
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 13  # v13: confirm-gate state hoisted module-level (survives re-render, resets on fire)
+PAGE_VERSION = 14  # v14: page timing/caps injected from config; diagnostics provenance shown
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
+_CONFIRM_ARM_MS_PLACEHOLDER = "@CONFIRM_ARM_MS@"
+_NOTICE_MS_PLACEHOLDER = "@NOTICE_MS@"
+_RELOAD_DELAY_MS_PLACEHOLDER = "@RELOAD_DELAY_MS@"
+_DIAG_ERR_CAP_PLACEHOLDER = "@DIAG_ERR_CAP@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
 
@@ -91,15 +95,35 @@ def render_page(
     *,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
+    confirm_arm_seconds: int | None = None,
+    notice_seconds: int | None = None,
+    reload_delay_ms: int | None = None,
+    diag_error_display_cap: int | None = None,
 ) -> str:
     """Serve-time substitution of version + configured intervals into the page."""
     poll = cfg.DEFAULTS["dashboard_poll_seconds"] if poll_seconds is None else poll_seconds
     vchk = cfg.DEFAULTS["version_check_seconds"] if version_check_seconds is None else version_check_seconds
+    confirm_arm = (
+        cfg.DEFAULTS["confirm_arm_seconds"] if confirm_arm_seconds is None else confirm_arm_seconds
+    )
+    notice = cfg.DEFAULTS["notice_seconds"] if notice_seconds is None else notice_seconds
+    reload_delay = (
+        cfg.DEFAULTS["reload_delay_ms"] if reload_delay_ms is None else reload_delay_ms
+    )
+    diag_err_cap = (
+        cfg.DEFAULTS["diag_error_display_cap"]
+        if diag_error_display_cap is None
+        else diag_error_display_cap
+    )
     return (
         load_page()
         .replace(_VERSION_PLACEHOLDER, str(version))
         .replace(_POLL_PLACEHOLDER, str(int(poll) * 1000))
         .replace(_VERSION_MS_PLACEHOLDER, str(int(vchk) * 1000))
+        .replace(_CONFIRM_ARM_MS_PLACEHOLDER, str(int(confirm_arm) * 1000))
+        .replace(_NOTICE_MS_PLACEHOLDER, str(int(notice) * 1000))
+        .replace(_RELOAD_DELAY_MS_PLACEHOLDER, str(int(reload_delay)))
+        .replace(_DIAG_ERR_CAP_PLACEHOLDER, str(int(diag_err_cap)))
     )
 
 
@@ -149,6 +173,10 @@ def handle_request(
     page_version: int = PAGE_VERSION,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
+    confirm_arm_seconds: int | None = None,
+    notice_seconds: int | None = None,
+    reload_delay_ms: int | None = None,
+    diag_error_display_cap: int | None = None,
 ) -> Response:
     # Host allowlist first — before any routing or work (DNS-rebinding defense).
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
@@ -157,7 +185,9 @@ def handle_request(
     if method == "GET":
         if path == "/":
             page = render_page(
-                page_version, poll_seconds=poll_seconds, version_check_seconds=version_check_seconds
+                page_version, poll_seconds=poll_seconds, version_check_seconds=version_check_seconds,
+                confirm_arm_seconds=confirm_arm_seconds, notice_seconds=notice_seconds,
+                reload_delay_ms=reload_delay_ms, diag_error_display_cap=diag_error_display_cap,
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
         if path == "/api/sessions":

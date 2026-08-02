@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v2).
+"""Status assembler — journal entries -> /api/sessions payload (contract v3).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned

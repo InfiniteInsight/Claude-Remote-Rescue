@@ -49,22 +49,28 @@ class FakeProbe:
 
 class FakeTmux:
     def __init__(self, live=(), fail_spawn=False, fail_kill=False):
-        self._live = set(live)
+        # live=None means "liveness is unknown" (F16 tri-state) — distinct
+        # from live=() (genuinely no live sessions).
+        self._live = None if live is None else set(live)
         self.created = []
         self.killed = []
         self._fail_spawn = fail_spawn
         self._fail_kill = fail_kill
 
     def list_sessions(self):
-        return set(self._live)
+        return None if self._live is None else set(self._live)
 
     def new_detached_session(self, name, cwd, argv):
+        if self._live is None:
+            raise AssertionError("must not spawn while tmux liveness is unknown")
         if self._fail_spawn:
             raise RuntimeError("tmux new-session boom")
         self.created.append((name, cwd, list(argv)))
         self._live.add(name)
 
     def kill_session(self, name):
+        if self._live is None:
+            raise AssertionError("must not kill while tmux liveness is unknown")
         if self._fail_kill:
             raise RuntimeError("tmux kill-session boom")
         self.killed.append(name)
@@ -251,6 +257,19 @@ def test_reopen_unavailable_spawner_stays_detached(tmp_path):
     assert f"tmux attach -t {name}" in res.message
 
 
+def test_reopen_refuses_when_tmux_liveness_is_unknown(tmp_path):
+    # F16: an unconfirmed tmux state must refuse honestly, never guess.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux(live=None)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    assert not res.ok
+    assert "cannot determine" in res.message.lower()
+    assert tmux.created == []
+    assert store.read(42)  # untouched
+
+
 # --- _open_tab (honesty when no spawner is available) ----------------------
 
 def test_open_tab_no_spawner_gives_the_attach_command():
@@ -346,6 +365,23 @@ def test_reopen_ghost_already_running_does_not_respawn(tmp_path):
     assert res.ok, res.message
     assert tmux.created == []  # already up, not respawned
     assert archive.read(_SID)["reason"] == "ghost-restored"
+
+
+def test_reopen_ghost_refuses_when_tmux_liveness_is_unknown(tmp_path):
+    # F16: the unknown-liveness refusal must happen BEFORE the ghost
+    # branch's kill+archive steps, not after — those are irreversible
+    # (a kill can't be undone), so the refusal has to land earlier.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux(live=None)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    assert not res.ok
+    assert "cannot determine" in res.message.lower()
+    assert ctrl.terminated == []          # never reached the kill step
+    assert flags.armed == {}
+    assert store.read(42)                 # entry untouched
+    with pytest.raises(KeyError):
+        archive.read(_SID)                # nothing archived
 
 
 # --- detmux ----------------------------------------------------------------
@@ -455,6 +491,18 @@ def test_detmux_refuses_when_tmux_session_is_gone(tmp_path):
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
 
 
+def test_detmux_refuses_when_tmux_liveness_is_unknown(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tab = FakeTabSpawner()
+    res = ops.detmux(store, archive, FakeTmux(live=None), FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=tab)
+    assert not res.ok
+    assert "cannot determine" in res.message.lower()
+    assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"  # untouched
+    assert tab.opened == []
+
+
 def test_detmux_requires_a_tab_spawner(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
@@ -535,6 +583,17 @@ def test_untmux_refuses_when_tmux_session_is_gone(tmp_path):
     res = ops.untmux(store, archive, FakeTmux(live=set()), FakeBoot(), FakeProbe(), 42, _NOW,
                       tab_spawner=FakeTabSpawner())
     assert not res.ok and "gone" in res.message
+    assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
+
+
+def test_untmux_refuses_when_tmux_liveness_is_unknown(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live=None)
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                      tab_spawner=FakeTabSpawner())
+    assert not res.ok
+    assert "cannot determine" in res.message.lower()
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
 
 

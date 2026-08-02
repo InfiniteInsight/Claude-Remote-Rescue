@@ -40,6 +40,9 @@ def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "journald"
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+    # F11: params carries the generating caps/lookback/timeout even when the
+    # source degraded — the lineage is about what was ASKED, not just answered.
+    assert set(payload["params"]) == {"lookback_boots", "event_cap", "line_cap", "timeout_seconds"}
 
 
 def test_select_diag_source_uses_windows_wsl_source_when_journald_absent(monkeypatch):
@@ -67,6 +70,42 @@ def test_diagnose_selects_macos_source_and_degrades_when_tools_absent(monkeypatc
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "log+pmset"
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
+    assert set(payload["params"]) == {"lookback", "event_cap", "timeout_seconds"}
+
+
+def test_diagnostics_params_named_per_source_semantics():
+    # F11: params must record only the config keys the selected source
+    # actually reads — recording e.g. macOS's timeout key for journald
+    # would be a lineage lie, not a lineage.
+    config = cfg.Config()
+    assert cli._diagnostics_params(cli.diag_source, config) == {
+        "lookback_boots": config.get("diagnose_lookback_boots"),
+        "event_cap": config.get("diagnose_event_cap"),
+        "line_cap": config.get("diagnose_line_cap"),
+        "timeout_seconds": config.get("interop_timeout_seconds"),
+    }
+    assert cli._diagnostics_params(cli.diagnostics_macos, config) == {
+        "lookback": config.get("diagnose_macos_lookback"),
+        "event_cap": config.get("diagnose_event_cap"),
+        "timeout_seconds": config.get("diagnose_macos_timeout_seconds"),
+    }
+    assert cli._diagnostics_params(cli.diagnostics_windows, config) == {
+        "event_cap": config.get("diagnose_event_cap"),
+        "timeout_seconds": config.get("interop_timeout_seconds"),
+    }
+
+
+def test_diagnostics_params_rejects_an_unrecognized_source():
+    # Finding 4 (re-audit): the old code fell through to journald's params
+    # for ANY source that wasn't macOS/Windows — so a future adapter would
+    # silently inherit journald's lineage claim instead of failing loudly.
+    config = cfg.Config()
+
+    class _FutureSource:
+        SOURCE_NAME = "future-source"
+
+    with pytest.raises(ValueError, match="future-source"):
+        cli._diagnostics_params(_FutureSource(), config)
 
 
 @pytest.mark.skipif(
@@ -80,6 +119,40 @@ def test_diagnose_emits_contract_valid_payload_from_journald(capsys):
     contracts.validate_diagnostics_payload(payload)
     assert payload["source"] == "journald"
     assert isinstance(payload["boots"], list)
+
+
+def _diag_payload(boots):
+    return {
+        "contract": contracts.DIAGNOSTICS_CONTRACT_VERSION,
+        "source": "journald",
+        "summary": ["looks clean — no shutdown/OOM/watchdog signature found."],
+        "boots": boots,
+        "prev_boot_errors": [],
+        "host_events": [],
+        "degraded": [],
+        "params": {"lookback_boots": 1, "event_cap": 50, "line_cap": 200, "timeout_seconds": 5},
+    }
+
+
+def test_diagnose_human_prints_source_and_boot_line(monkeypatch, capsys):
+    # F12: neither consumer rendered the payload's source/boots lineage.
+    boots = [{"index": -1, "boot_id": "b1", "start": "2026-07-23T00:00:00+00:00", "stop": ""}]
+    monkeypatch.setattr(cli, "gather_diagnostics", lambda config: _diag_payload(boots))
+    rc = cli.main(["diagnose"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.splitlines()
+    assert lines[0] == "source: journald"
+    assert lines[1].startswith("boot: b1")
+
+
+def test_diagnose_human_omits_boot_line_when_no_boots(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "gather_diagnostics", lambda config: _diag_payload([]))
+    rc = cli.main(["diagnose"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.splitlines()[0] == "source: journald"
+    assert "boot:" not in out
 
 
 def test_web_server_serves_sessions_and_enforces_host(tmp_path):
@@ -254,6 +327,138 @@ def test_schtasks_print_emits_both_tasks_and_runs_nothing(tmp_path, monkeypatch,
     assert "wsl.exe" in out and "/usr/bin/crr" in out
     assert "web --port 8378" in out
     assert "schtasks --install" in out  # printed install guidance
+
+
+# --- F6: --port default=None, resolved from config's dashboard_port -------
+
+def test_systemd_print_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd"])  # no --port -> config dashboard_port default (8377)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 8377" in out
+
+
+def test_systemd_print_default_port_honors_config_toml_override(tmp_path, monkeypatch, capsys):
+    sd = tmp_path / "state" / "crr"
+    sd.mkdir(parents=True)
+    (sd / "config.toml").write_text("dashboard_port = 9001\n", encoding="utf-8")
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 9001" in out
+
+
+def test_systemd_print_explicit_port_still_overrides_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["systemd", "--port", "9999"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 9999" in out
+
+
+def test_launchd_print_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    rc = cli.main(["launchd"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "8377" in out
+
+
+def test_schtasks_print_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/usr/bin/crr")
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("print must not run schtasks")))
+    rc = cli.main(["schtasks"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "web --port 8377" in out
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_web_default_port_comes_from_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            _FakeServer.addr = addr
+
+        def serve_forever(self):
+            raise KeyboardInterrupt()
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    rc = cli.main(["web"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert _FakeServer.addr == ("127.0.0.1", 8377)
+    assert "http://127.0.0.1:8377/" in out
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_web_explicit_port_still_overrides_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            _FakeServer.addr = addr
+
+        def serve_forever(self):
+            raise KeyboardInterrupt()
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    rc = cli.main(["web", "--port", "9123"])
+    assert rc == 0
+    assert _FakeServer.addr == ("127.0.0.1", 9123)
+
+
+def test_doctor_uses_configured_interop_timeout_for_systemctl_check(tmp_path, monkeypatch, capsys):
+    # F5: doctor's systemctl call literal `timeout=5` duplicated
+    # interop_timeout_seconds instead of reading it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text("interop_timeout_seconds = 42\n", encoding="utf-8")
+    monkeypatch.setattr(cli.systemd, "unit_dir", lambda home: tmp_path)
+    (tmp_path / cli.systemd.TIMER_NAME).write_text("", encoding="utf-8")
+    (tmp_path / cli.systemd.WEB_SERVICE_NAME).write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(stdout="enabled\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    assert captured["timeout"] == 42
+
+
+def test_doctor_reports_a_malformed_config_toml_exactly_once(tmp_path, monkeypatch, capsys):
+    # A malformed config.toml must be reported once, not twice: doctor's
+    # own [WARN] config.toml line is the single source of truth here, not
+    # duplicated by a second, independent _load_config() stderr message.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text('zombie_strikes = "not-an-int"\n', encoding="utf-8")
+    rc = cli.main(["doctor"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert err == ""  # no duplicate "crr: ignoring bad config" on stderr
+    assert out.count("zombie_strikes") == 1
+    assert "[WARN] config.toml" in out
 
 
 def test_systemd_install_failure_propagates(tmp_path, monkeypatch, capsys):
@@ -536,6 +741,21 @@ def test_doctor_reports_install_health(tmp_path, monkeypatch, capsys):
     assert "crr-revive.timer" in out  # names the watchdog unit to install
 
 
+def test_doctor_prints_all_six_declared_contract_versions(tmp_path, monkeypatch, capsys):
+    # F8: doctor used to print 3 of 6 declared contract versions (omitting
+    # archive, config-defaults, page) — an honesty gap the audit flagged.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"journal v{contracts.JOURNAL_SCHEMA_VERSION}" in out
+    assert f"sessions v{contracts.SESSIONS_CONTRACT_VERSION}" in out
+    assert f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}" in out
+    assert f"archive v{contracts.ARCHIVE_CONTRACT_VERSION}" in out
+    assert f"config-defaults v{cfg.CONFIG_DEFAULTS_VERSION}" in out
+    assert f"page v{cli.web.PAGE_VERSION}" in out
+
+
 def test_config_effective_lists_every_key_with_origin(capsys):
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out
@@ -543,6 +763,16 @@ def test_config_effective_lists_every_key_with_origin(capsys):
     for key in cfg.DEFAULTS:
         assert key in out
     assert "(default)" in out
+
+
+def test_config_effective_prints_defaults_version_header(capsys):
+    # F9: --effective never printed CONFIG_DEFAULTS_VERSION (zero consumers
+    # could tell which default generation they were reading).
+    rc = cli.main(["config", "--effective"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.splitlines()
+    assert lines[0] == f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}"
 
 
 def _live_entry(pid, boot_id):
@@ -597,10 +827,10 @@ def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsy
     assert payload["sessions"][0]["state"] == "crashed"
 
 
-def _human_card(model):
+def _human_card(model, duplicate_group=None, sid_source="injected"):
     return {
         "pid": 42, "sid8": "8a1b2c3d", "state": "live", "cwd": "/home/u/proj",
-        "model": model, "duplicate_group": None,
+        "model": model, "duplicate_group": duplicate_group, "sid_source": sid_source,
     }
 
 
@@ -611,8 +841,40 @@ def test_status_human_shows_model_when_known(capsys):
 
 def test_status_human_omits_model_when_unknown(capsys):
     # No model read yet -> the line is the plain terse form, no trailing gap.
+    # This also pins F13's compactness requirement: an `injected` sid_ource
+    # (the certain norm) adds nothing to the line.
     cli._print_status_human({"sessions": [_human_card("")]})
     assert capsys.readouterr().out == "#42 · 8a1b2c3d [live] /home/u/proj\n"
+
+
+def test_status_human_dup_tag_for_certain_sid(capsys):
+    # F13: verified/injected duplicates print the plain certain tag.
+    card = _human_card("", duplicate_group="8a1b2c3d-...", sid_source="verified")
+    cli._print_status_human({"sessions": [card]})
+    out = capsys.readouterr().out
+    assert "[dup]" in out
+    assert "[dup?" not in out
+    assert "sid:verified" in out  # non-injected sid_source is always surfaced
+
+
+def test_status_human_dup_tag_qualifies_guessed_sid(capsys):
+    # F13: a guessed duplicate must not collapse into the same [dup] tag as
+    # a certain one — sid_source travels with the human line too.
+    card = _human_card("", duplicate_group="8a1b2c3d-...", sid_source="guessed")
+    cli._print_status_human({"sessions": [card]})
+    out = capsys.readouterr().out
+    assert "[dup? guessed]" in out
+    assert "sid:guessed" in out
+
+
+def test_status_human_shows_sid_source_when_not_injected_even_without_dup(capsys):
+    # F13: sid_source is dropped even for non-duplicate guessed/verified
+    # cards today — the dashboard renders the distinction, the CLI doesn't.
+    card = _human_card("", duplicate_group=None, sid_source="guessed")
+    cli._print_status_human({"sessions": [card]})
+    out = capsys.readouterr().out
+    assert "[dup" not in out
+    assert "sid:guessed" in out
 
 
 # --- shim-facing commands: register / last-cmd / deregister --------------
@@ -991,6 +1253,100 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     assert entry["tmux_session"] == f"crr-{_G1_SID[:8]}"  # and it was actually revived
 
 
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_revive_names_gave_up_pids(tmp_path, monkeypatch, capsys):
+    # F14: a terminal outcome (gave up) used to report a bare count while
+    # sibling problem-loops name the file/session responsible.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [4242], []),
+    )
+    rc = cli.main(["revive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gave up: [4242]" in out
+
+
+def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], []),
+    )
+    rc = cli.main(["revive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "revived 0" in out  # normal-path summary line is still printed
+    assert "gave up:" not in out
+
+
+def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypatch, capsys):
+    # Finding 1 (re-audit): a None-liveness pass used to print the exact
+    # same "revived 0, gave up 0, already running 0" summary as a genuine
+    # no-op pass — a success-shaped line lying about an unknown state. Now
+    # RevivalOutcome.skipped surfaces the distinction and the CLI must
+    # honor it: a stderr note instead of the summary, but still exit 0 (a
+    # flapping nonzero oneshot would spam systemd failure state under a
+    # transient fault).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], [], skipped=True),
+    )
+    rc = cli.main(["revive"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == ""  # no success-shaped summary line for a skipped pass
+    assert "crr revive: tmux state unknown — pass skipped (no strikes accrued)" in err
+
+
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
 
 # --- session ops: remove / dismiss / reopen -----------------------------
@@ -1007,6 +1363,78 @@ def test_gc_removes_expired_archive_records_only(tmp_path, monkeypatch):
     assert cli.main(["gc"]) == 0
     sids = {r["entry"]["claude"]["session_id"] for r in archive.scan().records}
     assert sids == {"22222222-2222-4222-8222-222222222222"}  # only the fresh one remains
+
+
+def test_gc_names_removed_sid8s(tmp_path, monkeypatch, capsys):
+    # F14: gc reported a bare count while sibling problem-loops name files.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive = ArchiveStore(tmp_path)
+    old = _live_entry(pid=1, boot_id="b")
+    old["claude"] = _claude_field("11111111-1111-4111-8111-111111111111")
+    archive.archive(old, "gave-up", "2026-01-01T00:00:00+00:00")
+    assert cli.main(["gc"]) == 0
+    out = capsys.readouterr().out
+    assert "removed: ['11111111']" in out
+
+
+def test_gc_omits_removed_line_when_nothing_removed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    ArchiveStore(tmp_path)  # empty archive dir
+    assert cli.main(["gc"]) == 0
+    out = capsys.readouterr().out
+    assert "removed:" not in out
+
+
+# --- F15: `crr archive --list` — the human read path archive lineage lacked
+
+def test_archive_list_reports_none_when_empty(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["archive", "--list"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.strip() == "no archived sessions"
+
+
+def test_archive_list_prints_one_line_per_record_sorted_by_archived_at_desc(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive = ArchiveStore(tmp_path)
+    old = _live_entry(pid=1, boot_id="b")
+    old["claude"] = _claude_field("11111111-1111-4111-8111-111111111111")
+    old["cwd"] = "/home/u/old"
+    fresh = _live_entry(pid=2, boot_id="b")
+    fresh["claude"] = _claude_field("22222222-2222-4222-8222-222222222222")
+    fresh["cwd"] = "/home/u/fresh"
+    archive.archive(old, "gave-up", "2026-01-01T00:00:00+00:00")
+    archive.archive(fresh, "dismissed", "2026-06-01T00:00:00+00:00")
+
+    rc = cli.main(["archive", "--list"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.strip().splitlines()
+    assert len(lines) == 2
+    # most-recently-archived first
+    assert lines[0].startswith("dismissed")
+    assert "22222222" in lines[0] and "/home/u/fresh" in lines[0] and "2026-06-01" in lines[0]
+    assert lines[1].startswith("gave-up")
+    assert "11111111" in lines[1] and "/home/u/old" in lines[1] and "2026-01-01" in lines[1]
+
+
+def test_archive_requires_the_list_flag(capsys):
+    rc = cli.main(["archive"])
+    assert rc == 2
+    assert "usage: crr archive --list" in capsys.readouterr().err
+
+
+def test_archive_list_surfaces_scan_problems_on_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "corrupt.json").write_text("not json", encoding="utf-8")
+    rc = cli.main(["archive", "--list"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "corrupt.json" in err
+    assert "no archived sessions" in out
 
 
 def test_remove_delists_without_archiving(tmp_path, monkeypatch):
@@ -1290,6 +1718,44 @@ def test_rescued_reports_none(tmp_path, monkeypatch, capsys):
     assert "no rescued sessions" in capsys.readouterr().out
 
 
+class _FakeTmuxUnknown:
+    """F16: available() but list_sessions() can't determine liveness."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def available(self):
+        return True
+
+    def list_sessions(self):
+        return None
+
+
+def test_rescued_reports_none_when_tmux_liveness_is_unknown(tmp_path, monkeypatch, capsys):
+    # F16: unknown liveness must never be silently treated as "definitely
+    # rescued" — but per spec it degrades to the same "no rescued sessions"
+    # a genuinely-empty tmux server produces (never a prompt on unknown).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxUnknown)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(  # would be rescued if liveness were confirmed
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d",
+    ))
+
+    rc = cli.main(["rescued"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "no rescued sessions" in out
+    # Finding 2 (re-audit): the None-liveness degrade used to be silent —
+    # mirror the sibling journal-problems stderr pattern instead of
+    # quietly undercounting.
+    assert "crr rescued: tmux state unknown — rescued sessions may be undercounted" in err
+
+
 def _rescue_check_setup(monkeypatch, tmp_path, found):
     """Common wiring for `crr rescue-check` tests: fake boot + fake tmux
     (SAFETY: never the real adapters — this machine runs production crr
@@ -1328,6 +1794,37 @@ def test_rescue_check_silent_when_not_a_tty(tmp_path, monkeypatch, capsys):
     assert out == "" and err == ""
     # a later interactive shell must still be offered -> marker NOT written
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is False
+
+
+def test_rescue_check_silent_when_tmux_liveness_is_unknown(tmp_path, monkeypatch, capsys):
+    # F16: unknown liveness must never surface a prompt (a false "rescued
+    # session" the user can't actually attach to would be worse than
+    # staying silent) — real rescue.rescued_sessions is exercised here
+    # (not mocked) to prove the None->set() conversion happens before it,
+    # since `sid in None` would otherwise raise.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxUnknown)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(  # would be rescued if liveness were confirmed
+        pid=42, cwd=str(tmp_path), host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d",
+    ))
+
+    rc = cli.main(["rescue-check"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert out == ""  # never a prompt on unconfirmed liveness
+    # Finding 3 (re-audit): same stderr note as `crr rescued` (item 2), under
+    # this command's own name. The interactive shims redirect stderr to
+    # /dev/null on startup, so this stays quiet there; a manual
+    # `crr rescue-check` sees it.
+    assert "crr rescue-check: tmux state unknown — rescued sessions may be undercounted" in err
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is False  # nothing claimed
 
 
 def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys):
@@ -1665,3 +2162,11 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
         assert f"crr-{sid[:8]}" in sessions
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+def test_shim_output_carries_a_version_stamp(capsys):
+    """[audit P7] generated shims stamp the crr + config-defaults versions."""
+    assert cli.main(["shim", "bash", "--crr-bin", "/x/crr"]) == 0
+    out = capsys.readouterr().out
+    assert "generated by crr " in out and "config-defaults v" in out
+    assert "@CRR_VERSION@" not in out and "@CRR_DEFAULTS_V@" not in out

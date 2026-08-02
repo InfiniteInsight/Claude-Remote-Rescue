@@ -45,8 +45,36 @@ def test_audit_floor_priors_are_present():
         "archive_retention_days",
         "host_allowlist_extras",
         "rescue_prompt_timeout_seconds",
+        # audit 2026-07-31 (P5): priors lifted from hardcoded literals.
+        "dashboard_port",
+        "web_restart_seconds",
+        "confirm_arm_seconds",
+        "notice_seconds",
+        "reload_delay_ms",
+        "diag_error_display_cap",
+        "model_tail_lines",
     }
     assert floor <= set(cfg.DEFAULTS)
+
+
+def test_dashboard_port_default():
+    assert cfg.Config().get("dashboard_port") == 8377
+
+
+def test_web_restart_seconds_default():
+    assert cfg.Config().get("web_restart_seconds") == 2
+
+
+def test_page_timing_and_cap_defaults():
+    c = cfg.Config()
+    assert c.get("confirm_arm_seconds") == 4
+    assert c.get("notice_seconds") == 3
+    assert c.get("reload_delay_ms") == 800
+    assert c.get("diag_error_display_cap") == 20
+
+
+def test_model_tail_lines_default():
+    assert cfg.Config().get("model_tail_lines") == 200
 
 
 def test_vestigial_keys_are_gone_and_version_bumped():

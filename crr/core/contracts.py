@@ -22,7 +22,7 @@ from typing import Any, Iterable, Mapping
 
 JOURNAL_SCHEMA_VERSION = 1
 SESSIONS_CONTRACT_VERSION = 3  # v3 adds the per-session nullable tmux_session field
-DIAGNOSTICS_CONTRACT_VERSION = 2  # v2 adds the plain-English `summary` list
+DIAGNOSTICS_CONTRACT_VERSION = 3  # v3 adds `params` — the generating caps/lookback/timeout
 ARCHIVE_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
@@ -78,6 +78,7 @@ DIAGNOSTICS_PAYLOAD_KEYS = (
     "prev_boot_errors",
     "host_events",
     "degraded",
+    "params",
 )
 
 # Archive record (audit P8 — State-first lineage): why/when a revival-bearing
@@ -263,6 +264,25 @@ def validate_diagnostics_payload(payload: Any) -> None:
     _require_type(payload["prev_boot_errors"], list, "/api/diagnostics 'prev_boot_errors'")
     _require_type(payload["host_events"], list, "/api/diagnostics 'host_events'")
     _require_type(payload["degraded"], list, "/api/diagnostics 'degraded'")
+    _require_diagnostics_params(payload["params"])
+
+
+def _require_diagnostics_params(value: Any) -> None:
+    """`params` records the generating caps/lookback/timeout (audit P3/P5):
+    the values a source actually queried with, so the payload is
+    regenerable/judgeable later instead of losing that lineage the moment
+    ``collect()`` returns. A mapping of str keys to scalar (str/int/float)
+    values — bool excluded (an int subclass) for the same reason every
+    other int field here rejects it.
+    """
+    value = _require_mapping(value, "/api/diagnostics 'params'")
+    for key, val in value.items():
+        if not isinstance(key, str):
+            raise ContractError(f"/api/diagnostics 'params' key must be str, got {type(key).__name__}")
+        if isinstance(val, bool) or not isinstance(val, (str, int, float)):
+            raise ContractError(
+                f"/api/diagnostics 'params[{key!r}]' must be str/int/float, got {type(val).__name__}"
+            )
 
 
 # --------------------------------------------------------------------------

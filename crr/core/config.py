@@ -57,6 +57,20 @@ DEFAULTS: dict[str, Any] = {
     "wt_profile": "",  # Windows Terminal profile for a WSL reopen ("" = default)
     # restore prompt
     "rescue_prompt_timeout_seconds": 15,  # [Y/n] wait before defaulting to "not now"
+    # dashboard port + service restart cadence (audit 2026-07-31, P5)
+    "dashboard_port": 8377,        # `crr web`'s bind port; baked into systemd/launchd/schtasks units
+    "web_restart_seconds": 2,      # systemd RestartSec for crr-web.service after a crash
+    # page timing/caps injected into page.html at serve time (audit 2026-07-31, P5)
+    "confirm_arm_seconds": 4,      # danger-button confirm-arm window before it disarms
+    "notice_seconds": 3,           # transient notice banner display duration
+    "reload_delay_ms": 800,        # delay before a stale-page self-heal reload
+    "diag_error_display_cap": 20,  # max previous-boot error lines rendered client-side
+    # transcript scan bound (audit 2026-07-31, P5): a real model id always sits
+    # within a few lines of the tail (measured on 3243 live transcripts:
+    # p50=3, p99=37 lines back), but ~1 in 3 transcripts carry NO model at all
+    # — so the model search stops here rather than reading a model-less
+    # transcript in full on every poll. See transcript_source.read_tail_facts.
+    "model_tail_lines": 200,
 }
 
 

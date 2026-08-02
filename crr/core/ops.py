@@ -108,15 +108,23 @@ def reopen(
     if state == LIVE:
         return OpResult(False, f"session {pid} is live — use kick or close")
 
+    # F16 tri-state: resolve liveness ONCE, before any destructive step —
+    # the GHOST branch kills + archives before it would otherwise learn
+    # whether the target tmux session already exists, and a kill can't be
+    # undone, so an unknown state must refuse here rather than mid-branch.
+    live = tmux.list_sessions()
+    if live is None:
+        return OpResult(False, f"reopen {pid}: cannot determine tmux state — is tmux responding?")
+
     if state == GHOST:
         return _reopen_ghost(
             store, archive, tmux, controller, flags, entry, pid, now,
-            grace=grace, tab_spawner=tab_spawner,
+            live=live, grace=grace, tab_spawner=tab_spawner,
         )
 
     # CRASHED — original path, unchanged.
     name = session_name(entry)
-    if name in tmux.list_sessions():
+    if name in live:
         base = f"already running as {name}"
     else:
         tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
@@ -137,10 +145,17 @@ def _reopen_ghost(
     pid: int,
     now: str,
     *,
+    live: set[str],
     grace: float,
     tab_spawner: TabSpawner | None,
 ) -> OpResult:
     """The GHOST branch of ``reopen`` (see its docstring for the "why").
+
+    ``live`` is the tmux liveness snapshot ``reopen`` already resolved
+    (and confirmed non-None) before dispatching here — this branch commits
+    irreversible steps (kill, archive) before it would otherwise learn
+    whether the target session already exists, so the None-liveness
+    refusal has to happen in the caller, not here.
 
     Ordering, each choice load-bearing:
 
@@ -178,7 +193,7 @@ def _reopen_ghost(
     archive.archive(entry, "ghost-restored", now)
     store.remove(pid)
 
-    if name in tmux.list_sessions():
+    if name in live:
         return OpResult(
             True, f"restored {pid}'s conversation as {name} (already running){kill_suffix}"
             + _open_tab(tab_spawner, name)
@@ -316,7 +331,10 @@ def detmux(
     name = entry.get("tmux_session")
     if not name:
         return OpResult(False, f"session {pid} is not tmux-parked")
-    if name not in tmux.list_sessions():
+    live = tmux.list_sessions()
+    if live is None:
+        return OpResult(False, f"detmux {pid}: cannot determine tmux state — is tmux responding?")
+    if name not in live:
         return OpResult(False, f"tmux session {name} is gone")
     if tab_spawner is None or not tab_spawner.available():
         return OpResult(False, "no terminal tab spawner available on this host")
@@ -380,7 +398,10 @@ def untmux(
     name = entry.get("tmux_session")
     if not name:
         return OpResult(False, f"session {pid} is not tmux-parked")
-    if name not in tmux.list_sessions():
+    live = tmux.list_sessions()
+    if live is None:
+        return OpResult(False, f"untmux {pid}: cannot determine tmux state — is tmux responding?")
+    if name not in live:
         return OpResult(False, f"tmux session {name} is gone")
     if tab_spawner is None or not tab_spawner.available():
         return OpResult(False, "no terminal tab spawner available on this host")

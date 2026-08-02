@@ -69,7 +69,10 @@ def _tail_facts_extractor(config: cfg.Config):
     entry["claude"] is always present here.
     """
     cap = config.get("last_prompt_display_cap")
-    return lambda entry: transcript_source.read_tail_facts(entry["claude"]["session_id"], cap)
+    model_tail_lines = config.get("model_tail_lines")
+    return lambda entry: transcript_source.read_tail_facts(
+        entry["claude"]["session_id"], cap, model_tail_lines=model_tail_lines
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -146,8 +149,17 @@ def _build_parser() -> argparse.ArgumentParser:
     gc = sub.add_parser("gc", help="drop archive records past the retention window")
     gc.set_defaults(func=_cmd_gc)
 
+    arch = sub.add_parser("archive", help="inspect archived (revival-preserved) sessions")
+    arch.add_argument(
+        "--list",
+        action="store_true",
+        help="print every archived record (reason, archived_at, sid8, cwd)",
+    )
+    arch.set_defaults(func=_cmd_archive)
+
     w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
-    w.add_argument("--port", type=int, default=8377)
+    w.add_argument("--port", type=int, default=None,
+                   help="dashboard bind port (default: config dashboard_port = 8377)")
     w.set_defaults(func=_cmd_web)
 
     sysd = sub.add_parser(
@@ -160,8 +172,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="disable/remove the watchdog + dashboard integration")
     sysd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the units (default: this crr binary)")
-    sysd.add_argument("--port", type=int, default=8377,
-                      help="dashboard port to bake into crr-web.service (default: 8377)")
+    sysd.add_argument("--port", type=int, default=None,
+                      help="dashboard port to bake into crr-web.service "
+                           "(default: config dashboard_port = 8377)")
     sysd.set_defaults(func=_cmd_systemd)
 
     lncd = sub.add_parser(
@@ -174,8 +187,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="disable/remove the watchdog + dashboard integration")
     lncd.add_argument("--crr-bin", default=None,
                       help="absolute crr path to bake into the agents (default: this crr binary)")
-    lncd.add_argument("--port", type=int, default=8377,
-                      help="dashboard port to bake into the web agent (default: 8377)")
+    lncd.add_argument("--port", type=int, default=None,
+                      help="dashboard port to bake into the web agent "
+                           "(default: config dashboard_port = 8377)")
     lncd.set_defaults(func=_cmd_launchd)
 
     sch = sub.add_parser(
@@ -188,8 +202,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="disable/remove the watchdog + dashboard integration")
     sch.add_argument("--crr-bin", default=None,
                      help="crr path inside WSL to bake into the tasks (default: this crr binary)")
-    sch.add_argument("--port", type=int, default=8377,
-                     help="dashboard port to bake into the web task (default: 8377)")
+    sch.add_argument("--port", type=int, default=None,
+                     help="dashboard port to bake into the web task "
+                          "(default: config dashboard_port = 8377)")
     sch.set_defaults(func=_cmd_schtasks)
 
     conf = sub.add_parser("config", help="inspect configuration")
@@ -287,7 +302,11 @@ def _cmd_shim(args: argparse.Namespace) -> int:
     template = resources.files("crr.shims").joinpath(f"crr.{args.shell}").read_text(
         encoding="utf-8"
     )
-    print(template.replace("@CRR_BIN@", _resolve_crr_bin(args.crr_bin)), end="")
+    rendered = (template
+                .replace("@CRR_BIN@", _resolve_crr_bin(args.crr_bin))
+                .replace("@CRR_VERSION@", __version__)
+                .replace("@CRR_DEFAULTS_V@", str(cfg.CONFIG_DEFAULTS_VERSION)))
+    print(rendered, end="")
     return 0
 
 
@@ -302,7 +321,9 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     print(
         "contracts: journal v"
         f"{contracts.JOURNAL_SCHEMA_VERSION}, sessions v{contracts.SESSIONS_CONTRACT_VERSION}, "
-        f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}"
+        f"diagnostics v{contracts.DIAGNOSTICS_CONTRACT_VERSION}, "
+        f"archive v{contracts.ARCHIVE_CONTRACT_VERSION}, "
+        f"config-defaults v{cfg.CONFIG_DEFAULTS_VERSION}, page v{web.PAGE_VERSION}"
     )
 
     # Platform integration.
@@ -328,15 +349,20 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for name, reason in scan.problems:
         _check(f"journal file {name}", False, reason)
 
-    # Config.
+    # Config. Doctor's own parse attempt doubles as the source of `config`
+    # for the systemctl check below — a second, independent _load_config()
+    # call here would print its own "ignoring bad config" line on top of
+    # this section's structured [WARN], the same fact said twice.
     toml_path = sd / "config.toml"
     if toml_path.is_file():
         try:
-            cfg.Config(cfg.load_toml_overrides(toml_path))
+            config = cfg.Config(cfg.load_toml_overrides(toml_path))
             _check("config.toml", True, str(toml_path))
         except (cfg.ConfigError, ValueError, OSError) as exc:
+            config = cfg.Config()  # same fallback _load_config() would use
             _check("config.toml", False, f"{toml_path}: {exc}")
     else:
+        config = cfg.Config()
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
 
     # systemd units (installed? enabled?).
@@ -346,8 +372,11 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         enabled = ""
         if installed and shutil.which("systemctl"):
             try:
-                r = subprocess.run(["systemctl", "--user", "is-enabled", unit],
-                                   capture_output=True, text=True, timeout=5)
+                r = subprocess.run(
+                    ["systemctl", "--user", "is-enabled", unit],
+                    capture_output=True, text=True,
+                    timeout=config.get("interop_timeout_seconds"),
+                )
                 enabled = r.stdout.strip() or r.stderr.strip()
             except (subprocess.SubprocessError, OSError):
                 enabled = "unknown"
@@ -398,9 +427,18 @@ def _print_status_human(payload: dict) -> None:
         print("no journaled sessions")
         return
     for card in sessions:
-        dup = " [dup]" if card["duplicate_group"] else ""
+        if card["duplicate_group"]:
+            # A guessed duplicate is a weaker claim than a verified/injected
+            # one — collapsing both into the same [dup] tag would hide that
+            # difference (audit P3: confidence travels with the data).
+            dup = " [dup? guessed]" if card["sid_source"] == "guessed" else " [dup]"
+        else:
+            dup = ""
+        # injected is the certain norm; only a non-injected sid_source is
+        # worth the extra characters on an otherwise compact line.
+        sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
         model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
-        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}")
+        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}{sid_tag}")
 
 
 def _cmd_register(args: argparse.Namespace) -> int:
@@ -633,11 +671,24 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    if outcome.skipped:
+        print(
+            "crr revive: tmux state unknown — pass skipped (no strikes accrued)",
+            file=sys.stderr,
+        )
+        # Exit 0, not nonzero: this runs unattended as a systemd oneshot, and
+        # a transient tmux query failure flapping the unit into failed state
+        # would spam systemd failure alerts for something that resolves
+        # itself next pass. The stderr note above is the honest signal here,
+        # not the exit code.
+        return 0
     print(
         f"revived {len(outcome.revived)}, "
         f"gave up {len(outcome.gave_up)}, "
         f"already running {len(outcome.reset)}"
     )
+    if outcome.gave_up:
+        print(f"gave up: {outcome.gave_up}")
     return 0
 
 
@@ -804,6 +855,17 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
         return 2
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    if live is None:
+        # F16 tri-state: an unconfirmed tmux state must never be read as
+        # "definitely rescued" — degrade to the same "no rescued sessions"
+        # an unavailable tmux already produces above, never a guess. Say so
+        # on stderr (mirrors the sibling journal-problems pattern below) so
+        # the degrade isn't silent undercounting.
+        print(
+            "crr rescued: tmux state unknown — rescued sessions may be undercounted",
+            file=sys.stderr,
+        )
+        live = set()
     store = JournalStore(state_dir.state_dir())
     scan = store.scan()
     found = rescue.rescued_sessions(scan.entries, boot.current(), live)
@@ -875,6 +937,17 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
+    if live is None:
+        # F16 tri-state: never prompt on an unconfirmed tmux state. Same
+        # stderr note as `crr rescued`'s sibling degrade: the interactive
+        # shims redirect this command's stderr to /dev/null on shell
+        # startup, so this stays quiet there; a manual `crr rescue-check`
+        # still sees it.
+        print(
+            "crr rescue-check: tmux state unknown — rescued sessions may be undercounted",
+            file=sys.stderr,
+        )
+        live = set()
     store = JournalStore(sd)
     found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
     if not found:
@@ -938,6 +1011,10 @@ def make_web_handler(
     diagnostics_provider: Callable[[], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
+    confirm_arm_seconds: int | None = None,
+    notice_seconds: int | None = None,
+    reload_delay_ms: int | None = None,
+    diag_error_display_cap: int | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -959,6 +1036,10 @@ def make_web_handler(
                 allowed_suffixes=allowed_suffixes,
                 poll_seconds=poll_seconds,
                 version_check_seconds=version_check_seconds,
+                confirm_arm_seconds=confirm_arm_seconds,
+                notice_seconds=notice_seconds,
+                reload_delay_ms=reload_delay_ms,
+                diag_error_display_cap=diag_error_display_cap,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -996,6 +1077,38 @@ def _select_diag_source():
     return diag_source  # journald (native Linux, or WSL with systemd)
 
 
+def _diagnostics_params(source, config: cfg.Config) -> dict:
+    """The generating caps/lookback/timeout for ``source`` (audit P3/P5).
+
+    Records only the config keys the selected source's ``collect`` actually
+    reads — recording a sibling source's keys would be a lineage lie, not a
+    lineage. Mirrors ``_select_diag_source``'s branching so the mapping
+    can't silently drift from which source is actually wired.
+    """
+    if source is diagnostics_windows:
+        return {
+            "event_cap": config.get("diagnose_event_cap"),
+            "timeout_seconds": config.get("interop_timeout_seconds"),
+        }
+    if source is diagnostics_macos:
+        return {
+            "lookback": config.get("diagnose_macos_lookback"),
+            "event_cap": config.get("diagnose_event_cap"),
+            "timeout_seconds": config.get("diagnose_macos_timeout_seconds"),
+        }
+    if source is diag_source:
+        # journald (native Linux, or WSL with systemd) — diag_source's collect().
+        return {
+            "lookback_boots": config.get("diagnose_lookback_boots"),
+            "event_cap": config.get("diagnose_event_cap"),
+            "line_cap": config.get("diagnose_line_cap"),
+            "timeout_seconds": config.get("interop_timeout_seconds"),
+        }
+    # No implicit fallthrough: a future source falling through to
+    # journald's params would silently inherit journald's lineage claim.
+    raise ValueError(f"unknown diagnostics source {getattr(source, 'SOURCE_NAME', source)!r}")
+
+
 def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | None" = None) -> dict:
     """Query the platform diagnostics source, degrading (never aborting).
 
@@ -1009,6 +1122,7 @@ def gather_diagnostics(config: cfg.Config, source: "ports.DiagnosticsSource | No
     return diag_core.build_payload(
         source=source.SOURCE_NAME, boots=boots, prev_boot_errors=prev,
         host_events=events, degraded=degraded,
+        params=_diagnostics_params(source, config),
     )
 
 
@@ -1017,6 +1131,12 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+    # Source + boot identity first (F12: lineage before the verdict).
+    print(f"source: {payload['source']}")
+    boots = payload["boots"]
+    if boots:
+        b = boots[0]
+        print(f"boot: {b.get('boot_id')} (start {b.get('start')}, stop {b.get('stop') or 'ongoing'})")
     if payload["degraded"]:
         print(f"(degraded sources: {', '.join(payload['degraded'])})", file=sys.stderr)
     # Plain-English verdict first (the "why", before the raw evidence).
@@ -1041,17 +1161,43 @@ def _cmd_gc(_args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     archive = ArchiveStore(sd)
     now = _now()
-    removed = 0
+    removed_sid8s: list[str] = []
     with mutation_lock(sd):
         scan = archive.scan()
         for record in scan.records:
             if is_expired(record, now, retention):
-                archive.remove(record["entry"]["claude"]["session_id"])
-                removed += 1
+                sid = record["entry"]["claude"]["session_id"]
+                archive.remove(sid)
+                removed_sid8s.append(sid[:8])
     for name, reason in scan.problems:
         print(f"crr gc: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
-    print(f"gc: removed {removed} archive record(s) older than {retention} days, "
-          f"kept {len(scan.records) - removed}")
+    print(f"gc: removed {len(removed_sid8s)} archive record(s) older than {retention} days, "
+          f"kept {len(scan.records) - len(removed_sid8s)}")
+    if removed_sid8s:
+        print(f"removed: {removed_sid8s}")
+    return 0
+
+
+def _cmd_archive(args: argparse.Namespace) -> int:
+    """F15: archive lineage had no human read path — `crr archive --list`.
+
+    Read-only (no mutation_lock — mirrors config --effective's no-lock
+    reads, not gc's read-modify-write).
+    """
+    if not args.list:
+        print("usage: crr archive --list", file=sys.stderr)
+        return 2
+    sd = state_dir.state_dir()
+    scan = ArchiveStore(sd).scan()
+    for name, reason in scan.problems:
+        print(f"crr archive: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
+    if not scan.records:
+        print("no archived sessions")
+        return 0
+    for record in sorted(scan.records, key=lambda r: r["archived_at"], reverse=True):
+        sid8 = record["entry"]["claude"]["session_id"][:8]
+        cwd = record["entry"]["cwd"]
+        print(f"{record['reason']:<22} {record['archived_at']} {sid8} {cwd}")
     return 0
 
 
@@ -1120,6 +1266,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
         provider, allowed, (".ts.net",), action_provider, diagnostics_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
+        confirm_arm_seconds=config.get("confirm_arm_seconds"),
+        notice_seconds=config.get("notice_seconds"),
+        reload_delay_ms=config.get("reload_delay_ms"),
+        diag_error_display_cap=config.get("diag_error_display_cap"),
     )
 
     # Snapshot the page template NOW ([lesson: template/code skew]) — a lazy
@@ -1127,9 +1277,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # skews the served page against this process's loaded code.
     web.load_page()
 
+    port = args.port if args.port is not None else config.get("dashboard_port")
     # Bind loopback ONLY; the tailnet (or a user proxy) is the auth boundary.
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    print(f"crr web: serving on http://127.0.0.1:{args.port}/ (loopback only)")
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    print(f"crr web: serving on http://127.0.0.1:{port}/ (loopback only)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1160,11 +1311,13 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     # the right distro instead of silently falling back to the default one.
     wsl_distro = os.environ.get("WSL_DISTRO_NAME", "") if is_wsl else ""
     interval = config.get("watchdog_interval_seconds")
+    port = args.port if args.port is not None else config.get("dashboard_port")
     units = {
         systemd.SERVICE_NAME: systemd.revive_service_unit(crr_bin, path, state_home),
         systemd.TIMER_NAME: systemd.revive_timer_unit(interval),
         systemd.WEB_SERVICE_NAME: systemd.web_service_unit(
-            crr_bin, path, state_home, args.port, wsl_distro
+            crr_bin, path, state_home, port, wsl_distro,
+            restart_seconds=config.get("web_restart_seconds"),
         ),
     }
 
@@ -1245,9 +1398,10 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     # State dir is NOT baked: state_dir.resolve("Darwin", …) is env-independent,
     # so the agent resolves the same dir the shims write to via HOME alone.
     interval = config.get("watchdog_interval_seconds")
+    port = args.port if args.port is not None else config.get("dashboard_port")
     agents = {
         launchd.REVIVE_PLIST: launchd.revive_agent_plist(crr_bin, path, interval),
-        launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin, path, args.port),
+        launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin, path, port),
     }
 
     if missing:
@@ -1301,9 +1455,10 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
     crr_bin = _resolve_crr_bin(args.crr_bin)
     distro = os.environ.get("WSL_DISTRO_NAME")
     interval = config.get("watchdog_interval_seconds")
+    port = args.port if args.port is not None else config.get("dashboard_port")
     cmds = [
         scheduled_task.create_revive_task_command(crr_bin, interval, distro),
-        scheduled_task.create_web_task_command(crr_bin, args.port, distro),
+        scheduled_task.create_web_task_command(crr_bin, port, distro),
     ]
 
     if args.uninstall:
@@ -1369,6 +1524,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         print("usage: crr config --effective", file=sys.stderr)
         return 2
     config = _load_config()
+    print(f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}")
     for key, (value, origin) in sorted(config.effective().items()):
         print(f"{key} = {value!r}  ({origin})")
     return 0

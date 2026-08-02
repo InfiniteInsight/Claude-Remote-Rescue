@@ -141,6 +141,10 @@
 var PAGE_VERSION = "@PAGE_VERSION@";
 var POLL_MS = @POLL_MS@;
 var VERSION_MS = @VERSION_MS@;
+var CONFIRM_ARM_MS = @CONFIRM_ARM_MS@;
+var NOTICE_MS = @NOTICE_MS@;
+var RELOAD_DELAY_MS = @RELOAD_DELAY_MS@;
+var DIAG_ERR_CAP = @DIAG_ERR_CAP@;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
@@ -254,7 +258,7 @@ function renderCard(s, uncertain, groupColor) {
           setTimeout(function () {
             if (isArmed()) { confirmArmed = null; }
             b.textContent = label;  // harmless if this button was since rebuilt
-          }, 4000);
+          }, CONFIRM_ARM_MS);
           return;
         }
         // Firing the confirmed second click: reset the arm state FIRST, so
@@ -293,7 +297,7 @@ function showNotice(text) {
   var n = document.getElementById("notice");
   n.textContent = text;
   n.style.display = "block";
-  setTimeout(function () { n.style.display = "none"; }, 3000);
+  setTimeout(function () { n.style.display = "none"; }, NOTICE_MS);
 }
 
 function action(op, pid, btn) {
@@ -371,7 +375,7 @@ function pollVersion() {
     .then(function (v) {
       if (String(v.version) !== PAGE_VERSION) {
         document.getElementById("stale").style.display = "block";
-        setTimeout(function () { location.reload(); }, 800);
+        setTimeout(function () { location.reload(); }, RELOAD_DELAY_MS);
       }
     })
     .catch(function () {});
@@ -382,6 +386,17 @@ var diagLoaded = false;
 function renderDiag(d) {
   var panel = document.getElementById("diag-panel");
   panel.textContent = "";
+  // Lineage first (F12): which source answered, and its current boot
+  // identity, so a verdict is never read without knowing where it came
+  // from. Untrusted/server-derived fields -> textContent only.
+  var meta = el("div", "ev");
+  var metaText = "source: " + d.source;
+  if (d.boots && d.boots.length) {
+    var b0 = d.boots[0];
+    metaText += " · boot " + b0.boot_id + " (start " + b0.start + ")";
+  }
+  meta.textContent = metaText;
+  panel.appendChild(meta);
   if (d.degraded && d.degraded.length) {
     var warn = el("div", "ev");
     warn.textContent = "degraded sources: " + d.degraded.join(", ");
@@ -413,7 +428,7 @@ function renderDiag(d) {
   var h2 = el("h3");
   h2.textContent = "previous-boot errors (" + errs.length + ")";
   panel.appendChild(h2);
-  errs.slice(0, 20).forEach(function (line) {
+  errs.slice(0, DIAG_ERR_CAP).forEach(function (line) {
     var e = el("div", "ev");
     e.textContent = line;
     panel.appendChild(e);
