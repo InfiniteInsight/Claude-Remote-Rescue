@@ -542,11 +542,10 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_16():
-    """Explicit version check: v16 (Task C1) posts the dashboard "Untrack"
-    button's op as "untrack" instead of the deprecated "detmux" op name
-    (terminology change: detmux -> untrack)."""
-    assert web.PAGE_VERSION == 16
+def test_page_version_is_17():
+    """Explicit version check: v17 (Task C4) adds the lazy "Recently
+    untracked" and "Discoverable (untracked)" dashboard sections."""
+    assert web.PAGE_VERSION == 17
 
 
 def test_page_recency_sort_keys_on_last_active_with_updated_fallback():
@@ -583,6 +582,37 @@ def test_page_untrack_label_present_de_tmux_label_gone():
     page = web.render_page()
     assert "Untrack" in page
     assert "De-tmux" not in page
+
+
+def test_page_has_recently_untracked_section_lazy_like_diagnostics():
+    # C4: a collapsible section, lazy-fetched from /api/untracked only on
+    # open — never on the 5s sessions poll path (mirrors the diagnostics
+    # panel pattern).
+    page = web.render_page()
+    assert "Recently untracked" in page
+    assert '"/api/untracked"' in page
+    assert "Retrack" in page
+    assert '"retrack"' in page
+
+
+def test_page_has_discoverable_section_lazy_with_adopt_note():
+    # C4: a second collapsible section, lazy-fetched from /api/discoverable,
+    # with an Adopt action and a static clarifying note (adoption != a live
+    # process attachment).
+    page = web.render_page()
+    assert "Discoverable (untracked)" in page
+    assert '"/api/discoverable"' in page
+    assert "Adopt" in page
+    assert '"adopt"' in page
+    assert "does not attach to a live process" in page
+
+
+def test_page_sid_action_helper_posts_json_to_sid_action_endpoint():
+    # Both new sections must use the sid-keyed endpoint (not /api/action)
+    # with the same JSON Content-Type CSRF gate as the existing action POST.
+    page = web.render_page()
+    assert '"/api/sid-action"' in page
+    assert page.count('"Content-Type": "application/json"') >= 2
 
 
 def test_page_renders_diagnostics_source_and_boot_provenance():
