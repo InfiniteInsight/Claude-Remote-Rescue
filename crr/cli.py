@@ -62,11 +62,12 @@ def _load_config() -> cfg.Config:
 
 
 def _tail_facts_extractor(config: cfg.Config):
-    """A tail_facts(entry)->{last_prompt, model} closure for assemble_sessions.
+    """A tail_facts(entry)->{last_prompt, model, last_active, transcript_bytes}
+    closure for assemble_sessions.
 
-    One backward transcript read per card yields both facts. Only called for
-    claude-bearing entries (assemble_sessions filters the rest), so
-    entry["claude"] is always present here.
+    One backward transcript read per card yields all four facts. Only
+    called for claude-bearing entries (assemble_sessions filters the
+    rest), so entry["claude"] is always present here.
     """
     cap = config.get("last_prompt_display_cap")
     model_tail_lines = config.get("model_tail_lines")
@@ -403,7 +404,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     scan = store.scan()
     payload = status.assemble_sessions(
-        scan.entries, boot, probe, tail_facts=_tail_facts_extractor(config)
+        scan.entries,
+        boot,
+        probe,
+        tail_facts=_tail_facts_extractor(config),
+        context_tight_fraction=config.get("context_tight_fraction"),
+        context_compact_fraction=config.get("context_compact_fraction"),
     )
     # Validate our own output before emitting it (the P7 validator doubles
     # as a debug guard — both surfaces validate their own output; the web
@@ -1224,7 +1230,14 @@ def _cmd_web(args: argparse.Namespace) -> int:
         if _guessed_upgradable(store, now):
             with mutation_lock(sd):
                 _verify_guessed_sids(store, now)
-        payload = status.assemble_sessions(store.scan().entries, boot, probe, tail_facts=extract)
+        payload = status.assemble_sessions(
+            store.scan().entries,
+            boot,
+            probe,
+            tail_facts=extract,
+            context_tight_fraction=config.get("context_tight_fraction"),
+            context_compact_fraction=config.get("context_compact_fraction"),
+        )
         contracts.validate_sessions_payload(payload)
         return payload
 

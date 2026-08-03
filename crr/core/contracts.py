@@ -21,7 +21,8 @@ from typing import Any, Iterable, Mapping
 # --------------------------------------------------------------------------
 
 JOURNAL_SCHEMA_VERSION = 1
-SESSIONS_CONTRACT_VERSION = 3  # v3 adds the per-session nullable tmux_session field
+# v4 adds `last_active` (T-A — true recency) + `context_pressure` (F2 — compaction badge)
+SESSIONS_CONTRACT_VERSION = 4
 DIAGNOSTICS_CONTRACT_VERSION = 3  # v3 adds `params` — the generating caps/lookback/timeout
 ARCHIVE_CONTRACT_VERSION = 1
 
@@ -33,6 +34,7 @@ HOSTS = ("tab", "tmux", "ssh")
 SHELLS = ("zsh", "bash", "fish")
 SID_SOURCES = ("injected", "guessed", "verified")
 STATES = ("live", "ghost", "crashed")
+CONTEXT_PRESSURE_LEVELS = ("ok", "tight", "will-compact")
 
 # --------------------------------------------------------------------------
 # Canonical key lists.
@@ -67,6 +69,8 @@ SESSION_CARD_KEYS = (
     "duplicate_group",
     "tmux_session",
     "updated",
+    "last_active",
+    "context_pressure",
 )
 SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
 
@@ -223,6 +227,10 @@ def validate_session_card(card: Any) -> None:
         _require_type(card["duplicate_group"], str, "session 'duplicate_group'")
     if card["tmux_session"] is not None:
         _require_type(card["tmux_session"], str, "session 'tmux_session'")
+    # last_active (T-A): a possibly-empty ISO timestamp string — "" is an
+    # honest "no timestamped turn seen yet", not a missing value.
+    _require_type(card["last_active"], str, "session 'last_active'")
+    _require_enum(card["context_pressure"], CONTEXT_PRESSURE_LEVELS, "session 'context_pressure'")
 
 
 def validate_sessions_payload(payload: Any) -> None:

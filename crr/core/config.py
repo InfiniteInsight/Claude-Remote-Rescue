@@ -25,7 +25,9 @@ from typing import Any, Mapping
 # behavior can detect the shift.
 # v2: dropped watcher_backoff_count / watcher_cooldown_seconds / reopen_grace_seconds
 # (no crr mechanism consumes them; see DESIGN)
-CONFIG_DEFAULTS_VERSION = 2
+# v3: added context_tight_fraction / context_compact_fraction (Slice A, F2 —
+# compaction badge thresholds; see crr.core.context_pressure)
+CONFIG_DEFAULTS_VERSION = 3
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -71,6 +73,12 @@ DEFAULTS: dict[str, Any] = {
     # — so the model search stops here rather than reading a model-less
     # transcript in full on every poll. See transcript_source.read_tail_facts.
     "model_tail_lines": 200,
+    # context-pressure badge (Slice A, F2; audit P5): fraction of a model's
+    # (prior, unverified for most models) context window at which a session
+    # is "tight" vs. expected to compact on revive. See
+    # crr.core.context_pressure.pressure.
+    "context_tight_fraction": 0.7,
+    "context_compact_fraction": 1.0,
 }
 
 

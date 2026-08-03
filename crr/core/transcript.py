@@ -107,15 +107,25 @@ def last_prompt(records: Iterable[Mapping[str, Any]], *, cap: int) -> str:
     return ""
 
 
-def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, str]:
-    """Most recent real prompt + model across ``records`` in one pass.
+def extract_timestamp(record: Mapping[str, Any]) -> str | None:
+    """Return the ISO ``timestamp`` of ``record``, or None if it has none."""
+    if not isinstance(record, Mapping):
+        return None
+    ts = record.get("timestamp")
+    return ts if isinstance(ts, str) and ts else None
 
-    The two facts both live near the tail, so a single reverse walk fills
-    both and stops as soon as they are found (the adapter mirrors this to
-    turn what would be two backward file reads into one). Each field is an
+
+def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, str]:
+    """Most recent real prompt + model + activity timestamp, in one pass.
+
+    The three facts all live near the tail, so a single reverse walk fills
+    them and stops as soon as they are found (the adapter mirrors this to
+    turn what would be several backward file reads into one). ``last_active``
+    is the ISO ``timestamp`` of the newest record that carries one — not
+    necessarily the record that supplies the prompt/model. Each field is an
     honest ``""`` when absent — never fabricated.
     """
-    prompt = model = ""
+    prompt = model = last_active = ""
     for record in reversed(list(records)):
         if not prompt:
             found = extract_prompt(record)
@@ -125,6 +135,10 @@ def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, s
             found = extract_model(record)
             if found is not None:
                 model = found
-        if prompt and model:
+        if not last_active:
+            found = extract_timestamp(record)
+            if found is not None:
+                last_active = found
+        if prompt and model and last_active:
             break
-    return {"last_prompt": prompt, "model": model}
+    return {"last_prompt": prompt, "model": model, "last_active": last_active}

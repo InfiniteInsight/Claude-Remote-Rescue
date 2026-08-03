@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v3).
+"""Status assembler — journal entries -> /api/sessions payload (contract v4).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -11,10 +11,13 @@ journal the *same* ``session_id`` form a group. The refinement of
 down-weighting a ``guessed`` claim against an ``injected`` one is the
 dashboard's job — the raw provenance it needs is on each card.
 
-``last_prompt`` and ``model`` come from one injected ``tail_facts``
-extractor that reads both in a single backward pass over the transcript
-(both live near the tail). The default returns empty strings — an honest
-"not extracted", never a fabricated line or model.
+``last_prompt``, ``model``, ``last_active``, and ``transcript_bytes`` all
+come from one injected ``tail_facts`` extractor that reads them in a
+single backward pass over the transcript (all live near the tail). The
+default returns empty/zero values — an honest "not extracted", never a
+fabricated line, model, or timestamp. ``last_active`` and
+``transcript_bytes`` feed ``context_pressure`` (F2 — compaction badge),
+computed here via ``crr.core.context_pressure.pressure``.
 """
 
 from __future__ import annotations
@@ -24,11 +27,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from crr.core import contracts
 from crr.core.classifier import classify
+from crr.core.context_pressure import pressure as _pressure
 from crr.core.ports import BootIdentity, ProcessProbe
 
 
-def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, str]:
-    return {"last_prompt": "", "model": ""}
+def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
+    return {"last_prompt": "", "model": "", "last_active": "", "transcript_bytes": 0}
 
 
 class _MemoTtyProbe:
@@ -58,13 +62,21 @@ def assemble_sessions(
     boot_identity: BootIdentity,
     process_probe: ProcessProbe,
     *,
-    tail_facts: Callable[[Mapping[str, Any]], dict[str, str]] = _empty_facts,
+    tail_facts: Callable[[Mapping[str, Any]], dict[str, Any]] = _empty_facts,
+    context_tight_fraction: float = 0.7,
+    context_compact_fraction: float = 1.0,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
     Entries with ``claude is None`` are registered shells that have no
     claude session yet — live shells, but nothing to rescue — so they are
     not emitted as cards.
+
+    ``context_tight_fraction``/``context_compact_fraction`` are the
+    fractions of a model's context window (F2 — compaction badge) at which
+    a card's pressure moves from "ok" to "tight" to "will-compact"; the
+    caller (cli) reads these from config so this stays pure core with no
+    config import (audit: core never imports adapters/cli).
     """
     sessions = [e for e in entries if e.get("claude") is not None]
     sid_counts = Counter(e["claude"]["session_id"] for e in sessions)
@@ -93,6 +105,13 @@ def assemble_sessions(
                 "duplicate_group": sid if sid_counts[sid] > 1 else None,
                 "tmux_session": entry["tmux_session"],
                 "updated": entry["updated"],
+                "last_active": facts["last_active"],
+                "context_pressure": _pressure(
+                    facts["transcript_bytes"],
+                    facts["model"],
+                    tight=context_tight_fraction,
+                    compact=context_compact_fraction,
+                ),
             }
         )
 

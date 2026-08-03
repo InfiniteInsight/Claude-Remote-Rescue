@@ -30,7 +30,7 @@ from crr.core import config as cfg
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 14  # v14: page timing/caps injected from config; diagnostics provenance shown
+PAGE_VERSION = 15  # v15: T-A recency sort/relative-time, F2 compaction badge, T-B latest-per-cwd marker
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

@@ -26,6 +26,9 @@
   .k-live::before { background: #46c26a; }
   .k-ghost::before { background: #e0a53b; }
   .k-crashed::before { background: #e05252; }
+  .k-tight::before { background: #e0a53b; }
+  .k-will-compact::before { background: #e05252; }
+  #key .k-note::before { content: none; margin-right: 0; }
   #controls { display: flex; gap: 16px; padding: 0 16px 8px; font-size: 12px; color: #8a93a2; align-items: center; }
   #controls select {
     font: inherit; font-size: 12px; margin-left: 4px; padding: 3px 6px; border-radius: 6px;
@@ -44,7 +47,7 @@
   }
   .card.dup { border-left: 3px solid #6f7cf5; }
   .card.dup-uncertain { border-left-color: #e0a53b; }
-  .card .top { display: flex; align-items: center; gap: 10px; }
+  .card .top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .id { font-family: ui-monospace, monospace; font-size: 13px; color: #b9c1cf; }
   .badge {
     margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
@@ -55,7 +58,12 @@
   .badge.crashed { background: #3a1616; color: #e05252; }
   .badge.dup-badge { margin-left: 8px; background: #1e2740; color: #9fb0f5; text-transform: none; letter-spacing: 0; }
   .badge.dup-badge.uncertain { background: #3a2f12; color: #e0a53b; }
+  .badge.pressure-tight { margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none; letter-spacing: 0; }
+  .badge.pressure-will-compact { margin-left: 8px; background: #3a1616; color: #e05252; text-transform: none; letter-spacing: 0; }
+  .badge.latest-badge { margin-left: 8px; background: #123a3a; color: #46c2b0; text-transform: none; letter-spacing: 0; }
   .cwd { color: #8a93a2; font-size: 12px; margin-top: 6px; font-family: ui-monospace, monospace; word-break: break-all; }
+  .time { color: #8a93a2; font-size: 12px; margin-top: 4px; }
+  .time:empty { display: none; }
   .model {
     display: inline-block; margin-top: 6px; font-family: ui-monospace, monospace; font-size: 11px;
     color: #9fb0f5; background: #1a2030; padding: 1px 8px; border-radius: 999px;
@@ -100,6 +108,9 @@
   <span class="k-live">live</span>
   <span class="k-ghost">ghost</span>
   <span class="k-crashed">crashed</span>
+  <span class="k-tight">context tight</span>
+  <span class="k-will-compact">will compact on revive</span>
+  <span class="k-note">context badges are an estimate (byte-size / model-window heuristic, not exact)</span>
 </div>
 <div id="controls">
   <label>Show
@@ -172,13 +183,67 @@ function colorFor(key) {
   return "hsl(" + (h % 360) + ", 55%, 62%)";
 }
 
+// T-A: true recency. `last_active` (conversation activity, from the newest
+// transcript turn) is the honest signal; `updated` (shell-prompt activity,
+// written by the shim on register/last-cmd) is only a fallback for sessions
+// where the transcript tail hasn't been read yet (last_active === "").
+function recencyKey(s) {
+  return s.last_active || s.updated;
+}
+
+// Numeric epoch-ms form of recencyKey, for ordering/comparison. `last_active`
+// and `updated` come from two independent producers (transcript "timestamp"
+// field vs. the shim's datetime.now(...).isoformat()) that emit different-
+// but-both-valid ISO serializations (e.g. "...Z" vs "...+00:00", with or
+// without a fractional-second component) — raw string comparison across
+// those formats is not reliably order-preserving, so parse to a number
+// before comparing. Unknown/unparseable timestamps sort oldest (never win
+// a "latest" tie or float to the top of "Recent").
+function recencyMs(s) {
+  var t = Date.parse(recencyKey(s));
+  return isNaN(t) ? -Infinity : t;
+}
+
+// Relative-time display for a card's last activity. Returns "" (renders as
+// nothing, see .time:empty) when there is no timestamp to work with at all.
+function relTime(iso) {
+  if (!iso) return "";
+  var t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  var diffSec = Math.floor((Date.now() - t) / 1000);
+  if (diffSec < 60) return "just now";
+  var diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return diffMin + "m ago";
+  var diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return diffHr + "h ago";
+  var diffDay = Math.floor(diffHr / 24);
+  return diffDay + "d ago";
+}
+
 function sortSessions(arr) {
   return arr.slice().sort(function (x, y) {
     if (sortKey === "state") return (STATE_ORDER[x.state] - STATE_ORDER[y.state]) || (x.pid - y.pid);
     if (sortKey === "cwd") return x.cwd < y.cwd ? -1 : x.cwd > y.cwd ? 1 : (x.pid - y.pid);
     if (sortKey === "pid") return x.pid - y.pid;
-    return x.updated < y.updated ? 1 : x.updated > y.updated ? -1 : 0;  // "updated" desc
+    return recencyMs(y) - recencyMs(x);  // "Recent" desc, by true recency (T-A)
   });
+}
+
+// T-B: per-cwd "latest" marker. Only meaningful when a cwd has more than one
+// session (otherwise every card would trivially be "latest"); flags the
+// max-recencyMs card(s) in each cwd so a stale duplicate is obvious.
+// Computed over ALL sessions (not just the visible/filtered set), same
+// rationale as uncertainGroups: a filtered view shouldn't change the truth.
+function latestPerCwd(sessions) {
+  var byCwd = {};
+  sessions.forEach(function (s) {
+    var rk = recencyMs(s);
+    var entry = byCwd[s.cwd];
+    if (!entry) { entry = byCwd[s.cwd] = { max: rk, count: 0 }; }
+    entry.count++;
+    if (rk > entry.max) entry.max = rk;
+  });
+  return byCwd;
 }
 
 function groupValue(s) {
@@ -206,7 +271,7 @@ function uncertainGroups(sessions) {
 }
 
 // Untrusted fields (cwd, last_prompt, ids) reach the DOM via textContent ONLY.
-function renderCard(s, uncertain, groupColor) {
+function renderCard(s, uncertain, groupColor, latest) {
   var isDup = !!s.duplicate_group;
   var isUncertain = isDup && uncertain[s.duplicate_group];
   var card = el("div", "card" + (isDup ? (isUncertain ? " dup dup-uncertain" : " dup") : ""));
@@ -230,10 +295,33 @@ function renderCard(s, uncertain, groupColor) {
     dup.textContent = isUncertain ? "possible duplicate · guessed sid" : "duplicate";
     top.appendChild(dup);
   }
+  // F2: compaction badge from context_pressure. "ok" renders nothing (no
+  // clutter on the common case); tight/will-compact get a chip. Estimate —
+  // see the #key legend note.
+  if (s.context_pressure === "tight") {
+    var pb = el("span", "badge pressure-tight");
+    pb.textContent = "context tight";
+    top.appendChild(pb);
+  } else if (s.context_pressure === "will-compact") {
+    var pb2 = el("span", "badge pressure-will-compact");
+    pb2.textContent = "will compact on revive";
+    top.appendChild(pb2);
+  }
+  // T-B: latest-per-cwd marker.
+  var cwdInfo = latest && latest[s.cwd];
+  if (cwdInfo && cwdInfo.count > 1 && recencyMs(s) === cwdInfo.max) {
+    var lb = el("span", "badge latest-badge");
+    lb.textContent = "latest";
+    top.appendChild(lb);
+  }
   card.appendChild(top);
   var cwd = el("div", "cwd");
   cwd.textContent = s.cwd;
   card.appendChild(cwd);
+  // T-A: relative-time display of true recency (last_active, fallback updated).
+  var time = el("div", "time");
+  time.textContent = relTime(recencyKey(s));
+  card.appendChild(time);
   if (s.model) {  // model id from the transcript — untrusted -> textContent
     var model = el("div", "model");
     model.textContent = s.model;
@@ -336,11 +424,13 @@ function render(payload) {
   }
 
   // Weighting is computed over ALL sessions (not just visible) so a filtered
-  // view still shows a duplicate's true certain/uncertain status.
+  // view still shows a duplicate's true certain/uncertain status. Same
+  // rationale for the per-cwd "latest" marker (T-B).
   var uncertain = uncertainGroups(total);
+  var latest = latestPerCwd(total);
   var sorted = sortSessions(visible);
   if (groupKey === "none") {
-    sorted.forEach(function (s) { list.appendChild(renderCard(s, uncertain, null)); });
+    sorted.forEach(function (s) { list.appendChild(renderCard(s, uncertain, null, latest)); });
     return;
   }
   // Group, preserving group order by first appearance in the sorted list.
@@ -358,7 +448,7 @@ function render(payload) {
     var lbl = el("span"); lbl.textContent = k; head.appendChild(lbl);  // cwd/host -> textContent
     var cnt = el("span", "gcount"); cnt.textContent = "(" + groups[k].length + ")"; head.appendChild(cnt);
     list.appendChild(head);
-    groups[k].forEach(function (s) { list.appendChild(renderCard(s, uncertain, color)); });
+    groups[k].forEach(function (s) { list.appendChild(renderCard(s, uncertain, color, latest)); });
   });
 }
 
