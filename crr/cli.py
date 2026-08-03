@@ -982,9 +982,14 @@ def _recent_untracked_records(records: list[dict], n: int) -> list[dict]:
 def _untracked_view(record: dict) -> dict:
     """The /api/untracked (and dashboard) shape for one archive record.
 
-    Cheap fields only, no transcript read: last_prompt comes from the
-    archived entry if it carries one, else "" — an honest "unknown", not a
-    fabricated read.
+    Cheap fields only, no transcript read. Deliberately carries no
+    ``last_prompt``: that's only ever a status-CARD field (contracts.py),
+    never present on a journal entry (what an archive record wraps), so
+    reading it off ``entry`` would be structurally always "" — a fake
+    "unknown" dressed up as a real field, not an honest one. Backing it
+    with a transcript read instead is also out of scope here (that's what
+    ``_discoverable_rows`` does for the adopt/discover path, at the cost
+    of a real read per row).
     """
     entry = record["entry"]
     sid = entry["claude"]["session_id"]
@@ -993,7 +998,6 @@ def _untracked_view(record: dict) -> dict:
         "sid8": sid[:8],
         "cwd": entry["cwd"],
         "archived_at": record["archived_at"],
-        "last_prompt": entry.get("last_prompt", ""),
     }
 
 
@@ -1152,7 +1156,9 @@ def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
         store.write(entry)
     return True, (
         f"adopted {sid[:8]} — now tracked as recoverable (revive via `crr reopen`); "
-        "NOTE: this does NOT attach to a live process."
+        "NOTE: this does NOT attach to a running process — and if the session is "
+        "still alive elsewhere, the watchdog will start a second `claude --resume` "
+        "on the same conversation."
     )
 
 

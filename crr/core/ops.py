@@ -440,6 +440,24 @@ def retrack(store: JournalStore, archive: ArchiveStore, sid: str, now: str) -> O
     resurrecting it under the wrong pretext would misrepresent why it's
     back. On success the preserved entry is re-journaled verbatim and the
     archive record removed — the mirror image of what untrack/detmux did.
+
+    Recycled-pid guard (mirrors ``_adopt``'s and ``_cmd_register``'s
+    collision checks in ``crr.cli``): the archived entry's pid slot may no
+    longer be free by the time retrack runs — the OS can recycle a pid to
+    an unrelated, currently-tracked session in the time between untrack and
+    retrack. Blindly writing there would clobber that live entry, and then
+    ``archive.remove`` would destroy the only remaining record of the
+    conversation being retracked — a double loss. So the pid slot is
+    checked BEFORE either destructive step:
+    - empty (``store.read`` raises ``KeyError``) -> proceed.
+    - occupied by an entry whose claude session_id is this same sid ->
+      already tracked -> refuse (the archive record is left intact; this
+      is not the "restore" it looks like, so there's nothing to preserve).
+    - occupied by a different session -> refuse; that entry is a bystander
+      and must not be overwritten, and the archive record must survive so
+      the conversation isn't lost.
+    - unreadable (``ContractError``/``OSError``) -> refuse rather than
+      guess whose slot it is.
     """
     try:
         record = archive.read(sid)
@@ -452,6 +470,22 @@ def retrack(store: JournalStore, archive: ArchiveStore, sid: str, now: str) -> O
         )
     entry = dict(record["entry"])
     entry["updated"] = now  # re-journaling is itself a change; a stale timestamp would lie
+    pid = entry["pid"]
+    try:
+        existing = store.read(pid)
+    except KeyError:
+        existing = None  # slot is genuinely empty — safe to write
+    except (contracts.ContractError, OSError):
+        return OpResult(
+            False, f"cannot retrack {sid[:8]}: pid slot {pid} is unreadable, refusing to guess"
+        )
+    if existing is not None:
+        if (existing.get("claude") or {}).get("session_id") == sid:
+            return OpResult(False, f"session {sid[:8]} is already tracked")
+        return OpResult(
+            False,
+            f"cannot retrack {sid[:8]}: pid slot {pid} now belongs to a different session",
+        )
     store.write(entry)
     archive.remove(sid)
     return OpResult(True, f"retracked {sid[:8]}")

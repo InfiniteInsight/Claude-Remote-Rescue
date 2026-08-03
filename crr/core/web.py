@@ -31,7 +31,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 17  # v17: lazy "Recently untracked" (retrack) + "Discoverable" (adopt) dashboard sections (C4)
+PAGE_VERSION = 18  # v18: disclose the adopt competing-resume hazard; drop the always-empty last_prompt div for untracked rows
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

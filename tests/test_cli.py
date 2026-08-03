@@ -1688,6 +1688,23 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
     assert "crr no longer manages it" in out
 
 
+def test_untracked_view_omits_last_prompt():
+    # last_prompt is a status-CARD field (contracts.py); a journal entry
+    # (what archive records wrap) never carries one, so reading
+    # entry.get("last_prompt", "") off it is structurally always "" — not
+    # a real value. The dashboard/API shape must not advertise a field
+    # that can never be anything but an empty string.
+    entry = new_entry(
+        pid=42, cwd="/p42", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z",
+        claude=_claude_field("eeeeeeee-5555-4555-8555-555555555555"),
+    )
+    record = {"entry": entry, "reason": "untracked", "archived_at": "2026-08-01T00:00:00+00:00"}
+    view = cli._untracked_view(record)
+    assert "last_prompt" not in view
+    assert set(view) == {"session_id", "sid8", "cwd", "archived_at"}
+
+
 # --- retrack (C2) — undo untrack/detmux, no platform gating needed --------
 
 def _archived_untracked(archive, pid, sid, reason="untracked", archived_at="2026-08-01T00:00:00+00:00"):
@@ -1887,7 +1904,12 @@ def test_discover_adopt_writes_a_valid_journal_entry(tmp_path, monkeypatch, caps
     assert rc == 0
     assert "adopted" in out
     assert _DISCOVER_SID[:8] in out
-    assert "does NOT attach to a live process" in out
+    # Discloses the competing-resume hazard, not just "no attach": an
+    # adopted entry is always a revive candidate, so if the real session
+    # is still running elsewhere the watchdog will start a second
+    # `claude --resume` on it.
+    assert "does NOT attach to a running process" in out
+    assert "second" in out and "claude --resume" in out
 
     store = JournalStore(tmp_path / "state")
     scan = store.scan()

@@ -165,7 +165,7 @@
 <div id="discoverable">
   <button id="discoverable-btn" type="button">Discoverable (untracked)</button>
   <div id="discoverable-panel" hidden>
-    <div class="note">Adopting tracks a session as recoverable — it does not attach to a live process.</div>
+    <div class="note">Adopting tracks this conversation as recoverable (revive via `crr reopen`). It does NOT attach to a running process — and if the session is still alive elsewhere, the watchdog will start a second `claude --resume` on the same conversation.</div>
     <div id="discoverable-list"></div>
   </div>
 </div>
@@ -587,8 +587,12 @@ function sidAction(op, sid, btn, onDone) {
 }
 
 // Shared row for both lazy sid-keyed lists: sid8 + cwd + relative age +
-// last_prompt, plus one trailing action button. Untrusted fields (cwd,
-// last_prompt, sid8) -> textContent only, exactly like renderCard.
+// (discoverable rows only) last_prompt, plus one trailing action button.
+// Untrusted fields (cwd, last_prompt, sid8) -> textContent only, exactly
+// like renderCard. Untracked ("retrack") rows never carry a last_prompt —
+// it's structurally always "" for them (see cli._untracked_view) — so no
+// prompt div is rendered at all for op === "retrack", rather than showing
+// an always-empty one.
 function renderSidRow(r, ageIso, btnLabel, op, onDone) {
   var row = el("div", "u-row");
   var id = el("div", "id");
@@ -600,9 +604,11 @@ function renderSidRow(r, ageIso, btnLabel, op, onDone) {
   var time = el("div", "time");
   time.textContent = relTime(ageIso);
   row.appendChild(time);
-  var prompt = el("div", "prompt");
-  prompt.textContent = r.last_prompt || "";
-  row.appendChild(prompt);
+  if (op !== "retrack") {
+    var prompt = el("div", "prompt");
+    prompt.textContent = r.last_prompt || "";
+    row.appendChild(prompt);
+  }
   var actions = el("div", "actions");
   var btn = el("button");
   btn.textContent = btnLabel;
