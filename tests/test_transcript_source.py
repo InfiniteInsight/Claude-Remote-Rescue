@@ -32,6 +32,28 @@ def _assistant(text, model=None):
     return {"type": "assistant", "message": msg}
 
 
+def _assistant_end(text, model="claude-opus-4-8"):
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": text, "model": model, "stop_reason": "end_turn"},
+    }
+
+
+def _assistant_synthetic():
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": "interrupted", "model": "<synthetic>"},
+    }
+
+
+def _tool_result_turn():
+    return {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]},
+        "toolUseResult": {"stdout": "x"},
+    }
+
+
 def test_find_transcript_globs_any_project_dir(tmp_path):
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     _write_transcript(tmp_path, sid, [_user("hi")])
@@ -317,6 +339,52 @@ def test_search_cwd_tags_matches_with_their_session_id(tmp_path):
 
 def test_search_cwd_no_transcripts_is_empty_list(tmp_path):
     assert transcript_source.search_cwd("/no/such/cwd", "fox", cap=100, home=tmp_path) == []
+
+
+# --- read_takeover_signal (`crr adopt --takeover` safety signal) ----------
+
+
+def test_read_takeover_signal_assistant_end_tail(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    path = _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant_end("the final answer"),
+    ])
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == "assistant-end"
+    assert sig["mtime"] == path.stat().st_mtime
+    assert sig["mtime"] > 0
+
+
+def test_read_takeover_signal_skips_a_trailing_synthetic_record(tmp_path):
+    # A <synthetic> assistant record (API error/interrupt) at the tail must
+    # be transparent — the scan should skip it and report the prior REAL
+    # assistant end_turn underneath it.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant_end("the real final answer"),
+        _assistant_synthetic(),
+    ])
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == "assistant-end"
+
+
+def test_read_takeover_signal_mid_turn_tail(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant_end("an answer"),
+        _tool_result_turn(),
+    ])
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == "mid-turn"
+
+
+def test_read_takeover_signal_absent_transcript_is_honest_empty(tmp_path):
+    assert transcript_source.read_takeover_signal("no-such-sid", home=tmp_path) == {
+        "mtime": 0.0, "tail_kind": "",
+    }
 
 
 def test_search_transcript_survives_invalid_utf8_bytes(tmp_path):

@@ -293,6 +293,82 @@ def test_child_groups_selects_only_claude_children():
     assert pp._child_groups(rows, 100) == [200, 400, 500]
 
 
+# --- find_resume_process (`crr adopt --takeover` live-process resolver) ---
+#
+# A shim/watchdog-launched claude carries `claude --resume <sid>` on argv
+# (empirically verified via `ps`, see the adopt-takeover spec). This is a
+# DIFFERENT specificity class from `_child_groups`'s ancestry+argv0-prefix
+# selector (the kill-by-ancestry lesson) — one UUID matches one conversation,
+# not "any process that looks like claude".
+
+_SID = "93122659-c38d-4e24-a872-5521023a8cec"
+_OTHER_SID = "aaaaaaaa-1111-4111-8111-111111111111"
+
+
+def test_find_resume_process_matches_the_resume_sid(monkeypatch):
+    stdout = f"796194    916 796194 claude --resume {_SID}\n"
+    monkeypatch.setattr(
+        pp.subprocess, "run",
+        lambda *a, **k: _Result(0, stdout=stdout),
+    )
+    got = pp.PsProcessController(2.0).find_resume_process(_SID)
+    assert got == pp.ResumeProcess(pid=796194, ppid=916, pgid=796194)
+
+
+def test_find_resume_process_ignores_a_different_sid(monkeypatch):
+    stdout = f"796194    916 796194 claude --resume {_OTHER_SID}\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).find_resume_process(_SID) is None
+
+
+def test_find_resume_process_ignores_claude_without_resume(monkeypatch):
+    stdout = "796194    916 796194 claude\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).find_resume_process(_SID) is None
+
+
+def test_find_resume_process_empty_stdout_is_none(monkeypatch):
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=""))
+    assert pp.PsProcessController(2.0).find_resume_process(_SID) is None
+
+
+def test_find_resume_process_nonzero_returncode_is_none(monkeypatch):
+    stdout = f"796194    916 796194 claude --resume {_SID}\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(1, stdout=stdout))
+    assert pp.PsProcessController(2.0).find_resume_process(_SID) is None
+
+
+def test_find_resume_process_oserror_is_none(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("ps vanished")
+    monkeypatch.setattr(pp.subprocess, "run", boom)
+    assert pp.PsProcessController(2.0).find_resume_process(_SID) is None
+
+
+def test_find_resume_process_whole_token_guard_no_prefix_false_hit(monkeypatch):
+    # A row whose sid is a PREFIX of the queried sid (or vice-versa) must NOT
+    # match — the check is a whole-argv-token match, not a loose substring.
+    prefix_sid = _SID.split("-")[0]  # "93122659"
+    stdout = f"796194    916 796194 claude --resume {prefix_sid}\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).find_resume_process(_SID) is None
+    # And the reverse: queried sid is the shorter prefix, row carries the full uuid.
+    stdout2 = f"796194    916 796194 claude --resume {_SID}\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout2))
+    assert pp.PsProcessController(2.0).find_resume_process(prefix_sid) is None
+
+
+def test_find_resume_process_returns_first_match_pid_ppid_pgid(monkeypatch):
+    # Numbers must round-trip exactly, not just truthiness.
+    stdout = (
+        "100 1 100 -fish\n"
+        f"500 100 500 claude --resume {_SID}\n"
+    )
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    got = pp.PsProcessController(2.0).find_resume_process(_SID)
+    assert (got.pid, got.ppid, got.pgid) == (500, 100, 500)
+
+
 # --- DiagnosticsSource port conformance -----------------------------------
 
 def test_all_diagnostics_sources_satisfy_the_port():
