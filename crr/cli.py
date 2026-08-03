@@ -1125,11 +1125,15 @@ def _discoverable_rows(
     return discovery.untracked(journaled, enriched), scan.problems
 
 
-def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
+def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = True) -> tuple[bool, str]:
     """Adopt one discoverable (untracked) transcript into the journal.
 
     Shared by ``crr discover --adopt`` and the web ``/api/sid-action
-    {op:"adopt"}`` provider. The cwd resolution (``_discoverable_rows``)
+    {op:"adopt"}`` provider (which leave ``competing_note`` on — they have
+    NOT stopped any live process, so the "a second ``claude --resume`` may
+    start" hazard is real and must be disclosed) and by ``_takeover`` (which
+    passes ``competing_note=False`` — it just stopped the live process, so
+    that warning would be false there). The cwd resolution (``_discoverable_rows``)
     reads transcript content and runs OUTSIDE any lock; only the final
     re-check + write happens under ``mutation_lock`` — holding the lock
     across N transcript reads would stall every other op (the revive timer
@@ -1173,12 +1177,14 @@ def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
             # archive/journal discipline forbids elsewhere).
             return False, f"cannot adopt {sid[:8]}: synthetic pid slot collision, refusing to overwrite"
         store.write(entry)
-    return True, (
-        f"adopted {sid[:8]} — now tracked as recoverable (revive via `crr reopen`); "
-        "NOTE: this does NOT attach to a running process — and if the session is "
-        "still alive elsewhere, the watchdog will start a second `claude --resume` "
-        "on the same conversation."
-    )
+    msg = f"adopted {sid[:8]} — now tracked as recoverable (revive via `crr reopen`)"
+    if competing_note:
+        msg += (
+            "; NOTE: this does NOT attach to a running process — and if the session is "
+            "still alive elsewhere, the watchdog will start a second `claude --resume` "
+            "on the same conversation."
+        )
+    return True, msg
 
 
 def _takeover(
@@ -1283,7 +1289,7 @@ def _takeover(
             flags.clear(proc.ppid)  # no kill landed -> the flag must not linger
             return False, f"takeover: failed to stop live pid {proc.pid}: {exc}"
 
-    ok, msg = _adopt(store, sd, sid)
+    ok, msg = _adopt(store, sd, sid, competing_note=False)
     sid8 = sid[:8]
     prefix = f"took over {sid8} (stopped live pid {proc.pid})"
     if ok:

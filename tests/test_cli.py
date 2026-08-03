@@ -2877,6 +2877,45 @@ def test_takeover_happy_path_orders_arm_before_kill_before_adopt(tmp_path, monke
     assert len(matches) == 1
 
 
+def test_takeover_success_message_omits_the_competing_session_warning(tmp_path, monkeypatch):
+    # Plain adopt warns "if the session is still alive elsewhere, the watchdog
+    # will start a SECOND claude --resume" — takeover just STOPPED the live
+    # process, so that warning is false here and must be dropped.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    calls: list = []
+    store = _RecordingStore(tmp_path / "state", calls)
+    proc = ResumeProcess(pid=101, ppid=51, pgid=777)
+    controller = _FakeResumeController([proc, proc], calls)
+    flags = _FakeTakeoverFlags(calls)
+    ok, msg = cli._takeover(
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        max_wait=180.0,
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+    assert ok
+    assert "still alive elsewhere" not in msg
+    assert "second `claude --resume`" not in msg
+    # still an honest adoption message
+    assert "adopted" in msg and "recoverable" in msg
+
+
+def test_plain_adopt_keeps_the_competing_session_warning(tmp_path, monkeypatch):
+    # The default path (crr discover --adopt / crr adopt, no takeover) has NOT
+    # stopped any live process, so it must keep disclosing the hazard.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    store = JournalStore(tmp_path / "state")
+    ok, msg = cli._adopt(store, tmp_path / "state", _TAKEOVER_SID)
+    assert ok
+    assert "still alive elsewhere" in msg
+
+
 def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypatch):
     # find_resume_process returns a valid process on the FIRST call
     # (top-of-function resolve) but None on the SECOND call — the
