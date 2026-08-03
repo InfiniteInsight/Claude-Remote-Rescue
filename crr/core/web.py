@@ -31,7 +31,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 20  # v20: color-coded animated status toast; card actions now report success too
+PAGE_VERSION = 21  # v21: "Take over" button on discoverable rows (adopt --takeover parity), confirm-gated
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -153,8 +153,10 @@ ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", 
 
 # Sid-keyed actions — a SEPARATE namespace/endpoint from the pid-keyed
 # ACTIONS above (see POST /api/sid-action). "retrack" is C2; "adopt" (C3)
-# journals a transcript crr never tracked (T-C discovery).
-SID_ACTIONS = ("retrack", "adopt")
+# journals a transcript crr never tracked (T-C discovery); "takeover" stops
+# a still-live claude for that sid, then adopts (non-blocking on the web —
+# see cli._web_takeover), giving `crr adopt --takeover` a dashboard button.
+SID_ACTIONS = ("retrack", "adopt", "takeover")
 
 
 def _plain(status: int, text: str) -> Response:

@@ -179,7 +179,7 @@
 <div id="discoverable">
   <button id="discoverable-btn" type="button">Discoverable (untracked)</button>
   <div id="discoverable-panel" hidden>
-    <div class="note">Adopting tracks this conversation as recoverable (revive via `crr reopen`). It does NOT attach to a running process — and if the session is still alive elsewhere, the watchdog will start a second `claude --resume` on the same conversation.</div>
+    <div class="note">Adopting tracks this conversation as recoverable (revive via `crr reopen`). It does NOT attach to a running process — and if the session is still alive elsewhere, the watchdog will start a second `claude --resume` on the same conversation. <strong>Take over</strong> instead stops the live process first (only at a safe turn boundary; if it's mid-turn it refuses — try again in a moment), then adopts, so no second copy runs.</div>
     <div id="discoverable-list"></div>
   </div>
 </div>
@@ -613,7 +613,16 @@ function sidAction(op, sid, btn, onDone) {
 // cli._untracked_view) — so the user can tell candidates apart. Untrusted
 // fields (cwd, last_prompt, sid8) -> textContent only, exactly like
 // renderCard.
-function renderSidRow(r, ageIso, btnLabel, op, onDone) {
+// Two-tap confirm state for destructive SID-row actions (Take over), keyed
+// by { sid, op } — the sid-row analogue of confirmArmed for card buttons, so
+// arming one row never arms another.
+var sidConfirmArmed = null;
+
+// Shared row for both lazy sid-keyed lists. `actions` is a list of
+// { label, op, danger?, confirm? }: a discoverable row carries a safe Adopt
+// AND a destructive, confirm-gated Take over (which SIGKILLs the live
+// process first). Untrusted fields (cwd, last_prompt, sid8) -> textContent.
+function renderSidRow(r, ageIso, actions, onDone) {
   var row = el("div", "u-row");
   var id = el("div", "id");
   id.textContent = r.sid8;
@@ -627,14 +636,31 @@ function renderSidRow(r, ageIso, btnLabel, op, onDone) {
   var prompt = el("div", "prompt");
   prompt.textContent = r.last_prompt || "";
   row.appendChild(prompt);
-  var actions = el("div", "actions");
-  var btn = el("button");
-  btn.textContent = btnLabel;
-  btn.addEventListener("click", function () {
-    sidAction(op, r.session_id, btn, onDone);
+  var actionsDiv = el("div", "actions");
+  actions.forEach(function (a) {
+    var btn = el("button", a.danger ? "danger" : "");
+    var isArmed = function () {
+      return !!sidConfirmArmed && sidConfirmArmed.sid === r.session_id && sidConfirmArmed.op === a.op;
+    };
+    btn.textContent = a.label;
+    btn.addEventListener("click", function () {
+      if (a.confirm && !isArmed()) {
+        sidConfirmArmed = { sid: r.session_id, op: a.op };
+        btn.textContent = "Confirm " + a.label + "?";
+        setTimeout(function () {
+          if (isArmed()) { sidConfirmArmed = null; }
+          btn.textContent = a.label;  // harmless if this button was since rebuilt
+        }, CONFIRM_ARM_MS);
+        return;
+      }
+      // Firing the confirmed tap: clear the arm FIRST so a failed op never
+      // leaves a stale armed button (same rule as addBtn).
+      if (a.confirm) { sidConfirmArmed = null; btn.textContent = a.label; }
+      sidAction(a.op, r.session_id, btn, onDone);
+    });
+    actionsDiv.appendChild(btn);
   });
-  actions.appendChild(btn);
-  row.appendChild(actions);
+  row.appendChild(actionsDiv);
   return row;
 }
 
@@ -657,7 +683,7 @@ function loadUntracked() {
         panel.appendChild(none);
       } else {
         rows.forEach(function (r) {
-          panel.appendChild(renderSidRow(r, r.archived_at, "Retrack", "retrack", loadUntracked));
+          panel.appendChild(renderSidRow(r, r.archived_at, [{ label: "Retrack", op: "retrack" }], loadUntracked));
         });
       }
     })
@@ -688,7 +714,10 @@ function loadDiscoverable() {
         list.appendChild(none);
       } else {
         rows.forEach(function (r) {
-          list.appendChild(renderSidRow(r, r.last_active, "Adopt", "adopt", loadDiscoverable));
+          list.appendChild(renderSidRow(r, r.last_active, [
+            { label: "Adopt", op: "adopt" },
+            { label: "Take over", op: "takeover", danger: true, confirm: true }
+          ], loadDiscoverable));
         });
       }
     })

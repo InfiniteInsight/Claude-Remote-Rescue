@@ -1300,6 +1300,25 @@ def _takeover(
     return False, f"{prefix} but adoption failed: {msg}"
 
 
+def _web_takeover(store, sd, config, controller, flags, sid, **kwargs) -> tuple[bool, str]:
+    """Dashboard takeover (the phone-reachable ``/api/sid-action {op:"takeover"}``).
+
+    ``max_wait=0.0`` so the request never blocks on the wait loop — the loop
+    makes exactly ONE decision and returns (idle+boundary -> take over;
+    parked/busy -> refuse), never sleeping. A mid-turn session therefore
+    refuses immediately with ``_takeover``'s internal "still actively writing
+    after 0s" wording, which reads like a bug on a phone; translate it to a
+    retry-friendly message. (The dashboard runs on ThreadingHTTPServer, so the
+    only real block is ``terminate_group``'s grace on a landed kill — the same
+    bound the Kick/Close buttons already accept.) ``**kwargs`` forwards the
+    injectable clock/sleep/read_signal seams for tests.
+    """
+    ok, msg = _takeover(store, sd, config, controller, flags, sid, max_wait=0.0, **kwargs)
+    if not ok and "actively writing" in msg:
+        return False, "session is mid-turn — try again in a moment"
+    return ok, msg
+
+
 def _cmd_adopt(args: argparse.Namespace) -> int:
     if not contracts.valid_session_id(args.sid):
         print(f"crr adopt: {args.sid!r} is not a valid session id", file=sys.stderr)
@@ -1849,6 +1868,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
             # that resolve the cwd must NOT hold the lock the pid-keyed
             # action_provider and the revive timer also contend for.
             return _adopt(store, sd, sid)
+        if op == "takeover":
+            # _web_takeover uses max_wait=0.0 (non-blocking) and manages its
+            # own mutation_lock for the kill, like _adopt — do NOT wrap it.
+            return _web_takeover(store, sd, config, controller, flags, sid)
         # Same mutation lock as action_provider — a sid-keyed op racing the
         # pid-keyed ops or the revive timer must not interleave.
         with mutation_lock(sd):

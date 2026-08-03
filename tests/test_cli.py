@@ -2933,6 +2933,44 @@ def test_plain_adopt_keeps_the_competing_session_warning(tmp_path, monkeypatch):
     assert "still alive elsewhere" in msg
 
 
+def test_web_takeover_refuses_when_no_live_process(tmp_path, monkeypatch):
+    # The dashboard takeover path (max_wait=0.0) still refuses honestly when
+    # nothing is running for the sid — no kill, no flag.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    calls: list = []
+    store = JournalStore(tmp_path / "state")
+    controller = _FakeResumeController([None], calls)
+    flags = _FakeTakeoverFlags(calls)
+    ok, msg = cli._web_takeover(
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""},
+        clock=_scripted([0.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert "no live" in msg
+    assert not any(c[0] == "terminate_group" for c in calls)
+
+
+def test_web_takeover_translates_the_mid_turn_refusal_for_the_phone(tmp_path, monkeypatch):
+    # max_wait=0.0 makes a busy session refuse with the internal "still
+    # actively writing after 0s" — a phone user must see something sane.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    calls: list = []
+    store = JournalStore(tmp_path / "state")
+    proc = ResumeProcess(pid=101, ppid=51, pgid=777)
+    controller = _FakeResumeController([proc, proc], calls)
+    flags = _FakeTakeoverFlags(calls)
+    ok, msg = cli._web_takeover(
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        read_signal=lambda sid: {"mtime": 1000.0, "tail_kind": "mid-turn"},
+        clock=_scripted([1000.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert "mid-turn" in msg
+    assert "0s" not in msg  # the raw "after 0s" wording is gone
+    assert not any(c[0] == "terminate_group" for c in calls)
+
+
 def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypatch):
     # find_resume_process returns a valid process on the FIRST call
     # (top-of-function resolve) but None on the SECOND call — the
