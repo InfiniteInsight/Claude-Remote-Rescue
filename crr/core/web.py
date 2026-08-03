@@ -31,7 +31,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 19  # v19: retrack panel now shows a real last_prompt (read from the untracked session's transcript), parity with discoverable
+PAGE_VERSION = 20  # v20: color-coded animated status toast; card actions now report success too
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

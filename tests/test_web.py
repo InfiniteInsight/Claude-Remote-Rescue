@@ -545,11 +545,28 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_19():
-    """Explicit version check: v19 renders a real last_prompt on the retrack
-    rows too (read from the untracked session's transcript), so renderSidRow
-    no longer skips the prompt div for op === "retrack"."""
-    assert web.PAGE_VERSION == 19
+def test_page_version_is_20():
+    """Explicit version check: v20 turns the notice into a color-coded,
+    animated status toast that reports BOTH success and failure for every
+    action button (card actions previously stayed silent on success)."""
+    assert web.PAGE_VERSION == 20
+
+
+def test_page_status_toast_is_color_coded_and_animated():
+    page = web.render_page()
+    # showNotice takes an outcome kind and drives color-coded classes.
+    assert "function showNotice(text, kind)" in page
+    assert "#notice.ok" in page
+    assert "#notice.error" in page
+    # a real entrance animation, not just display:block.
+    assert "@keyframes notice-in" in page
+
+
+def test_page_actions_report_both_success_and_failure():
+    page = web.render_page()
+    # Both the card (/api/action) and sid (/api/sid-action) handlers map the
+    # outcome to a toast kind — success is no longer silent.
+    assert page.count('j.ok ? "ok" : "error"') >= 2
 
 
 def test_page_retrack_rows_render_last_prompt():
