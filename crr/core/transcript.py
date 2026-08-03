@@ -115,6 +115,73 @@ def extract_timestamp(record: Mapping[str, Any]) -> str | None:
     return ts if isinstance(ts, str) and ts else None
 
 
+def _assistant_text(record: Mapping[str, Any]) -> str | None:
+    """The text of a real assistant turn, or None (tool-use/no-text/synthetic
+    turns). Mirrors ``extract_model``'s ``<synthetic>`` skip: the assistant
+    records Claude Code writes for API errors and interrupts are noise, not
+    real conversation — they must not surface in a recall search either."""
+    if not isinstance(record, Mapping) or record.get("type") != "assistant":
+        return None
+    message = record.get("message")
+    if not isinstance(message, Mapping) or message.get("role") != "assistant":
+        return None
+    if message.get("model") == "<synthetic>":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, Mapping) and b.get("type") == "text"
+        ]
+        # A list with no text blocks (tool_use only) is not a display turn.
+        return "\n".join(texts) if texts else None
+    return None
+
+
+def search(
+    records: Iterable[Mapping[str, Any]], query: str, *, cap: int,
+) -> list[dict[str, Any]]:
+    """Case-insensitive substring search over real prompt/assistant turns.
+
+    Pure and testable with synthetic records (F1 — ``crr recall``): reuses
+    ``extract_prompt``/``clean_display``/``extract_timestamp`` so the same
+    noise skip-list that keeps cards honest also keeps recall from surfacing
+    tool-result/meta garbage. Each match carries its chronological ``index``
+    (position in ``records``) so a caller can order results (e.g.
+    most-recent-first) without re-deriving recency from scratch.
+
+    Snippet context (N adjacent turns around a match) is deferred by
+    design — ``-C``/``context`` isn't wired in this slice, so the param was
+    dropped rather than kept as an accepted-but-no-op knob. Reintroduce it
+    when a caller actually implements the widening.
+    """
+    query_lower = query.lower()
+    matches: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        prompt = extract_prompt(record)
+        if prompt is not None:
+            if query_lower in prompt.lower():
+                matches.append({
+                    "role": "user",
+                    "text": clean_display(prompt, cap),
+                    "index": index,
+                    "timestamp": extract_timestamp(record) or "",
+                })
+            continue
+        text = _assistant_text(record)
+        if text is not None and query_lower in text.lower():
+            matches.append({
+                "role": "assistant",
+                "text": clean_display(text, cap),
+                "index": index,
+                "timestamp": extract_timestamp(record) or "",
+            })
+    return matches
+
+
 def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, str]:
     """Most recent real prompt + model + activity timestamp, in one pass.
 
