@@ -1198,8 +1198,13 @@ def _takeover(
     --takeover`). See docs/superpowers/specs/2026-08-03-adopt-takeover.md.
 
     Ordering, each step load-bearing:
-      1. Resolve the live process. None -> refuse (the fresh-session /
-         not-running home): no kill, no flag.
+      1. Resolve the live process ONCE, up front. None -> refuse (the
+         fresh-session / not-running home): no kill, no flag, no wait paid
+         for. This early resolve only confirms a target exists before the
+         wait loop — it is NOT the tuple that gets killed (see step 3):
+         the wait loop below can run up to ``max_wait`` seconds lock-free,
+         long enough for this process to exit and its pid/ppid/pgid to be
+         recycled by the OS.
       2. Wait loop, refuse-fast, LOCK-FREE (mirrors ``_adopt``'s lock-free
          read phase — the wait can run up to ``max_wait`` seconds; holding
          ``mutation_lock`` here would stall every other op, the revive
@@ -1209,13 +1214,21 @@ def _takeover(
          non-ready outcome here is a refusal, never a kill.
       3. Kill under ``mutation_lock`` (bounded by ``grace``): re-check the
          sid is still untracked (closes the resolve->kill race), then
-         ``arm_close(ppid)`` STRICTLY BEFORE ``terminate_group(pgid)`` — a
-         flag survives only when a kill actually lands (mirrors
-         ``_reopen_ghost``'s rollback rule); an undeliverable kill clears
-         the flag and fails with nothing else touched.
+         RE-RESOLVE the live process (``find_resume_process`` again) —
+         this is the tuple the kill actually uses, so it can never be the
+         stale one from step 1. None on re-resolve -> refuse honestly (the
+         process exited during the wait): no kill, no flag. Otherwise
+         ``arm_close(ppid)`` STRICTLY BEFORE ``terminate_group(pgid)`` on
+         the FRESH tuple — a flag survives only when a kill actually lands
+         (mirrors ``_reopen_ghost``'s rollback rule); an undeliverable kill
+         clears the flag and fails with nothing else touched.
       4. Adopt via ``_adopt`` (its own lock + re-check) AFTER the kill
          lock is released — the journal write only ever happens once a
-         kill has actually landed.
+         kill has actually landed. ``_adopt`` can still refuse past its own
+         journal re-check (row no longer discoverable, a synthetic-pid
+         slot collision, an unreadable slot) — a killed-but-not-adopted
+         state is reachable and reported honestly; the close flag armed in
+         step 3 still lets a later plain ``crr adopt`` recover it.
     """
     proc = controller.find_resume_process(sid)
     if proc is None:
@@ -1253,6 +1266,16 @@ def _takeover(
         }
         if sid in journaled:
             return False, f"{sid[:8]} is now tracked — not taking over"
+        # Re-resolve under the lock: the wait loop above ran lock-free for
+        # up to max_wait seconds, long enough for the step-1 process to
+        # exit and its pid/ppid/pgid to be recycled by the OS. The kill
+        # below must use THIS tuple, never the stale one from the top of
+        # the function.
+        proc = controller.find_resume_process(sid)
+        if proc is None:
+            return False, (
+                f"the live process for {sid[:8]} exited; adopt without --takeover"
+            )
         flags.arm_close(proc.ppid)
         try:
             controller.terminate_group(proc.pgid, grace)
@@ -1282,6 +1305,19 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     flags = FlagStore(sd)
     max_wait = args.wait if args.wait is not None else config.get("takeover_max_wait_seconds")
+    idle_window = config.get("takeover_idle_seconds")
+    if max_wait < idle_window:
+        # Honest heads-up, not a block: a quiet/parked transcript can never
+        # reach the idle-decision branch within a --wait shorter than the
+        # idle window, so a later "still actively writing after Ns" refusal
+        # would be misleading — it may not have been writing at all.
+        print(
+            f"note: --wait {max_wait:g}s is below the takeover idle window "
+            f"({idle_window:g}s); a takeover can only proceed if the transcript "
+            f"is already quiet — it cannot wait out an active turn in under "
+            f"{idle_window:g}s",
+            file=sys.stderr,
+        )
     ok, msg = _takeover(store, sd, config, controller, flags, args.sid, max_wait=max_wait)
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1
