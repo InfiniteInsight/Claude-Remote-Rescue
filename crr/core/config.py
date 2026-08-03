@@ -27,7 +27,9 @@ from typing import Any, Mapping
 # (no crr mechanism consumes them; see DESIGN)
 # v3: added context_tight_fraction / context_compact_fraction (Slice A, F2 —
 # compaction badge thresholds; see crr.core.context_pressure)
-CONFIG_DEFAULTS_VERSION = 3
+# v4: added recall_match_cap / recall_snippet_cap (Slice B, F1 — `crr recall`
+# print caps; see crr.core.transcript.search)
+CONFIG_DEFAULTS_VERSION = 4
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -79,6 +81,10 @@ DEFAULTS: dict[str, Any] = {
     # crr.core.context_pressure.pressure.
     "context_tight_fraction": 0.7,
     "context_compact_fraction": 1.0,
+    # `crr recall` (Slice B, F1): query-scoped, capped transcript search — a
+    # grep for your own history, not a transcript dump (never uncapped).
+    "recall_match_cap": 5,      # max matches printed, most-recent-first (-n)
+    "recall_snippet_cap": 500,  # chars of matched text shown per match
 }
 
 

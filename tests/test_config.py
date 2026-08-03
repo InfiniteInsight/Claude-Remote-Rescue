@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 3
+    assert cfg.CONFIG_DEFAULTS_VERSION == 4
 
 
 def test_context_pressure_fraction_defaults():
@@ -94,6 +94,15 @@ def test_context_pressure_fraction_defaults():
     assert cfg.DEFAULTS["context_compact_fraction"] == 1.0
     assert cfg.Config().get("context_tight_fraction") == 0.7
     assert cfg.Config().get("context_compact_fraction") == 1.0
+
+
+def test_recall_caps_defaults():
+    # Slice B / F1 (`crr recall`): print caps are named config, never a
+    # magic number in cli.py or the search path.
+    assert cfg.DEFAULTS["recall_match_cap"] == 5
+    assert cfg.DEFAULTS["recall_snippet_cap"] == 500
+    assert cfg.Config().get("recall_match_cap") == 5
+    assert cfg.Config().get("recall_snippet_cap") == 500
 
 
 def test_terminal_prior_defaults_to_auto():
