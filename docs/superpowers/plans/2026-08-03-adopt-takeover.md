@@ -36,9 +36,14 @@ stays. (Config DEFAULTS version DOES bump — Task 1.)
   *, idle_window: float) -> bool` = `seconds_idle >= idle_window and tail_kind
   == "assistant-end"`. Pure; no I/O/clock/sleep. Docstring explains WHY only
   `assistant-end` is safe (spec: response-always-follows-a-prompt).
-- `crr/core/config.py` DEFAULTS: add `"takeover_idle_seconds": 12.0`,
+- `crr/core/config.py` DEFAULTS: add `"takeover_idle_seconds": 20.0`,
   `"takeover_max_wait_seconds": 180.0`, `"takeover_poll_seconds": 2.0`. Bump
   `CONFIG_DEFAULTS_VERSION`.
+
+> **NOTE (already implemented + refined in commits `8fd1bd4` + follow-up):**
+> Task 1 is done. `turn_boundary` classifies `<synthetic>` assistant records
+> as `"other"` (transparent, matching `extract_model`); `takeover_idle_seconds`
+> is `20.0`. Task 2/3 build on that.
 
 **Steps:** read `extract_prompt`/`extract_model`/`_assistant_text` (reuse their
 role/synthetic/`toolUseResult` conventions — do NOT reinvent the user-turn
@@ -71,11 +76,16 @@ Watch fail. Implement. Green + KEPT. Commit.
   warns against — one UUID, one conversation; the caller additionally guards
   by re-checking untracked and kills by the returned pgid.
 - `crr/adapters/transcript_source.py::read_takeover_signal(session_id, home=None)
-  -> dict`: `{"mtime": float, "tail_kind": str}`. One `stat()` for mtime
-  (`0.0` if absent) + a bounded backward read (`_reversed_lines`, early-exit)
-  for the newest record whose `turn_boundary` is not `"other"` → its
-  `tail_kind` (`""` if none / absent transcript). Reuse the backward-read +
-  per-line `json.loads` guard pattern from `read_tail_facts`.
+  -> dict`: `{"mtime": float, "tail_kind": str}`. **Read the TAIL first, THEN
+  stat the mtime** (concurrent-append safety — see the spec: tail-first pairs
+  a just-changed tail with a fresh mtime → `seconds_idle` small → keep waiting,
+  the safe direction). A bounded backward read (`_reversed_lines`, early-exit)
+  finds the newest record whose `turn_boundary` is not `"other"` → its
+  `tail_kind` (synthetic/permission-mode/etc. are `"other"`, so the scan skips
+  past them to the prior real turn). `""` if none found; `mtime=0.0` and
+  `tail_kind=""` if the transcript is absent. Reuse the backward-read +
+  per-line `json.loads` guard pattern from `read_tail_facts`, and call the
+  core `transcript.turn_boundary` (adapters may import core).
 
 **Steps:** read `_ps_snapshot_argv`/`_parse_ps_rows`/`_child_groups` and
 `read_tail_facts`. Failing tests first: `find_resume_process` via a
@@ -102,12 +112,19 @@ fail. Implement. Green + KEPT. Commit.
   1. `proc = controller.find_resume_process(sid)`. None → refuse:
      `"no live 'claude --resume <sid>' found; adopt without --takeover, or exit
      it in its own terminal first"`. (Fresh-session home.)
-  2. **Wait loop** (real `time.sleep`, `time.time()` deadline): each poll,
-     `sig = transcript_source.read_takeover_signal(sid)`; `seconds_idle =
-     time.time() - sig["mtime"]`; if `takeover.ready_to_take_over(seconds_idle,
-     sig["tail_kind"], idle_window=config...)` → break. On deadline exceeded →
-     refuse, **no kill, no flag**: `"session still mid-turn after Ns; not
-     taking over"`.
+  2. **Wait loop, refuse-fast** (real `time.sleep`, `time.time()` deadline).
+     Each poll: `sig = transcript_source.read_takeover_signal(sid)`;
+     `seconds_idle = time.time() - sig["mtime"]`.
+     - `seconds_idle < idle_window` (`takeover_idle_seconds`) → still writing →
+       keep polling; if past the `max_wait` deadline → refuse, **no kill, no
+       flag**: `"still actively writing after Ns; not taking over"`.
+     - `seconds_idle >= idle_window` → decide NOW:
+       - `sig["tail_kind"] == "assistant-end"` (use
+         `takeover.ready_to_take_over`) → break, proceed to kill.
+       - else → refuse **immediately** (do NOT wait out the timeout), **no
+         kill, no flag**: `"idle but parked at <tail_kind> — not a safe
+         boundary to take over; finish or exit it manually"`.
+     Every non-`assistant-end` branch is a refusal — refuse-fast never kills.
   3. **Re-check untracked** immediately before the kill (exclusion guard vs the
      resolve→kill race): the sid must NOT be in the journaled set now (reuse the
      `_discoverable_rows`/journal-scan path or a targeted `store` check). Now
