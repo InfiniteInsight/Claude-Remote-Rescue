@@ -53,6 +53,8 @@ def _session_card():
         "duplicate_group": None,
         "tmux_session": None,
         "updated": "2026-07-23T00:00:00Z",
+        "last_active": "2026-07-23T00:00:00Z",
+        "context_pressure": "ok",
     }
 
 
@@ -224,6 +226,11 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
+def test_sessions_contract_version_is_4():
+    # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 4
+
+
 def test_sessions_wrong_contract_version_rejected():
     p = _sessions_payload()
     p["contract"] = 999
@@ -273,6 +280,36 @@ def test_session_card_rejects_non_string_tmux_session():
     card["tmux_session"] = 7
     with pytest.raises(contracts.ContractError):
         contracts.validate_session_card(card)
+
+
+def test_sessions_card_missing_last_active_rejected():
+    # last_active (Slice A, T-A) is a contracted card field.
+    p = _sessions_payload()
+    del p["sessions"][0]["last_active"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_last_active_must_be_str():
+    p = _sessions_payload()
+    p["sessions"][0]["last_active"] = 5
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_missing_context_pressure_rejected():
+    # context_pressure (Slice A, F2) is a contracted card field.
+    p = _sessions_payload()
+    del p["sessions"][0]["context_pressure"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_bad_context_pressure_enum_rejected():
+    p = _sessions_payload()
+    p["sessions"][0]["context_pressure"] = "overflowing"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
 
 
 def test_sessions_payload_rejects_previous_contract_version():

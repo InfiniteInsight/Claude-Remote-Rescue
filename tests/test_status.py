@@ -135,7 +135,12 @@ def test_tail_facts_extractor_is_used_for_prompt_and_model():
         [_entry(42, sid)],
         FakeBoot(),
         FakeProbe(),
-        tail_facts=lambda entry: {"last_prompt": f"prompt-for-{entry['pid']}", "model": "claude-opus-5"},
+        tail_facts=lambda entry: {
+            "last_prompt": f"prompt-for-{entry['pid']}",
+            "model": "claude-opus-5",
+            "last_active": "2026-08-01T00:00:00Z",
+            "transcript_bytes": 0,
+        },
     )
     card = payload["sessions"][0]
     assert card["last_prompt"] == "prompt-for-42"
@@ -149,6 +154,67 @@ def test_tail_facts_default_to_empty_strings():
     card = payload["sessions"][0]
     assert card["last_prompt"] == ""
     assert card["model"] == ""
+    assert card["last_active"] == ""
+
+
+def test_card_carries_last_active_from_tail_facts():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)],
+        FakeBoot(),
+        FakeProbe(),
+        tail_facts=lambda entry: {
+            "last_prompt": "",
+            "model": "",
+            "last_active": "2026-08-01T12:34:56Z",
+            "transcript_bytes": 0,
+        },
+    )
+    card = payload["sessions"][0]
+    assert card["last_active"] == "2026-08-01T12:34:56Z"
+
+
+def test_card_context_pressure_default_is_ok_with_no_transcript():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
+    assert payload["sessions"][0]["context_pressure"] == "ok"
+
+
+def test_card_context_pressure_will_compact_when_over_window():
+    # DEFAULT_WINDOW is 200_000 tokens; estimate_tokens is bytes // 4, so
+    # 200_000 * 4 bytes clears the compact fraction (default 1.0) for an
+    # unmapped model.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)],
+        FakeBoot(),
+        FakeProbe(),
+        tail_facts=lambda entry: {
+            "last_prompt": "",
+            "model": "some-unmapped-model",
+            "last_active": "",
+            "transcript_bytes": 200_000 * 4,
+        },
+    )
+    assert payload["sessions"][0]["context_pressure"] == "will-compact"
+
+
+def test_card_context_pressure_thresholds_are_configurable():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)],
+        FakeBoot(),
+        FakeProbe(),
+        tail_facts=lambda entry: {
+            "last_prompt": "",
+            "model": "some-unmapped-model",
+            "last_active": "",
+            "transcript_bytes": 100_000 * 4,  # fraction 0.5 of 200_000 default window
+        },
+        context_tight_fraction=0.4,
+        context_compact_fraction=0.9,
+    )
+    assert payload["sessions"][0]["context_pressure"] == "tight"
 
 
 def test_card_carries_tmux_session():
