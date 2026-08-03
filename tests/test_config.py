@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 4
+    assert cfg.CONFIG_DEFAULTS_VERSION == 5
 
 
 def test_context_pressure_fraction_defaults():
@@ -111,6 +111,17 @@ def test_terminal_prior_defaults_to_auto():
     assert cfg.DEFAULTS["terminal"] == "auto"
     assert cfg.Config().get("terminal") == "auto"
     assert cfg.Config(overrides={"terminal": "iterm"}).get("terminal") == "iterm"
+
+
+def test_takeover_defaults():
+    # `crr adopt --takeover` (audit: destructive op, thresholds must be
+    # named priors): idle window, refusal timeout, and poll cadence.
+    assert cfg.DEFAULTS["takeover_idle_seconds"] == 12.0
+    assert cfg.DEFAULTS["takeover_max_wait_seconds"] == 180.0
+    assert cfg.DEFAULTS["takeover_poll_seconds"] == 2.0
+    assert cfg.Config().get("takeover_idle_seconds") == 12.0
+    assert cfg.Config().get("takeover_max_wait_seconds") == 180.0
+    assert cfg.Config().get("takeover_poll_seconds") == 2.0
 
 
 def test_no_overrides_all_default():
