@@ -222,9 +222,19 @@ def turn_boundary(record: Mapping[str, Any]) -> str:
       ``isMeta`` lines, and malformed/non-Mapping input.
 
     A ``<synthetic>`` assistant record (the API-error/interrupt turns
-    Claude Code writes — see ``extract_model``) never counts as
-    ``"assistant-end"`` even if shaped like one: it carries no real turn,
-    so it must never look like the "safe to take over" boundary.
+    Claude Code writes) is treated transparently — always ``"other"``,
+    never ``"assistant-end"`` or ``"mid-turn"`` — mirroring how
+    ``extract_model``/``_assistant_text`` already skip through it as not a
+    real turn. This matters for a caller scanning backward for the newest
+    non-``"other"`` record (Task 2's ``read_takeover_signal``): it lets the
+    scan skip past an API-error/interrupt record at the tail to the real
+    prior turn, so a session parked behind a synthetic record right after
+    a genuine assistant ``end_turn`` still surfaces as ``"assistant-end"``
+    instead of getting stuck reporting a phantom ``"mid-turn"`` forever.
+    Safety against a still-*active* session isn't this function's job —
+    it comes from the idle-seconds guard in ``ready_to_take_over``
+    (a live session has a recent mtime, so ``seconds_idle`` stays below
+    ``idle_window`` regardless of tail kind).
     """
     if not isinstance(record, Mapping):
         return "other"
@@ -233,9 +243,9 @@ def turn_boundary(record: Mapping[str, Any]) -> str:
         message = record.get("message")
         if not isinstance(message, Mapping) or message.get("role") != "assistant":
             return "other"
-        stop_reason = message.get("stop_reason")
-        model = message.get("model")
-        if stop_reason == "end_turn" and model != "<synthetic>":
+        if message.get("model") == "<synthetic>":
+            return "other"
+        if message.get("stop_reason") == "end_turn":
             return "assistant-end"
         return "mid-turn"
     if rtype == "user":

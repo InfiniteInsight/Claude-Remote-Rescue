@@ -331,18 +331,31 @@ def test_turn_boundary_user_tool_result_with_tooluseresult_key_is_mid_turn():
     assert transcript.turn_boundary(record) == "mid-turn"
 
 
-def test_turn_boundary_synthetic_assistant_is_not_assistant_end():
+def test_turn_boundary_synthetic_assistant_is_other():
     # <synthetic> assistant records (API errors/interrupts) carry no real
-    # turn — even if end_turn-shaped, they must never look like the safe
-    # "finished, awaiting the user" boundary.
+    # turn — treated transparently, like extract_model/_assistant_text
+    # already do, so a caller scanning backward for the newest non-"other"
+    # record skips straight past it to the real prior turn instead of
+    # getting stuck reporting "mid-turn" forever.
     record = {"type": "assistant", "message": {
         "role": "assistant",
         "model": "<synthetic>",
         "stop_reason": "end_turn",
         "content": "interrupted",
     }}
-    assert transcript.turn_boundary(record) != "assistant-end"
-    assert transcript.turn_boundary(record) == "mid-turn"
+    assert transcript.turn_boundary(record) == "other"
+
+
+def test_turn_boundary_synthetic_assistant_with_non_end_turn_stop_reason_is_also_other():
+    # The transparency rule applies regardless of stop_reason — synthetic
+    # is never a real turn, so it's never mid-turn either.
+    record = {"type": "assistant", "message": {
+        "role": "assistant",
+        "model": "<synthetic>",
+        "stop_reason": "stop_sequence",
+        "content": "interrupted",
+    }}
+    assert transcript.turn_boundary(record) == "other"
 
 
 @pytest.mark.parametrize("rtype", ["permission-mode", "pr-link", "bridge-session"])

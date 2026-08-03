@@ -116,10 +116,10 @@ def test_terminal_prior_defaults_to_auto():
 def test_takeover_defaults():
     # `crr adopt --takeover` (audit: destructive op, thresholds must be
     # named priors): idle window, refusal timeout, and poll cadence.
-    assert cfg.DEFAULTS["takeover_idle_seconds"] == 12.0
+    assert cfg.DEFAULTS["takeover_idle_seconds"] == 20.0
     assert cfg.DEFAULTS["takeover_max_wait_seconds"] == 180.0
     assert cfg.DEFAULTS["takeover_poll_seconds"] == 2.0
-    assert cfg.Config().get("takeover_idle_seconds") == 12.0
+    assert cfg.Config().get("takeover_idle_seconds") == 20.0
     assert cfg.Config().get("takeover_max_wait_seconds") == 180.0
     assert cfg.Config().get("takeover_poll_seconds") == 2.0
 

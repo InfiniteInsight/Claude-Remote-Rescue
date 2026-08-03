@@ -89,8 +89,14 @@ DEFAULTS: dict[str, Any] = {
     "recall_snippet_cap": 500,  # chars of matched text shown per match
     # `crr adopt --takeover` (destructive: SIGTERMs a live process) — the
     # idle window + refusal timeout + poll cadence for the cli-owned wait
-    # loop. See crr.core.takeover.ready_to_take_over.
-    "takeover_idle_seconds": 12.0,       # transcript quiet + clean tail this long
+    # loop. See crr.core.takeover.ready_to_take_over. idle_window doubles
+    # as a decision threshold, not just a "feels idle" gate: a transcript
+    # quiet for less than this refuses fast as "still mid-turn", so the
+    # window must exceed the longest expected no-write gap during ACTIVE
+    # generation (extended thinking / a slow non-streaming API turn) or
+    # it produces false "parked mid-turn" refusals — 20s is the safer
+    # floor (12s measured too short against that gap).
+    "takeover_idle_seconds": 20.0,       # transcript quiet + clean tail this long
     "takeover_max_wait_seconds": 180.0,  # give up (refuse, never kill) after this
     "takeover_poll_seconds": 2.0,        # wait-loop poll cadence
 }
