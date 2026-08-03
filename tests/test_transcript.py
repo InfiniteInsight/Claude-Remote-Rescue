@@ -119,7 +119,11 @@ def test_tail_facts_returns_last_prompt_and_last_model():
         _assistant("later answer", model="claude-opus-5"),
     ]
     facts = transcript.tail_facts(records, cap=100)
-    assert facts == {"last_prompt": "the most recent prompt", "model": "claude-opus-5"}
+    assert facts == {
+        "last_prompt": "the most recent prompt",
+        "model": "claude-opus-5",
+        "last_active": "",
+    }
 
 
 def test_tail_facts_skips_synthetic_to_find_the_real_model():
@@ -133,4 +137,27 @@ def test_tail_facts_skips_synthetic_to_find_the_real_model():
 
 def test_tail_facts_honest_empties_when_absent():
     facts = transcript.tail_facts([_user([{"type": "tool_result", "content": "x"}])], cap=100)
-    assert facts == {"last_prompt": "", "model": ""}
+    assert facts == {"last_prompt": "", "model": "", "last_active": ""}
+
+
+def test_tail_facts_returns_last_active_from_the_newest_timestamped_record():
+    # last_active is the ISO timestamp of the newest record that has one —
+    # independent of which record supplies the prompt/model.
+    records = [
+        _user("older prompt", timestamp="2026-01-01T00:00:00Z"),
+        _assistant("answer", model="claude-opus-4-8"),
+        _user("the most recent prompt", timestamp="2026-01-02T00:00:00Z"),
+    ]
+    facts = transcript.tail_facts(records, cap=100)
+    assert facts["last_active"] == "2026-01-02T00:00:00Z"
+
+
+def test_tail_facts_last_active_skips_records_with_no_timestamp():
+    # The newest record has no timestamp; the walk keeps going backward
+    # until it finds one that does.
+    records = [
+        _user("older prompt", timestamp="2026-01-01T00:00:00Z"),
+        _user("newest prompt but untimestamped"),
+    ]
+    facts = transcript.tail_facts(records, cap=100)
+    assert facts["last_active"] == "2026-01-01T00:00:00Z"

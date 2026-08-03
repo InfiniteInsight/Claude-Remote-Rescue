@@ -41,7 +41,7 @@ def test_find_transcript_globs_any_project_dir(tmp_path):
 
 def test_read_tail_facts_skips_trailing_noise(tmp_path):
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-    _write_transcript(tmp_path, sid, [
+    path = _write_transcript(tmp_path, sid, [
         _user("an older prompt"),
         _user("the real last prompt"),
         _assistant("answer", model="claude-opus-4-8"),
@@ -49,7 +49,10 @@ def test_read_tail_facts_skips_trailing_noise(tmp_path):
         _user("<task-notification>bg task done</task-notification>"),
     ])
     facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)
-    assert facts == {"last_prompt": "the real last prompt", "model": "claude-opus-4-8"}
+    assert facts["last_prompt"] == "the real last prompt"
+    assert facts["model"] == "claude-opus-4-8"
+    assert facts["transcript_bytes"] == path.stat().st_size
+    assert facts["transcript_bytes"] > 0
 
 
 def test_read_tail_facts_reads_model_from_a_trailing_assistant_turn(tmp_path):
@@ -87,8 +90,27 @@ def test_model_tail_lines_is_the_named_config_default():
 
 def test_read_tail_facts_missing_transcript_is_empty(tmp_path):
     assert transcript_source.read_tail_facts("nope", cap=100, home=tmp_path) == {
-        "last_prompt": "", "model": ""
+        "last_prompt": "", "model": "", "last_active": "", "transcript_bytes": 0,
     }
+
+
+def test_read_tail_facts_last_active_is_the_newest_turns_timestamp(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("older prompt", timestamp="2026-01-01T00:00:00Z"),
+        _user("the real last prompt", timestamp="2026-01-02T00:00:00Z"),
+    ])
+    facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)
+    assert facts["last_active"] == "2026-01-02T00:00:00Z"
+
+
+def test_read_tail_facts_transcript_bytes_matches_file_size(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    path = _write_transcript(tmp_path, sid, [
+        _user("a prompt", timestamp="2026-01-01T00:00:00Z"),
+    ])
+    facts = transcript_source.read_tail_facts(sid, cap=100, home=tmp_path)
+    assert facts["transcript_bytes"] == path.stat().st_size
 
 
 def test_read_tail_facts_honors_configured_model_tail_lines(tmp_path):

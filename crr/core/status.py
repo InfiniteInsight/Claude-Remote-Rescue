@@ -27,8 +27,8 @@ from crr.core.classifier import classify
 from crr.core.ports import BootIdentity, ProcessProbe
 
 
-def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, str]:
-    return {"last_prompt": "", "model": ""}
+def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
+    return {"last_prompt": "", "model": "", "last_active": "", "transcript_bytes": 0}
 
 
 class _MemoTtyProbe:

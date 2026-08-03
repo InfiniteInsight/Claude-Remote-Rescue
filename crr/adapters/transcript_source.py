@@ -88,20 +88,30 @@ MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
 def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,
-) -> dict[str, str]:
-    """Most recent real prompt + model for ``session_id`` in ONE backward read.
+) -> dict[str, str | int]:
+    """Most recent real prompt + model + activity + size, in ONE backward read.
 
-    Both facts live near the tail, so a single reverse read fills both and
-    early-exits — collapsing what would be two independent reads (each paying
-    ``find_transcript``'s cross-project glob and the first 64KB block) into
-    one on the poll path. The model search is bounded to ``model_tail_lines``
-    (injectable — see crr.core.config's ``model_tail_lines``); the prompt
-    search is not. Missing/absent transcript degrades to honest empty
-    strings, never a fabricated value.
+    ``last_prompt``, ``model``, and ``last_active`` all live near the tail, so
+    a single reverse read fills them and early-exits — collapsing what would
+    be several independent reads (each paying ``find_transcript``'s
+    cross-project glob and the first 64KB block) into one on the poll path.
+    ``last_active`` is the first timestamped record seen on the backward walk
+    (that record IS the newest). ``transcript_bytes`` is a single ``stat()``
+    on the already-located path — free relative to the read. The model
+    search is bounded to ``model_tail_lines`` (injectable — see
+    crr.core.config's ``model_tail_lines``); the prompt and timestamp
+    searches are not. Missing/absent transcript degrades to honest empty
+    strings / zero, never a fabricated value.
     """
-    facts = {"last_prompt": "", "model": ""}
+    facts: dict[str, str | int] = {
+        "last_prompt": "", "model": "", "last_active": "", "transcript_bytes": 0,
+    }
     path = find_transcript(session_id, home)
     if path is None:
+        return facts
+    try:
+        facts["transcript_bytes"] = path.stat().st_size
+    except OSError:
         return facts
     try:
         for i, line in enumerate(_reversed_lines(path)):
@@ -118,9 +128,17 @@ def read_tail_facts(
                 model = transcript.extract_model(record)
                 if model is not None:
                     facts["model"] = model
-            # Stop once the prompt is found and the model is either found or can
-            # no longer appear (past the tail window).
-            if facts["last_prompt"] and (facts["model"] or not in_model_window):
+            if record is not None and not facts["last_active"]:
+                ts = transcript.extract_timestamp(record)
+                if ts is not None:
+                    facts["last_active"] = ts
+            # Stop once the prompt and timestamp are found and the model is
+            # either found or can no longer appear (past the tail window).
+            if (
+                facts["last_prompt"]
+                and facts["last_active"]
+                and (facts["model"] or not in_model_window)
+            ):
                 break
     except OSError:
         return facts
