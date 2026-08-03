@@ -592,16 +592,19 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_22():
-    """Explicit version check: v22 adds dashboard recall — a global search bar
-    plus a per-card Search button (the surface of `crr recall`)."""
-    assert web.PAGE_VERSION == 22
+def test_page_version_is_23():
+    """Explicit version check: v23 adds dashboard recall — a recent-transcripts
+    search bar plus a per-card Search button (the surface of `crr recall`).
+    Labeled "Search recent" (not "all"): the byte budget bounds coverage, so
+    the label must not overclaim (the panel reports what it skipped)."""
+    assert web.PAGE_VERSION == 23
 
 
 def test_page_has_global_recall_search_bar():
     page = web.render_page()
     assert 'id="recall-q"' in page          # the query input
-    assert "Search all" in page             # the global button
+    assert "Search recent" in page          # the global button (honest label, not "all")
+    assert "Search all" not in page         # must not overclaim byte-budgeted coverage
     assert "function runRecall(" in page
     assert "/api/recall?q=" in page          # GET, not sidAction
     assert "encodeURIComponent" in page      # query is URL-encoded
