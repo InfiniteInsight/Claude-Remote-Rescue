@@ -116,11 +116,16 @@ def extract_timestamp(record: Mapping[str, Any]) -> str | None:
 
 
 def _assistant_text(record: Mapping[str, Any]) -> str | None:
-    """The text of a real assistant turn, or None (tool-use/no-text turns)."""
+    """The text of a real assistant turn, or None (tool-use/no-text/synthetic
+    turns). Mirrors ``extract_model``'s ``<synthetic>`` skip: the assistant
+    records Claude Code writes for API errors and interrupts are noise, not
+    real conversation — they must not surface in a recall search either."""
     if not isinstance(record, Mapping) or record.get("type") != "assistant":
         return None
     message = record.get("message")
     if not isinstance(message, Mapping) or message.get("role") != "assistant":
+        return None
+    if message.get("model") == "<synthetic>":
         return None
     content = message.get("content")
     if isinstance(content, str):
@@ -154,7 +159,7 @@ def search(
     """
     query_lower = query.lower()
     matches: list[dict[str, Any]] = []
-    for index, record in enumerate(list(records)):
+    for index, record in enumerate(records):
         prompt = extract_prompt(record)
         if prompt is not None:
             if query_lower in prompt.lower():

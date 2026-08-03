@@ -231,6 +231,14 @@ def test_search_includes_timestamp_when_present():
     assert out[0]["timestamp"] == "2026-01-02T00:00:00Z"
 
 
+def test_search_skips_synthetic_assistant_turns():
+    # <synthetic> assistant turns are the API-error/interrupt records
+    # Claude Code writes — noise, not real conversation (mirrors
+    # extract_model's skip). They must not surface in recall.
+    records = [_assistant("a fox error occurred", model="<synthetic>")]
+    assert transcript.search(records, "fox", cap=100) == []
+
+
 def test_search_matches_assistant_text_from_list_content_blocks():
     records = [{"type": "assistant", "message": {
         "role": "assistant",

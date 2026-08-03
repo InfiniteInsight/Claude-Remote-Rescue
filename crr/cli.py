@@ -6,8 +6,9 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close/detmux/untmux), diagnose, gc, the web
-dashboard, the systemd watchdog, and the shim-facing hooks.
+(reopen/dismiss/remove/kick/close/detmux/untmux), recall (print-only
+transcript search), diagnose, gc, the web dashboard, the systemd watchdog,
+and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -207,6 +208,21 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="dashboard port to bake into the web task "
                           "(default: config dashboard_port = 8377)")
     sch.set_defaults(func=_cmd_schtasks)
+
+    rec = sub.add_parser(
+        "recall",
+        help="search a session's transcript for earlier conversation (print-only)",
+    )
+    rec.add_argument("--pid", type=int, default=None, help="resolve the sid from this pid's journal entry")
+    rec.add_argument("--sid", default=None, help="search this session id's transcript directly")
+    rec.add_argument("--all", action="store_true",
+                      help="search every transcript in the cwd's project dir")
+    rec.add_argument("--cwd", default=None,
+                      help="cwd for --all when --pid isn't given (or to override --pid's cwd)")
+    rec.add_argument("-n", type=int, default=None, dest="limit",
+                      help="max matches to print, most-recent-first (default: config recall_match_cap)")
+    rec.add_argument("query", help="case-insensitive substring to search for")
+    rec.set_defaults(func=_cmd_recall)
 
     conf = sub.add_parser("config", help="inspect configuration")
     conf.add_argument(
@@ -445,6 +461,68 @@ def _print_status_human(payload: dict) -> None:
         sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
         model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
         print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}{sid_tag}")
+
+
+def _cmd_recall(args: argparse.Namespace) -> int:
+    """F1: query-scoped, capped transcript search — print-only, never
+    re-injects into a live session (feeding recalled text back in would
+    add tokens and could trigger the very compaction being worked around).
+    """
+    if args.pid is not None and args.sid is not None:
+        print("crr recall: pass only one of --pid / --sid", file=sys.stderr)
+        return 2
+    if args.pid is None and args.sid is None and not args.all:
+        print("crr recall: specify --pid, --sid, or --all", file=sys.stderr)
+        return 2
+    if args.sid is not None and not contracts.valid_session_id(args.sid):
+        # A user-typed --sid may be junk (mirrors claude-launch's guard on a
+        # user-typed --session-id): reject before it reaches find_transcript's
+        # glob rather than treating an arbitrary string as a glob pattern.
+        print(f"crr recall: {args.sid!r} is not a valid session id", file=sys.stderr)
+        return 2
+
+    config = _load_config()
+    cap = config.get("recall_snippet_cap")
+    limit = args.limit if args.limit is not None else config.get("recall_match_cap")
+
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+
+    entry = None
+    if args.pid is not None:
+        try:
+            entry = store.read(args.pid)
+        except (KeyError, contracts.ContractError):
+            print(f"crr recall: no journal entry for pid {args.pid}", file=sys.stderr)
+            return 2
+        if not args.all and entry.get("claude") is None:
+            print(f"crr recall: pid {args.pid} has no claude session", file=sys.stderr)
+            return 2
+
+    if args.all:
+        cwd = args.cwd if args.cwd is not None else (entry["cwd"] if entry is not None else None)
+        if cwd is None:
+            print("crr recall: --all needs --cwd or --pid to derive one", file=sys.stderr)
+            return 2
+        matches = transcript_source.search_cwd(cwd, args.query, cap=cap)
+    else:
+        sid = args.sid if args.sid is not None else entry["claude"]["session_id"]
+        matches = transcript_source.search_transcript(sid, args.query, cap=cap)
+
+    if not matches:
+        print(f"no matches for '{args.query}'")
+        return 0
+
+    # Most-recent-first: timestamp (ISO strings sort lexically) is the
+    # primary key; index only breaks ties at equal timestamps (or orders a
+    # single transcript when none carry one). An untimestamped match sorts
+    # last regardless of index — unknown recency is never presented as recent.
+    ordered = sorted(matches, key=lambda m: (m["timestamp"], m["index"]), reverse=True)[:limit]
+    for m in ordered:
+        ts = f" {m['timestamp']}" if m["timestamp"] else ""
+        sid_tag = f" {m['session_id'][:8]}" if "session_id" in m else ""
+        print(f"[{m['role']}]{ts}{sid_tag} {m['text']}")
+    return 0
 
 
 def _cmd_register(args: argparse.Namespace) -> int:
