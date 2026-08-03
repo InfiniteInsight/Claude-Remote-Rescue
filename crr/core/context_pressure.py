@@ -5,12 +5,12 @@ labeled inputs:
 
 - ``estimate_tokens``: a rough ESTIMATE of a transcript's token count from
   its byte size (``bytes // 4``) — not a real tokenizer count.
-- ``MODEL_CONTEXT_WINDOWS``: a documented PRIOR (audit P5) mapping model
-  name -> context window size in tokens. Only ``claude-opus-4-8`` is
-  confirmed; every other entry is a best-guess placeholder marked
-  ``# PRIOR — verify`` and MUST be checked against real model docs before
-  being trusted. Wrong-but-conservative beats confidently-wrong, so unsure
-  entries use ``DEFAULT_WINDOW`` (200_000) rather than a fabricated number.
+- ``MODEL_CONTEXT_WINDOWS``: model name -> context window size in tokens.
+  Every listed entry is now confirmed against published model docs (each
+  carries a ``# confirmed`` provenance comment). Any model NOT in the map
+  falls back to ``DEFAULT_WINDOW`` (200_000): wrong-but-conservative beats
+  confidently-wrong, so an unknown model's badge under-warns rather than
+  fabricates a window. A new model joins the map only with a real source.
 
 Pure core: stdlib only, no I/O.
 """
@@ -21,16 +21,15 @@ from __future__ import annotations
 # for models we are genuinely unsure about (see comments per entry).
 DEFAULT_WINDOW = 200_000
 
-# PRIOR (audit P5): model -> context window size in tokens. Only the first
-# entry is confirmed from released model documentation; the rest are
-# placeholders for models observed in the wild at write time and must be
-# verified against real published specs, not treated as ground truth.
+# model -> context window size in tokens. All entries confirmed from released
+# model documentation (see each entry's provenance comment); a model absent
+# from this map falls back to DEFAULT_WINDOW rather than a fabricated number.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-8": 1_000_000,  # confirmed
     "claude-opus-5": 1_000_000,  # confirmed (user, 2026-08)
     "claude-sonnet-5": 1_000_000,  # confirmed (user, 2026-08)
-    "claude-sonnet-4-6": DEFAULT_WINDOW,  # PRIOR — verify
-    "claude-haiku-4-5-20251001": DEFAULT_WINDOW,  # PRIOR — verify (haiku is smaller)
+    "claude-sonnet-4-6": 1_000_000,  # confirmed (web, 2026-08): Sonnet 4.6 = 1M GA
+    "claude-haiku-4-5-20251001": 200_000,  # confirmed (web, 2026-08): Haiku 4.5 = 200K (smaller tier)
     "claude-fable-5": 1_000_000,  # confirmed (user, 2026-08)
 }
 
