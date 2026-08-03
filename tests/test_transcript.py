@@ -277,6 +277,25 @@ def test_search_keeps_head_form_when_match_is_visible():
     assert "…" not in out[0]["text"]
 
 
+def test_rank_matches_orders_most_recent_first_and_truncates():
+    matches = [
+        {"text": "old", "index": 0, "timestamp": "2026-01-01T00:00:00Z"},
+        {"text": "new", "index": 5, "timestamp": "2026-03-01T00:00:00Z"},
+        {"text": "mid", "index": 2, "timestamp": "2026-02-01T00:00:00Z"},
+    ]
+    out = transcript.rank_matches(matches, limit=2)
+    assert [m["text"] for m in out] == ["new", "mid"]  # newest first, capped to 2
+
+
+def test_rank_matches_untimestamped_sorts_last():
+    matches = [
+        {"text": "no-ts", "index": 9, "timestamp": ""},
+        {"text": "has-ts", "index": 0, "timestamp": "2026-01-01T00:00:00Z"},
+    ]
+    out = transcript.rank_matches(matches, limit=10)
+    assert [m["text"] for m in out] == ["has-ts", "no-ts"]  # unknown recency never "recent"
+
+
 def test_search_includes_timestamp_when_present():
     records = [_user("a fox prompt", timestamp="2026-01-02T00:00:00Z")]
     out = transcript.search(records, "fox", cap=100)

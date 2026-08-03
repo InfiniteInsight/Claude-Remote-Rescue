@@ -342,6 +342,59 @@ def test_search_cwd_no_transcripts_is_empty_list(tmp_path):
     assert transcript_source.search_cwd("/no/such/cwd", "fox", cap=100, home=tmp_path) == []
 
 
+# --- search_all (dashboard global recall) ---------------------------------
+
+_SID_A = "aaaaaaaa-0000-4000-8000-000000000000"  # newest
+_SID_B = "bbbbbbbb-0000-4000-8000-000000000000"
+_SID_C = "cccccccc-0000-4000-8000-000000000000"  # oldest
+
+
+def _write_dated(tmp_path, sid, records, project, mtime):
+    p = _write_transcript(tmp_path, sid, records, project=project)
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_search_all_scans_every_transcript_within_a_generous_budget(tmp_path):
+    _write_dated(tmp_path, _SID_A, [_user("a fox in A")], "-home-u-a", 3000)
+    _write_dated(tmp_path, _SID_B, [_user("a fox in B")], "-home-u-b", 2000)
+    _write_dated(tmp_path, _SID_C, [_user("no match here")], "-home-u-c", 1000)
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=10, byte_budget=10_000_000, home=tmp_path
+    )
+    assert {m["session_id"] for m in res["matches"]} == {_SID_A, _SID_B}
+    assert res["scanned"] == 3
+    assert res["skipped"] == 0
+
+
+def test_search_all_stops_at_the_byte_budget_newest_first(tmp_path):
+    pA = _write_dated(tmp_path, _SID_A, [_user("a fox in A"), _user("x" * 4000)], "-home-u-a", 3000)
+    _write_dated(tmp_path, _SID_B, [_user("a fox in B")], "-home-u-b", 2000)
+    _write_dated(tmp_path, _SID_C, [_user("a fox in C")], "-home-u-c", 1000)
+    # budget only fits the newest (A); B and C are past it.
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=10, byte_budget=pA.stat().st_size + 1, home=tmp_path
+    )
+    assert {m["session_id"] for m in res["matches"]} == {_SID_A}  # only the newest searched
+    assert res["scanned"] == 1
+    assert res["skipped"] == 2  # honest: two newest-first transcripts not searched
+
+
+def test_search_all_truncates_to_match_cap(tmp_path):
+    _write_dated(tmp_path, _SID_A, [_user("fox one"), _user("fox two"), _user("fox three")], "-home-u-a", 3000)
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=2, byte_budget=10_000_000, home=tmp_path
+    )
+    assert len(res["matches"]) == 2
+
+
+def test_search_all_no_transcripts_is_empty(tmp_path):
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=5, byte_budget=10_000_000, home=tmp_path
+    )
+    assert res == {"matches": [], "scanned": 0, "skipped": 0}
+
+
 # --- read_takeover_signal (`crr adopt --takeover` safety signal) ----------
 
 

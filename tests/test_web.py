@@ -56,7 +56,8 @@ def _payload():
 
 def _handle(method="GET", path="/", host="localhost", provider=None,
             body=b"", headers=None, action_provider=None,
-            untracked_provider=None, discoverable_provider=None, sid_action_provider=None):
+            untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
+            recall_provider=None, query=""):
     h = {"Host": host}
     if headers:
         h.update(headers)
@@ -67,9 +68,55 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         untracked_provider=untracked_provider,
         discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
+        recall_provider=recall_provider,
+        query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
     )
+
+
+_RECALL_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def test_recall_endpoint_passes_query_and_sid_to_provider():
+    seen = []
+
+    def recall(q, sid):
+        seen.append((q, sid))
+        return {"matches": [{"role": "user", "text": "a fox", "session_id": _RECALL_SID}],
+                "scanned": 1, "skipped": 0}
+
+    resp = _handle(path="/api/recall", query=f"q=fox&sid={_RECALL_SID}", recall_provider=recall)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "application/json"
+    assert seen == [("fox", _RECALL_SID)]
+    assert json.loads(resp.body)["scanned"] == 1
+
+
+def test_recall_without_sid_searches_globally():
+    seen = []
+    resp = _handle(path="/api/recall", query="q=fox",
+                   recall_provider=lambda q, sid: seen.append((q, sid)) or {"matches": [], "scanned": 0, "skipped": 0})
+    assert resp.status == 200
+    assert seen == [("fox", None)]  # no sid -> global
+
+
+def test_recall_empty_or_missing_query_is_400():
+    calls = []
+    prov = lambda q, sid: calls.append(1) or {"matches": [], "scanned": 0, "skipped": 0}
+    assert _handle(path="/api/recall", query="q=", recall_provider=prov).status == 400
+    assert _handle(path="/api/recall", query="q=%20%20", recall_provider=prov).status == 400  # whitespace
+    assert _handle(path="/api/recall", query="", recall_provider=prov).status == 400  # missing key
+    assert calls == []  # never reached the provider
+
+
+def test_recall_bad_sid_is_400():
+    prov = lambda q, sid: {"matches": [], "scanned": 0, "skipped": 0}
+    assert _handle(path="/api/recall", query="q=fox&sid=not-a-uuid", recall_provider=prov).status == 400
+
+
+def test_recall_404_without_provider():
+    assert _handle(path="/api/recall", query="q=fox").status == 404
 
 
 def test_disallowed_host_is_403_before_anything_else():
@@ -545,10 +592,31 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_21():
-    """Explicit version check: v21 adds a confirm-gated "Take over" button on
-    discoverable rows — the dashboard surface of `crr adopt --takeover`."""
-    assert web.PAGE_VERSION == 21
+def test_page_version_is_22():
+    """Explicit version check: v22 adds dashboard recall — a global search bar
+    plus a per-card Search button (the surface of `crr recall`)."""
+    assert web.PAGE_VERSION == 22
+
+
+def test_page_has_global_recall_search_bar():
+    page = web.render_page()
+    assert 'id="recall-q"' in page          # the query input
+    assert "Search all" in page             # the global button
+    assert "function runRecall(" in page
+    assert "/api/recall?q=" in page          # GET, not sidAction
+    assert "encodeURIComponent" in page      # query is URL-encoded
+
+
+def test_page_cards_have_a_per_session_search_button():
+    page = web.render_page()
+    # a per-card Search scoped to that session's sid (GET path, not an action).
+    assert "runRecall(s.session_id)" in page
+
+
+def test_page_recall_reports_skipped_transcripts():
+    # "no silent caps": the global sweep surfaces what the byte budget skipped.
+    page = web.render_page()
+    assert "skipped" in page
 
 
 def test_takeover_is_a_sid_action():

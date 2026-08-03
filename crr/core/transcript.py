@@ -231,6 +231,21 @@ def search(
     return matches
 
 
+def rank_matches(matches: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    """Order recall matches most-recent-first and truncate to ``limit``.
+
+    Timestamp is the primary key (ISO-8601 strings sort lexically); ``index``
+    breaks ties within a single transcript (and orders an untimestamped
+    single-transcript search). An untimestamped match (``timestamp == ""``)
+    sorts LAST regardless of index — unknown recency is never presented as
+    recent. Shared by ``crr recall`` (cli) and the dashboard's recall provider
+    (per-session and global), so the two surfaces can't drift on ordering.
+    """
+    return sorted(
+        matches, key=lambda m: (m.get("timestamp", ""), m.get("index", 0)), reverse=True
+    )[:limit]
+
+
 def turn_boundary(record: Mapping[str, Any]) -> str:
     """Classify a single JSONL record as a turn boundary (`crr adopt
     --takeover`'s safety signal).

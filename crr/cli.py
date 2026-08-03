@@ -40,7 +40,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, discovery, ops, ports, rescue, resume, reviver, status, takeover, web
+from crr.core import contracts, discovery, ops, ports, rescue, resume, reviver, status, takeover, transcript, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -567,11 +567,9 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         print(f"no matches for '{args.query}'")
         return 0
 
-    # Most-recent-first: timestamp (ISO strings sort lexically) is the
-    # primary key; index only breaks ties at equal timestamps (or orders a
-    # single transcript when none carry one). An untimestamped match sorts
-    # last regardless of index — unknown recency is never presented as recent.
-    ordered = sorted(matches, key=lambda m: (m["timestamp"], m["index"]), reverse=True)[:limit]
+    # Most-recent-first, capped — shared with the dashboard recall provider
+    # (transcript.rank_matches), so the CLI and web can't drift on ordering.
+    ordered = transcript.rank_matches(matches, limit=limit)
     for m in ordered:
         ts = f" {m['timestamp']}" if m["timestamp"] else ""
         sid_tag = f" {m['session_id'][:8]}" if "session_id" in m else ""
@@ -1584,6 +1582,7 @@ def make_web_handler(
     untracked_provider: Callable[[], list] | None = None,
     discoverable_provider: Callable[[], list] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
+    recall_provider: Callable[[str, str | None], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -1601,7 +1600,7 @@ def make_web_handler(
         def _dispatch(self, method: str) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
-            path = self.path.split("?", 1)[0]
+            path, _, query = self.path.partition("?")
             resp = web.handle_request(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
@@ -1610,6 +1609,8 @@ def make_web_handler(
                 untracked_provider=untracked_provider,
                 discoverable_provider=discoverable_provider,
                 sid_action_provider=sid_action_provider,
+                recall_provider=recall_provider,
+                query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
                 poll_seconds=poll_seconds,
@@ -1881,6 +1882,24 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 return False, f"unknown op {op}"
         return res.ok, res.message
 
+    def recall_provider(query: str, sid: str | None) -> dict:
+        # Lazy GET (never the poll path): print-only transcript search, the
+        # dashboard surface of `crr recall`. sid -> that one session; no sid ->
+        # global (search_all bounds the newest-first whole-transcript sweep by
+        # bytes and reports what it skipped). No lock: reads only.
+        snippet_cap = config.get("recall_snippet_cap")
+        match_cap = config.get("recall_match_cap")
+        if sid is not None:
+            matches = transcript_source.search_transcript(sid, query, cap=snippet_cap)
+            for m in matches:
+                m["session_id"] = sid
+            return {"matches": transcript.rank_matches(matches, limit=match_cap),
+                    "scanned": 1, "skipped": 0}
+        return transcript_source.search_all(
+            query, snippet_cap=snippet_cap, match_cap=match_cap,
+            byte_budget=config.get("recall_scan_byte_budget"),
+        )
+
     # Host allowlist: loopback + this host's name + tailnet suffix + any
     # config.toml extras.
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
@@ -1892,6 +1911,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         untracked_provider=untracked_provider,
         discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
+        recall_provider=recall_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),
