@@ -334,12 +334,41 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_14():
-    """Explicit version check: v14 injects page timing/caps (confirm-arm,
-    notice, stale-reload delay, diagnostics error display cap) from config
-    instead of hardcoding them, and (commit 3, no further bump) renders
-    diagnostics source/boot provenance."""
-    assert web.PAGE_VERSION == 14
+def test_page_version_is_15():
+    """Explicit version check: v15 (Task A4) adds true-recency sort +
+    relative-time display (T-A), a compaction badge from context_pressure
+    (F2), and a per-cwd "latest" marker (T-B)."""
+    assert web.PAGE_VERSION == 15
+
+
+def test_page_recency_sort_keys_on_last_active_with_updated_fallback():
+    # T-A: the "Recent" sort must key on last_active, falling back to
+    # updated only when last_active is empty — never the reverse.
+    page = web.render_page()
+    assert "recencyKey" in page
+    assert "s.last_active || s.updated" in page
+
+
+def test_page_has_relative_time_helper():
+    page = web.render_page()
+    assert "function relTime(iso)" in page
+    assert "just now" in page
+
+
+def test_page_has_compaction_badge_and_legend_note():
+    # F2: badge per card from context_pressure, plus a legend line noting
+    # it's an estimate.
+    page = web.render_page()
+    assert "context_pressure" in page
+    assert "will compact on revive" in page
+    assert "estimate" in page
+
+
+def test_page_has_latest_per_cwd_marker():
+    # T-B: the newest session per cwd gets a "latest" chip.
+    page = web.render_page()
+    assert "function latestPerCwd(sessions)" in page
+    assert "latest-badge" in page
 
 
 def test_page_untrack_label_present_de_tmux_label_gone():
