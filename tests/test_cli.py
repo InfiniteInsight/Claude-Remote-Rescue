@@ -1689,21 +1689,38 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
     assert "crr no longer manages it" in out
 
 
-def test_untracked_view_omits_last_prompt():
-    # last_prompt is a status-CARD field (contracts.py); a journal entry
-    # (what archive records wrap) never carries one, so reading
-    # entry.get("last_prompt", "") off it is structurally always "" — not
-    # a real value. The dashboard/API shape must not advertise a field
-    # that can never be anything but an empty string.
+def test_untracked_view_reads_last_prompt_from_the_transcript(tmp_path, monkeypatch):
+    # A journal entry (what an archive record wraps) never carries last_prompt,
+    # but the untracked session's transcript is still on disk — so the retrack
+    # panel reads the real last prompt from it (parity with the discoverable
+    # panel), rather than omitting the field. Lazy panel only, never the poll.
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/p42", sid, [
+        _discover_user_rec("the last thing I typed", cwd="/p42"),
+    ])
     entry = new_entry(
         pid=42, cwd="/p42", host="tmux", shell="zsh", boot_id="old-boot",
-        now="2026-07-24T00:00:00Z",
-        claude=_claude_field("eeeeeeee-5555-4555-8555-555555555555"),
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
     )
     record = {"entry": entry, "reason": "untracked", "archived_at": "2026-08-01T00:00:00+00:00"}
-    view = cli._untracked_view(record)
-    assert "last_prompt" not in view
-    assert set(view) == {"session_id", "sid8", "cwd", "archived_at"}
+    view = cli._untracked_view(record, cap=80, model_tail_lines=40)
+    assert view["last_prompt"] == "the last thing I typed"
+    assert set(view) == {"session_id", "sid8", "cwd", "archived_at", "last_prompt"}
+
+
+def test_untracked_view_last_prompt_empty_when_transcript_absent(tmp_path, monkeypatch):
+    # A gone/unreadable transcript degrades to "" — honest empty, never an error.
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    entry = new_entry(
+        pid=42, cwd="/p42", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    )
+    record = {"entry": entry, "reason": "untracked", "archived_at": "2026-08-01T00:00:00+00:00"}
+    view = cli._untracked_view(record, cap=80, model_tail_lines=40)
+    assert view["last_prompt"] == ""
 
 
 # --- retrack (C2) — undo untrack/detmux, no platform gating needed --------

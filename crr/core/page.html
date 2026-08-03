@@ -587,12 +587,12 @@ function sidAction(op, sid, btn, onDone) {
 }
 
 // Shared row for both lazy sid-keyed lists: sid8 + cwd + relative age +
-// (discoverable rows only) last_prompt, plus one trailing action button.
-// Untrusted fields (cwd, last_prompt, sid8) -> textContent only, exactly
-// like renderCard. Untracked ("retrack") rows never carry a last_prompt —
-// it's structurally always "" for them (see cli._untracked_view) — so no
-// prompt div is rendered at all for op === "retrack", rather than showing
-// an always-empty one.
+// last_prompt, plus one trailing action button. Both panels now carry a
+// real last_prompt: discoverable rows from the live transcript, retrack
+// rows from the untracked session's on-disk transcript (see
+// cli._untracked_view) — so the user can tell candidates apart. Untrusted
+// fields (cwd, last_prompt, sid8) -> textContent only, exactly like
+// renderCard.
 function renderSidRow(r, ageIso, btnLabel, op, onDone) {
   var row = el("div", "u-row");
   var id = el("div", "id");
@@ -604,11 +604,9 @@ function renderSidRow(r, ageIso, btnLabel, op, onDone) {
   var time = el("div", "time");
   time.textContent = relTime(ageIso);
   row.appendChild(time);
-  if (op !== "retrack") {
-    var prompt = el("div", "prompt");
-    prompt.textContent = r.last_prompt || "";
-    row.appendChild(prompt);
-  }
+  var prompt = el("div", "prompt");
+  prompt.textContent = r.last_prompt || "";
+  row.appendChild(prompt);
   var actions = el("div", "actions");
   var btn = el("button");
   btn.textContent = btnLabel;
