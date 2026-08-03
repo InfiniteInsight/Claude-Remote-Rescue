@@ -165,6 +165,27 @@ def test_tail_facts_last_active_skips_records_with_no_timestamp():
     assert facts["last_active"] == "2026-01-01T00:00:00Z"
 
 
+# --- cwd extraction (T-C — discovery's authoritative cwd source) ----------
+
+
+def test_extract_cwd_reads_the_stamped_cwd():
+    record = _user("a prompt", cwd="/home/u/proj")
+    assert transcript.extract_cwd(record) == "/home/u/proj"
+
+
+def test_extract_cwd_none_when_absent():
+    assert transcript.extract_cwd(_user("a prompt")) is None
+
+
+def test_extract_cwd_none_for_non_mapping():
+    assert transcript.extract_cwd("not a record") is None
+
+
+@pytest.mark.parametrize("bad", ["", 123, None])
+def test_extract_cwd_none_for_malformed_values(bad):
+    assert transcript.extract_cwd({"cwd": bad}) is None
+
+
 # --- search (F1 — `crr recall`) -------------------------------------------
 
 

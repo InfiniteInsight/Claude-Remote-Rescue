@@ -115,6 +115,24 @@ def extract_timestamp(record: Mapping[str, Any]) -> str | None:
     return ts if isinstance(ts, str) and ts else None
 
 
+def extract_cwd(record: Mapping[str, Any]) -> str | None:
+    """Return the record's stamped ``cwd``, or None if absent/malformed.
+
+    Claude Code stamps ``cwd`` on every non-header record (the session-start
+    and snapshot lines near the top of a transcript don't carry it; the
+    first real turn does). This is the AUTHORITATIVE source for a session's
+    working directory — used by discovery (T-C) to seed an adopted entry's
+    ``cwd`` instead of decoding the project directory name, which is lossy
+    (a literal ``-`` inside a real path component, e.g. this repo's own
+    ``Claude-Remote-Rescue``, is indistinguishable from an encoded ``/``)
+    and can hand a revive path a directory that doesn't exist.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    cwd = record.get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
+
+
 def _assistant_text(record: Mapping[str, Any]) -> str | None:
     """The text of a real assistant turn, or None (tool-use/no-text/synthetic
     turns). Mirrors ``extract_model``'s ``<synthetic>`` skip: the assistant

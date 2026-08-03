@@ -154,6 +154,90 @@ def test_list_transcripts_absent_project_dir_is_empty(tmp_path):
     assert transcript_source.list_transcripts("/no/such/cwd", home=tmp_path) == []
 
 
+# --- list_all_transcripts / read_cwd (T-C — discovery) --------------------
+
+
+def test_list_all_transcripts_enumerates_across_projects(tmp_path):
+    sid_a = "aaaaaaaa-1111-4111-8111-111111111111"
+    sid_b = "bbbbbbbb-2222-4222-8222-222222222222"
+    _write_transcript(tmp_path, sid_a, [_user("a")], project="-home-u-projA")
+    _write_transcript(tmp_path, sid_b, [_user("b")], project="-home-u-projB")
+
+    got = transcript_source.list_all_transcripts(home=tmp_path)
+    by_id = {t["session_id"]: t for t in got}
+    assert set(by_id) == {sid_a, sid_b}
+    assert by_id[sid_a]["cwd"] == "/home/u/projA"
+    assert all(isinstance(t["mtime"], float) for t in got)
+
+
+def test_list_all_transcripts_decodes_cwd_from_project_dir_name(tmp_path):
+    sid = "aaaaaaaa-1111-4111-8111-111111111111"
+    _write_transcript(tmp_path, sid, [_user("a")], project="-home-u-proj")
+    got = transcript_source.list_all_transcripts(home=tmp_path)
+    assert got[0]["cwd"] == "/home/u/proj"
+
+
+def test_list_all_transcripts_skips_non_uuid_filenames(tmp_path):
+    # A non-UUID stem can never round-trip through the /api/sid-action
+    # UUID gate or ArchiveStore.path_for — filtered out here rather than
+    # surfaced as a "discoverable" entry nothing can actually adopt.
+    sid = "aaaaaaaa-1111-4111-8111-111111111111"
+    _write_transcript(tmp_path, sid, [_user("a")], project="-home-u-proj")
+    _write_transcript(tmp_path, "not-a-uuid", [_user("b")], project="-home-u-proj")
+    got = transcript_source.list_all_transcripts(home=tmp_path)
+    assert [t["session_id"] for t in got] == [sid]
+
+
+def test_list_all_transcripts_absent_projects_dir_is_empty(tmp_path):
+    assert transcript_source.list_all_transcripts(home=tmp_path) == []
+
+
+def test_list_all_transcripts_no_content_read(tmp_path, monkeypatch):
+    # Cheap by design: glob + stat only, no file open.
+    sid = "aaaaaaaa-1111-4111-8111-111111111111"
+    _write_transcript(tmp_path, sid, [_user("a")], project="-home-u-proj")
+    real_open = open
+
+    def guarded_open(*a, **kw):
+        raise AssertionError("list_all_transcripts must not open file content")
+
+    import builtins
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    try:
+        got = transcript_source.list_all_transcripts(home=tmp_path)
+    finally:
+        monkeypatch.setattr(builtins, "open", real_open)
+    assert len(got) == 1
+
+
+def test_read_cwd_finds_the_stamped_cwd(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("a prompt", cwd="/home/u/Real-Path-With-Dashes"),
+    ])
+    assert transcript_source.read_cwd(sid, home=tmp_path) == "/home/u/Real-Path-With-Dashes"
+
+
+def test_read_cwd_missing_transcript_is_none(tmp_path):
+    assert transcript_source.read_cwd("no-such-sid", home=tmp_path) is None
+
+
+def test_read_cwd_absent_field_is_none(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [_user("a prompt")])
+    assert transcript_source.read_cwd(sid, home=tmp_path) is None
+
+
+def test_read_cwd_bounded_to_scan_lines(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    noise = [_user("no cwd here") for _ in range(10)]
+    _write_transcript(tmp_path, sid, [*noise, _user("has cwd", cwd="/home/u/proj")])
+    # cwd sits past the tiny scan window -> not found (bounded, honest None).
+    assert transcript_source.read_cwd(sid, home=tmp_path, scan_lines=5) is None
+    # A large-enough window finds it.
+    assert transcript_source.read_cwd(sid, home=tmp_path, scan_lines=20) == "/home/u/proj"
+
+
 def test_reverse_lines_yields_end_to_start(tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("a\nb\nc\n", encoding="utf-8")

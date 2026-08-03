@@ -8,7 +8,7 @@ no platform gating.
 
 import pytest
 
-from crr.core import ops
+from crr.core import contracts, ops
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 from crr.core.reviver import revive_crashed
@@ -397,7 +397,8 @@ def test_detmux_archives_and_delists_the_entry(tmp_path):
     # The reviver owns tmux_session (its reset branch re-parks a cleared
     # field within one watchdog pass and would later resurrect the
     # conversation) — successful detmux must take the entry out of crr's
-    # management entirely: archive (reason "detmuxed"), then delist.
+    # management entirely: archive (reason "untracked" — terminology change:
+    # detmux -> untrack), then delist.
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tab = FakeTabSpawner()
@@ -409,7 +410,7 @@ def test_detmux_archives_and_delists_the_entry(tmp_path):
         store.read(42)
     records = archive.scan().records
     assert len(records) == 1
-    assert records[0]["reason"] == "detmuxed"
+    assert records[0]["reason"] == "untracked"
     assert records[0]["entry"]["pid"] == 42
 
 
@@ -636,6 +637,167 @@ def test_untmux_spawn_failure_after_kill_leaves_entry_for_the_watchdog(tmp_path)
     assert "watchdog" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
     assert archive.scan().records == []
+
+
+# --- retrack ------------------------------------------------------------------
+#
+# The undo of untrack/detmux: read the archive record, re-journal its entry,
+# remove the record. Only records archived for that reason are eligible.
+
+def _archive_untracked(archive, pid=42, reason="untracked", now=_NOW):
+    entry = new_entry(
+        pid=pid, cwd=f"/p{pid}", host="tmux", shell="zsh",
+        boot_id="entry-boot", now=now, claude=_claude(),
+    )
+    archive.archive(entry, reason, now)
+    return entry
+
+
+def test_retrack_rejournals_and_removes_the_archive_record(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.ok, res.message
+    entry = store.read(42)
+    assert entry["claude"]["session_id"] == _SID
+    with pytest.raises(KeyError):
+        archive.read(_SID)
+
+
+def test_retrack_stamps_updated_with_now(tmp_path):
+    # Re-journaling is itself a change to the entry — a stale `updated`
+    # (still the pre-untrack timestamp) would misrepresent when the entry
+    # last changed.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, now=_NOW)
+    later = "2026-07-25T00:00:00Z"
+    ops.retrack(store, archive, _SID, later)
+    assert store.read(42)["updated"] == later
+
+
+def test_retrack_message_reports_the_sid8(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.message == f"retracked {_SID[:8]}"
+
+
+def test_retrack_accepts_the_deprecated_detmuxed_reason(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, reason="detmuxed")
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.ok, res.message
+    assert store.read(42)["claude"]["session_id"] == _SID
+    with pytest.raises(KeyError):
+        archive.read(_SID)
+
+
+def test_retrack_entry_becomes_a_valid_journal_entry(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    ops.retrack(store, archive, _SID, _NOW)
+    contracts.validate_journal_entry(store.read(42))  # raises if invalid
+
+
+def test_retrack_refuses_a_missing_archive_record(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "no archived session" in res.message
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+def test_retrack_refuses_a_malformed_sid(tmp_path):
+    # archive.read raises ContractError (not KeyError) for a non-UUID sid —
+    # both must refuse the same honest way, never let a bad sid reach a
+    # path/glob.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    res = ops.retrack(store, archive, "not-a-uuid", _NOW)
+    assert not res.ok
+    assert "no archived session" in res.message
+
+
+@pytest.mark.parametrize("reason", [
+    "dismissed", "gave-up", "ghost-restored", "untmuxed",
+    "superseded-on-register", "superseded-on-launch",
+])
+def test_retrack_refuses_non_untracked_reasons(tmp_path, reason):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, reason=reason)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "not untracked" in res.message
+    # untouched: the record stays archived, nothing is journaled.
+    assert archive.read(_SID)["reason"] == reason
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+_OTHER_SID = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+
+def test_retrack_works_when_the_pid_slot_is_free(tmp_path):
+    # The recycled-pid guard must not block the ordinary case: nothing
+    # occupies pid 42 in the journal, so retrack proceeds exactly as before.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    with pytest.raises(KeyError):
+        store.read(42)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.ok, res.message
+    assert store.read(42)["claude"]["session_id"] == _SID
+    with pytest.raises(KeyError):
+        archive.read(_SID)
+
+
+def test_retrack_refuses_when_pid_slot_now_belongs_to_a_different_live_session(tmp_path):
+    # A recycled pid: the OS handed 42 to a different, currently-tracked
+    # session before retrack ran. Writing the archived entry there would
+    # clobber the live one AND then archive.remove would destroy the only
+    # remaining record of the conversation being retracked.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, pid=42)
+    live_claude = {
+        "session_id": _OTHER_SID, "sid_source": "injected", "started": _NOW,
+    }
+    _seed(store, 42, claude=live_claude)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "42" in res.message
+    assert "different session" in res.message
+    # The live entry must survive untouched.
+    assert store.read(42)["claude"]["session_id"] == _OTHER_SID
+    # The archive record must survive — refusing must not destroy it.
+    assert archive.read(_SID)["reason"] == "untracked"
+
+
+def test_retrack_refuses_when_the_pid_slot_is_already_this_sid(tmp_path):
+    # Already tracked under that pid (e.g. a duplicate retrack request) —
+    # refuse without touching the archive record.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, pid=42)
+    _seed(store, 42, claude=_claude())
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "already tracked" in res.message
+    assert archive.read(_SID)["reason"] == "untracked"
+
+
+def test_retrack_refuses_when_the_pid_slot_is_unreadable(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, pid=42)
+    tabs_dir = tmp_path / "tabs"
+    tabs_dir.mkdir(parents=True, exist_ok=True)
+    (tabs_dir / "42.json").write_text("not json", encoding="utf-8")
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "42" in res.message
+    # Refusing must not destroy the archive record.
+    assert archive.read(_SID)["reason"] == "untracked"
+    # The unreadable file itself must be left untouched — refusing must
+    # not have written the archived entry over it.
+    assert (tabs_dir / "42.json").read_text(encoding="utf-8") == "not json"
 
 
 # --- kick / close -----------------------------------------------------------

@@ -103,8 +103,10 @@ pipx install claude-remote-rescue      # or: pip install --user .
 | `crr remove --pid N` | Delist a session, touch nothing else |
 | `crr kick <pid>` | Restart claude in place on the same conversation |
 | `crr close <pid>` | End a live session (remote exit); no revival |
-| `crr detmux <pid>` | Re-home a revived tmux session into a visible tab (dashboard button: `Untrack` — the tab still runs tmux underneath) |
+| `crr untrack <pid>` (alias `crr detmux <pid>`) | Stop tracking a session — re-home a revived tmux session into a visible tab, archive it, and delist it (dashboard button: `Untrack` — the tab still runs tmux underneath) |
 | `crr untmux <pid>` | Kill a parked tmux session and relaunch `claude --resume` directly in a visible tab, no tmux wrapper left behind (dashboard button: `Un-tmux`, confirm-gated) |
+| `crr retrack [--last N \| --sid ID]` | Undo untrack/detmux: restore the N most-recently untracked sessions (default 10), or one by `--sid`, back into crr's management |
+| `crr discover [--adopt SID]` | List untracked transcripts crr never journaled, or adopt one with `--adopt` into crr's management (revive via `crr reopen`; the watchdog may start a second `claude --resume` if the session is still alive elsewhere) |
 | `crr rescued` | List conversations the reviver already parked in tmux from a previous boot, awaiting re-home |
 | `crr diagnose [--json]` | Explain why the previous boot / sessions may have died |
 | `crr gc` | Drop archive records past the retention window |

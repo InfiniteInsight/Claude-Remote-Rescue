@@ -436,8 +436,17 @@ def test_archive_dismissed_reason_accepted():
 
 
 def test_archive_detmuxed_reason_accepted():
+    # Deprecated spelling — pre-rename archive records must still validate.
     r = _archive_record()
     r["reason"] = "detmuxed"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_archive_untracked_reason_accepted():
+    # Terminology change: detmux -> untrack; ops.detmux now archives with
+    # this reason.
+    r = _archive_record()
+    r["reason"] = "untracked"
     contracts.validate_archive_record(r)  # must not raise
 
 

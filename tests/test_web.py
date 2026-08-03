@@ -55,7 +55,8 @@ def _payload():
 
 
 def _handle(method="GET", path="/", host="localhost", provider=None,
-            body=b"", headers=None, action_provider=None):
+            body=b"", headers=None, action_provider=None,
+            untracked_provider=None, discoverable_provider=None, sid_action_provider=None):
     h = {"Host": host}
     if headers:
         h.update(headers)
@@ -63,6 +64,9 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         method, path, h, body,
         sessions_provider=provider or _payload,
         action_provider=action_provider,
+        untracked_provider=untracked_provider,
+        discoverable_provider=discoverable_provider,
+        sid_action_provider=sid_action_provider,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
     )
@@ -118,6 +122,77 @@ def test_diagnostics_endpoint_uses_provider_lazily():
 
 def test_diagnostics_endpoint_404_without_provider():
     assert _handle(path="/api/diagnostics").status == 404
+
+
+# --------------------------------------------------------------------------
+# GET /api/untracked — the last N untracked/detmuxed archive records (C2)
+# --------------------------------------------------------------------------
+
+_UNTRACKED_ITEM = {
+    "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "sid8": "8a1b2c3d",
+    "cwd": "/home/u/proj",
+    "archived_at": "2026-08-01T00:00:00+00:00",
+}
+
+
+def test_untracked_endpoint_uses_provider_lazily():
+    calls = []
+
+    def untracked():
+        calls.append(1)
+        return [_UNTRACKED_ITEM]
+
+    resp = _handle(path="/api/untracked", untracked_provider=untracked)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "application/json"
+    body = json.loads(resp.body)
+    assert body == [_UNTRACKED_ITEM]
+    # No last_prompt: a journal entry (what an archive record wraps) never
+    # carries one, so it would be structurally always "" — cli._untracked_view
+    # deliberately omits it rather than advertise a fake field.
+    assert set(body[0]) == {"session_id", "sid8", "cwd", "archived_at"}
+    assert calls == [1]  # only called when the endpoint is hit
+
+
+def test_untracked_endpoint_404_without_provider():
+    assert _handle(path="/api/untracked").status == 404
+
+
+# --------------------------------------------------------------------------
+# GET /api/discoverable — untracked transcripts (T-C, C3)
+# --------------------------------------------------------------------------
+
+_DISCOVERABLE_ITEM = {
+    "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "sid8": "8a1b2c3d",
+    "cwd": "/home/u/proj",
+    "last_active": "2026-08-01T00:00:00+00:00",
+    "transcript_bytes": 123,
+    "last_prompt": "hi",
+}
+
+
+def test_discoverable_endpoint_uses_provider_lazily():
+    calls = []
+
+    def discoverable():
+        calls.append(1)
+        return [_DISCOVERABLE_ITEM]
+
+    resp = _handle(path="/api/discoverable", discoverable_provider=discoverable)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "application/json"
+    body = json.loads(resp.body)
+    assert body == [_DISCOVERABLE_ITEM]
+    assert set(body[0]) == {
+        "session_id", "sid8", "cwd", "last_active", "transcript_bytes", "last_prompt",
+    }
+    assert calls == [1]  # only called when the endpoint is hit
+
+
+def test_discoverable_endpoint_404_without_provider():
+    assert _handle(path="/api/discoverable").status == 404
 
 
 def test_unknown_path_is_404():
@@ -196,7 +271,14 @@ def test_actions_include_kick_and_close():
     assert "close" in web.ACTIONS
 
 
+def test_actions_include_untrack():
+    from crr.core import web
+    assert "untrack" in web.ACTIONS
+
+
 def test_actions_include_detmux():
+    # Deprecated alias — the dashboard button now posts "untrack", but the
+    # server must keep accepting "detmux" for back-compat.
     from crr.core import web
     assert "detmux" in web.ACTIONS
 
@@ -224,7 +306,18 @@ def test_post_kick_is_accepted_and_dispatched():
     assert seen == {"op": "kick", "pid": 5}
 
 
+def test_post_untrack_is_accepted_and_dispatched():
+    seen = {}
+    def act(op, pid):
+        seen["call"] = (op, pid)
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it"
+    resp = _post({"op": "untrack", "pid": 42}, action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("untrack", 42)
+
+
 def test_post_detmux_is_accepted_and_dispatched():
+    # Deprecated alias must still round-trip through /api/action.
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
@@ -255,6 +348,123 @@ def test_post_untmux_is_accepted_and_dispatched():
 def test_post_to_non_action_path_is_404():
     resp = _handle(method="POST", path="/api/other", body=b"{}", headers=_JSON)
     assert resp.status == 404
+
+
+def test_post_action_still_rejects_a_bad_pid_unchanged():
+    # /api/sid-action is a SEPARATE route (C2) — must not weaken the
+    # existing pid-keyed /api/action's strict validation.
+    resp = _post({"op": "reopen", "pid": "not-an-int"},
+                 action_provider=lambda o, p: (True, "should-not-run"))
+    assert resp.status == 400
+
+
+# --------------------------------------------------------------------------
+# POST /api/sid-action — sid-keyed ops (C2), separate from /api/action
+# --------------------------------------------------------------------------
+
+_VALID_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def _post_sid(payload=None, host="localhost", headers=None, sid_action_provider=None, raw=None):
+    body = raw if raw is not None else json.dumps(payload or {}).encode()
+    return _handle(method="POST", path="/api/sid-action", host=host,
+                   body=body, headers=headers if headers is not None else _JSON,
+                   sid_action_provider=sid_action_provider)
+
+
+def test_sid_actions_include_retrack():
+    assert "retrack" in web.SID_ACTIONS
+
+
+def test_sid_actions_include_adopt():
+    assert "adopt" in web.SID_ACTIONS
+
+
+def test_post_sid_action_adopt_dispatches_and_returns_result():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, f"adopted {sid[:8]} — now tracked as recoverable"
+
+    resp = _post_sid({"op": "adopt", "sid": _VALID_SID}, sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("adopt", _VALID_SID)
+    assert json.loads(resp.body) == {"ok": True, "message": f"adopted {_VALID_SID[:8]} — now tracked as recoverable"}
+
+
+def test_post_sid_action_adopt_gate_refusal_is_409():
+    resp = _post_sid({"op": "adopt", "sid": _VALID_SID},
+                     sid_action_provider=lambda o, s: (False, "not discoverable"))
+    assert resp.status == 409
+    assert json.loads(resp.body)["ok"] is False
+
+
+def test_post_sid_action_dispatches_and_returns_result():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, f"retracked {sid[:8]}"
+
+    resp = _post_sid({"op": "retrack", "sid": _VALID_SID}, sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("retrack", _VALID_SID)
+    assert json.loads(resp.body) == {"ok": True, "message": f"retracked {_VALID_SID[:8]}"}
+
+
+def test_post_sid_action_gate_refusal_is_409():
+    resp = _post_sid({"op": "retrack", "sid": _VALID_SID},
+                     sid_action_provider=lambda o, s: (False, "no archived session"))
+    assert resp.status == 409
+    assert json.loads(resp.body)["ok"] is False
+
+
+def test_post_sid_action_rejects_unknown_op():
+    resp = _post_sid({"op": "nuke", "sid": _VALID_SID},
+                     sid_action_provider=lambda o, s: (True, "should-not-run"))
+    assert resp.status == 400
+
+
+@pytest.mark.parametrize("sid", [
+    "not-a-uuid",
+    "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d\n",  # trailing newline must not slip through
+    123,
+    None,
+])
+def test_post_sid_action_rejects_a_non_uuid_sid(sid):
+    resp = _post_sid({"op": "retrack", "sid": sid},
+                     sid_action_provider=lambda o, s: (True, "should-not-run"))
+    assert resp.status == 400
+
+
+def test_post_sid_action_rejects_missing_sid():
+    resp = _post_sid({"op": "retrack"}, sid_action_provider=lambda o, s: (True, "should-not-run"))
+    assert resp.status == 400
+
+
+def test_post_sid_action_without_json_content_type_is_415():
+    resp = _post_sid({"op": "retrack", "sid": _VALID_SID}, headers={},
+                     sid_action_provider=lambda o, s: (True, "ok"))
+    assert resp.status == 415
+
+
+def test_post_sid_action_bad_json_is_400():
+    resp = _post_sid(raw=b"{not json", sid_action_provider=lambda o, s: (True, "ok"))
+    assert resp.status == 400
+
+
+def test_post_sid_action_missing_provider_is_503():
+    resp = _post_sid({"op": "retrack", "sid": _VALID_SID})
+    assert resp.status == 503
+
+
+def test_post_sid_action_disallowed_host_is_403_before_dispatch():
+    called = []
+    resp = _post_sid({"op": "retrack", "sid": _VALID_SID}, host="evil.com",
+                     sid_action_provider=lambda o, s: called.append(1) or (True, "ok"))
+    assert resp.status == 403
+    assert called == []
 
 
 def test_options_preflight_is_rejected():
@@ -334,11 +544,11 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_15():
-    """Explicit version check: v15 (Task A4) adds true-recency sort +
-    relative-time display (T-A), a compaction badge from context_pressure
-    (F2), and a per-cwd "latest" marker (T-B)."""
-    assert web.PAGE_VERSION == 15
+def test_page_version_is_18():
+    """Explicit version check: v18 (Slice C fix-wave) disclosed the
+    competing-resume hazard in the adopt note and stopped rendering an
+    always-empty prompt div for untracked ("retrack") rows."""
+    assert web.PAGE_VERSION == 18
 
 
 def test_page_recency_sort_keys_on_last_active_with_updated_fallback():
@@ -375,6 +585,41 @@ def test_page_untrack_label_present_de_tmux_label_gone():
     page = web.render_page()
     assert "Untrack" in page
     assert "De-tmux" not in page
+
+
+def test_page_has_recently_untracked_section_lazy_like_diagnostics():
+    # C4: a collapsible section, lazy-fetched from /api/untracked only on
+    # open — never on the 5s sessions poll path (mirrors the diagnostics
+    # panel pattern).
+    page = web.render_page()
+    assert "Recently untracked" in page
+    assert '"/api/untracked"' in page
+    assert "Retrack" in page
+    assert '"retrack"' in page
+
+
+def test_page_has_discoverable_section_lazy_with_adopt_note():
+    # C4: a second collapsible section, lazy-fetched from /api/discoverable,
+    # with an Adopt action and a static clarifying note (adoption != a live
+    # process attachment).
+    page = web.render_page()
+    assert "Discoverable (untracked)" in page
+    assert '"/api/discoverable"' in page
+    assert "Adopt" in page
+    assert '"adopt"' in page
+    # Discloses the competing-resume hazard: an adopted entry is always a
+    # revive candidate, so if the real session is still running elsewhere
+    # the watchdog will start a second `claude --resume` on it.
+    assert "does NOT attach to a running process" in page
+    assert "second" in page and "claude --resume" in page
+
+
+def test_page_sid_action_helper_posts_json_to_sid_action_endpoint():
+    # Both new sections must use the sid-keyed endpoint (not /api/action)
+    # with the same JSON Content-Type CSRF gate as the existing action POST.
+    page = web.render_page()
+    assert '"/api/sid-action"' in page
+    assert page.count('"Content-Type": "application/json"') >= 2
 
 
 def test_page_renders_diagnostics_source_and_boot_provenance():
