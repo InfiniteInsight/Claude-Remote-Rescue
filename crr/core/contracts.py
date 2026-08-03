@@ -93,7 +93,8 @@ ARCHIVE_REASONS = (
     "superseded-on-launch",
     "gave-up",
     "dismissed",
-    "detmuxed",
+    "detmuxed",  # deprecated: pre-rename spelling; kept so old records still validate
+    "untracked",  # ops.detmux/untrack's current archive reason (terminology: detmux -> untrack)
     "ghost-restored",
     "untmuxed",
 )

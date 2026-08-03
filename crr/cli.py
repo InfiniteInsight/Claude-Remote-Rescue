@@ -6,7 +6,7 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close/detmux/untmux), recall (print-only
+(reopen/dismiss/remove/kick/close/untrack/untmux), recall (print-only
 transcript search), diagnose, gc, the web dashboard, the systemd watchdog,
 and the shim-facing hooks.
 """
@@ -122,9 +122,12 @@ def _build_parser() -> argparse.ArgumentParser:
     close.add_argument("pid", type=int)
     close.set_defaults(func=_cmd_close)
 
-    dtm = sub.add_parser("detmux", help="re-home a revived tmux session into a visible tab")
-    dtm.add_argument("pid", type=int)
-    dtm.set_defaults(func=_cmd_detmux)
+    utk = sub.add_parser(
+        "untrack", aliases=["detmux"],
+        help="stop tracking a session — archive it and re-home into a visible tab",
+    )
+    utk.add_argument("pid", type=int)
+    utk.set_defaults(func=_cmd_untrack)
 
     utm = sub.add_parser(
         "untmux", help="kill a parked tmux session and relaunch claude --resume in a visible tab"
@@ -900,16 +903,18 @@ def _cmd_close(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
-def _cmd_detmux(args: argparse.Namespace) -> int:
+def _cmd_untrack(args: argparse.Namespace) -> int:
+    """Handler for both the primary ``untrack`` command and its deprecated
+    ``detmux`` alias (terminology change: detmux -> untrack)."""
     try:
         boot = boot_identity.detect()
     except NotImplementedError as exc:
-        print(f"crr detmux: {exc}", file=sys.stderr)
+        print(f"crr untrack: {exc}", file=sys.stderr)
         return 2
     config = _load_config()
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     if not tmux_spawner.available():
-        print("crr detmux: tmux was not found", file=sys.stderr)
+        print("crr untrack: tmux was not found", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
@@ -1350,7 +1355,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "kick":
                 res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
-            elif op == "detmux":
+            elif op in ("untrack", "detmux"):  # detmux: deprecated alias, same op
                 res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             elif op == "untmux":
                 res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)

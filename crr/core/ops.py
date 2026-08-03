@@ -343,7 +343,10 @@ def detmux(
     except Exception as exc:  # adapter subprocess/osascript failure
         return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
     if entry.get("claude") is not None:
-        archive.archive(entry, "detmuxed", now)
+        # Terminology: detmux -> untrack (dashboard/CLI); "detmuxed" stays a
+        # valid archive reason for pre-rename records, but new archives use
+        # the current name.
+        archive.archive(entry, "untracked", now)
     store.remove(pid)
     return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab; crr no longer manages it")
 

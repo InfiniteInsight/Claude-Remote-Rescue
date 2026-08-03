@@ -30,7 +30,7 @@ from crr.core import config as cfg
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 15  # v15: T-A recency sort/relative-time, F2 compaction badge, T-B latest-per-cwd marker
+PAGE_VERSION = 16  # v16: Untrack button posts op "untrack" (C1 terminology: detmux -> untrack)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -148,7 +148,7 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
-ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "detmux", "untmux")
+ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", "untmux")
 
 
 def _plain(status: int, text: str) -> Response:

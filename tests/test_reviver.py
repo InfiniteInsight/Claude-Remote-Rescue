@@ -255,6 +255,24 @@ def test_detmuxed_archive_record_is_not_re_revived(tmp_path):
     assert tmux.created == []
 
 
+def test_untracked_archive_record_is_not_re_revived(tmp_path):
+    # Terminology change: detmux -> untrack; ops.detmux now archives with
+    # reason "untracked" rather than "detmuxed". Same terminal skip as
+    # test_detmuxed_archive_record_is_not_re_revived above, exercised
+    # against the current (not the deprecated) reason spelling.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(), tmux_session="crr-8a1b2c3d",
+    )
+    archive.archive(entry, "untracked", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())  # the attached tab's tmux session is gone
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []
+
+
 def test_untmuxed_archive_record_is_not_re_revived(tmp_path):
     # [user request 2026-07-31] An untmuxed record is also terminal: the
     # user took manual ownership of a bare `claude --resume` in a visible
@@ -282,8 +300,8 @@ def test_ghost_restored_archive_records_are_revival_candidates(tmp_path):
     # card's conversation to the archive as "ghost-restored" *before*
     # attempting the spawn — a spawn failure there must not strand the
     # conversation: the watchdog's next revive pass has to pick it up. The
-    # skip tuple stays (gave-up, detmuxed, dismissed); ghost-restored is not
-    # in it.
+    # skip tuple stays (gave-up, detmuxed, untracked, untmuxed, dismissed);
+    # ghost-restored is not in it.
     store = JournalStore(tmp_path)
     archive = ArchiveStore(tmp_path)
     entry = new_entry(

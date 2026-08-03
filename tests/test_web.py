@@ -196,7 +196,14 @@ def test_actions_include_kick_and_close():
     assert "close" in web.ACTIONS
 
 
+def test_actions_include_untrack():
+    from crr.core import web
+    assert "untrack" in web.ACTIONS
+
+
 def test_actions_include_detmux():
+    # Deprecated alias — the dashboard button now posts "untrack", but the
+    # server must keep accepting "detmux" for back-compat.
     from crr.core import web
     assert "detmux" in web.ACTIONS
 
@@ -224,7 +231,18 @@ def test_post_kick_is_accepted_and_dispatched():
     assert seen == {"op": "kick", "pid": 5}
 
 
+def test_post_untrack_is_accepted_and_dispatched():
+    seen = {}
+    def act(op, pid):
+        seen["call"] = (op, pid)
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it"
+    resp = _post({"op": "untrack", "pid": 42}, action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("untrack", 42)
+
+
 def test_post_detmux_is_accepted_and_dispatched():
+    # Deprecated alias must still round-trip through /api/action.
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
@@ -334,11 +352,11 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_15():
-    """Explicit version check: v15 (Task A4) adds true-recency sort +
-    relative-time display (T-A), a compaction badge from context_pressure
-    (F2), and a per-cwd "latest" marker (T-B)."""
-    assert web.PAGE_VERSION == 15
+def test_page_version_is_16():
+    """Explicit version check: v16 (Task C1) posts the dashboard "Untrack"
+    button's op as "untrack" instead of the deprecated "detmux" op name
+    (terminology change: detmux -> untrack)."""
+    assert web.PAGE_VERSION == 16
 
 
 def test_page_recency_sort_keys_on_last_active_with_updated_fallback():

@@ -397,7 +397,8 @@ def test_detmux_archives_and_delists_the_entry(tmp_path):
     # The reviver owns tmux_session (its reset branch re-parks a cleared
     # field within one watchdog pass and would later resurrect the
     # conversation) — successful detmux must take the entry out of crr's
-    # management entirely: archive (reason "detmuxed"), then delist.
+    # management entirely: archive (reason "untracked" — terminology change:
+    # detmux -> untrack), then delist.
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tab = FakeTabSpawner()
@@ -409,7 +410,7 @@ def test_detmux_archives_and_delists_the_entry(tmp_path):
         store.read(42)
     records = archive.scan().records
     assert len(records) == 1
-    assert records[0]["reason"] == "detmuxed"
+    assert records[0]["reason"] == "untracked"
     assert records[0]["entry"]["pid"] == 42
 
 

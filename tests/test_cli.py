@@ -575,6 +575,24 @@ def test_restore_is_an_alias_for_reopen(monkeypatch):
     assert seen["pid"] == 111111
 
 
+def test_detmux_is_an_alias_for_untrack(monkeypatch):
+    """Terminology change: detmux -> untrack; 'detmux' stays a deprecated
+    alias (mirrors restore->reopen)."""
+    seen = {}
+
+    def fake_untrack(args):
+        seen["pid"] = args.pid
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_untrack", fake_untrack)
+    assert cli.main(["detmux", "424242"]) == 0
+    assert seen["pid"] == 424242
+    # The primary name must still route the same way (aliases=[...] must not
+    # have displaced "untrack" itself).
+    assert cli.main(["untrack", "111111"]) == 0
+    assert seen["pid"] == 111111
+
+
 def test_systemd_install_and_uninstall_together_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(cli.subprocess, "run",

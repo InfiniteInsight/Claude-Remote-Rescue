@@ -364,7 +364,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     addBtn("Reopen", "reopen", false, false);
     addBtn("Dismiss", "dismiss", false, false);
     if (s.tmux_session) {        // revived into tmux: offer re-homing
-      addBtn("Untrack", "detmux", false, false);
+      addBtn("Untrack", "untrack", false, false);
       // kills the tmux session and relaunches `claude --resume` directly
       // in a visible tab -- confirm-gated (second click) since it kills.
       addBtn("Un-tmux", "untmux", true, true);

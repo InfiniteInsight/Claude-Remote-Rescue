@@ -133,10 +133,12 @@ def revive_crashed(
             revived.append(pid)
 
     # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'
-    #    is abandoned for good, 'detmuxed' has been re-homed to a visible
+    #    is abandoned for good, 'untracked' (formerly 'detmuxed' — terminology
+    #    change: detmux -> untrack; both spellings are terminal here, the old
+    #    one kept for pre-rename records) has been re-homed to a visible
     #    tab under the user's manual ownership — reviving it here would
     #    resurrect the conversation the moment the user exits claude in that
-    #    tab, exactly what detmux's delist is meant to prevent — 'untmuxed'
+    #    tab, exactly what untrack's delist is meant to prevent — 'untmuxed'
     #    is the same terminality one step further (the tab runs a bare
     #    `claude --resume`, no tmux wrapper left at all — reviving it would
     #    both resurrect the conversation and contradict the tmux session
@@ -145,7 +147,7 @@ def revive_crashed(
     #    their decision. The two 'superseded-*' reasons stay revivable on
     #    purpose: their archives exist to preserve revival data.)
     for record in archive.scan().records:
-        if record["reason"] in ("gave-up", "detmuxed", "untmuxed", "dismissed"):
+        if record["reason"] in ("gave-up", "detmuxed", "untracked", "untmuxed", "dismissed"):
             continue
         entry = record["entry"]
         action, updated, name = _decide(entry, live, max_strikes, now)
