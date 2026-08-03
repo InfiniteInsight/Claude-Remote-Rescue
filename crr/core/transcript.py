@@ -115,6 +115,67 @@ def extract_timestamp(record: Mapping[str, Any]) -> str | None:
     return ts if isinstance(ts, str) and ts else None
 
 
+def _assistant_text(record: Mapping[str, Any]) -> str | None:
+    """The text of a real assistant turn, or None (tool-use/no-text turns)."""
+    if not isinstance(record, Mapping) or record.get("type") != "assistant":
+        return None
+    message = record.get("message")
+    if not isinstance(message, Mapping) or message.get("role") != "assistant":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, Mapping) and b.get("type") == "text"
+        ]
+        # A list with no text blocks (tool_use only) is not a display turn.
+        return "\n".join(texts) if texts else None
+    return None
+
+
+def search(
+    records: Iterable[Mapping[str, Any]], query: str, *, cap: int, context: int = 0,
+) -> list[dict[str, Any]]:
+    """Case-insensitive substring search over real prompt/assistant turns.
+
+    Pure and testable with synthetic records (F1 — ``crr recall``): reuses
+    ``extract_prompt``/``clean_display``/``extract_timestamp`` so the same
+    noise skip-list that keeps cards honest also keeps recall from surfacing
+    tool-result/meta garbage. Each match carries its chronological ``index``
+    (position in ``records``) so a caller can order results (e.g.
+    most-recent-first) without re-deriving recency from scratch.
+
+    ``context`` is a clean extension point for pulling in N adjacent turns'
+    text (not yet implemented — only ``context=0``, the matching turn alone,
+    is supported today).
+    """
+    query_lower = query.lower()
+    matches: list[dict[str, Any]] = []
+    for index, record in enumerate(list(records)):
+        prompt = extract_prompt(record)
+        if prompt is not None:
+            if query_lower in prompt.lower():
+                matches.append({
+                    "role": "user",
+                    "text": clean_display(prompt, cap),
+                    "index": index,
+                    "timestamp": extract_timestamp(record) or "",
+                })
+            continue
+        text = _assistant_text(record)
+        if text is not None and query_lower in text.lower():
+            matches.append({
+                "role": "assistant",
+                "text": clean_display(text, cap),
+                "index": index,
+                "timestamp": extract_timestamp(record) or "",
+            })
+    return matches
+
+
 def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, str]:
     """Most recent real prompt + model + activity timestamp, in one pass.
 

@@ -161,3 +161,80 @@ def test_tail_facts_last_active_skips_records_with_no_timestamp():
     ]
     facts = transcript.tail_facts(records, cap=100)
     assert facts["last_active"] == "2026-01-01T00:00:00Z"
+
+
+# --- search (F1 — `crr recall`) -------------------------------------------
+
+
+def test_search_matches_a_user_prompt_case_insensitively():
+    records = [_user("the quick brown Fox")]
+    out = transcript.search(records, "FOX", cap=100)
+    assert out == [{"role": "user", "text": "the quick brown Fox", "index": 0, "timestamp": ""}]
+
+
+def test_search_matches_assistant_text():
+    records = [_assistant("the answer involves a fox")]
+    out = transcript.search(records, "fox", cap=100)
+    assert out == [
+        {"role": "assistant", "text": "the answer involves a fox", "index": 0, "timestamp": ""}
+    ]
+
+
+def test_search_no_match_returns_empty_list():
+    records = [_user("hello there"), _assistant("general kenobi")]
+    assert transcript.search(records, "nonexistent", cap=100) == []
+
+
+def test_search_preserves_chronological_index_across_matches():
+    records = [
+        _user("first fox sighting"),
+        _assistant("no fox here"),
+        _user("second fox sighting"),
+    ]
+    out = transcript.search(records, "fox", cap=100)
+    assert [m["index"] for m in out] == [0, 1, 2]
+    assert [m["role"] for m in out] == ["user", "assistant", "user"]
+
+
+def test_search_skips_tool_result_and_meta_noise():
+    records = [
+        _user([{"type": "tool_result", "content": "fox output"}]),
+        _user("<task-notification>a fox task finished</task-notification>"),
+        _user("<command-name>/fox", isMeta=True),
+        _user("a real fox prompt"),
+    ]
+    out = transcript.search(records, "fox", cap=100)
+    assert out == [
+        {"role": "user", "text": "a real fox prompt", "index": 3, "timestamp": ""}
+    ]
+
+
+def test_search_ignores_assistant_tool_use_turns_with_no_text():
+    records = [{"type": "assistant", "message": {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "name": "fox_tool", "input": {}}],
+    }}]
+    assert transcript.search(records, "fox", cap=100) == []
+
+
+def test_search_caps_and_cleans_the_matched_text():
+    raw = "a   fox\nwith\n\nlots   of space " + "x" * 100
+    records = [_user(raw)]
+    out = transcript.search(records, "fox", cap=20)
+    assert out[0]["text"] == " ".join(raw.split())[:20]
+    assert len(out[0]["text"]) == 20
+
+
+def test_search_includes_timestamp_when_present():
+    records = [_user("a fox prompt", timestamp="2026-01-02T00:00:00Z")]
+    out = transcript.search(records, "fox", cap=100)
+    assert out[0]["timestamp"] == "2026-01-02T00:00:00Z"
+
+
+def test_search_matches_assistant_text_from_list_content_blocks():
+    records = [{"type": "assistant", "message": {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "a fox in a list block"}],
+    }}]
+    out = transcript.search(records, "fox", cap=100)
+    assert out[0]["text"] == "a fox in a list block"
