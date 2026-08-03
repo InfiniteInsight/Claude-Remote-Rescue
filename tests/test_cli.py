@@ -1689,21 +1689,38 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
     assert "crr no longer manages it" in out
 
 
-def test_untracked_view_omits_last_prompt():
-    # last_prompt is a status-CARD field (contracts.py); a journal entry
-    # (what archive records wrap) never carries one, so reading
-    # entry.get("last_prompt", "") off it is structurally always "" — not
-    # a real value. The dashboard/API shape must not advertise a field
-    # that can never be anything but an empty string.
+def test_untracked_view_reads_last_prompt_from_the_transcript(tmp_path, monkeypatch):
+    # A journal entry (what an archive record wraps) never carries last_prompt,
+    # but the untracked session's transcript is still on disk — so the retrack
+    # panel reads the real last prompt from it (parity with the discoverable
+    # panel), rather than omitting the field. Lazy panel only, never the poll.
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/p42", sid, [
+        _discover_user_rec("the last thing I typed", cwd="/p42"),
+    ])
     entry = new_entry(
         pid=42, cwd="/p42", host="tmux", shell="zsh", boot_id="old-boot",
-        now="2026-07-24T00:00:00Z",
-        claude=_claude_field("eeeeeeee-5555-4555-8555-555555555555"),
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
     )
     record = {"entry": entry, "reason": "untracked", "archived_at": "2026-08-01T00:00:00+00:00"}
-    view = cli._untracked_view(record)
-    assert "last_prompt" not in view
-    assert set(view) == {"session_id", "sid8", "cwd", "archived_at"}
+    view = cli._untracked_view(record, cap=80, model_tail_lines=40)
+    assert view["last_prompt"] == "the last thing I typed"
+    assert set(view) == {"session_id", "sid8", "cwd", "archived_at", "last_prompt"}
+
+
+def test_untracked_view_last_prompt_empty_when_transcript_absent(tmp_path, monkeypatch):
+    # A gone/unreadable transcript degrades to "" — honest empty, never an error.
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    entry = new_entry(
+        pid=42, cwd="/p42", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    )
+    record = {"entry": entry, "reason": "untracked", "archived_at": "2026-08-01T00:00:00+00:00"}
+    view = cli._untracked_view(record, cap=80, model_tail_lines=40)
+    assert view["last_prompt"] == ""
 
 
 # --- retrack (C2) — undo untrack/detmux, no platform gating needed --------
@@ -2875,6 +2892,45 @@ def test_takeover_happy_path_orders_arm_before_kill_before_adopt(tmp_path, monke
     scan = store.scan()
     matches = [e for e in scan.entries if e.get("claude", {}).get("session_id") == _TAKEOVER_SID]
     assert len(matches) == 1
+
+
+def test_takeover_success_message_omits_the_competing_session_warning(tmp_path, monkeypatch):
+    # Plain adopt warns "if the session is still alive elsewhere, the watchdog
+    # will start a SECOND claude --resume" — takeover just STOPPED the live
+    # process, so that warning is false here and must be dropped.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    calls: list = []
+    store = _RecordingStore(tmp_path / "state", calls)
+    proc = ResumeProcess(pid=101, ppid=51, pgid=777)
+    controller = _FakeResumeController([proc, proc], calls)
+    flags = _FakeTakeoverFlags(calls)
+    ok, msg = cli._takeover(
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        max_wait=180.0,
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+    assert ok
+    assert "still alive elsewhere" not in msg
+    assert "second `claude --resume`" not in msg
+    # still an honest adoption message
+    assert "adopted" in msg and "recoverable" in msg
+
+
+def test_plain_adopt_keeps_the_competing_session_warning(tmp_path, monkeypatch):
+    # The default path (crr discover --adopt / crr adopt, no takeover) has NOT
+    # stopped any live process, so it must keep disclosing the hazard.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    store = JournalStore(tmp_path / "state")
+    ok, msg = cli._adopt(store, tmp_path / "state", _TAKEOVER_SID)
+    assert ok
+    assert "still alive elsewhere" in msg
 
 
 def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypatch):

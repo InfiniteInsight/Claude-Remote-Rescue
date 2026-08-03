@@ -1,5 +1,33 @@
 # Claude-Remote-Rescue — Autonomous Completion Handoff
 
+> ## ✅ FULFILLED — HISTORICAL (updated 2026-08-03)
+>
+> **Every code item in this handoff has shipped, and the cutover is done.**
+> This document is kept for its method + isolation-recipe reference value; its
+> forward-looking sections below are historical, not a live to-do list.
+>
+> - **#4 Slice 2b (shim repair loop)** — shipped; task #4 complete.
+> - **#10 (dashboard de-tmux, since renamed `untrack`)** — shipped; plus
+>   `retrack`, discovery/`adopt`, recall, the compaction-pressure badge, and
+>   `adopt --takeover` (safe adoption of a still-live session) landed after.
+> - **#9 (packaging artifacts)** — shipped.
+> - **The production cutover** — **DONE.** crr is now the live tool.
+>
+> **⚠️ The "ABSOLUTE SAFETY RULES" below are INVERTED by the cutover.** They
+> describe the PRE-cutover world where **ccresume** was production. Today
+> **crr IS production** on HedyLamarr: it owns port **8377**
+> (`crr-web.service`), the watchdog (`crr-revive.timer`), the shim, and the
+> live sessions. ccresume is **retired** (kept only as a rollback net). So the
+> same care those rules demanded for ccresume now applies to **crr**: never
+> disrupt the live crr sessions or rebind 8377; all on-hardware testing stays
+> isolated (scratch `HOME`/`XDG_STATE_HOME`, a fake `claude`, no dangling);
+> restart `crr-web.service` to deploy a page change. The isolation recipe in
+> §0 is still valid technique — only the "what is production" premise flipped.
+>
+> Current state of record lives in the git history and the specs under
+> `docs/superpowers/`. Publishing (GitHub release/tag, Homebrew/AUR, public
+> announcement) remains the one genuinely human-gated item still open.
+
 **Audience:** an autonomous agent (Fable) tasked with finishing crr in one pass.
 **Author of this handoff:** the Opus session that built Slices 1 + 2a of task #4.
 **Prime directive:** complete all remaining **code**, merging each unit on

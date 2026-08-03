@@ -26,6 +26,20 @@ def test_window_for_unknown_model_falls_back_to_default():
     assert cp.window_for("") == cp.DEFAULT_WINDOW
 
 
+def test_confirmed_model_windows():
+    # Confirmed against published docs (web, 2026-08): the 1M-context tier...
+    for model in (
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-fable-5",
+    ):
+        assert cp.window_for(model) == 1_000_000, model
+    # ...and Claude Haiku 4.5, confirmed at 200K (smaller than the 1M tier).
+    assert cp.window_for("claude-haiku-4-5-20251001") == 200_000
+
+
 def test_default_window_is_200k():
     assert cp.DEFAULT_WINDOW == 200_000
 

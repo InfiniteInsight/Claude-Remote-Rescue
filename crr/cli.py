@@ -998,25 +998,28 @@ def _recent_untracked_records(records: list[dict], n: int) -> list[dict]:
     return sorted(candidates, key=lambda r: r["archived_at"], reverse=True)[:n]
 
 
-def _untracked_view(record: dict) -> dict:
-    """The /api/untracked (and dashboard) shape for one archive record.
+def _untracked_view(record: dict, cap: int, model_tail_lines: int) -> dict:
+    """The /api/untracked (and dashboard retrack panel) shape for one archive
+    record, including a transcript-read ``last_prompt``.
 
-    Cheap fields only, no transcript read. Deliberately carries no
-    ``last_prompt``: that's only ever a status-CARD field (contracts.py),
-    never present on a journal entry (what an archive record wraps), so
-    reading it off ``entry`` would be structurally always "" — a fake
-    "unknown" dressed up as a real field, not an honest one. Backing it
-    with a transcript read instead is also out of scope here (that's what
-    ``_discoverable_rows`` does for the adopt/discover path, at the cost
-    of a real read per row).
+    The wrapped journal entry never carries ``last_prompt`` itself (that's a
+    status-CARD field, contracts.py), but the untracked session's transcript
+    is still on disk, so we read the real last prompt from it — parity with
+    the discoverable panel (``_discoverable_rows``), so the user can tell one
+    retrack candidate from another. One ``read_tail_facts`` per record; safe
+    here because ``/api/untracked`` is a lazy panel (opened on demand, capped
+    at 10 records), never the poll path. A gone/unreadable transcript degrades
+    to an honest ``""``, never an error.
     """
     entry = record["entry"]
     sid = entry["claude"]["session_id"]
+    facts = transcript_source.read_tail_facts(sid, cap, model_tail_lines=model_tail_lines)
     return {
         "session_id": sid,
         "sid8": sid[:8],
         "cwd": entry["cwd"],
         "archived_at": record["archived_at"],
+        "last_prompt": facts["last_prompt"],
     }
 
 
@@ -1125,11 +1128,15 @@ def _discoverable_rows(
     return discovery.untracked(journaled, enriched), scan.problems
 
 
-def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
+def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = True) -> tuple[bool, str]:
     """Adopt one discoverable (untracked) transcript into the journal.
 
     Shared by ``crr discover --adopt`` and the web ``/api/sid-action
-    {op:"adopt"}`` provider. The cwd resolution (``_discoverable_rows``)
+    {op:"adopt"}`` provider (which leave ``competing_note`` on — they have
+    NOT stopped any live process, so the "a second ``claude --resume`` may
+    start" hazard is real and must be disclosed) and by ``_takeover`` (which
+    passes ``competing_note=False`` — it just stopped the live process, so
+    that warning would be false there). The cwd resolution (``_discoverable_rows``)
     reads transcript content and runs OUTSIDE any lock; only the final
     re-check + write happens under ``mutation_lock`` — holding the lock
     across N transcript reads would stall every other op (the revive timer
@@ -1173,12 +1180,14 @@ def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
             # archive/journal discipline forbids elsewhere).
             return False, f"cannot adopt {sid[:8]}: synthetic pid slot collision, refusing to overwrite"
         store.write(entry)
-    return True, (
-        f"adopted {sid[:8]} — now tracked as recoverable (revive via `crr reopen`); "
-        "NOTE: this does NOT attach to a running process — and if the session is "
-        "still alive elsewhere, the watchdog will start a second `claude --resume` "
-        "on the same conversation."
-    )
+    msg = f"adopted {sid[:8]} — now tracked as recoverable (revive via `crr reopen`)"
+    if competing_note:
+        msg += (
+            "; NOTE: this does NOT attach to a running process — and if the session is "
+            "still alive elsewhere, the watchdog will start a second `claude --resume` "
+            "on the same conversation."
+        )
+    return True, msg
 
 
 def _takeover(
@@ -1283,7 +1292,7 @@ def _takeover(
             flags.clear(proc.ppid)  # no kill landed -> the flag must not linger
             return False, f"takeover: failed to stop live pid {proc.pid}: {exc}"
 
-    ok, msg = _adopt(store, sd, sid)
+    ok, msg = _adopt(store, sd, sid, competing_note=False)
     sid8 = sid[:8]
     prefix = f"took over {sid8} (stopped live pid {proc.pid})"
     if ok:
@@ -1816,8 +1825,14 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return gather_diagnostics(config)  # lazy: only on panel open, never on poll
 
     def untracked_provider() -> list[dict]:
-        # Lazy, like diagnostics: never on the poll path.
-        return [_untracked_view(r) for r in _recent_untracked_records(archive.scan().records, 10)]
+        # Lazy, like diagnostics: never on the poll path (reads one transcript
+        # per record for last_prompt — capped at 10, only on panel open).
+        cap = config.get("last_prompt_display_cap")
+        model_tail_lines = config.get("model_tail_lines")
+        return [
+            _untracked_view(r, cap, model_tail_lines)
+            for r in _recent_untracked_records(archive.scan().records, 10)
+        ]
 
     def discoverable_provider() -> list[dict]:
         # Lazy (T-C): reads transcript content per untracked candidate —

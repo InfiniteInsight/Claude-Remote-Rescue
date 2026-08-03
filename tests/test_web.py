@@ -133,6 +133,7 @@ _UNTRACKED_ITEM = {
     "sid8": "8a1b2c3d",
     "cwd": "/home/u/proj",
     "archived_at": "2026-08-01T00:00:00+00:00",
+    "last_prompt": "the last thing I typed",
 }
 
 
@@ -148,10 +149,10 @@ def test_untracked_endpoint_uses_provider_lazily():
     assert resp.headers["Content-Type"] == "application/json"
     body = json.loads(resp.body)
     assert body == [_UNTRACKED_ITEM]
-    # No last_prompt: a journal entry (what an archive record wraps) never
-    # carries one, so it would be structurally always "" — cli._untracked_view
-    # deliberately omits it rather than advertise a fake field.
-    assert set(body[0]) == {"session_id", "sid8", "cwd", "archived_at"}
+    # last_prompt IS present now: cli._untracked_view reads it from the
+    # untracked session's on-disk transcript (parity with the discoverable
+    # panel), so the retrack panel can show what each candidate was about.
+    assert set(body[0]) == {"session_id", "sid8", "cwd", "archived_at", "last_prompt"}
     assert calls == [1]  # only called when the endpoint is hit
 
 
@@ -544,11 +545,18 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_18():
-    """Explicit version check: v18 (Slice C fix-wave) disclosed the
-    competing-resume hazard in the adopt note and stopped rendering an
-    always-empty prompt div for untracked ("retrack") rows."""
-    assert web.PAGE_VERSION == 18
+def test_page_version_is_19():
+    """Explicit version check: v19 renders a real last_prompt on the retrack
+    rows too (read from the untracked session's transcript), so renderSidRow
+    no longer skips the prompt div for op === "retrack"."""
+    assert web.PAGE_VERSION == 19
+
+
+def test_page_retrack_rows_render_last_prompt():
+    # v19: the retrack prompt div is no longer gated out — both sid-row panels
+    # render last_prompt.
+    page = web.render_page()
+    assert 'if (op !== "retrack")' not in page
 
 
 def test_page_recency_sort_keys_on_last_active_with_updated_fallback():

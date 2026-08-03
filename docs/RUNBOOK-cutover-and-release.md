@@ -1,5 +1,11 @@
 # RUNBOOK — production cutover and first release
 
+> **Update 2026-08-03:** the **cutover is COMPLETE** — crr is now the live
+> tool on HedyLamarr (owns port 8377, the watchdog, and the shim; ccresume
+> retired as a rollback net). The cutover phases below are **historical
+> record**. The **release/publishing** phase (GitHub release/tag,
+> Homebrew/AUR, announcement) is **still pending** and remains human-gated.
+
 **Status:** written by the autonomous completion session, deliberately **not
 executed** — both procedures are human-gated: the cutover disrupts your live
 sessions and must be done with you present; publishing needs your accounts
