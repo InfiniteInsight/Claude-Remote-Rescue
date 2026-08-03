@@ -31,7 +31,9 @@ from typing import Any, Mapping
 # print caps; see crr.core.transcript.search)
 # v5: added takeover_idle_seconds / takeover_max_wait_seconds /
 # takeover_poll_seconds (`crr adopt --takeover`; see crr.core.takeover)
-CONFIG_DEFAULTS_VERSION = 5
+# v6: added recall_scan_byte_budget (dashboard global recall — bounds the
+# newest-first whole-transcript sweep; see transcript_source.search_all)
+CONFIG_DEFAULTS_VERSION = 6
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -87,6 +89,10 @@ DEFAULTS: dict[str, Any] = {
     # grep for your own history, not a transcript dump (never uncapped).
     "recall_match_cap": 5,      # max matches printed, most-recent-first (-n)
     "recall_snippet_cap": 500,  # chars of matched text shown per match
+    # dashboard global recall: cap the cumulative bytes of transcript read in
+    # one newest-first sweep (a whole-file read per transcript is unbounded
+    # otherwise; multi-MB transcripts exist). Reports what it skipped.
+    "recall_scan_byte_budget": 50_000_000,
     # `crr adopt --takeover` (destructive: SIGTERMs a live process) — the
     # idle window + refusal timeout + poll cadence for the cli-owned wait
     # loop. See crr.core.takeover.ready_to_take_over. idle_window doubles

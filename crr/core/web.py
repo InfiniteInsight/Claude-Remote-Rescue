@@ -25,13 +25,14 @@ import json
 import re
 from importlib import resources
 from typing import Any, Callable, Mapping, NamedTuple
+from urllib.parse import parse_qs
 
 from crr.core import config as cfg
 from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 21  # v21: "Take over" button on discoverable rows (adopt --takeover parity), confirm-gated
+PAGE_VERSION = 22  # v22: dashboard recall (global search bar + per-card Search) — crr recall parity
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -179,8 +180,10 @@ def handle_request(
     untracked_provider: Callable[[], list[Any]] | None = None,
     discoverable_provider: Callable[[], list[Any]] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
+    recall_provider: Callable[[str, str | None], dict] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
+    query: str = "",
     page_version: int = PAGE_VERSION,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
@@ -225,6 +228,24 @@ def handle_request(
             if discoverable_provider is None:
                 return _plain(404, "not found")
             return _json(200, discoverable_provider())
+        if path == "/api/recall":
+            # Lazy GET (never the poll path): transcript search. The query
+            # string is parsed here (the composition root passes it in as
+            # `query`, keeping this handler a pure function). Guards mirror
+            # `crr recall`: a missing/empty/whitespace `q` is rejected (an
+            # empty substring matches every turn), and `sid` — when given —
+            # must be a real UUID before it reaches find_transcript's glob.
+            if recall_provider is None:
+                return _plain(404, "not found")
+            params = parse_qs(query)
+            q = (params.get("q", [""])[0]).strip()
+            if not q:
+                return _plain(400, "recall: query (q) required")
+            sid_vals = params.get("sid")
+            sid = sid_vals[0] if sid_vals else None
+            if sid is not None and not contracts.valid_session_id(sid):
+                return _plain(400, "recall: invalid session id")
+            return _json(200, recall_provider(q, sid))
         return _plain(404, "not found")
 
     if method == "POST":

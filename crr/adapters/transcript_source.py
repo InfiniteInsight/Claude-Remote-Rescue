@@ -297,6 +297,57 @@ def read_takeover_signal(session_id: str, home: Path | None = None) -> dict[str,
     return {"mtime": mtime, "tail_kind": tail_kind}
 
 
+def search_all(
+    query: str, *, snippet_cap: int, match_cap: int, byte_budget: int, home: Path | None = None,
+) -> dict:
+    """Global recall — search EVERY transcript on disk, newest-first, bounded.
+
+    Backs the dashboard's global recall box. Each ``search_transcript`` reads a
+    whole file forward, so an unbounded sweep over a machine with multi-MB
+    transcripts is real work; this walks ``list_all_transcripts`` sorted by
+    mtime DESCENDING (newest conversations first — the ones a recall usually
+    wants) and stops once the cumulative on-disk size would cross
+    ``byte_budget``. The newest transcript is always searched even if it alone
+    exceeds the budget. Returns ``{"matches", "scanned", "skipped"}``: matches
+    are tagged with their ``session_id`` and ranked most-recent-first (capped
+    to ``match_cap``); ``scanned`` is how many transcripts were searched;
+    ``skipped`` is how many newest-first transcripts the budget left unsearched
+    (surfaced to the user — no silent truncation).
+    """
+    home = home or Path.home()
+    transcripts = list_all_transcripts(home)
+    transcripts.sort(key=lambda t: t["mtime"], reverse=True)
+    matches: list[dict] = []
+    scanned = 0
+    skipped = 0
+    used = 0
+    for i, t in enumerate(transcripts):
+        sid = t["session_id"]
+        path = find_transcript(sid, home)
+        if path is None:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        # Always scan the newest; then stop once the budget would be exceeded,
+        # counting the current + remaining transcripts as skipped.
+        if scanned > 0 and used + size > byte_budget:
+            skipped = len(transcripts) - i
+            break
+        used += size
+        scanned += 1
+        for m in search_transcript(sid, query, cap=snippet_cap, home=home):
+            m = dict(m)
+            m["session_id"] = sid
+            matches.append(m)
+    return {
+        "matches": transcript.rank_matches(matches, limit=match_cap),
+        "scanned": scanned,
+        "skipped": skipped,
+    }
+
+
 def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,
