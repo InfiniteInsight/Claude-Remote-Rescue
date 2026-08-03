@@ -27,11 +27,11 @@ DEFAULT_WINDOW = 200_000
 # verified against real published specs, not treated as ground truth.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-8": 1_000_000,  # confirmed
-    "claude-opus-5": DEFAULT_WINDOW,  # PRIOR — verify
-    "claude-sonnet-5": DEFAULT_WINDOW,  # PRIOR — verify
+    "claude-opus-5": 1_000_000,  # confirmed (user, 2026-08)
+    "claude-sonnet-5": 1_000_000,  # confirmed (user, 2026-08)
     "claude-sonnet-4-6": DEFAULT_WINDOW,  # PRIOR — verify
-    "claude-haiku-4-5-20251001": DEFAULT_WINDOW,  # PRIOR — verify
-    "claude-fable-5": DEFAULT_WINDOW,  # PRIOR — verify
+    "claude-haiku-4-5-20251001": DEFAULT_WINDOW,  # PRIOR — verify (haiku is smaller)
+    "claude-fable-5": 1_000_000,  # confirmed (user, 2026-08)
 }
 
 
