@@ -184,7 +184,7 @@
 <div id="notice" role="status" aria-live="polite"></div>
 <div id="recall">
   <input id="recall-q" type="search" placeholder="Search transcripts…" autocomplete="off" aria-label="Search transcripts">
-  <button id="recall-all-btn" type="button">Search all</button>
+  <button id="recall-all-btn" type="button">Search recent</button>
 </div>
 <div id="recall-panel" hidden></div>
 <div id="diag">
@@ -757,8 +757,10 @@ document.getElementById("discoverable-btn").addEventListener("click", function (
 
 // Recall (crr recall parity): a GET to /api/recall, NOT sidAction — the
 // response is a match list, not an action result. sid scopes to one session
-// (per-card Search); no sid searches all transcripts (Search all). Lazy: only
-// on submit, never the poll path. All transcript text -> textContent.
+// (per-card Search); no sid searches the most-recent transcripts within a
+// byte budget (Search recent — the panel reports how many it skipped, so the
+// label never overclaims coverage). Lazy: only on submit, never the poll
+// path. All transcript text -> textContent.
 function renderRecall(data, scopeLabel) {
   var panel = document.getElementById("recall-panel");
   panel.hidden = false;
@@ -804,7 +806,7 @@ function runRecall(sid) {
   panel.textContent = "searching…";
   fetch(url)
     .then(function (r) { return r.json(); })
-    .then(function (data) { renderRecall(data, sid ? ("session " + sid.slice(0, 8)) : "all sessions"); })
+    .then(function (data) { renderRecall(data, sid ? ("session " + sid.slice(0, 8)) : "recent sessions"); })
     .catch(function () { panel.textContent = "recall unavailable"; });
 }
 document.getElementById("recall-all-btn").addEventListener("click", function () { runRecall(null); });
