@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from crr.core import transcript
+from crr.core import contracts, transcript
 from crr.core.config import DEFAULTS
 
 
@@ -56,6 +56,108 @@ def list_transcripts(cwd: str, home: Path | None = None) -> list[dict]:
             continue
         out.append({"session_id": path.stem, "mtime": mtime})
     return out
+
+
+def _decode_project_dir_name(name: str) -> str:
+    """Best-effort decode of a project dir name back to a cwd.
+
+    ``_project_dir_name`` encodes a cwd by replacing every ``/`` with
+    ``-``. That's LOSSY going the other way: a literal ``-`` inside a real
+    path component (e.g. this very repo's directory,
+    ``Claude-Remote-Rescue``) is indistinguishable from an encoded ``/`` —
+    ``"-home-u-Claude-Remote-Rescue".replace("-", "/")`` yields
+    ``/home/u/Claude/Remote/Rescue``, not the real path. This is therefore
+    a DISPLAY/fallback value, not authoritative: discovery prefers the cwd
+    a transcript's own records carry (see ``read_cwd``) and only falls back
+    to this decode when that read comes up empty (e.g. an empty
+    transcript). Note the round-trip back through ``_project_dir_name`` IS
+    stable (every ``-`` becomes a ``/`` here, then every ``/`` becomes a
+    ``-`` again there), so even a "wrong" decode still globs the correct
+    project directory — it's specifically cwd-as-*meaning* (display, or
+    passing it to a real filesystem `cwd=` spawn) that the lossiness
+    breaks, not cwd-as-*glob-key*.
+    """
+    return name.replace("-", "/")
+
+
+def list_all_transcripts(home: Path | None = None) -> list[dict]:
+    """Enumerate every transcript under ``~/.claude/projects/*/*.jsonl``.
+
+    Cheap by design: one glob + one ``stat()`` per file, no content read —
+    discovery's on-demand callers (`crr discover`, the lazy
+    `/api/discoverable` panel) enrich only the untracked subset afterward
+    (via ``read_tail_facts``/``read_cwd``); reading every transcript's
+    content here would waste work on the — usually much larger —
+    already-journaled majority. Only session-UUID-shaped filenames are
+    returned (``contracts.valid_session_id``): downstream, ``sid8``
+    derivation, ``ArchiveStore.path_for``, and the ``/api/sid-action``
+    UUID gate all assume the shape, so a non-UUID stem would surface as an
+    entry nothing can actually adopt.
+    """
+    home = home or Path.home()
+    projects = home / ".claude" / "projects"
+    if not projects.is_dir():
+        return []
+    out = []
+    for path in projects.glob("*/*.jsonl"):
+        session_id = path.stem
+        if not contracts.valid_session_id(session_id):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        out.append({
+            "session_id": session_id,
+            "cwd": _decode_project_dir_name(path.parent.name),
+            "mtime": mtime,
+        })
+    return out
+
+
+# Authoritative cwd shows up within the first handful of records in every
+# observed transcript (the session-start/snapshot header lines don't carry
+# it; the very first real turn does) — bounded so `read_cwd` never has to
+# read a multi-megabyte transcript end to end for a field that lives near
+# the top.
+_CWD_SCAN_LINES = 200
+
+
+def read_cwd(session_id: str, home: Path | None = None, scan_lines: int = _CWD_SCAN_LINES) -> str | None:
+    """The AUTHORITATIVE cwd a transcript's own records carry, or None.
+
+    Unlike ``_decode_project_dir_name`` (lossy: a literal ``-`` in a real
+    path component is indistinguishable from an encoded ``/``), this reads
+    the ``cwd`` Claude Code actually stamped on the session's turns — the
+    source of truth discovery (T-C) needs before handing an adopted entry's
+    cwd to anything that spawns with ``cwd=`` (a wrong directory there
+    doesn't just display wrong, it fails to revive). On-demand only (never
+    the poll path): a forward, line-capped read, distinct from
+    ``read_tail_facts``'s backward walk — adding a cwd search to that
+    early-exit condition would defeat it for cwd-less transcripts and cost
+    a full read on every 5s poll.
+    """
+    path = find_transcript(session_id, home)
+    if path is None:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= scan_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                cwd = transcript.extract_cwd(record)
+                if cwd is not None:
+                    return cwd
+    except OSError:
+        return None
+    return None
 
 
 def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:

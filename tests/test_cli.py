@@ -22,6 +22,7 @@ from crr import cli
 from crr.adapters import boot_identity, state_dir
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core import discovery
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 
@@ -1810,6 +1811,207 @@ def test_retrack_surfaces_scan_problems_on_stderr(tmp_path, monkeypatch, capsys)
     assert rc == 0
     assert "corrupt.json" in err
     assert "no untracked sessions to retrack" in out
+
+
+# --- discover (T-C, C3) — surface + adopt untracked transcripts -----------
+
+
+def _write_discover_transcript(home, cwd, sid, records):
+    d = home / ".claude" / "projects" / cwd.replace("/", "-")
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{sid}.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return p
+
+
+def _discover_user_rec(text, cwd=None, **extra):
+    rec = {"type": "user", "message": {"role": "user", "content": text}}
+    if cwd is not None:
+        rec["cwd"] = cwd
+    rec.update(extra)
+    return rec
+
+
+_DISCOVER_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def test_discover_lists_untracked_transcripts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj", timestamp="2026-08-01T00:00:00Z"),
+    ])
+    rc = cli.main(["discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert _DISCOVER_SID[:8] in out
+    assert "/home/u/proj" in out
+    assert "a prompt" in out
+
+
+def test_discover_excludes_journaled_sessions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(_DISCOVER_SID)
+    store.write(entry)
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    rc = cli.main(["discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert _DISCOVER_SID[:8] not in out
+    assert "no discoverable" in out
+
+
+def test_discover_empty_prints_a_clean_message(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    rc = cli.main(["discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no discoverable (untracked) transcripts" in out
+
+
+def test_discover_adopt_writes_a_valid_journal_entry(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    rc = cli.main(["discover", "--adopt", _DISCOVER_SID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "adopted" in out
+    assert _DISCOVER_SID[:8] in out
+    assert "does NOT attach to a live process" in out
+
+    store = JournalStore(tmp_path / "state")
+    scan = store.scan()
+    assert not scan.problems
+    matches = [e for e in scan.entries if e["claude"]["session_id"] == _DISCOVER_SID]
+    assert len(matches) == 1
+    entry = matches[0]
+    contracts.validate_journal_entry(entry)
+    assert entry["cwd"] == "/home/u/proj"
+    assert entry["claude"]["sid_source"] == "guessed"
+    assert entry["tmux_session"] is None
+
+
+def test_discover_adopt_uses_the_transcripts_authoritative_cwd(tmp_path, monkeypatch, capsys):
+    # The project dir name is "-home-u-Real-Dashed-Proj", which a naive
+    # decode would mangle into "/home/u/Real/Dashed/Proj". The transcript's
+    # own stamped cwd is what must land in the adopted entry.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/Real-Dashed-Proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/Real-Dashed-Proj"),
+    ])
+    rc = cli.main(["discover", "--adopt", _DISCOVER_SID])
+    assert rc == 0
+    entry = JournalStore(tmp_path / "state").scan().entries[0]
+    assert entry["cwd"] == "/home/u/Real-Dashed-Proj"
+
+
+def test_discover_adopt_rejects_a_malformed_sid(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    rc = cli.main(["discover", "--adopt", "not-a-uuid"])
+    assert rc == 2
+    assert "not a valid session id" in capsys.readouterr().err
+
+
+def test_discover_adopt_reports_a_non_discoverable_sid(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    rc = cli.main(["discover", "--adopt", _DISCOVER_SID])
+    assert rc == 1
+    assert "not a discoverable" in capsys.readouterr().err
+
+
+def test_discover_adopt_is_idempotent_on_repeat(tmp_path, monkeypatch, capsys):
+    # Re-adopting the same sid lands in the same pid slot rather than
+    # leaking a second journal file.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    rc1 = cli.main(["discover", "--adopt", _DISCOVER_SID])
+    assert rc1 == 0
+    # After the first adopt the sid is tracked, so it's no longer
+    # "discoverable" -> the second attempt refuses honestly rather than
+    # duplicating the entry.
+    capsys.readouterr()
+    rc2 = cli.main(["discover", "--adopt", _DISCOVER_SID])
+    assert rc2 == 1
+    store = JournalStore(tmp_path / "state")
+    matches = [e for e in store.scan().entries if e["claude"]["session_id"] == _DISCOVER_SID]
+    assert len(matches) == 1
+
+
+def test_discover_adopt_refuses_a_pid_slot_collision(tmp_path, monkeypatch, capsys):
+    # A different session's journal entry already occupies the deterministic
+    # synthetic pid slot discovery.adopted_pid(_DISCOVER_SID) would land in.
+    # Adopt must refuse rather than silently overwrite it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    other_sid = "99999999-9999-4999-8999-999999999999"
+    colliding_pid = discovery.adopted_pid(_DISCOVER_SID)
+    store.write(new_entry(
+        pid=colliding_pid, cwd="/home/u/other", host="tmux", shell="zsh",
+        boot_id="some-real-boot", now="2026-08-01T00:00:00Z",
+        claude=_claude_field(other_sid),
+    ))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+
+    rc = cli.main(["discover", "--adopt", _DISCOVER_SID])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "collision" in err
+
+    # The pre-existing entry must survive untouched.
+    entry = store.read(colliding_pid)
+    assert entry["claude"]["session_id"] == other_sid
+    assert entry["cwd"] == "/home/u/other"
+
+
+def test_discover_survives_a_naive_last_active_timestamp(tmp_path, monkeypatch, capsys):
+    # fromisoformat happily parses a timestamp with no UTC offset; naively
+    # subtracting it from the (always-aware) `_now()` raises TypeError, not
+    # ValueError — that must not crash the whole listing.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj", timestamp="2026-08-01T00:00:00"),
+    ])
+    rc = cli.main(["discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert _DISCOVER_SID[:8] in out
+
+
+def test_discover_surfaces_corrupt_journal_files_on_stderr(tmp_path, monkeypatch, capsys):
+    # Mirrors test_retrack_surfaces_scan_problems_on_stderr: a corrupt
+    # tabs/<pid>.json must be reported, never silently dropped — dropping
+    # it would leave that pid's sid out of the "journaled" exclusion set
+    # and surface an already-tracked session as falsely "discoverable".
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    tabs_dir = tmp_path / "state" / "tabs"
+    tabs_dir.mkdir(parents=True)
+    (tabs_dir / "99.json").write_text("not json", encoding="utf-8")
+
+    rc = cli.main(["discover"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "99.json" in err
+    assert "no discoverable" in out
 
 
 class _FakeBoot:

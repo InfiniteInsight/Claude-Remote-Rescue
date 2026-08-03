@@ -56,7 +56,7 @@ def _payload():
 
 def _handle(method="GET", path="/", host="localhost", provider=None,
             body=b"", headers=None, action_provider=None,
-            untracked_provider=None, sid_action_provider=None):
+            untracked_provider=None, discoverable_provider=None, sid_action_provider=None):
     h = {"Host": host}
     if headers:
         h.update(headers)
@@ -65,6 +65,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         sessions_provider=provider or _payload,
         action_provider=action_provider,
         untracked_provider=untracked_provider,
+        discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -154,6 +155,42 @@ def test_untracked_endpoint_uses_provider_lazily():
 
 def test_untracked_endpoint_404_without_provider():
     assert _handle(path="/api/untracked").status == 404
+
+
+# --------------------------------------------------------------------------
+# GET /api/discoverable — untracked transcripts (T-C, C3)
+# --------------------------------------------------------------------------
+
+_DISCOVERABLE_ITEM = {
+    "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "sid8": "8a1b2c3d",
+    "cwd": "/home/u/proj",
+    "last_active": "2026-08-01T00:00:00+00:00",
+    "transcript_bytes": 123,
+    "last_prompt": "hi",
+}
+
+
+def test_discoverable_endpoint_uses_provider_lazily():
+    calls = []
+
+    def discoverable():
+        calls.append(1)
+        return [_DISCOVERABLE_ITEM]
+
+    resp = _handle(path="/api/discoverable", discoverable_provider=discoverable)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "application/json"
+    body = json.loads(resp.body)
+    assert body == [_DISCOVERABLE_ITEM]
+    assert set(body[0]) == {
+        "session_id", "sid8", "cwd", "last_active", "transcript_bytes", "last_prompt",
+    }
+    assert calls == [1]  # only called when the endpoint is hit
+
+
+def test_discoverable_endpoint_404_without_provider():
+    assert _handle(path="/api/discoverable").status == 404
 
 
 def test_unknown_path_is_404():
@@ -335,6 +372,30 @@ def _post_sid(payload=None, host="localhost", headers=None, sid_action_provider=
 
 def test_sid_actions_include_retrack():
     assert "retrack" in web.SID_ACTIONS
+
+
+def test_sid_actions_include_adopt():
+    assert "adopt" in web.SID_ACTIONS
+
+
+def test_post_sid_action_adopt_dispatches_and_returns_result():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, f"adopted {sid[:8]} — now tracked as recoverable"
+
+    resp = _post_sid({"op": "adopt", "sid": _VALID_SID}, sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("adopt", _VALID_SID)
+    assert json.loads(resp.body) == {"ok": True, "message": f"adopted {_VALID_SID[:8]} — now tracked as recoverable"}
+
+
+def test_post_sid_action_adopt_gate_refusal_is_409():
+    resp = _post_sid({"op": "adopt", "sid": _VALID_SID},
+                     sid_action_provider=lambda o, s: (False, "not discoverable"))
+    assert resp.status == 409
+    assert json.loads(resp.body)["ok"] is False
 
 
 def test_post_sid_action_dispatches_and_returns_result():

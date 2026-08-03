@@ -6,9 +6,10 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close/untrack/untmux/retrack), recall
-(print-only transcript search), diagnose, gc, the web dashboard, the
-systemd watchdog, and the shim-facing hooks.
+(reopen/dismiss/remove/kick/close/untrack/untmux/retrack), discover
+(surface + adopt untracked transcripts, T-C), recall (print-only transcript
+search), diagnose, gc, the web dashboard, the systemd watchdog, and the
+shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, ops, ports, rescue, resume, reviver, status, web
+from crr.core import contracts, discovery, ops, ports, rescue, resume, reviver, status, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -143,6 +144,16 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="retrack the N most recently untracked sessions (default 10)")
     rtk.add_argument("--sid", default=None, help="retrack this specific archived session id")
     rtk.set_defaults(func=_cmd_retrack)
+
+    dsc = sub.add_parser(
+        "discover",
+        help="list transcripts on disk crr hasn't journaled yet (T-C)",
+    )
+    dsc.add_argument(
+        "--adopt", default=None, metavar="SID",
+        help="adopt this discoverable session id into crr's journal (recoverable, not live)",
+    )
+    dsc.set_defaults(func=_cmd_discover)
 
     rescued = sub.add_parser(
         "rescued",
@@ -1033,6 +1044,183 @@ def _cmd_retrack(args: argparse.Namespace) -> int:
     return 0 if ok_all else 1
 
 
+def _discoverable_rows(
+    store: JournalStore, config: cfg.Config | None = None,
+) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Untracked transcripts (T-C): everything on disk crr's journal doesn't
+    know about, enriched + recency-sorted (``crr.core.discovery.untracked``).
+
+    Filters against the journal BEFORE reading any transcript content
+    (``transcript_source.list_all_transcripts`` is glob+stat only), so a
+    mostly-already-tracked ``~/.claude/projects`` doesn't pay a
+    ``read_tail_facts``/``read_cwd`` read per already-journaled transcript
+    — only the (usually much smaller) untracked subset does. Acceptable
+    here (unlike the poll path) because every caller — `crr discover`, the
+    lazy `/api/discoverable` panel, and adopt's cwd resolution — is
+    on-demand, never the dashboard poll.
+
+    Returns ``(rows, problems)``: ``problems`` is the journal scan's
+    ``JournalScan.problems`` (corrupt/stale ``tabs/<pid>.json`` files) —
+    NOT silently dropped, because a corrupt file means its session_id never
+    entered the "journaled" exclusion set, so that already-tracked session
+    would otherwise appear as falsely "discoverable" (and adoptable into a
+    SECOND journal entry). The listing caller (`crr discover`) surfaces
+    these on stderr, mirroring `_cmd_retrack`/`_cmd_status`; a single-sid
+    caller (`_adopt`) and the web provider (which can't print) drop them —
+    same precedent as `_cmd_retrack --sid` not consulting the archive
+    scan's problems for a targeted lookup.
+    """
+    if config is None:
+        config = _load_config()
+    scan = store.scan()
+    journaled = {
+        e["claude"]["session_id"] for e in scan.entries if e.get("claude") is not None
+    }
+    cap = config.get("last_prompt_display_cap")
+    model_tail_lines = config.get("model_tail_lines")
+    enriched = []
+    for t in transcript_source.list_all_transcripts():
+        if t["session_id"] in journaled:
+            continue
+        facts = transcript_source.read_tail_facts(
+            t["session_id"], cap, model_tail_lines=model_tail_lines
+        )
+        # The transcript's own stamped cwd is authoritative (a revive spawn
+        # uses this cwd; the project-dir-name decode is lossy — see
+        # transcript_source._decode_project_dir_name); fall back to the
+        # decode only when nothing was read (e.g. an unreadable/near-empty
+        # transcript).
+        cwd = transcript_source.read_cwd(t["session_id"]) or t["cwd"]
+        enriched.append({
+            "session_id": t["session_id"],
+            "cwd": cwd,
+            "last_active": facts["last_active"],
+            "transcript_bytes": facts["transcript_bytes"],
+            "last_prompt": facts["last_prompt"],
+            "mtime": t["mtime"],
+        })
+    return discovery.untracked(journaled, enriched), scan.problems
+
+
+def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
+    """Adopt one discoverable (untracked) transcript into the journal.
+
+    Shared by ``crr discover --adopt`` and the web ``/api/sid-action
+    {op:"adopt"}`` provider. The cwd resolution (``_discoverable_rows``)
+    reads transcript content and runs OUTSIDE any lock; only the final
+    re-check + write happens under ``mutation_lock`` — holding the lock
+    across N transcript reads would stall every other op (the revive timer
+    included) for the duration of a full enumeration.
+    """
+    rows_list, _problems = _discoverable_rows(store)  # a targeted single-sid
+    # lookup; the caller isn't listing, so a scan problem elsewhere in the
+    # journal doesn't get printed here (mirrors `_cmd_retrack --sid`).
+    rows = {r["session_id"]: r for r in rows_list}
+    row = rows.get(sid)
+    if row is None:
+        return False, f"{sid[:8]} is not a discoverable (untracked) session"
+    with mutation_lock(sd):
+        # Re-check under the lock: another writer may have journaled this
+        # sid since the read above (register(), retrack, or a concurrent
+        # adopt of the same sid).
+        journaled = {
+            e["claude"]["session_id"] for e in store.scan().entries if e.get("claude") is not None
+        }
+        if sid in journaled:
+            return False, f"{sid[:8]} is already tracked"
+        entry = discovery.build_adopted_entry(row["session_id"], row["cwd"], _now())
+        pid = entry["pid"]
+        try:
+            existing = store.read(pid)
+        except KeyError:
+            existing = None  # slot is genuinely empty — safe to write
+        except (contracts.ContractError, OSError):
+            # Can't tell whose slot this is (a corrupt file or a read
+            # error — JournalStore.scan hits the same two reading its
+            # sibling files). Refuse rather than guess: silently treating
+            # "unreadable" as "empty" risks clobbering a real entry, which
+            # is exactly the kind of laundering this repo's archive/journal
+            # discipline forbids elsewhere.
+            return False, f"cannot adopt {sid[:8]}: pid slot {pid} is unreadable, refusing to guess"
+        if existing is not None and (existing.get("claude") or {}).get("session_id") != sid:
+            # The deterministic synthetic-pid slot (see discovery.adopted_pid)
+            # already belongs to a DIFFERENT entry — refuse rather than
+            # silently clobber it (a birthday-bound long shot, but a silent
+            # overwrite is exactly the kind of laundering this repo's
+            # archive/journal discipline forbids elsewhere).
+            return False, f"cannot adopt {sid[:8]}: synthetic pid slot collision, refusing to overwrite"
+        store.write(entry)
+    return True, (
+        f"adopted {sid[:8]} — now tracked as recoverable (revive via `crr reopen`); "
+        "NOTE: this does NOT attach to a live process."
+    )
+
+
+def _relative_age(iso: str, now_iso: str) -> str:
+    """"Xm/h/d ago" (or "just now"/"" for unknown) — the CLI's server-side
+    mirror of page.html's ``relTime()`` (T-A), for `crr discover`'s listing.
+    """
+    if not iso:
+        return ""
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return ""
+    # A transcript's stamped timestamp isn't guaranteed to carry a UTC
+    # offset (fromisoformat happily parses "2026-01-01 00:00:00" as naive);
+    # `_now()` always is. Subtracting an aware datetime from a naive one
+    # raises TypeError, not ValueError — normalize instead of crashing the
+    # whole `crr discover` listing over one honestly-timestamped-but-naive
+    # transcript (mirrors archive.is_expired's ValueError/TypeError guard).
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    diff = (now - t).total_seconds()
+    if diff < 60:
+        return "just now"
+    minutes = int(diff // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = int(diff // 3600)
+    if hours < 24:
+        return f"{hours}h ago"
+    days = int(diff // 86400)
+    return f"{days}d ago"
+
+
+def _cmd_discover(args: argparse.Namespace) -> int:
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+
+    if args.adopt is not None:
+        if not contracts.valid_session_id(args.adopt):
+            print(f"crr discover: {args.adopt!r} is not a valid session id", file=sys.stderr)
+            return 2
+        ok, message = _adopt(store, sd, args.adopt)
+        print(message, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+
+    rows, problems = _discoverable_rows(store)
+    # Corrupt journal files are surfaced on stderr, never silently dropped
+    # (mirrors _cmd_status/_cmd_retrack/_cmd_gc/_cmd_archive) — a session
+    # this listing can't exclude because its journal file failed to parse
+    # is a session that would otherwise look falsely "discoverable".
+    for name, reason in problems:
+        print(f"crr discover: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
+    if not rows:
+        print("no discoverable (untracked) transcripts")
+        return 0
+    now_iso = _now()
+    for r in rows:
+        age = _relative_age(r["last_active"], now_iso)
+        age_tag = f" {age}" if age else ""
+        prompt = f" — {r['last_prompt']}" if r["last_prompt"] else ""
+        print(f"{r['sid8']} {r['cwd']}{age_tag}{prompt}")
+    return 0
+
+
 def _cmd_rescued(_args: argparse.Namespace) -> int:
     """List prior-boot conversations the reviver parked in live tmux,
     awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
@@ -1199,6 +1387,7 @@ def make_web_handler(
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
     untracked_provider: Callable[[], list] | None = None,
+    discoverable_provider: Callable[[], list] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
@@ -1224,6 +1413,7 @@ def make_web_handler(
                 action_provider=action_provider,
                 diagnostics_provider=diagnostics_provider,
                 untracked_provider=untracked_provider,
+                discoverable_provider=discoverable_provider,
                 sid_action_provider=sid_action_provider,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -1462,7 +1652,21 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # Lazy, like diagnostics: never on the poll path.
         return [_untracked_view(r) for r in _recent_untracked_records(archive.scan().records, 10)]
 
+    def discoverable_provider() -> list[dict]:
+        # Lazy (T-C): reads transcript content per untracked candidate —
+        # never on the poll path, only when the "Discoverable" panel opens.
+        # Scan problems are dropped here (a web handler can't print to
+        # stderr); `crr discover` is where they're surfaced.
+        rows, _problems = _discoverable_rows(store, config)
+        return rows
+
     def sid_action_provider(op: str, sid: str) -> tuple[bool, str]:
+        if op == "adopt":
+            # _adopt takes its own mutation_lock scoped to just the
+            # re-check + write (see its docstring) — the transcript reads
+            # that resolve the cwd must NOT hold the lock the pid-keyed
+            # action_provider and the revive timer also contend for.
+            return _adopt(store, sd, sid)
         # Same mutation lock as action_provider — a sid-keyed op racing the
         # pid-keyed ops or the revive timer must not interleave.
         with mutation_lock(sd):
@@ -1481,6 +1685,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         action_provider=action_provider,
         diagnostics_provider=diagnostics_provider,
         untracked_provider=untracked_provider,
+        discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),

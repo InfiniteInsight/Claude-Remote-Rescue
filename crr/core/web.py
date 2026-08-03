@@ -152,9 +152,9 @@ def _header(headers: Mapping[str, str], name: str) -> str:
 ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", "untmux")
 
 # Sid-keyed actions — a SEPARATE namespace/endpoint from the pid-keyed
-# ACTIONS above (see POST /api/sid-action). "retrack" is C2; C3 extends this
-# with "adopt".
-SID_ACTIONS = ("retrack",)
+# ACTIONS above (see POST /api/sid-action). "retrack" is C2; "adopt" (C3)
+# journals a transcript crr never tracked (T-C discovery).
+SID_ACTIONS = ("retrack", "adopt")
 
 
 def _plain(status: int, text: str) -> Response:
@@ -175,6 +175,7 @@ def handle_request(
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
     untracked_provider: Callable[[], list[Any]] | None = None,
+    discoverable_provider: Callable[[], list[Any]] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
@@ -213,6 +214,15 @@ def handle_request(
             if untracked_provider is None:
                 return _plain(404, "not found")
             return _json(200, untracked_provider())
+        if path == "/api/discoverable":
+            # Lazy (T-C): the untracked-transcript scan reads transcript
+            # content per candidate — never on the poll path, only when the
+            # dashboard's "Discoverable" panel is opened. Shape:
+            # [{session_id, sid8, cwd, last_active, transcript_bytes,
+            #   last_prompt}, ...] — see crr.core.discovery.untracked.
+            if discoverable_provider is None:
+                return _plain(404, "not found")
+            return _json(200, discoverable_provider())
         return _plain(404, "not found")
 
     if method == "POST":
