@@ -233,3 +233,25 @@ def test_search_cwd_tags_matches_with_their_session_id(tmp_path):
 
 def test_search_cwd_no_transcripts_is_empty_list(tmp_path):
     assert transcript_source.search_cwd("/no/such/cwd", "fox", cap=100, home=tmp_path) == []
+
+
+def test_search_transcript_survives_invalid_utf8_bytes(tmp_path):
+    # A UnicodeDecodeError (ValueError subclass) raised mid-line-iteration
+    # happens BEFORE json.loads's try/except and would escape the outer
+    # `except OSError` in search_transcript, killing the whole search (and,
+    # under --all, the whole sweep) with a traceback. errors="replace" on
+    # the open() call keeps a corrupt file from raising at all.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    d = tmp_path / ".claude" / "projects" / "-home-u-proj"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{sid}.jsonl"
+    good_line = json.dumps({
+        "type": "user", "message": {"role": "user", "content": "a fox prompt"},
+    }).encode("utf-8")
+    with open(path, "wb") as fh:
+        fh.write(good_line + b"\n")
+        fh.write(b"\xff\xfe not valid utf-8 \x80\x81\n")  # invalid UTF-8 bytes
+        fh.write(good_line + b"\n")
+    matches = transcript_source.search_transcript(sid, "fox", cap=100, home=tmp_path)
+    assert len(matches) == 2
+    assert all(m["text"] == "a fox prompt" for m in matches)

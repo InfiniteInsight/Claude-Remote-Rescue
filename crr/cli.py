@@ -471,8 +471,20 @@ def _cmd_recall(args: argparse.Namespace) -> int:
     if args.pid is not None and args.sid is not None:
         print("crr recall: pass only one of --pid / --sid", file=sys.stderr)
         return 2
+    if args.sid is not None and args.all:
+        # --sid names one transcript; --all means "every transcript in the
+        # cwd". Combined, --sid would be silently ignored and the scope
+        # quietly widened to --all — reject rather than widen scope behind
+        # the user's back.
+        print("crr recall: --sid cannot be combined with --all", file=sys.stderr)
+        return 2
     if args.pid is None and args.sid is None and not args.all:
         print("crr recall: specify --pid, --sid, or --all", file=sys.stderr)
+        return 2
+    if not args.query.strip():
+        # An empty/whitespace-only query is a substring of every real turn
+        # — reject it rather than silently matching the whole transcript.
+        print("crr recall: query must not be empty", file=sys.stderr)
         return 2
     if args.sid is not None and not contracts.valid_session_id(args.sid):
         # A user-typed --sid may be junk (mirrors claude-launch's guard on a

@@ -88,9 +88,17 @@ MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
 def _read_records(path: Path) -> list[dict]:
     """Parse every JSONL line of ``path`` forward; unparseable lines are
     skipped rather than aborting the read (mirrors read_tail_facts's
-    per-line ``json.loads`` guard)."""
+    per-line ``json.loads`` guard).
+
+    ``errors="replace"`` mirrors ``_reversed_lines``'s ``.decode("utf-8",
+    "replace")``: without it, a transcript with invalid UTF-8 bytes raises
+    ``UnicodeDecodeError`` (a ``ValueError`` subclass) during line
+    iteration — BEFORE the per-line ``json.loads`` try/except gets a
+    chance, and past the caller's ``except OSError`` — turning one corrupt
+    file into a traceback that kills the whole search (or, under
+    ``--all``, the whole sweep)."""
     records: list[dict] = []
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:

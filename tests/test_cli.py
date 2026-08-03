@@ -2304,6 +2304,16 @@ def test_recall_rejects_both_pid_and_sid(capsys):
     assert "only one of --pid / --sid" in capsys.readouterr().err
 
 
+def test_recall_rejects_sid_combined_with_all(capsys):
+    # --sid names one transcript; --all means "every transcript in the cwd".
+    # Combined, --sid was previously silently ignored and the scope quietly
+    # widened to --all — reject instead of widening scope behind the user's
+    # back.
+    rc = cli.main(["recall", "--sid", _RECALL_SID, "--all", "--cwd", "/home/u/proj", "fox"])
+    assert rc == 2
+    assert "--sid" in capsys.readouterr().err
+
+
 def test_recall_unknown_pid_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
     rc = cli.main(["recall", "--pid", "9999", "fox"])
@@ -2324,6 +2334,21 @@ def test_recall_all_without_cwd_or_pid_errors(capsys):
     rc = cli.main(["recall", "--all", "fox"])
     assert rc == 2
     assert "--all needs --cwd or --pid" in capsys.readouterr().err
+
+
+def test_recall_rejects_an_empty_query(capsys):
+    # An empty (or whitespace-only) query would match every real turn in
+    # the transcript ("" is a substring of everything) — reject it with a
+    # clear error instead of silently widening the search to "everything".
+    rc = cli.main(["recall", "--sid", _RECALL_SID, ""])
+    assert rc == 2
+    assert "query" in capsys.readouterr().err
+
+
+def test_recall_rejects_a_whitespace_only_query(capsys):
+    rc = cli.main(["recall", "--sid", _RECALL_SID, "   "])
+    assert rc == 2
+    assert "query" in capsys.readouterr().err
 
 
 def test_recall_rejects_a_junk_sid(tmp_path, monkeypatch, capsys):

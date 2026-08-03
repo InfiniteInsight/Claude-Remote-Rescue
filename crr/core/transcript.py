@@ -142,7 +142,7 @@ def _assistant_text(record: Mapping[str, Any]) -> str | None:
 
 
 def search(
-    records: Iterable[Mapping[str, Any]], query: str, *, cap: int, context: int = 0,
+    records: Iterable[Mapping[str, Any]], query: str, *, cap: int,
 ) -> list[dict[str, Any]]:
     """Case-insensitive substring search over real prompt/assistant turns.
 
@@ -153,9 +153,10 @@ def search(
     (position in ``records``) so a caller can order results (e.g.
     most-recent-first) without re-deriving recency from scratch.
 
-    ``context`` is a clean extension point for pulling in N adjacent turns'
-    text (not yet implemented — only ``context=0``, the matching turn alone,
-    is supported today).
+    Snippet context (N adjacent turns around a match) is deferred by
+    design — ``-C``/``context`` isn't wired in this slice, so the param was
+    dropped rather than kept as an accepted-but-no-op knob. Reintroduce it
+    when a caller actually implements the widening.
     """
     query_lower = query.lower()
     matches: list[dict[str, Any]] = []

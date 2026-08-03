@@ -7,6 +7,8 @@ compaction continuations, and meta lines. These tests encode each with a
 synthetic record so no real conversation content is needed.
 """
 
+import pytest
+
 from crr.core import transcript
 
 
@@ -183,6 +185,16 @@ def test_search_matches_assistant_text():
 def test_search_no_match_returns_empty_list():
     records = [_user("hello there"), _assistant("general kenobi")]
     assert transcript.search(records, "nonexistent", cap=100) == []
+
+
+def test_search_has_no_context_param():
+    # `context` used to be accepted but silently no-op for any non-zero
+    # value — an invisible lie about a capability (-C snippet widening)
+    # that isn't wired in this slice. Dropped entirely rather than kept as
+    # a no-op knob; a TypeError here is the guard against it creeping back.
+    records = [_user("a fox sighting")]
+    with pytest.raises(TypeError):
+        transcript.search(records, "fox", cap=100, context=2)
 
 
 def test_search_preserves_chronological_index_across_matches():
