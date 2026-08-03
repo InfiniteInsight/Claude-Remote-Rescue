@@ -426,6 +426,37 @@ def untmux(
     return OpResult(True, f"un-tmuxed {pid}: claude --resume in a new tab; crr no longer manages it")
 
 
+def retrack(store: JournalStore, archive: ArchiveStore, sid: str, now: str) -> OpResult:
+    """Undo untrack/detmux: restore an archived untracked session to the
+    active journal.
+
+    Reads the archive record for ``sid`` (a missing record, or one whose id
+    fails the UUID shape check, refuses honestly rather than guessing —
+    ``archive.read`` raises ``KeyError``/``ContractError`` for either). Only
+    records left the active set via untrack/detmux (reason ``"untracked"``,
+    or the deprecated ``"detmuxed"`` spelling for pre-rename records) are
+    eligible: any other reason (e.g. ``"dismissed"``, ``"ghost-restored"``)
+    means the entry left crr's management for a different reason, and
+    resurrecting it under the wrong pretext would misrepresent why it's
+    back. On success the preserved entry is re-journaled verbatim and the
+    archive record removed — the mirror image of what untrack/detmux did.
+    """
+    try:
+        record = archive.read(sid)
+    except (KeyError, contracts.ContractError):
+        return OpResult(False, f"no archived session {sid}")
+    if record["reason"] not in ("untracked", "detmuxed"):
+        return OpResult(
+            False,
+            f"session {sid} was archived as {record['reason']!r}, not untracked — refusing",
+        )
+    entry = dict(record["entry"])
+    entry["updated"] = now  # re-journaling is itself a change; a stale timestamp would lie
+    store.write(entry)
+    archive.remove(sid)
+    return OpResult(True, f"retracked {sid[:8]}")
+
+
 def _signal_groups(
     controller: "ProcessController", groups: list[int], grace: float
 ) -> tuple[int, list[str]]:

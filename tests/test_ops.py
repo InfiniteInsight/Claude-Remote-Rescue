@@ -8,7 +8,7 @@ no platform gating.
 
 import pytest
 
-from crr.core import ops
+from crr.core import contracts, ops
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 from crr.core.reviver import revive_crashed
@@ -637,6 +637,101 @@ def test_untmux_spawn_failure_after_kill_leaves_entry_for_the_watchdog(tmp_path)
     assert "watchdog" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
     assert archive.scan().records == []
+
+
+# --- retrack ------------------------------------------------------------------
+#
+# The undo of untrack/detmux: read the archive record, re-journal its entry,
+# remove the record. Only records archived for that reason are eligible.
+
+def _archive_untracked(archive, pid=42, reason="untracked", now=_NOW):
+    entry = new_entry(
+        pid=pid, cwd=f"/p{pid}", host="tmux", shell="zsh",
+        boot_id="entry-boot", now=now, claude=_claude(),
+    )
+    archive.archive(entry, reason, now)
+    return entry
+
+
+def test_retrack_rejournals_and_removes_the_archive_record(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.ok, res.message
+    entry = store.read(42)
+    assert entry["claude"]["session_id"] == _SID
+    with pytest.raises(KeyError):
+        archive.read(_SID)
+
+
+def test_retrack_stamps_updated_with_now(tmp_path):
+    # Re-journaling is itself a change to the entry — a stale `updated`
+    # (still the pre-untrack timestamp) would misrepresent when the entry
+    # last changed.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, now=_NOW)
+    later = "2026-07-25T00:00:00Z"
+    ops.retrack(store, archive, _SID, later)
+    assert store.read(42)["updated"] == later
+
+
+def test_retrack_message_reports_the_sid8(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.message == f"retracked {_SID[:8]}"
+
+
+def test_retrack_accepts_the_deprecated_detmuxed_reason(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, reason="detmuxed")
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert res.ok, res.message
+    assert store.read(42)["claude"]["session_id"] == _SID
+    with pytest.raises(KeyError):
+        archive.read(_SID)
+
+
+def test_retrack_entry_becomes_a_valid_journal_entry(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive)
+    ops.retrack(store, archive, _SID, _NOW)
+    contracts.validate_journal_entry(store.read(42))  # raises if invalid
+
+
+def test_retrack_refuses_a_missing_archive_record(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "no archived session" in res.message
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+def test_retrack_refuses_a_malformed_sid(tmp_path):
+    # archive.read raises ContractError (not KeyError) for a non-UUID sid —
+    # both must refuse the same honest way, never let a bad sid reach a
+    # path/glob.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    res = ops.retrack(store, archive, "not-a-uuid", _NOW)
+    assert not res.ok
+    assert "no archived session" in res.message
+
+
+@pytest.mark.parametrize("reason", [
+    "dismissed", "gave-up", "ghost-restored", "untmuxed",
+    "superseded-on-register", "superseded-on-launch",
+])
+def test_retrack_refuses_non_untracked_reasons(tmp_path, reason):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, reason=reason)
+    res = ops.retrack(store, archive, _SID, _NOW)
+    assert not res.ok
+    assert "not untracked" in res.message
+    # untouched: the record stays archived, nothing is journaled.
+    assert archive.read(_SID)["reason"] == reason
+    with pytest.raises(KeyError):
+        store.read(42)
 
 
 # --- kick / close -----------------------------------------------------------

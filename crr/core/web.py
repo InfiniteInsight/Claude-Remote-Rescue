@@ -27,6 +27,7 @@ from importlib import resources
 from typing import Any, Callable, Mapping, NamedTuple
 
 from crr.core import config as cfg
+from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
@@ -150,6 +151,11 @@ def _header(headers: Mapping[str, str], name: str) -> str:
 
 ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", "untmux")
 
+# Sid-keyed actions — a SEPARATE namespace/endpoint from the pid-keyed
+# ACTIONS above (see POST /api/sid-action). "retrack" is C2; C3 extends this
+# with "adopt".
+SID_ACTIONS = ("retrack",)
+
 
 def _plain(status: int, text: str) -> Response:
     return _resp(status, "text/plain; charset=utf-8", text.encode("utf-8"))
@@ -168,6 +174,8 @@ def handle_request(
     sessions_provider: Callable[[], dict[str, Any]],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
+    untracked_provider: Callable[[], list[Any]] | None = None,
+    sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     page_version: int = PAGE_VERSION,
@@ -199,30 +207,60 @@ def handle_request(
             if diagnostics_provider is None:
                 return _plain(404, "not found")
             return _json(200, diagnostics_provider())
+        if path == "/api/untracked":
+            # Lazy, like diagnostics: computed only when the panel is
+            # opened, never on the poll path.
+            if untracked_provider is None:
+                return _plain(404, "not found")
+            return _json(200, untracked_provider())
         return _plain(404, "not found")
 
     if method == "POST":
-        if path != "/api/action":
-            return _plain(404, "not found")
-        # Require a JSON body: the forced CORS preflight (plus zero CORS
-        # headers) is what kills simple-request CSRF. Match the media type
-        # tolerantly (clients append "; charset=utf-8").
-        ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
-        if ctype != "application/json":
-            return _plain(415, "content-type must be application/json")
-        try:
-            data = json.loads(body or b"")
-        except (ValueError, TypeError):
-            return _plain(400, "invalid JSON")
-        op = data.get("op") if isinstance(data, dict) else None
-        pid = data.get("pid") if isinstance(data, dict) else None
-        # Strict validation: known op, and a real positive int pid (bool is
-        # an int subclass — reject it).
-        if op not in ACTIONS or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-            return _plain(400, "invalid op or pid")
-        if action_provider is None:
-            return _plain(503, "actions unavailable")
-        ok, message = action_provider(op, pid)
-        return _json(200 if ok else 409, {"ok": ok, "message": message})
+        if path == "/api/action":
+            # Require a JSON body: the forced CORS preflight (plus zero CORS
+            # headers) is what kills simple-request CSRF. Match the media
+            # type tolerantly (clients append "; charset=utf-8").
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            op = data.get("op") if isinstance(data, dict) else None
+            pid = data.get("pid") if isinstance(data, dict) else None
+            # Strict validation: known op, and a real positive int pid (bool
+            # is an int subclass — reject it). Left exactly as-is (C2): the
+            # sid-keyed endpoint below is deliberately separate rather than
+            # loosening this gate.
+            if op not in ACTIONS or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                return _plain(400, "invalid op or pid")
+            if action_provider is None:
+                return _plain(503, "actions unavailable")
+            ok, message = action_provider(op, pid)
+            return _json(200 if ok else 409, {"ok": ok, "message": message})
+
+        if path == "/api/sid-action":
+            # Same CSRF posture as /api/action (JSON content-type gate; the
+            # host allowlist already ran above; no CORS headers are ever
+            # emitted) — a separate route + validator so a sid-keyed op can
+            # never be reached through the strict pid-keyed gate above.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            op = data.get("op") if isinstance(data, dict) else None
+            sid = data.get("sid") if isinstance(data, dict) else None
+            if op not in SID_ACTIONS or not contracts.valid_session_id(sid):
+                return _plain(400, "invalid op or sid")
+            if sid_action_provider is None:
+                return _plain(503, "actions unavailable")
+            ok, message = sid_action_provider(op, sid)
+            return _json(200 if ok else 409, {"ok": ok, "message": message})
+
+        return _plain(404, "not found")
 
     return _plain(405, "method not allowed")

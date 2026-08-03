@@ -1687,6 +1687,131 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
     assert "crr no longer manages it" in out
 
 
+# --- retrack (C2) — undo untrack/detmux, no platform gating needed --------
+
+def _archived_untracked(archive, pid, sid, reason="untracked", archived_at="2026-08-01T00:00:00+00:00"):
+    entry = new_entry(
+        pid=pid, cwd=f"/p{pid}", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    )
+    archive.archive(entry, reason, archived_at)
+    return entry
+
+
+def test_retrack_by_sid_restores_the_session(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _archived_untracked(archive, 42, sid)
+
+    rc = cli.main(["retrack", "--sid", sid])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"retracked {sid[:8]}" in out
+    assert store.read(42)["claude"]["session_id"] == sid
+    with pytest.raises(KeyError):
+        archive.read(sid)
+
+
+def test_retrack_by_sid_rejects_a_malformed_sid(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["retrack", "--sid", "not-a-uuid"])
+    assert rc == 2
+    assert "not a valid session id" in capsys.readouterr().err
+
+
+def test_retrack_by_sid_reports_a_missing_record(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    rc = cli.main(["retrack", "--sid", sid])
+    assert rc == 1
+    assert "no archived session" in capsys.readouterr().err
+
+
+def test_retrack_last_defaults_to_ten_most_recent(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sids = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(12)]
+    for i, sid in enumerate(sids):
+        _archived_untracked(archive, i, sid, archived_at=f"2026-08-01T00:00:{i:02d}+00:00")
+
+    rc = cli.main(["retrack"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The 10 most recently archived (highest index) were retracked; the two
+    # oldest (index 0, 1) are left behind.
+    for sid in sids[2:]:
+        assert store.read(sids.index(sid))["claude"]["session_id"] == sid
+    for sid in sids[:2]:
+        assert archive.read(sid)["reason"] == "untracked"
+    assert out.count("retracked ") == 10
+
+
+def test_retrack_last_n_retracks_only_the_most_recent_n(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    old_sid = "10000000-0000-4000-8000-000000000000"
+    new_sid = "20000000-0000-4000-8000-000000000000"
+    _archived_untracked(archive, 1, old_sid, archived_at="2026-08-01T00:00:00+00:00")
+    _archived_untracked(archive, 2, new_sid, archived_at="2026-08-01T00:00:01+00:00")
+
+    rc = cli.main(["retrack", "--last", "1"])
+    assert rc == 0
+    assert store.read(2)["claude"]["session_id"] == new_sid  # the more recent one
+    with pytest.raises(KeyError):
+        store.read(1)
+    assert archive.read(old_sid)["reason"] == "untracked"  # left behind
+
+
+def test_retrack_reports_nothing_to_do_when_archive_is_empty(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["retrack"])
+    assert rc == 0
+    assert "no untracked sessions to retrack" in capsys.readouterr().out
+
+
+def test_retrack_ignores_non_untracked_archive_records(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive = ArchiveStore(tmp_path)
+    sid = "33333333-3333-4333-8333-333333333333"
+    _archived_untracked(archive, 1, sid, reason="dismissed")
+
+    rc = cli.main(["retrack"])
+    assert rc == 0
+    assert "no untracked sessions to retrack" in capsys.readouterr().out
+    assert archive.read(sid)["reason"] == "dismissed"  # untouched
+
+
+def test_retrack_rejects_sid_combined_with_last(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "44444444-4444-4444-8444-444444444444"
+    rc = cli.main(["retrack", "--sid", sid, "--last", "5"])
+    assert rc == 2
+    assert "--sid cannot be combined with --last" in capsys.readouterr().err
+
+
+def test_retrack_rejects_a_negative_last(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["retrack", "--last", "-1"])
+    assert rc == 2
+    assert "--last must not be negative" in capsys.readouterr().err
+
+
+def test_retrack_surfaces_scan_problems_on_stderr(tmp_path, monkeypatch, capsys):
+    # Mirrors test_archive_list_surfaces_scan_problems_on_stderr: a corrupt
+    # archive file must be reported, never silently dropped from the count.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "corrupt.json").write_text("not json", encoding="utf-8")
+
+    rc = cli.main(["retrack"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "corrupt.json" in err
+    assert "no untracked sessions to retrack" in out
+
+
 class _FakeBoot:
     """Stands in for boot_identity.detect() so `rescued` tests aren't
     gated to a real Linux/macOS boot adapter (mirrors the fake-tmux

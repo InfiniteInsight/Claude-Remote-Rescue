@@ -6,9 +6,9 @@ is wiring: pick platform adapters, hand them to core, dispatch
 subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
-(reopen/dismiss/remove/kick/close/untrack/untmux), recall (print-only
-transcript search), diagnose, gc, the web dashboard, the systemd watchdog,
-and the shim-facing hooks.
+(reopen/dismiss/remove/kick/close/untrack/untmux/retrack), recall
+(print-only transcript search), diagnose, gc, the web dashboard, the
+systemd watchdog, and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -134,6 +134,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     utm.add_argument("pid", type=int)
     utm.set_defaults(func=_cmd_untmux)
+
+    rtk = sub.add_parser(
+        "retrack",
+        help="restore untracked/detmuxed sessions back into crr's management",
+    )
+    rtk.add_argument("--last", type=int, default=None,
+                      help="retrack the N most recently untracked sessions (default 10)")
+    rtk.add_argument("--sid", default=None, help="retrack this specific archived session id")
+    rtk.set_defaults(func=_cmd_retrack)
 
     rescued = sub.add_parser(
         "rescued",
@@ -945,6 +954,85 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def _recent_untracked_records(records: list[dict], n: int) -> list[dict]:
+    """The N most-recent untracked/detmuxed records out of ``records``
+    (an ``ArchiveScan.records`` list), newest first.
+
+    Shared by `crr retrack --last` and the web dashboard's /api/untracked
+    provider — one implementation, so the two surfaces can't drift on what
+    "recently untracked" means. Takes records rather than an ArchiveStore so
+    the caller decides what to do with ``ArchiveScan.problems`` (a corrupt
+    archive file must be surfaced, not silently dropped here).
+    """
+    candidates = [r for r in records if r["reason"] in ("untracked", "detmuxed")]
+    return sorted(candidates, key=lambda r: r["archived_at"], reverse=True)[:n]
+
+
+def _untracked_view(record: dict) -> dict:
+    """The /api/untracked (and dashboard) shape for one archive record.
+
+    Cheap fields only, no transcript read: last_prompt comes from the
+    archived entry if it carries one, else "" — an honest "unknown", not a
+    fabricated read.
+    """
+    entry = record["entry"]
+    sid = entry["claude"]["session_id"]
+    return {
+        "session_id": sid,
+        "sid8": sid[:8],
+        "cwd": entry["cwd"],
+        "archived_at": record["archived_at"],
+        "last_prompt": entry.get("last_prompt", ""),
+    }
+
+
+def _cmd_retrack(args: argparse.Namespace) -> int:
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+
+    if args.sid is not None:
+        if args.last is not None:
+            # --sid names one record; --last means "the N most recent".
+            # Combined, --last would be silently ignored — reject rather
+            # than quietly narrow the scope behind the user's back (mirrors
+            # recall's --sid/--all mutual-exclusion guard).
+            print("crr retrack: --sid cannot be combined with --last", file=sys.stderr)
+            return 2
+        if not contracts.valid_session_id(args.sid):
+            print(f"crr retrack: {args.sid!r} is not a valid session id", file=sys.stderr)
+            return 2
+        with mutation_lock(sd):
+            res = ops.retrack(store, archive, args.sid, _now())
+        print(res.message, file=sys.stdout if res.ok else sys.stderr)
+        return 0 if res.ok else 1
+
+    last = 10 if args.last is None else args.last
+    if last < 0:
+        print("crr retrack: --last must not be negative", file=sys.stderr)
+        return 2
+
+    with mutation_lock(sd):
+        scan = archive.scan()
+        records = _recent_untracked_records(scan.records, last)
+        results = [
+            ops.retrack(store, archive, record["entry"]["claude"]["session_id"], _now())
+            for record in records
+        ]
+    # Corrupt files are surfaced on stderr, never silently dropped (mirrors
+    # _cmd_status/_cmd_revive/_cmd_gc/_cmd_archive).
+    for name, reason in scan.problems:
+        print(f"crr retrack: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
+    if not results:
+        print("no untracked sessions to retrack")
+        return 0
+    ok_all = True
+    for res in results:
+        print(res.message, file=sys.stdout if res.ok else sys.stderr)
+        ok_all = ok_all and res.ok
+    return 0 if ok_all else 1
+
+
 def _cmd_rescued(_args: argparse.Namespace) -> int:
     """List prior-boot conversations the reviver parked in live tmux,
     awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
@@ -1110,6 +1198,8 @@ def make_web_handler(
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
+    untracked_provider: Callable[[], list] | None = None,
+    sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -1133,6 +1223,8 @@ def make_web_handler(
                 sessions_provider=sessions_provider,
                 action_provider=action_provider,
                 diagnostics_provider=diagnostics_provider,
+                untracked_provider=untracked_provider,
+                sid_action_provider=sid_action_provider,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
                 poll_seconds=poll_seconds,
@@ -1366,12 +1458,30 @@ def _cmd_web(args: argparse.Namespace) -> int:
     def diagnostics_provider() -> dict:
         return gather_diagnostics(config)  # lazy: only on panel open, never on poll
 
+    def untracked_provider() -> list[dict]:
+        # Lazy, like diagnostics: never on the poll path.
+        return [_untracked_view(r) for r in _recent_untracked_records(archive.scan().records, 10)]
+
+    def sid_action_provider(op: str, sid: str) -> tuple[bool, str]:
+        # Same mutation lock as action_provider — a sid-keyed op racing the
+        # pid-keyed ops or the revive timer must not interleave.
+        with mutation_lock(sd):
+            if op == "retrack":
+                res = ops.retrack(store, archive, sid, _now())
+            else:
+                return False, f"unknown op {op}"
+        return res.ok, res.message
+
     # Host allowlist: loopback + this host's name + tailnet suffix + any
     # config.toml extras.
     allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
     allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
     handler = make_web_handler(
-        provider, allowed, (".ts.net",), action_provider, diagnostics_provider,
+        provider, allowed, (".ts.net",),
+        action_provider=action_provider,
+        diagnostics_provider=diagnostics_provider,
+        untracked_provider=untracked_provider,
+        sid_action_provider=sid_action_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),
