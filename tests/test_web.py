@@ -545,11 +545,24 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_20():
-    """Explicit version check: v20 turns the notice into a color-coded,
-    animated status toast that reports BOTH success and failure for every
-    action button (card actions previously stayed silent on success)."""
-    assert web.PAGE_VERSION == 20
+def test_page_version_is_21():
+    """Explicit version check: v21 adds a confirm-gated "Take over" button on
+    discoverable rows — the dashboard surface of `crr adopt --takeover`."""
+    assert web.PAGE_VERSION == 21
+
+
+def test_takeover_is_a_sid_action():
+    assert "takeover" in web.SID_ACTIONS
+
+
+def test_page_discoverable_has_confirm_gated_takeover_button():
+    page = web.render_page()
+    # the button + op are present, and it's a destructive/confirm action.
+    assert "Take over" in page
+    assert 'op: "takeover"' in page
+    assert "confirm: true" in page
+    # the sid-row confirm state exists (analogue of card confirmArmed).
+    assert "sidConfirmArmed" in page
 
 
 def test_page_status_toast_is_color_coded_and_animated():
