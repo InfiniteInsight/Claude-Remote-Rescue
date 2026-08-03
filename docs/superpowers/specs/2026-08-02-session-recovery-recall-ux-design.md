@@ -119,10 +119,27 @@ contract change. `PAGE_VERSION` bump (shared).
 
 ---
 
-## F3 — Restore de-tmux'd sessions
+## Terminology change: `detmux` → `untrack`, restore = `retrack`
 
-**What:** undo a de-tmux — move archived `"detmuxed"` records back into crr's
-active tracking so they show on the dashboard and are revivable.
+Unify the vocabulary around **tracking**: crr *tracks* sessions.
+- **`untrack`** (renamed from the existing `detmux`): stop tracking a session
+  — archive it and re-home it into a visible tab. Same behavior as today's
+  `detmux`; only the name/label change.
+- **`retrack`** (new, F3): resume tracking — pull an untracked (archived)
+  session back into crr.
+
+Back-compat (this renames a *shipped* command):
+- Keep `detmux` as a **deprecated alias** of `untrack` (like `restore`→`reopen`).
+- Archive reason: write **`"untracked"`** going forward; keep **`"detmuxed"`**
+  valid in `ARCHIVE_REASONS` so existing archived records still validate, and
+  `retrack` matches **both** reasons.
+- Dashboard button `de-tmux` → **Untrack**; restore button → **Retrack**.
+- Update help text, tests, and docs referencing detmux.
+
+## F3 — `retrack`: restore untracked sessions
+
+**What:** undo an untrack — move archived `"untracked"`/`"detmuxed"` records
+back into crr's active tracking so they show on the dashboard and are revivable.
 
 **Behavior (your choice: re-track as recoverable):** for each target, read the
 archive record, write its `entry` back to the journal (active), and
@@ -131,16 +148,16 @@ dead → it classifies `crashed` → appears on the dashboard, revivable via
 Reopen/watchdog. Nothing is force-spawned.
 
 **Interface (both CLI + dashboard):**
-- CLI: `crr readopt [--last N] [--sid SID]` — `--last N` (default 10) restores the N most-recent `"detmuxed"` records by `archived_at`; `--sid` restores one. *(Name `readopt` because `restore` is already a `reopen` alias — open to a better name.)*
-- Web: `GET /api/detmuxed` → the last 10 detmuxed records (sid8, cwd, archived_at, last_prompt). Dashboard shows them in a "Recently de-tmux'd" list with a per-item **Restore** button.
+- CLI: `crr retrack [--last N] [--sid SID]` — `--last N` (default 10) restores the N most-recent untracked records by `archived_at`; `--sid` restores one.
+- Web: `GET /api/untracked` → the last 10 untracked records (sid8, cwd, archived_at, last_prompt). Dashboard shows them in a "Recently untracked" list with a per-item **Retrack** button.
 
 **Architecture:**
-- Core op (`crr/core/ops.py`): `readopt(store, archive, sid, now) -> OpResult` (single-sid, classifier-agnostic — it's un-archiving, not signalling). A cli/web helper batches `--last N`.
-- **Action protocol:** the existing `/api/action` is pid-keyed (`op`, `pid`). `readopt` is **sid-keyed**. Extend the POST validator to accept a `readopt` op carrying `sid` (string) instead of `pid` — carefully, preserving the strict validation for the pid-keyed ops. Add `readopt` to a sid-keyed action set.
-- **Web:** new `GET /api/detmuxed`; new action branch.
-- **Dashboard:** the list + Restore buttons. `PAGE_VERSION` bump.
+- Core op (`crr/core/ops.py`): `retrack(store, archive, sid, now) -> OpResult` (single-sid, classifier-agnostic — it's un-archiving, not signalling). A cli/web helper batches `--last N`. Matches both `"untracked"` and legacy `"detmuxed"` reasons.
+- **Action protocol:** the existing `/api/action` is pid-keyed (`op`, `pid`). `retrack` is **sid-keyed**. Extend the POST validator to accept a `retrack` op carrying `sid` (string) instead of `pid` — carefully, preserving the strict validation for the pid-keyed ops. Add `retrack` to a sid-keyed action set.
+- **Web:** new `GET /api/untracked`; new action branch.
+- **Dashboard:** the list + Retrack buttons. `PAGE_VERSION` bump.
 
-**Tests:** `readopt` re-journals + removes from archive; refuses a non-detmuxed / missing sid; batch `--last N` ordering; `/api/detmuxed` shape; POST `readopt` sid validation (and that a pid-keyed op still rejects a missing pid); node gate.
+**Tests:** `retrack` re-journals + removes from archive; matches both reasons; refuses a non-untracked / missing sid; batch `--last N` ordering; `untrack` (renamed) still archives + re-homes and its `detmux` alias works; `/api/untracked` shape; POST `retrack` sid validation (and that a pid-keyed op still rejects a missing pid); node gate.
 
 ---
 
@@ -182,9 +199,13 @@ can't attach to; adoption creates a *recoverable* entry (revivable via
    (relative-time recency, Recent-sort fix, compaction badge, latest marker).
    Cohesive; ships the fix for "which session is latest" + "will it compact."
 2. **Slice B — `crr recall`.** CLI-only, independent, no contract/page change.
-3. **Slice C — restore + discovery (F3 + T-C).** Shared "recoverable entry
-   from an external record" helper, the sid-keyed action-protocol extension,
-   two new GET payloads, dashboard lists. One page bump.
+3. **Slice C — retrack + discovery (F3 + T-C), incl. the `detmux`→`untrack`
+   rename.** Rename the shipped `detmux` command to `untrack` (deprecated
+   `detmux` alias; button relabel; write `"untracked"` archive reason,
+   accept legacy `"detmuxed"`). Then `retrack` + `discover`/adopt, sharing a
+   "recoverable entry from an external record" helper, the sid-keyed
+   action-protocol extension, two new GET payloads (`/api/untracked`,
+   `/api/discoverable`), and dashboard lists. One page bump.
 
 Each merges on local-CI-green. Build subagent-driven, per-task review, opus
 whole-branch review, re-verify HEAD before merge.
@@ -194,6 +215,6 @@ whole-branch review, re-verify HEAD before merge.
 - **Recency:** a session active minutes ago sorts above one idle for days, using transcript activity — even if its `updated` is stale. Cards show relative last-active; the latest per cwd is marked.
 - **Compaction badge:** a session whose estimated tokens exceed its model window shows "will compact on revive"; a small one shows "ok". Windows are documented priors; the estimate is labeled.
 - **Recall:** `crr recall --pid P "<phrase>"` prints the matching earlier exchanges (capped, recent-first) and nothing else; `--all` widens to the project; no matches → clean message. Never re-injects.
-- **Restore:** `crr readopt --last 10` moves the 10 most-recent de-tmux'd records back to the journal (removed from archive), where they appear and are revivable; the dashboard offers the same per-item. Refuses non-detmuxed/missing sids.
+- **Untrack/Retrack:** `crr untrack` (with `detmux` still working as a deprecated alias) archives + re-homes as before; `crr retrack --last 10` moves the 10 most-recent untracked records back to the journal (removed from archive), where they appear and are revivable; the dashboard offers the same per-item. Refuses non-untracked/missing sids; legacy `"detmuxed"` records are retrackable.
 - **Discovery:** `crr discover` lists on-disk transcripts not in the journal (like `6e262205`), recency-sorted; adopt creates a revivable entry. UI states adoption ≠ attaching to a live process.
 - Layering `KEPT`; contracts bumped with validators; `PAGE_VERSION` bumped per page change; node gate green.
