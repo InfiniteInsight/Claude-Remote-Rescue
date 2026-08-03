@@ -200,6 +200,63 @@ def search(
     return matches
 
 
+def turn_boundary(record: Mapping[str, Any]) -> str:
+    """Classify a single JSONL record as a turn boundary (`crr adopt
+    --takeover`'s safety signal).
+
+    Returns exactly one of:
+    - ``"assistant-end"`` — a real (non-``<synthetic>``) assistant turn
+      whose ``stop_reason`` is ``"end_turn"``. The only kind that means
+      "finished, awaiting the user" — the sole safe tail for a takeover.
+    - ``"mid-turn"`` — an assistant record with any OTHER ``stop_reason``
+      (empirically ``"tool_use"``, even on a record whose only content is
+      a ``text``/``thinking`` block — Claude Code stamps that regardless
+      of which block actually holds the tool call), or a ``type=="user"``
+      record carrying a top-level ``toolUseResult`` key (a tool-result
+      turn: Claude Code will continue, this is not a prompt awaiting a
+      reply).
+    - ``"user-prompt"`` — a real human prompt (mirrors ``extract_prompt``'s
+      noise skip-list) that carries no ``toolUseResult``.
+    - ``"other"`` — everything else: non-turn record ``type``s
+      (``"permission-mode"``, ``"pr-link"``, ``"bridge-session"``, …),
+      ``isMeta`` lines, and malformed/non-Mapping input.
+
+    A ``<synthetic>`` assistant record (the API-error/interrupt turns
+    Claude Code writes) is treated transparently — always ``"other"``,
+    never ``"assistant-end"`` or ``"mid-turn"`` — mirroring how
+    ``extract_model``/``_assistant_text`` already skip through it as not a
+    real turn. This matters for a caller scanning backward for the newest
+    non-``"other"`` record (Task 2's ``read_takeover_signal``): it lets the
+    scan skip past an API-error/interrupt record at the tail to the real
+    prior turn, so a session parked behind a synthetic record right after
+    a genuine assistant ``end_turn`` still surfaces as ``"assistant-end"``
+    instead of getting stuck reporting a phantom ``"mid-turn"`` forever.
+    Safety against a still-*active* session isn't this function's job —
+    it comes from the idle-seconds guard in ``ready_to_take_over``
+    (a live session has a recent mtime, so ``seconds_idle`` stays below
+    ``idle_window`` regardless of tail kind).
+    """
+    if not isinstance(record, Mapping):
+        return "other"
+    rtype = record.get("type")
+    if rtype == "assistant":
+        message = record.get("message")
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            return "other"
+        if message.get("model") == "<synthetic>":
+            return "other"
+        if message.get("stop_reason") == "end_turn":
+            return "assistant-end"
+        return "mid-turn"
+    if rtype == "user":
+        if "toolUseResult" in record:
+            return "mid-turn"
+        if extract_prompt(record) is not None:
+            return "user-prompt"
+        return "other"
+    return "other"
+
+
 def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, str]:
     """Most recent real prompt + model + activity timestamp, in one pass.
 

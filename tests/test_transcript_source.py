@@ -5,6 +5,7 @@ No real conversation content: the test writes its own JSONL transcript
 """
 
 import json
+import os
 from pathlib import Path
 
 from crr.adapters import transcript_source
@@ -30,6 +31,28 @@ def _assistant(text, model=None):
     if model is not None:
         msg["model"] = model
     return {"type": "assistant", "message": msg}
+
+
+def _assistant_end(text, model="claude-opus-4-8"):
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": text, "model": model, "stop_reason": "end_turn"},
+    }
+
+
+def _assistant_synthetic():
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": "interrupted", "model": "<synthetic>"},
+    }
+
+
+def _tool_result_turn():
+    return {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]},
+        "toolUseResult": {"stdout": "x"},
+    }
 
 
 def test_find_transcript_globs_any_project_dir(tmp_path):
@@ -317,6 +340,79 @@ def test_search_cwd_tags_matches_with_their_session_id(tmp_path):
 
 def test_search_cwd_no_transcripts_is_empty_list(tmp_path):
     assert transcript_source.search_cwd("/no/such/cwd", "fox", cap=100, home=tmp_path) == []
+
+
+# --- read_takeover_signal (`crr adopt --takeover` safety signal) ----------
+
+
+def test_read_takeover_signal_assistant_end_tail(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    path = _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant_end("the final answer"),
+    ])
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == "assistant-end"
+    assert sig["mtime"] == path.stat().st_mtime
+    assert sig["mtime"] > 0
+
+
+def test_read_takeover_signal_skips_a_trailing_synthetic_record(tmp_path):
+    # A <synthetic> assistant record (API error/interrupt) at the tail must
+    # be transparent — the scan should skip it and report the prior REAL
+    # assistant end_turn underneath it.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant_end("the real final answer"),
+        _assistant_synthetic(),
+    ])
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == "assistant-end"
+
+
+def test_read_takeover_signal_mid_turn_tail(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("a prompt"),
+        _assistant_end("an answer"),
+        _tool_result_turn(),
+    ])
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == "mid-turn"
+
+
+def test_read_takeover_signal_absent_transcript_is_honest_empty(tmp_path):
+    assert transcript_source.read_takeover_signal("no-such-sid", home=tmp_path) == {
+        "mtime": 0.0, "tail_kind": "",
+    }
+
+
+def test_read_takeover_signal_stats_mtime_after_reading_the_tail(tmp_path, monkeypatch):
+    # Ordering is load-bearing (see the docstring): an append landing between
+    # the tail read and the mtime stat must pair the already-read tail with
+    # the FRESH mtime -> seconds_idle small -> caller keeps waiting (the safe
+    # direction). Stat-first would instead pair a stale-quiet mtime with a
+    # tail that had already changed. Simulate the concurrent append inside
+    # the backward-read generator itself, so it lands strictly between the
+    # two reads no matter how the implementation is refactored. An
+    # all-"other" transcript (no turn-bearing record at all) forces the scan
+    # to walk every line rather than early-exiting on the first record, so
+    # the simulated append is guaranteed to land before the stat runs; it
+    # also exercises the "present but no turn-bearing record found" branch.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    path = _write_transcript(tmp_path, sid, [{"type": "permission-mode", "mode": "plan"}])
+    bumped = path.stat().st_mtime + 100
+    real_reversed_lines = transcript_source._reversed_lines
+
+    def spy(p, *a, **kw):
+        yield from real_reversed_lines(p, *a, **kw)
+        os.utime(p, (bumped, bumped))  # the "concurrent append" lands here
+
+    monkeypatch.setattr(transcript_source, "_reversed_lines", spy)
+    sig = transcript_source.read_takeover_signal(sid, home=tmp_path)
+    assert sig["tail_kind"] == ""
+    assert sig["mtime"] == bumped  # stat happened AFTER the tail read completed
 
 
 def test_search_transcript_survives_invalid_utf8_bytes(tmp_path):

@@ -25,6 +25,7 @@ from crr.core import contracts
 from crr.core import discovery
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
+from crr.core.ports import ResumeProcess
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="journald source is Linux-selected")
@@ -2743,3 +2744,428 @@ def test_recall_never_re_injects_only_prints(tmp_path, monkeypatch, capsys):
     ])
     cli.main(["recall", "--pid", "4242", "fox"])
     assert store.read(4242) == before
+
+
+# --- adopt --takeover (safe adoption of a still-live session) --------------
+
+_TAKEOVER_SID = "7b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e"
+
+
+class _FakeResumeController:
+    """Records find_resume_process/terminate_group calls into a SHARED
+    ``calls`` list (with _FakeTakeoverFlags below) so cross-object call
+    ORDER can be asserted, not just each object's own call count.
+
+    ``proc`` is either a single ResumeProcess/None (returned on every call —
+    the common case) or a LIST, which is call-scripted: each call pops the
+    next value until one remains, then that last value repeats forever
+    (same repeat-last-value convention as the module-level ``_scripted``
+    helper) — lets a test give ``find_resume_process`` a different answer
+    on the top-of-function resolve vs. the under-lock re-resolve.
+    """
+
+    def __init__(self, proc, calls, raise_on_terminate=None):
+        self._proc = proc
+        self._calls = calls
+        self._raise = raise_on_terminate
+
+    def find_resume_process(self, session_id):
+        self._calls.append(("find_resume_process", session_id))
+        if isinstance(self._proc, list):
+            return self._proc.pop(0) if len(self._proc) > 1 else self._proc[0]
+        return self._proc
+
+    def terminate_group(self, pgid, grace_seconds):
+        self._calls.append(("terminate_group", pgid, grace_seconds))
+        if self._raise is not None:
+            raise self._raise
+
+
+class _FakeTakeoverFlags:
+    def __init__(self, calls):
+        self._calls = calls
+        self.armed: set[int] = set()
+
+    def arm_close(self, pid):
+        self._calls.append(("arm_close", pid))
+        self.armed.add(pid)
+
+    def clear(self, pid):
+        self._calls.append(("clear", pid))
+        self.armed.discard(pid)
+
+
+class _RecordingStore(JournalStore):
+    """A JournalStore that appends a marker to the shared ``calls`` list on
+    every write — lets a test see exactly where, relative to arm_close /
+    terminate_group, the adoption's journal write lands."""
+
+    def __init__(self, sd, calls):
+        super().__init__(sd)
+        self._calls = calls
+
+    def write(self, entry):
+        claude = entry.get("claude")
+        self._calls.append(("store.write", claude["session_id"] if claude else None))
+        super().write(entry)
+
+
+def _scripted(values):
+    """A zero/positional-arg callable yielding ``values`` in order, then
+    repeating the last value forever (a test scripts exactly the values
+    that matter and needn't predict every remaining call)."""
+    values = list(values)
+
+    def fn(*_a, **_kw):
+        return values.pop(0) if len(values) > 1 else values[0]
+
+    return fn
+
+
+def _failing_sleep(seconds):
+    raise AssertionError(f"unexpected sleep({seconds}) — refuse-fast must not wait")
+
+
+def test_takeover_happy_path_orders_arm_before_kill_before_adopt(tmp_path, monkeypatch):
+    # Two DIFFERENT ResumeProcess tuples: the first is the top-of-function
+    # resolve (only confirms a target exists / gates the wait), the second
+    # is the under-the-lock re-resolve that the kill must actually use. If
+    # the kill ever reused the stale first tuple, this test would see
+    # arm_close(50) and terminate_group(100, ...) instead of the fresh
+    # ppid/pgid — and "stopped live pid 100" instead of 101.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    calls: list = []
+    store = _RecordingStore(tmp_path / "state", calls)
+    proc1 = ResumeProcess(pid=100, ppid=50, pgid=100)
+    proc2 = ResumeProcess(pid=101, ppid=51, pgid=777)
+    controller = _FakeResumeController([proc1, proc2], calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+    read_signal = lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"}
+    clock = _scripted([500.0, 1000.0])  # deadline calc, then seconds_idle calc
+
+    ok, msg = cli._takeover(
+        store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
+        max_wait=180.0, read_signal=read_signal, clock=clock, sleep=_failing_sleep,
+    )
+    assert ok
+    assert msg.startswith("took over ")
+    assert _TAKEOVER_SID[:8] in msg
+    assert "stopped live pid 101" in msg
+
+    # Both resolves happened (top-of-function, then the under-lock re-resolve).
+    assert [c for c in calls if c[0] == "find_resume_process"] == [
+        ("find_resume_process", _TAKEOVER_SID),
+        ("find_resume_process", _TAKEOVER_SID),
+    ]
+    # arm_close(ppid) strictly before terminate_group(pgid, grace); the
+    # journal write (adoption) strictly after the kill — and both use the
+    # SECOND (fresh) tuple, never the first (stale) one.
+    kinds = [c[0] for c in calls]
+    assert kinds.index("arm_close") < kinds.index("terminate_group")
+    assert kinds.index("terminate_group") < kinds.index("store.write")
+    assert ("arm_close", 51) in calls
+    assert ("arm_close", 50) not in calls
+    assert ("terminate_group", 777, config.get("close_grace_seconds")) in calls
+    assert not any(c[0] == "terminate_group" and c[1] == 100 for c in calls)
+
+    scan = store.scan()
+    matches = [e for e in scan.entries if e.get("claude", {}).get("session_id") == _TAKEOVER_SID]
+    assert len(matches) == 1
+
+
+def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypatch):
+    # find_resume_process returns a valid process on the FIRST call
+    # (top-of-function resolve) but None on the SECOND call — the
+    # under-lock re-resolve immediately before the kill. This models the
+    # live process exiting (and its pid/ppid/pgid being recycled) during
+    # the lock-free wait loop. Must refuse honestly using the FRESH (None)
+    # result: no kill, no flag armed on the stale first-call tuple.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    calls: list = []
+    store = JournalStore(tmp_path / "state")
+    proc1 = ResumeProcess(pid=100, ppid=50, pgid=100)
+    controller = _FakeResumeController([proc1, None], calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+
+    ok, msg = cli._takeover(
+        store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
+        max_wait=180.0,
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert _TAKEOVER_SID[:8] in msg
+    assert "exited" in msg
+    assert "adopt without --takeover" in msg
+    assert not any(c[0] == "terminate_group" for c in calls)
+    assert flags.armed == set()
+    assert [c for c in calls if c[0] == "find_resume_process"] == [
+        ("find_resume_process", _TAKEOVER_SID),
+        ("find_resume_process", _TAKEOVER_SID),
+    ]
+
+
+def test_takeover_polls_through_activity_then_takes_over(tmp_path, monkeypatch):
+    # Spec bullet "cli wait loop timing": a session that STREAMS (busy) for
+    # several polls, then stops at assistant-end, must become ready without
+    # ever hitting max_wait — the only path exercising the loop's
+    # cross-iteration seconds_idle recompute and sleep(poll) cadence. mtime
+    # advances with the clock while busy (seconds_idle stays a small
+    # constant, not a huge negative one — a real streaming transcript), then
+    # freezes while the clock jumps forward past the idle window.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    calls: list = []
+    store = _RecordingStore(tmp_path / "state", calls)
+    proc = ResumeProcess(pid=100, ppid=50, pgid=100)
+    controller = _FakeResumeController(proc, calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+    assert config.get("takeover_idle_seconds") == 20.0  # this test's math assumes it
+    sleeps: list = []
+
+    read_signal = _scripted([
+        {"mtime": 1001.0, "tail_kind": "mid-turn"},   # busy poll 1
+        {"mtime": 1003.0, "tail_kind": "mid-turn"},   # busy poll 2
+        {"mtime": 1005.0, "tail_kind": "mid-turn"},   # busy poll 3
+        {"mtime": 1005.0, "tail_kind": "assistant-end"},  # writing stopped
+    ])
+    clock = _scripted([
+        1000.0,  # deadline calc
+        1002.0, 1002.0,  # poll 1: seconds_idle, then deadline check
+        1004.0, 1004.0,  # poll 2: seconds_idle, then deadline check
+        1006.0, 1006.0,  # poll 3: seconds_idle, then deadline check
+        1030.0,          # poll 4: seconds_idle = 25 >= idle_window(20) -> ready
+    ])
+
+    ok, msg = cli._takeover(
+        store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
+        max_wait=100.0, read_signal=read_signal, clock=clock,
+        sleep=lambda s: sleeps.append(s),
+    )
+    assert ok
+    assert msg.startswith("took over ")
+    assert "still actively writing" not in msg
+    assert len(sleeps) == 3
+    assert sleeps == [config.get("takeover_poll_seconds")] * 3
+    assert ("terminate_group", 100, config.get("close_grace_seconds")) in calls
+
+
+def test_takeover_no_live_process_refuses_without_kill_or_flag(tmp_path):
+    calls: list = []
+    store = JournalStore(tmp_path)
+    controller = _FakeResumeController(None, calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+
+    ok, msg = cli._takeover(
+        store, tmp_path, config, controller, flags, _TAKEOVER_SID,
+        max_wait=180.0, read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""},
+        clock=_scripted([0.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert f"claude --resume {_TAKEOVER_SID}" in msg
+    assert "no live" in msg
+    assert not any(c[0] == "terminate_group" for c in calls)
+    assert flags.armed == set()
+
+
+def test_takeover_refuses_fast_when_idle_but_parked_mid_turn(tmp_path):
+    # First poll is already quiet (seconds_idle >= idle_window) but the
+    # tail is NOT a clean boundary -> must refuse IMMEDIATELY, never
+    # sleeping out the (very long) max_wait deadline.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    proc = ResumeProcess(pid=100, ppid=50, pgid=100)
+    controller = _FakeResumeController(proc, calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+
+    ok, msg = cli._takeover(
+        store, tmp_path, config, controller, flags, _TAKEOVER_SID,
+        max_wait=100_000.0,
+        read_signal=lambda sid: {"mtime": 0.0, "tail_kind": "mid-turn"},
+        clock=_scripted([1000.0, 1000.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert "idle but parked at mid-turn" in msg
+    assert not any(c[0] == "terminate_group" for c in calls)
+    assert flags.armed == set()
+
+
+def test_takeover_times_out_while_still_actively_writing(tmp_path):
+    calls: list = []
+    store = JournalStore(tmp_path)
+    proc = ResumeProcess(pid=100, ppid=50, pgid=100)
+    controller = _FakeResumeController(proc, calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+    sleeps: list = []
+
+    # mtime pinned far in the "future" relative to the scripted clock, so
+    # seconds_idle is always deeply negative (< idle_window) -> "busy"
+    # every iteration, until clock() crosses the max_wait deadline.
+    ok, msg = cli._takeover(
+        store, tmp_path, config, controller, flags, _TAKEOVER_SID,
+        max_wait=5.0,
+        read_signal=lambda sid: {"mtime": 1_000_000.0, "tail_kind": "mid-turn"},
+        clock=_scripted([0.0, 1.0, 1.0, 3.0, 3.0, 6.0, 6.0]),
+        sleep=lambda s: sleeps.append(s),
+    )
+    assert not ok
+    assert "still actively writing after 5s" in msg
+    assert not any(c[0] == "terminate_group" for c in calls)
+    assert flags.armed == set()
+    assert len(sleeps) == 2  # polled twice before the deadline tripped
+
+
+def test_takeover_refuses_when_sid_becomes_tracked_before_the_kill(tmp_path):
+    # Ready to take over, but the exclusion re-check finds the sid already
+    # journaled (a resolve->kill race) -> refuse, no kill, no flag.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _seed(store, 4242, cwd="/home/u/proj")
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(_TAKEOVER_SID)
+    store.write(entry)
+
+    proc = ResumeProcess(pid=100, ppid=50, pgid=100)
+    controller = _FakeResumeController(proc, calls)
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+
+    ok, msg = cli._takeover(
+        store, tmp_path, config, controller, flags, _TAKEOVER_SID,
+        max_wait=180.0,
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert f"{_TAKEOVER_SID[:8]} is now tracked" in msg
+    # The exclusion re-check must happen BEFORE arm_close (not merely
+    # "armed-then-rolled-back") — assert the flag call never happens at all.
+    assert not any(c[0] == "arm_close" for c in calls)
+    assert not any(c[0] == "terminate_group" for c in calls)
+    assert flags.armed == set()
+
+
+def test_takeover_rolls_back_the_flag_when_the_kill_fails(tmp_path):
+    calls: list = []
+    store = JournalStore(tmp_path)
+    proc = ResumeProcess(pid=100, ppid=50, pgid=100)
+    controller = _FakeResumeController(proc, calls, raise_on_terminate=OSError("no such process"))
+    flags = _FakeTakeoverFlags(calls)
+    config = cfg.Config()
+
+    ok, msg = cli._takeover(
+        store, tmp_path, config, controller, flags, _TAKEOVER_SID,
+        max_wait=180.0,
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+    assert not ok
+    assert "failed to stop live pid 100" in msg
+    assert ("arm_close", 50) in calls
+    assert flags.armed == set()  # rolled back — no kill landed
+    # adoption must never happen on a failed kill
+    assert not any(
+        e.get("claude", {}).get("session_id") == _TAKEOVER_SID for e in store.scan().entries
+    )
+
+
+def test_adopt_plain_delegates_to_the_existing_adopt_path(tmp_path, monkeypatch, capsys):
+    # No --takeover: `crr adopt SID` must behave exactly like
+    # `crr discover --adopt SID` (same message, same journal write).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    rc = cli.main(["adopt", _DISCOVER_SID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "adopted" in out
+    assert _DISCOVER_SID[:8] in out
+
+    store = JournalStore(tmp_path / "state")
+    matches = [e for e in store.scan().entries if e["claude"]["session_id"] == _DISCOVER_SID]
+    assert len(matches) == 1
+
+
+def test_adopt_rejects_a_malformed_sid(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    rc = cli.main(["adopt", "not-a-uuid"])
+    assert rc == 2
+    assert "not a valid session id" in capsys.readouterr().err
+
+
+def test_adopt_takeover_wires_wait_flag_to_max_wait(tmp_path, monkeypatch, capsys):
+    # `_cmd_adopt` must pass --wait through as _takeover's max_wait, and
+    # fall back to config.takeover_max_wait_seconds when --wait is absent.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    recorded: list = []
+
+    def fake_takeover(store, sd, config, controller, flags, sid, *, max_wait, **kw):
+        recorded.append(max_wait)
+        return True, "took over stub"
+
+    monkeypatch.setattr(cli, "_takeover", fake_takeover)
+
+    rc = cli.main(["adopt", _TAKEOVER_SID, "--takeover", "--wait", "7"])
+    assert rc == 0
+    assert "took over stub" in capsys.readouterr().out
+    assert recorded[-1] == 7.0
+
+    rc = cli.main(["adopt", _TAKEOVER_SID, "--takeover"])
+    assert rc == 0
+    assert recorded[-1] == cfg.Config().get("takeover_max_wait_seconds")
+
+
+def test_adopt_takeover_notes_when_wait_is_below_idle_window(tmp_path, monkeypatch, capsys):
+    # --wait 5 is below the default takeover_idle_seconds (20) — a quiet,
+    # parked transcript can never reach the idle branch within 5s, so an
+    # eventual "still actively writing after 5s" refusal would be
+    # misleading (it wasn't writing). An honest up-front note must appear
+    # on stderr, without blocking the attempt.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+
+    def fake_takeover(store, sd, config, controller, flags, sid, *, max_wait, **kw):
+        return True, "took over stub"
+
+    monkeypatch.setattr(cli, "_takeover", fake_takeover)
+    rc = cli.main(["adopt", _TAKEOVER_SID, "--takeover", "--wait", "5"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "--wait 5" in err
+    assert "20" in err
+
+
+def test_adopt_takeover_no_note_when_wait_meets_idle_window(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+
+    def fake_takeover(store, sd, config, controller, flags, sid, *, max_wait, **kw):
+        return True, "took over stub"
+
+    monkeypatch.setattr(cli, "_takeover", fake_takeover)
+    rc = cli.main(["adopt", _TAKEOVER_SID, "--takeover", "--wait", "30"])
+    assert rc == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_adopt_takeover_refusal_prints_to_stderr_and_returns_1(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+
+    def fake_takeover(store, sd, config, controller, flags, sid, *, max_wait, **kw):
+        return False, "refused stub"
+
+    monkeypatch.setattr(cli, "_takeover", fake_takeover)
+    rc = cli.main(["adopt", _TAKEOVER_SID, "--takeover"])
+    assert rc == 1
+    assert "refused stub" in capsys.readouterr().err

@@ -249,6 +249,54 @@ def search_cwd(cwd: str, query: str, *, cap: int, home: Path | None = None) -> l
     return matches
 
 
+def read_takeover_signal(session_id: str, home: Path | None = None) -> dict[str, float | str]:
+    """Sample the takeover safety signal for ``session_id`` (`crr adopt
+    --takeover`): ``{"mtime": float, "tail_kind": str}``.
+
+    Reads the TAIL FIRST, THEN stats the mtime — the ordering is load-
+    bearing, not incidental. If the transcript is appended to between the
+    two reads, tail-first pairs the (now slightly stale) tail we already
+    read with a FRESH mtime, so the caller's ``seconds_idle = now - mtime``
+    comes out small → "still writing, keep waiting" (the safe direction:
+    never mistake an in-flight append for a quiet, adoptable session).
+    Stat-first would risk the opposite: pairing a stale-quiet mtime read
+    before the append with a tail read after it — pairing "was quiet a
+    moment ago" with "already changed", overstating idleness.
+
+    The tail is found with the same bounded backward read + per-line
+    ``json.loads`` guard as ``read_tail_facts``, classifying each record
+    with ``transcript.turn_boundary`` and stopping at the newest record
+    whose kind is NOT ``"other"`` (the scan transparently skips past
+    ``<synthetic>``/non-turn noise at the tail to the last REAL turn — see
+    ``turn_boundary``'s docstring). No non-``"other"`` record found (a
+    transcript of pure noise) → ``tail_kind = ""``.
+
+    An absent transcript, or an mtime ``stat()`` that fails, degrades to
+    an honest ``0.0`` / ``""`` — never a fabricated value.
+    """
+    path = find_transcript(session_id, home)
+    if path is None:
+        return {"mtime": 0.0, "tail_kind": ""}
+    tail_kind = ""
+    try:
+        for line in _reversed_lines(path):
+            try:
+                record = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            kind = transcript.turn_boundary(record)
+            if kind != "other":
+                tail_kind = kind
+                break
+    except OSError:
+        pass
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return {"mtime": mtime, "tail_kind": tail_kind}
+
+
 def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,

@@ -29,7 +29,9 @@ from typing import Any, Mapping
 # compaction badge thresholds; see crr.core.context_pressure)
 # v4: added recall_match_cap / recall_snippet_cap (Slice B, F1 — `crr recall`
 # print caps; see crr.core.transcript.search)
-CONFIG_DEFAULTS_VERSION = 4
+# v5: added takeover_idle_seconds / takeover_max_wait_seconds /
+# takeover_poll_seconds (`crr adopt --takeover`; see crr.core.takeover)
+CONFIG_DEFAULTS_VERSION = 5
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -85,6 +87,18 @@ DEFAULTS: dict[str, Any] = {
     # grep for your own history, not a transcript dump (never uncapped).
     "recall_match_cap": 5,      # max matches printed, most-recent-first (-n)
     "recall_snippet_cap": 500,  # chars of matched text shown per match
+    # `crr adopt --takeover` (destructive: SIGTERMs a live process) — the
+    # idle window + refusal timeout + poll cadence for the cli-owned wait
+    # loop. See crr.core.takeover.ready_to_take_over. idle_window doubles
+    # as a decision threshold, not just a "feels idle" gate: a transcript
+    # quiet for less than this refuses fast as "still mid-turn", so the
+    # window must exceed the longest expected no-write gap during ACTIVE
+    # generation (extended thinking / a slow non-streaming API turn) or
+    # it produces false "parked mid-turn" refusals — 20s is the safer
+    # floor (12s measured too short against that gap).
+    "takeover_idle_seconds": 20.0,       # transcript quiet + clean tail this long
+    "takeover_max_wait_seconds": 180.0,  # give up (refuse, never kill) after this
+    "takeover_poll_seconds": 2.0,        # wait-loop poll cadence
 }
 
 

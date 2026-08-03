@@ -279,3 +279,96 @@ def test_search_matches_assistant_text_from_list_content_blocks():
     }}]
     out = transcript.search(records, "fox", cap=100)
     assert out[0]["text"] == "a fox in a list block"
+
+
+# --- turn_boundary (adopt --takeover) -------------------------------------
+#
+# Classify a single record as a turn boundary: "assistant-end" (the only
+# safe-to-take-over tail — the response is finished and Claude Code is
+# waiting on the user), "mid-turn" (a response or tool round-trip is still
+# in flight), "user-prompt" (a real prompt awaiting a reply), or "other"
+# (non-turn records: permission-mode/pr-link/bridge-session, isMeta, or
+# malformed input). Shapes below mirror real Claude Code JSONL records.
+
+
+def test_turn_boundary_assistant_end_turn_is_assistant_end():
+    record = {"type": "assistant", "message": {
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "done"}],
+    }}
+    assert transcript.turn_boundary(record) == "assistant-end"
+
+
+def test_turn_boundary_assistant_tool_use_with_text_only_content_is_mid_turn():
+    # Empirical: Claude Code stamps stop_reason "tool_use" even when the
+    # record's only content block is text/thinking (the tool_use block
+    # itself lives on a later record) — so this text-only record is still
+    # mid-turn, not a safe boundary.
+    record = {"type": "assistant", "message": {
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "stop_reason": "tool_use",
+        "content": [{"type": "text", "text": "let me check that"}],
+    }}
+    assert transcript.turn_boundary(record) == "mid-turn"
+
+
+def test_turn_boundary_real_user_prompt_is_user_prompt():
+    record = {"type": "user", "message": {"role": "user", "content": "fix the bug"}}
+    assert transcript.turn_boundary(record) == "user-prompt"
+
+
+def test_turn_boundary_user_tool_result_with_tooluseresult_key_is_mid_turn():
+    record = {
+        "type": "user",
+        "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "output"},
+        ]},
+        "toolUseResult": {"stdout": "output"},
+    }
+    assert transcript.turn_boundary(record) == "mid-turn"
+
+
+def test_turn_boundary_synthetic_assistant_is_other():
+    # <synthetic> assistant records (API errors/interrupts) carry no real
+    # turn — treated transparently, like extract_model/_assistant_text
+    # already do, so a caller scanning backward for the newest non-"other"
+    # record skips straight past it to the real prior turn instead of
+    # getting stuck reporting "mid-turn" forever.
+    record = {"type": "assistant", "message": {
+        "role": "assistant",
+        "model": "<synthetic>",
+        "stop_reason": "end_turn",
+        "content": "interrupted",
+    }}
+    assert transcript.turn_boundary(record) == "other"
+
+
+def test_turn_boundary_synthetic_assistant_with_non_end_turn_stop_reason_is_also_other():
+    # The transparency rule applies regardless of stop_reason — synthetic
+    # is never a real turn, so it's never mid-turn either.
+    record = {"type": "assistant", "message": {
+        "role": "assistant",
+        "model": "<synthetic>",
+        "stop_reason": "stop_sequence",
+        "content": "interrupted",
+    }}
+    assert transcript.turn_boundary(record) == "other"
+
+
+@pytest.mark.parametrize("rtype", ["permission-mode", "pr-link", "bridge-session"])
+def test_turn_boundary_non_turn_types_are_other(rtype):
+    assert transcript.turn_boundary({"type": rtype}) == "other"
+
+
+def test_turn_boundary_meta_user_record_is_other():
+    record = {"type": "user", "isMeta": True,
+              "message": {"role": "user", "content": "<command-name>/foo"}}
+    assert transcript.turn_boundary(record) == "other"
+
+
+@pytest.mark.parametrize("bad", [None, [], "not a record", 42])
+def test_turn_boundary_non_mapping_input_is_other(bad):
+    assert transcript.turn_boundary(bad) == "other"

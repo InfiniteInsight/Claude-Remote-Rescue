@@ -7,9 +7,10 @@ subcommands. Business logic belongs in core, not here.
 
 Phase 1 (headless Linux) is implemented: status, revive, session ops
 (reopen/dismiss/remove/kick/close/untrack/untmux/retrack), discover
-(surface + adopt untracked transcripts, T-C), recall (print-only transcript
-search), diagnose, gc, the web dashboard, the systemd watchdog, and the
-shim-facing hooks.
+(surface + adopt untracked transcripts, T-C), adopt (`--takeover` safely
+stops and adopts a still-live `claude --resume`), recall (print-only
+transcript search), diagnose, gc, the web dashboard, the systemd watchdog,
+and the shim-facing hooks.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,7 +40,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, discovery, ops, ports, rescue, resume, reviver, status, web
+from crr.core import contracts, discovery, ops, ports, rescue, resume, reviver, status, takeover, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -154,6 +156,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="adopt this discoverable session id into crr's journal (recoverable, not live)",
     )
     dsc.set_defaults(func=_cmd_discover)
+
+    adp = sub.add_parser(
+        "adopt",
+        help="adopt a discoverable session id (--takeover stops a still-live one first)",
+    )
+    adp.add_argument("sid", help="the session id to adopt")
+    adp.add_argument(
+        "--takeover", action="store_true",
+        help="stop the live 'claude --resume SID' first (waits for a safe turn "
+             "boundary), then adopt — destructive, default off",
+    )
+    adp.add_argument(
+        "--wait", type=float, default=None,
+        help="max seconds to wait for a safe boundary before refusing "
+             "(default: config takeover_max_wait_seconds)",
+    )
+    adp.set_defaults(func=_cmd_adopt)
 
     rescued = sub.add_parser(
         "rescued",
@@ -1160,6 +1179,148 @@ def _adopt(store: JournalStore, sd: Path, sid: str) -> tuple[bool, str]:
         "still alive elsewhere, the watchdog will start a second `claude --resume` "
         "on the same conversation."
     )
+
+
+def _takeover(
+    store: JournalStore,
+    sd: Path,
+    config: cfg.Config,
+    controller,
+    flags: FlagStore,
+    sid: str,
+    *,
+    max_wait: float,
+    read_signal=transcript_source.read_takeover_signal,
+    clock=time.time,
+    sleep=time.sleep,
+) -> tuple[bool, str]:
+    """Safe adoption of a still-live ``claude --resume sid`` (`crr adopt
+    --takeover`). See docs/superpowers/specs/2026-08-03-adopt-takeover.md.
+
+    Ordering, each step load-bearing:
+      1. Resolve the live process ONCE, up front. None -> refuse (the
+         fresh-session / not-running home): no kill, no flag, no wait paid
+         for. This early resolve only confirms a target exists before the
+         wait loop — it is NOT the tuple that gets killed (see step 3):
+         the wait loop below can run up to ``max_wait`` seconds lock-free,
+         long enough for this process to exit and its pid/ppid/pgid to be
+         recycled by the OS.
+      2. Wait loop, refuse-fast, LOCK-FREE (mirrors ``_adopt``'s lock-free
+         read phase — the wait can run up to ``max_wait`` seconds; holding
+         ``mutation_lock`` here would stall every other op, the revive
+         timer included, for that whole span). A quiet-but-not-clean tail
+         refuses IMMEDIATELY, never waiting out the timeout; a busy
+         transcript only refuses once ``max_wait`` elapses. Every
+         non-ready outcome here is a refusal, never a kill.
+      3. Kill under ``mutation_lock`` (bounded by ``grace``): re-check the
+         sid is still untracked (closes the resolve->kill race), then
+         RE-RESOLVE the live process (``find_resume_process`` again) —
+         this is the tuple the kill actually uses, so it can never be the
+         stale one from step 1. None on re-resolve -> refuse honestly (the
+         process exited during the wait): no kill, no flag. Otherwise
+         ``arm_close(ppid)`` STRICTLY BEFORE ``terminate_group(pgid)`` on
+         the FRESH tuple — a flag survives only when a kill actually lands
+         (mirrors ``_reopen_ghost``'s rollback rule); an undeliverable kill
+         clears the flag and fails with nothing else touched.
+      4. Adopt via ``_adopt`` (its own lock + re-check) AFTER the kill
+         lock is released — the journal write only ever happens once a
+         kill has actually landed. ``_adopt`` can still refuse past its own
+         journal re-check (row no longer discoverable, a synthetic-pid
+         slot collision, an unreadable slot) — a killed-but-not-adopted
+         state is reachable and reported honestly; the close flag armed in
+         step 3 still lets a later plain ``crr adopt`` recover it.
+    """
+    proc = controller.find_resume_process(sid)
+    if proc is None:
+        return False, (
+            f"no live 'claude --resume {sid}' found; adopt without --takeover, "
+            "or exit it in its own terminal first"
+        )
+
+    idle_window = config.get("takeover_idle_seconds")
+    poll = config.get("takeover_poll_seconds")
+    grace = config.get("close_grace_seconds")
+
+    deadline = clock() + max_wait
+    while True:
+        sig = read_signal(sid)
+        seconds_idle = clock() - sig["mtime"]
+        if seconds_idle >= idle_window:
+            # Quiet — decide now, an idle process won't advance its own tail.
+            if takeover.ready_to_take_over(seconds_idle, sig["tail_kind"], idle_window=idle_window):
+                break
+            tail_kind = sig["tail_kind"] or "unknown"
+            return False, (
+                f"idle but parked at {tail_kind} — not a safe boundary to take over; "
+                "finish or exit it manually"
+            )
+        # Still writing — keep polling unless the wait-for-quiet phase's
+        # own deadline has elapsed.
+        if clock() >= deadline:
+            return False, f"still actively writing after {max_wait:g}s; not taking over"
+        sleep(poll)
+
+    with mutation_lock(sd):
+        journaled = {
+            e["claude"]["session_id"] for e in store.scan().entries if e.get("claude") is not None
+        }
+        if sid in journaled:
+            return False, f"{sid[:8]} is now tracked — not taking over"
+        # Re-resolve under the lock: the wait loop above ran lock-free for
+        # up to max_wait seconds, long enough for the step-1 process to
+        # exit and its pid/ppid/pgid to be recycled by the OS. The kill
+        # below must use THIS tuple, never the stale one from the top of
+        # the function.
+        proc = controller.find_resume_process(sid)
+        if proc is None:
+            return False, (
+                f"the live process for {sid[:8]} exited; adopt without --takeover"
+            )
+        flags.arm_close(proc.ppid)
+        try:
+            controller.terminate_group(proc.pgid, grace)
+        except OSError as exc:
+            flags.clear(proc.ppid)  # no kill landed -> the flag must not linger
+            return False, f"takeover: failed to stop live pid {proc.pid}: {exc}"
+
+    ok, msg = _adopt(store, sd, sid)
+    sid8 = sid[:8]
+    prefix = f"took over {sid8} (stopped live pid {proc.pid})"
+    if ok:
+        return True, f"{prefix}; {msg}"
+    return False, f"{prefix} but adoption failed: {msg}"
+
+
+def _cmd_adopt(args: argparse.Namespace) -> int:
+    if not contracts.valid_session_id(args.sid):
+        print(f"crr adopt: {args.sid!r} is not a valid session id", file=sys.stderr)
+        return 2
+    config = _load_config()
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    if not args.takeover:
+        ok, msg = _adopt(store, sd, args.sid)
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    flags = FlagStore(sd)
+    max_wait = args.wait if args.wait is not None else config.get("takeover_max_wait_seconds")
+    idle_window = config.get("takeover_idle_seconds")
+    if max_wait < idle_window:
+        # Honest heads-up, not a block: a quiet/parked transcript can never
+        # reach the idle-decision branch within a --wait shorter than the
+        # idle window, so a later "still actively writing after Ns" refusal
+        # would be misleading — it may not have been writing at all.
+        print(
+            f"note: --wait {max_wait:g}s is below the takeover idle window "
+            f"({idle_window:g}s); a takeover can only proceed if the transcript "
+            f"is already quiet — it cannot wait out an active turn in under "
+            f"{idle_window:g}s",
+            file=sys.stderr,
+        )
+    ok, msg = _takeover(store, sd, config, controller, flags, args.sid, max_wait=max_wait)
+    print(msg, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
 
 
 def _relative_age(iso: str, now_iso: str) -> str:

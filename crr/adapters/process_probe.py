@@ -19,6 +19,8 @@ import subprocess
 import time
 from typing import Sequence
 
+from crr.core.ports import ResumeProcess
+
 # tty strings that mean "no controlling terminal".
 _NO_TTY = {"?", "??"}
 
@@ -126,6 +128,29 @@ def _is_claude_argv0(argv0: str) -> bool:
     return base.startswith("claude")
 
 
+def _parse_ps_rows_full_args(stdout: str) -> list[tuple[int, int, int, str]]:
+    """Same row shape as ``_parse_ps_rows`` (pid, ppid, pgid) but keeps the
+    FULL args string as the fourth field instead of truncating it to argv0.
+
+    ``_parse_ps_rows`` deliberately keeps only argv0 (all ``claude_groups``
+    needs) — do not change that; ``find_resume_process`` instead needs the
+    whole cmdline so it can find ``--resume <sid>`` as argv tokens further
+    along the line, so this is a second, separate parser over the same
+    ``ps -o pid=,ppid=,pgid=,args=`` snapshot shape.
+    """
+    rows: list[tuple[int, int, int, str]] = []
+    for line in stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        rows.append((pid, ppid, pgid, parts[3]))
+    return rows
+
+
 def _child_groups(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list[int]:
     shell_pgid = next((pgid for pid, _ppid, pgid, _a in rows if pid == shell_pid), None)
     if shell_pgid is None:
@@ -163,6 +188,53 @@ class PsProcessController:
         if result.returncode != 0:
             return []
         return _child_groups(_parse_ps_rows(result.stdout), shell_pid)
+
+    def find_resume_process(self, session_id: str) -> ResumeProcess | None:
+        """Locate a live ``claude --resume <session_id>`` process (`crr
+        adopt --takeover`'s live-process resolver).
+
+        One ``ps`` snapshot, matched on the FULL argv (via
+        ``_parse_ps_rows_full_args`` — ``_parse_ps_rows`` truncates to
+        argv0 for ``claude_groups``'s ancestry selector and must stay that
+        way, so this is a separate parse of the same snapshot). A row
+        matches when its argv0 basename starts with ``claude``
+        (``_is_claude_argv0``, reused) AND its args, split on whitespace,
+        contain both ``"--resume"`` and ``session_id`` as WHOLE tokens —
+        never a substring check, so a row carrying a sid that is merely a
+        prefix (or superstring) of ``session_id`` cannot false-hit.
+
+        This sid-scoped ``--resume <UUID>`` match is a DIFFERENT
+        specificity class from the broad ``_is_claude_argv0``-only
+        ancestry selector the kill-by-ancestry lesson warns against
+        (``_child_groups``/``claude_groups``): matching a specific UUID
+        identifies one conversation, not "any process that looks like
+        claude". It is still not trusted alone — the caller (cli)
+        additionally re-checks the sid is untracked immediately before
+        killing (closing the resolve-to-kill race) and signals by the
+        returned ``pgid``, never by re-running this argv pattern at kill
+        time.
+
+        Returns the first match's ``(pid, ppid, pgid)``; ``None`` if no
+        row matches, if ``ps`` exits non-zero, or if the subprocess call
+        itself fails (mirrors ``claude_groups``'s degrade-to-empty policy —
+        an inconclusive probe must never be read as "found").
+        """
+        try:
+            result = subprocess.run(
+                _ps_snapshot_argv(),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        for pid, ppid, pgid, args in _parse_ps_rows_full_args(result.stdout):
+            tokens = args.split()
+            if not tokens or not _is_claude_argv0(tokens[0]):
+                continue
+            if "--resume" in tokens and session_id in tokens:
+                return ResumeProcess(pid, ppid, pgid)
+        return None
 
     def terminate_group(self, pgid: int, grace_seconds: float) -> None:
         os.killpg(pgid, signal.SIGTERM)  # raises OSError if undeliverable

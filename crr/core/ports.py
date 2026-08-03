@@ -12,7 +12,22 @@ way: adapters import core to implement these, never the reverse.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, NamedTuple, Protocol, Sequence, runtime_checkable
+
+
+class ResumeProcess(NamedTuple):
+    """The (pid, ppid, pgid) of a live ``claude --resume <sid>`` process.
+
+    Returned by ``ProcessController.find_resume_process`` — the caller
+    (cli) kills by ``pgid`` (never by re-matching the argv pattern) and
+    arms the shim close-flag on ``ppid`` before the kill (see
+    ``ProcessController.find_resume_process``'s docstring for why this
+    argv match is a different specificity class from ``claude_groups``'s
+    ancestry selector)."""
+
+    pid: int
+    ppid: int
+    pgid: int
 
 
 @runtime_checkable
@@ -74,6 +89,26 @@ class ProcessController(Protocol):
     def terminate_group(self, pgid: int, grace_seconds: float) -> None:
         """SIGTERM the group, then SIGKILL it if still alive after the grace
         window. Raises OSError if the initial signal cannot be delivered."""
+        ...
+
+    def find_resume_process(self, session_id: str) -> "ResumeProcess | None":
+        """Locate a live ``claude --resume <session_id>`` process (`crr
+        adopt --takeover`'s live-process resolver), or None if none is
+        running.
+
+        This is a sid-scoped, whole-argv-token match on a specific UUID —
+        a DIFFERENT specificity class from ``claude_groups``'s
+        ``_is_claude_argv0``-only ancestry selector, which the
+        kill-by-ancestry lesson warns is too broad to signal from
+        (any process that merely *looks like* claude). One UUID matches
+        one conversation; there is no plausible false-positive class the
+        way "any argv0 starting with claude" has. The caller still keeps
+        two independent guards on top of this match rather than trusting
+        it alone: it re-checks the sid is still untracked immediately
+        before killing (closing the resolve-to-kill race), and it signals
+        by the returned ``pgid`` — never by re-running this pattern match
+        at kill time.
+        """
         ...
 
 
