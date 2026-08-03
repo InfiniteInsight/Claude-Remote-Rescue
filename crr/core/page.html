@@ -82,8 +82,22 @@
   #empty, #stale { color: #8a93a2; padding: 20px 16px; }
   #stale { color: #e0a53b; display: none; }
   #notice {
-    position: sticky; top: 49px; margin: 0 16px; padding: 8px 12px; border-radius: 8px;
-    background: #3a2f12; color: #e0a53b; font-size: 13px; display: none;
+    position: fixed; left: 50%; top: 60px; transform: translateX(-50%);
+    max-width: min(92%, 520px); padding: 10px 16px; border-radius: 8px;
+    font-size: 13px; font-weight: 500; display: none; z-index: 50;
+    border: 1px solid transparent; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    word-break: break-word;
+  }
+  #notice.show { display: block; animation: notice-in 0.22s ease-out; }
+  #notice.ok    { background: #123a22; color: #7fe0a0; border-color: #1c5233; }
+  #notice.error { background: #3a1616; color: #f08b8b; border-color: #5a2222; }
+  #notice.warn  { background: #3a2f12; color: #e0a53b; border-color: #5a4a1c; }
+  @keyframes notice-in {
+    from { opacity: 0; transform: translate(-50%, -10px); }
+    to   { opacity: 1; transform: translate(-50%, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #notice.show { animation: none; }
   }
   #diag { padding: 4px 16px 0; }
   #diag-btn {
@@ -153,7 +167,7 @@
   </label>
 </div>
 <div id="stale">A newer version is available — reloading…</div>
-<div id="notice"></div>
+<div id="notice" role="status" aria-live="polite"></div>
 <div id="diag">
   <button id="diag-btn" type="button">Why did sessions die?</button>
   <div id="diag-panel" hidden></div>
@@ -407,11 +421,17 @@ function renderCard(s, uncertain, groupColor, latest) {
   return card;
 }
 
-function showNotice(text) {
+// Status toast: `kind` is "ok" | "error" | "warn" (default), driving the
+// color-coded class. Re-adding the class after a reflow re-triggers the
+// entrance animation even when a notice is already showing.
+function showNotice(text, kind) {
   var n = document.getElementById("notice");
   n.textContent = text;
-  n.style.display = "block";
-  setTimeout(function () { n.style.display = "none"; }, NOTICE_MS);
+  n.className = "";
+  void n.offsetWidth;  // force reflow so the animation restarts on repeat calls
+  n.className = (kind || "warn") + " show";
+  clearTimeout(n._t);
+  n._t = setTimeout(function () { n.className = ""; }, NOTICE_MS);
 }
 
 function action(op, pid, btn) {
@@ -423,10 +443,10 @@ function action(op, pid, btn) {
   })
     .then(function (r) { return r.json(); })
     .then(function (j) {
-      if (!j.ok) { showNotice(j.message || "action failed"); }
+      showNotice(j.message || (j.ok ? op + " ok" : "action failed"), j.ok ? "ok" : "error");
       pollSessions();
     })
-    .catch(function () { showNotice("request failed"); })
+    .catch(function () { showNotice("request failed", "error"); })
     .finally(function () { btn.disabled = false; });
 }
 
@@ -576,13 +596,13 @@ function sidAction(op, sid, btn, onDone) {
   })
     .then(function (r) { return r.json(); })
     .then(function (j) {
-      showNotice(j.message || (j.ok ? "done" : "action failed"));
+      showNotice(j.message || (j.ok ? "done" : "action failed"), j.ok ? "ok" : "error");
       if (j.ok) {
         pollSessions();
         if (onDone) onDone();
       }
     })
-    .catch(function () { showNotice("request failed"); })
+    .catch(function () { showNotice("request failed", "error"); })
     .finally(function () { btn.disabled = false; });
 }
 
