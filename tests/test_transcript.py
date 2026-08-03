@@ -258,6 +258,25 @@ def test_search_caps_and_cleans_the_matched_text():
     assert len(out[0]["text"]) == 20
 
 
+def test_search_centers_the_snippet_on_a_deep_match():
+    # A match far past `cap` would be invisible under head-capping. The
+    # snippet must re-center on the match so the query is actually shown.
+    raw = "x" * 600 + " NEEDLE here " + "y" * 600
+    out = transcript.search([_user(raw)], "NEEDLE", cap=100)
+    assert "NEEDLE" in out[0]["text"]
+    assert out[0]["text"].startswith("…")  # elided head
+    assert out[0]["text"].endswith("…")    # elided tail
+
+
+def test_search_keeps_head_form_when_match_is_visible():
+    # A match within the head window must NOT reflow to a centered snippet
+    # (no spurious ellipsis) — only deep matches re-center.
+    raw = "the fox is right here " + "z" * 300
+    out = transcript.search([_user(raw)], "fox", cap=40)
+    assert out[0]["text"] == " ".join(raw.split())[:40]
+    assert "…" not in out[0]["text"]
+
+
 def test_search_includes_timestamp_when_present():
     records = [_user("a fox prompt", timestamp="2026-01-02T00:00:00Z")]
     out = transcript.search(records, "fox", cap=100)

@@ -98,6 +98,36 @@ def clean_display(text: str, cap: int) -> str:
     return " ".join(text.split())[:cap]
 
 
+def center_snippet(text: str, query: str, cap: int) -> str:
+    """Whitespace-collapse ``text`` and return a ``cap``-wide window that keeps
+    the ``query`` match VISIBLE (F1 — ``crr recall``).
+
+    Head-capping (``clean_display``) hides a match that falls past ``cap`` in a
+    long turn. This keeps the cheap head form whenever the match is already
+    visible there — so short turns and head matches are byte-for-byte identical
+    to ``clean_display`` (no spurious reflow) — and only re-centers the window
+    on the match, with ``…`` markers for any elided head/tail, when the match
+    would otherwise be cut off. Case-insensitive (mirrors ``search``'s own
+    matching); a query that somehow isn't present degrades to the head form.
+    """
+    flat = " ".join(text.split())
+    if len(flat) <= cap:
+        return flat
+    idx = flat.lower().find(query.lower())
+    if idx < 0 or idx + len(query) <= cap:
+        return flat[:cap]  # absent (shouldn't happen) or already visible in the head
+    half = max(0, (cap - len(query)) // 2)
+    start = max(0, idx - half)
+    end = min(len(flat), start + cap)
+    start = max(0, end - cap)  # pull the window back if it ran into the tail
+    snippet = flat[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(flat):
+        snippet = snippet + "…"
+    return snippet
+
+
 def last_prompt(records: Iterable[Mapping[str, Any]], *, cap: int) -> str:
     """Most recent real prompt across ``records`` (chronological), capped."""
     for record in reversed(list(records)):
@@ -165,9 +195,10 @@ def search(
     """Case-insensitive substring search over real prompt/assistant turns.
 
     Pure and testable with synthetic records (F1 — ``crr recall``): reuses
-    ``extract_prompt``/``clean_display``/``extract_timestamp`` so the same
-    noise skip-list that keeps cards honest also keeps recall from surfacing
-    tool-result/meta garbage. Each match carries its chronological ``index``
+    ``extract_prompt``/``extract_timestamp`` so the same noise skip-list that
+    keeps cards honest also keeps recall from surfacing tool-result/meta
+    garbage, and ``center_snippet`` so a match deep in a long turn stays
+    visible instead of being head-capped off. Each match carries its chronological ``index``
     (position in ``records``) so a caller can order results (e.g.
     most-recent-first) without re-deriving recency from scratch.
 
@@ -184,7 +215,7 @@ def search(
             if query_lower in prompt.lower():
                 matches.append({
                     "role": "user",
-                    "text": clean_display(prompt, cap),
+                    "text": center_snippet(prompt, query, cap),
                     "index": index,
                     "timestamp": extract_timestamp(record) or "",
                 })
@@ -193,7 +224,7 @@ def search(
         if text is not None and query_lower in text.lower():
             matches.append({
                 "role": "assistant",
-                "text": clean_display(text, cap),
+                "text": center_snippet(text, query, cap),
                 "index": index,
                 "timestamp": extract_timestamp(record) or "",
             })
