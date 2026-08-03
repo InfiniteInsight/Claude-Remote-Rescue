@@ -158,3 +158,78 @@ def test_reverse_lines_yields_end_to_start(tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("a\nb\nc\n", encoding="utf-8")
     assert [ln.strip() for ln in transcript_source._reversed_lines(p, block_size=2)] == ["c", "b", "a"]
+
+
+# --- search_transcript / search_cwd (F1 — `crr recall`) -------------------
+
+
+def test_search_transcript_finds_a_user_prompt(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("what is a fox"),
+        _assistant("a small mammal"),
+    ])
+    matches = transcript_source.search_transcript(sid, "fox", cap=100, home=tmp_path)
+    assert len(matches) == 1
+    assert matches[0]["role"] == "user"
+    assert matches[0]["text"] == "what is a fox"
+
+
+def test_search_transcript_finds_assistant_text_too(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("tell me about mammals"),
+        _assistant("a fox is a small mammal"),
+    ])
+    matches = transcript_source.search_transcript(sid, "fox", cap=100, home=tmp_path)
+    assert len(matches) == 1
+    assert matches[0]["role"] == "assistant"
+
+
+def test_search_transcript_skips_tool_result_noise(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user([{"type": "tool_result", "content": "fox output"}]),
+        _user("a real fox prompt"),
+    ])
+    matches = transcript_source.search_transcript(sid, "fox", cap=100, home=tmp_path)
+    assert len(matches) == 1
+    assert matches[0]["text"] == "a real fox prompt"
+
+
+def test_search_transcript_no_match_is_empty_list(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [_user("hello there")])
+    assert transcript_source.search_transcript(sid, "nonexistent", cap=100, home=tmp_path) == []
+
+
+def test_search_transcript_missing_transcript_is_empty_list(tmp_path):
+    assert transcript_source.search_transcript("no-such-sid", "fox", cap=100, home=tmp_path) == []
+
+
+def test_search_transcript_preserves_chronological_order(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [
+        _user("first fox"),
+        _assistant("no fox here"),
+        _user("second fox"),
+    ])
+    matches = transcript_source.search_transcript(sid, "fox", cap=100, home=tmp_path)
+    assert [m["text"] for m in matches] == ["first fox", "no fox here", "second fox"]
+    assert [m["index"] for m in matches] == [0, 1, 2]
+
+
+def test_search_cwd_tags_matches_with_their_session_id(tmp_path):
+    _write_transcript(tmp_path, "sidA", [_user("a fox in project A")], project="-home-u-proj")
+    _write_transcript(tmp_path, "sidB", [_user("a fox in project B")], project="-home-u-proj")
+    # A different cwd's transcript must not leak in.
+    _write_transcript(tmp_path, "sidC", [_user("a fox elsewhere")], project="-home-u-elsewhere")
+
+    matches = transcript_source.search_cwd("/home/u/proj", "fox", cap=100, home=tmp_path)
+    by_sid = {m["session_id"]: m for m in matches}
+    assert set(by_sid) == {"sidA", "sidB"}
+    assert by_sid["sidA"]["text"] == "a fox in project A"
+
+
+def test_search_cwd_no_transcripts_is_empty_list(tmp_path):
+    assert transcript_source.search_cwd("/no/such/cwd", "fox", cap=100, home=tmp_path) == []

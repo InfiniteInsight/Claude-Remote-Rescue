@@ -85,6 +85,60 @@ def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
 MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
 
 
+def _read_records(path: Path) -> list[dict]:
+    """Parse every JSONL line of ``path`` forward; unparseable lines are
+    skipped rather than aborting the read (mirrors read_tail_facts's
+    per-line ``json.loads`` guard)."""
+    records: list[dict] = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except (ValueError, TypeError):
+                continue
+    return records
+
+
+def search_transcript(
+    session_id: str, query: str, *, cap: int, home: Path | None = None,
+) -> list[dict]:
+    """Search one session's transcript for ``query`` (F1 — ``crr recall``).
+
+    On-demand command, not the poll path: reads the whole file forward
+    (unlike ``read_tail_facts``'s early-exit backward walk — there is no
+    "near the tail" shortcut for an arbitrary query) and delegates the
+    actual matching to the pure ``core.search``. An absent transcript
+    degrades to an empty list, never an error.
+    """
+    path = find_transcript(session_id, home)
+    if path is None:
+        return []
+    try:
+        records = _read_records(path)
+    except OSError:
+        return []
+    return transcript.search(records, query, cap=cap)
+
+
+def search_cwd(cwd: str, query: str, *, cap: int, home: Path | None = None) -> list[dict]:
+    """Search every transcript in ``cwd``'s project dir (F1 — ``--all``).
+
+    Each match is tagged with its ``session_id`` so a caller merging
+    matches across sessions (e.g. printing most-recent-first) knows which
+    transcript it came from.
+    """
+    matches: list[dict] = []
+    for t in list_transcripts(cwd, home):
+        for match in search_transcript(t["session_id"], query, cap=cap, home=home):
+            match = dict(match)
+            match["session_id"] = t["session_id"]
+            matches.append(match)
+    return matches
+
+
 def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,
