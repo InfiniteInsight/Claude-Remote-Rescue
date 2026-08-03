@@ -84,7 +84,16 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 2
+    assert cfg.CONFIG_DEFAULTS_VERSION == 3
+
+
+def test_context_pressure_fraction_defaults():
+    # Slice A / F2 (audit P5): context-pressure thresholds are named priors,
+    # not magic numbers in crr.core.context_pressure.
+    assert cfg.DEFAULTS["context_tight_fraction"] == 0.7
+    assert cfg.DEFAULTS["context_compact_fraction"] == 1.0
+    assert cfg.Config().get("context_tight_fraction") == 0.7
+    assert cfg.Config().get("context_compact_fraction") == 1.0
 
 
 def test_terminal_prior_defaults_to_auto():
