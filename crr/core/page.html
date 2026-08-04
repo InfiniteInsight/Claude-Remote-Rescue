@@ -247,7 +247,7 @@
     <div id="disc-tools">
       <input id="disc-filter" type="search" placeholder="Filter by directory or id" autocomplete="off" aria-label="Filter discoverable sessions by directory or id">
     </div>
-    <div class="note" style="padding: 8px 16px 0; margin: 0;"><strong>Adopt</strong> tracks a conversation as recoverable (revive via `crr reopen`); it does NOT attach to a running process. If a row is marked <strong>running now</strong>, adopting it would start a SECOND `claude --resume` on the same conversation — use <strong>Take over</strong>, which stops the live one first (only at a safe turn boundary) and then adopts.</div>
+    <div class="note" style="padding: 8px 16px 0; margin: 0;"><strong>Adopt</strong> tracks a conversation as recoverable (revive via `crr reopen`); it does NOT attach to a running process. Everything listed here is <em>untracked</em> — crr is not managing it. A row marked <strong>running (untracked)</strong> also has a live `claude --resume` going right now, so adopting it would start a SECOND copy on the same transcript — use <strong>Take over</strong>, which stops the live one first (only at a safe turn boundary) and then adopts.</div>
     <div id="disc-list"></div>
     <div id="disc-foot">
       <span id="disc-count"></span>
@@ -893,8 +893,8 @@ function loadDiscoverable() {
           var row = renderSidRow(r, r.last_active, actions, loadDiscoverable);
           if (r.running) {
             var tag = el("span", "badge running-badge");
-            tag.textContent = "running now";
-            tag.title = "A live `claude --resume` is running for this conversation. Adopting it would start a SECOND copy — use Take over instead.";
+            tag.textContent = "running (untracked)";
+            tag.title = "crr is not tracking this conversation, but a live `claude --resume` is running for it right now. Adopting would start a SECOND copy on the same transcript — use Take over instead.";
             row.firstChild.appendChild(tag);  // inline beside the sid
           }
           list.appendChild(row);
