@@ -40,7 +40,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, discovery, ops, ports, rescue, resume, reviver, status, takeover, transcript, web
+from crr.core import contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, status, takeover, transcript, web
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -1127,7 +1127,12 @@ def _discoverable_candidates(store: JournalStore, config=None):
     """
     if config is None:
         config = _load_config()
-    excluded_dirs = config.get("discover_exclude_dirs")
+    # config.toml's list is the user's hand-owned baseline; the dashboard's
+    # admin section can add more without ever rewriting their TOML.
+    excluded_dirs = exclusions.effective(
+        config.get("discover_exclude_dirs"),
+        exclusions.ExclusionStore(state_dir.state_dir()).read(),
+    )
     scan = store.scan()
     journaled = {
         e["claude"]["session_id"] for e in scan.entries if e.get("claude") is not None
@@ -1661,6 +1666,8 @@ def make_web_handler(
     discoverable_provider: Callable[[str, int, int], dict] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
+    exclusions_provider: Callable[[], dict] | None = None,
+    exclusions_writer: Callable[[object], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -1688,6 +1695,8 @@ def make_web_handler(
                 discoverable_provider=discoverable_provider,
                 sid_action_provider=sid_action_provider,
                 recall_provider=recall_provider,
+                exclusions_provider=exclusions_provider,
+                exclusions_writer=exclusions_writer,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -1980,6 +1989,18 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 return False, f"unknown op {op}"
         return res.ok, res.message
 
+    def exclusions_provider() -> dict:
+        return {
+            "configured": list(config.get("discover_exclude_dirs")),
+            "managed": exclusions.ExclusionStore(sd).read(),
+        }
+
+    def exclusions_writer(dirs) -> dict:
+        # ExclusionError is a ValueError, which handle_request turns into a
+        # 400 carrying the message — bounds/type errors reach the user.
+        managed = exclusions.ExclusionStore(sd).write(dirs)
+        return {"configured": list(config.get("discover_exclude_dirs")), "managed": managed}
+
     def recall_provider(query: str, sid: str | None) -> dict:
         # Lazy GET (never the poll path): print-only transcript search, the
         # dashboard surface of `crr recall`. sid -> that one session; no sid ->
@@ -2010,6 +2031,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
         recall_provider=recall_provider,
+        exclusions_provider=exclusions_provider,
+        exclusions_writer=exclusions_writer,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),
