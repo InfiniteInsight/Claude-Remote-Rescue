@@ -592,6 +592,26 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
+def test_page_buttons_have_explanatory_tooltips():
+    """Every action button explains itself on hover — the labels alone
+    ('Kick', 'Un-tmux', 'Adopt') don't tell a new user what will happen."""
+    page = web.render_page()
+    assert "BUTTON_HELP" in page
+    for label in ("Reopen", "Restore", "Dismiss", "Remove", "Kick", "Close",
+                  "Untrack", "Un-tmux", "Search", "Retrack", "Adopt", "Take over"):
+        assert '"' + label + '":' in page, label
+    # the helper actually applies them
+    assert "BUTTON_HELP[" in page
+
+
+def test_page_panel_toggles_have_tooltips():
+    page = web.render_page()
+    for el_id in ("diag-btn", "untracked-btn", "discoverable-btn", "recall-all-btn"):
+        # each toggle carries a title= in the markup
+        assert el_id in page
+    assert page.count("title=") >= 4
+
+
 def test_page_cards_label_every_field():
     """UX: bare values ('verified', a naked uuid8, a relative time) don't tell
     a new user what they are. Every card field carries a dim inline label."""
@@ -610,9 +630,10 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_24():
-    """v24: inline field labels on cards + a sid-provenance legend entry."""
-    assert web.PAGE_VERSION == 24
+def test_page_version_is_25():
+    """v25: explanatory tooltips on every action button and panel toggle
+    (v24 added the inline field labels + sid-provenance legend)."""
+    assert web.PAGE_VERSION == 25
 
 
 def test_page_has_global_recall_search_bar():
