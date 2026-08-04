@@ -25,19 +25,22 @@ See [DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md).
 
 Honest calibration — what is and isn't verified:
 
-- **Verified:** the Linux CI matrix (ubuntu, Python 3.11/3.12), the
-  `node --check` page-JS gate, and the import-linter layering contract all
-  pass. Business logic is covered by unit tests with fakes. `kick` and
-  `close` (they signal live processes) and the shim repair loop (the
-  `claude()` wrapper's post-exit relaunch/close/crash-offer branching) are
-  shipped; the repair loop is also live-verified on Linux/WSL (fish) in
-  isolation.
-- **NOT yet verified:** the macOS-runner tests (`plutil`, `osacompile`,
-  `log show`/`pmset`, mac boot-identity) have not run on this batch; any real
-  GUI tab spawn (macOS/Linux-desktop/`wt.exe`) and all Windows integration
-  are unrun; and the **end-to-end hardware acceptance** — kill the tmux
-  server, reboot, watch every conversation revive and the dashboard return
-  over the tailnet — has not been run. These are the next milestone.
+- **Verified on Linux/WSL, in production.** crr is the author's daily-driver
+  on a WSL2 machine: it owns the watchdog, the shell shim, and the tailnet
+  dashboard, and tracks live sessions day to day. The **end-to-end hardware
+  acceptance has been run** — a real reboot, after which the watchdog revived
+  every conversation into tmux and the dashboard returned over the tailnet —
+  and `kick`/`close`/`reopen`, the shim repair loop, and the recovery/recall/
+  discovery/adopt(+`--takeover`) features are all live-exercised. The Linux CI
+  matrix (Python 3.11/3.12), the `node --check` page-JS gate, and the
+  import-linter layering contract pass; business logic is unit-tested with
+  fakes.
+- **NOT yet verified on real macOS or Windows.** Those platform adapters
+  (launchd/`plutil`, `osacompile`/Terminal-tab spawn, `log show`/`pmset`, mac
+  boot-identity; `wt.exe`, Scheduled Tasks, WinEvent/WSL-OOM) are unit-tested
+  but have never run on the hardware. **macOS first-run testing is in
+  progress** — see [docs/TESTING-macos.md](docs/TESTING-macos.md). Windows is
+  next.
 
 This is a ground-up OSS rewrite of a private Windows/WSL tool that
 survived two real outages in production (a Windows-Update reboot and a WSL
@@ -59,19 +62,36 @@ two sessions that share an `injected`/`verified` id are a real **duplicate**
 duplicate · guessed sid** (amber), because two `--continue` tabs can guess the
 same newest transcript.
 
+Cards sort by **true conversation recency** (the transcript's last turn, not
+just the last shell action), mark the newest session per directory with a
+**latest** chip, and carry a **compaction-pressure badge** that warns when a
+transcript is close to the model's context window (so you know a revive will
+compact). Every action button — `Kick`, `Close`, `Reopen`, `Untrack`, and the
+rest — reports success or failure in a color-coded status toast. Two lazy
+panels surface sessions crr *isn't* actively tracking: **Recently untracked**
+(one-tap **Retrack**) and **Discoverable** — transcripts on disk crr never
+journaled, each with **Adopt** and a confirm-gated **Take over** (stop a
+still-live `claude` at a safe turn boundary, then adopt it — the phone-side of
+`crr adopt --takeover`). A **search bar** (plus a per-card **Search**) recalls
+earlier conversation from transcripts without re-injecting it into a live
+session.
+
 ![The "why did sessions die?" panel](docs/screenshots/diagnostics.png)
 
 The lazy "Why did sessions die?" panel leads with a **plain-English verdict**
 (out-of-memory, kernel panic, unexpected shutdown, clean reboot, or "looks
 clean") above the raw journald/WinEvent evidence.
 
-## Install (headless Linux)
+## Install
 
 Requires Python ≥ 3.11 and `tmux`. Zero runtime dependencies otherwise.
 
-```sh
-pipx install claude-remote-rescue      # or: pip install --user .
-```
+> **Not on PyPI yet** (still pre-release). Install from source until the first
+> published release:
+> ```sh
+> pipx install "git+https://github.com/InfiniteInsight/Claude-Remote-Rescue"
+> # or, from a checkout:  pipx install .
+> ```
 
 1. **Shell shim** — source it from your rc file so shells journal
    themselves and `claude` launches become identifiable:
@@ -81,7 +101,8 @@ pipx install claude-remote-rescue      # or: pip install --user .
 2. **Watchdog + dashboard** — install the user services (autonomous revival
    + a dashboard that survives logout/reboot):
    ```sh
-   crr systemd --install       # prints first with no args, so you can inspect
+   crr systemd --install       # Linux; prints first with no args, so you can inspect
+   crr launchd --install       # macOS (launchd user agents) — see docs/TESTING-macos.md
    ```
 3. **Expose the dashboard on your tailnet** (loopback-only by default):
    ```sh
@@ -91,6 +112,9 @@ pipx install claude-remote-rescue      # or: pip install --user .
    ```sh
    crr doctor
    ```
+
+macOS is unit-tested but not yet hardware-verified — if you're trying it there,
+[docs/TESTING-macos.md](docs/TESTING-macos.md) is the first-run guide.
 
 ## Commands
 
