@@ -990,9 +990,10 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
-def _recent_untracked_records(records: list[dict], n: int) -> list[dict]:
+def _recent_untracked_records(records: list[dict], n: int | None) -> list[dict]:
     """The N most-recent untracked/detmuxed records out of ``records``
-    (an ``ArchiveScan.records`` list), newest first.
+    (an ``ArchiveScan.records`` list), newest first. ``n=None`` returns all
+    of them (the dashboard pages the full list itself).
 
     Shared by `crr retrack --last` and the web dashboard's /api/untracked
     provider — one implementation, so the two surfaces can't drift on what
@@ -1001,7 +1002,8 @@ def _recent_untracked_records(records: list[dict], n: int) -> list[dict]:
     archive file must be surfaced, not silently dropped here).
     """
     candidates = [r for r in records if r["reason"] in ("untracked", "detmuxed")]
-    return sorted(candidates, key=lambda r: r["archived_at"], reverse=True)[:n]
+    ordered = sorted(candidates, key=lambda r: r["archived_at"], reverse=True)
+    return ordered if n is None else ordered[:n]
 
 
 def _untracked_view(record: dict, cap: int, model_tail_lines: int) -> dict:
@@ -1108,7 +1110,7 @@ def _discoverable_rows(
     return discovery.untracked(journaled, _enrich_discoverable(candidates, config)), problems
 
 
-def _discoverable_candidates(store: JournalStore):
+def _discoverable_candidates(store: JournalStore, config=None):
     """The CHEAP half of discovery: which transcripts are untracked, newest first.
 
     Glob + stat only (``list_all_transcripts``) plus the journal scan — NO
@@ -1123,6 +1125,9 @@ def _discoverable_candidates(store: JournalStore):
     (see ``transcript_source._decode_project_dir_name``) — good enough to
     filter on, replaced with the authoritative stamped cwd during enrichment.
     """
+    if config is None:
+        config = _load_config()
+    excluded_dirs = config.get("discover_exclude_dirs")
     scan = store.scan()
     journaled = {
         e["claude"]["session_id"] for e in scan.entries if e.get("claude") is not None
@@ -1130,6 +1135,9 @@ def _discoverable_candidates(store: JournalStore):
     candidates = [
         t for t in transcript_source.list_all_transcripts()
         if t["session_id"] not in journaled
+        # Tool-internal transcripts (claude-mem's observer sessions and the
+        # like) are not the user's conversations — see discovery.is_excluded.
+        and not discovery.is_excluded(t["cwd"], excluded_dirs)
     ]
     # Newest-first by file mtime: a cheap stand-in for conversation recency
     # (the accurate `last_active` needs the very read we're avoiding), so the
@@ -1649,7 +1657,7 @@ def make_web_handler(
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
-    untracked_provider: Callable[[], list] | None = None,
+    untracked_provider: Callable[[str, int, int], dict] | None = None,
     discoverable_provider: Callable[[str, int, int], dict] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
@@ -1914,15 +1922,24 @@ def _cmd_web(args: argparse.Namespace) -> int:
     def diagnostics_provider() -> dict:
         return gather_diagnostics(config)  # lazy: only on panel open, never on poll
 
-    def untracked_provider() -> list[dict]:
-        # Lazy, like diagnostics: never on the poll path (reads one transcript
-        # per record for last_prompt — capped at 10, only on panel open).
+    def untracked_provider(query: str = "", offset: int = 0, limit: int = 20) -> dict:
+        # Lazy AND paged, mirroring discoverable_provider (they share one
+        # modal, so they share the contract): filter/slice on the cheap
+        # archive records, then read a transcript per row ONLY for the page.
         cap = config.get("last_prompt_display_cap")
         model_tail_lines = config.get("model_tail_lines")
-        return [
-            _untracked_view(r, cap, model_tail_lines)
-            for r in _recent_untracked_records(archive.scan().records, 10)
+        records = _recent_untracked_records(archive.scan().records, None)
+        # Filter on the fields available without a transcript read.
+        cheap = [
+            {"session_id": r["entry"]["claude"]["session_id"],
+             "cwd": r["entry"]["cwd"], "_record": r}
+            for r in records
         ]
+        page = discovery.filter_and_page(cheap, query=query, offset=offset, limit=limit)
+        page["rows"] = [
+            _untracked_view(row["_record"], cap, model_tail_lines) for row in page["rows"]
+        ]
+        return page
 
     def discoverable_provider(query: str = "", offset: int = 0, limit: int = 20) -> dict:
         # Lazy (T-C) AND paged: filter/slice the CHEAP candidate list first,

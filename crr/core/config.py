@@ -33,7 +33,9 @@ from typing import Any, Mapping
 # takeover_poll_seconds (`crr adopt --takeover`; see crr.core.takeover)
 # v6: added recall_scan_byte_budget (dashboard global recall — bounds the
 # newest-first whole-transcript sweep; see transcript_source.search_all)
-CONFIG_DEFAULTS_VERSION = 6
+# v7: added discover_exclude_dirs (keep tool-internal transcript dirs out of
+# discovery; see crr.core.discovery.is_excluded)
+CONFIG_DEFAULTS_VERSION = 7
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -93,6 +95,10 @@ DEFAULTS: dict[str, Any] = {
     # one newest-first sweep (a whole-file read per transcript is unbounded
     # otherwise; multi-MB transcripts exist). Reports what it skipped.
     "recall_scan_byte_budget": 50_000_000,
+    # Directory names whose transcripts are NOT the user's own conversations
+    # and so never appear as "discoverable". Default: claude-mem's observer
+    # sessions, which on a busy machine can be >98% of all transcripts.
+    "discover_exclude_dirs": [".claude-mem"],
     # `crr adopt --takeover` (destructive: SIGTERMs a live process) — the
     # idle window + refusal timeout + poll cadence for the cli-owned wait
     # loop. See crr.core.takeover.ready_to_take_over. idle_window doubles
