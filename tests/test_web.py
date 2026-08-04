@@ -682,11 +682,11 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_26():
-    """v26: the discoverable list became a modal with server-side paging +
-    filter and a "running now" duplicate warning (v25 added button tooltips;
-    v24 the inline field labels + sid-provenance legend)."""
-    assert web.PAGE_VERSION == 26
+def test_page_version_is_27():
+    """v27: the discoverable/untracked modal rows get the same inline field
+    labels as the session cards (v26 added the modal + paging + filter +
+    "running now" warning; v25 tooltips; v24 the card labels)."""
+    assert web.PAGE_VERSION == 27
 
 
 def test_page_has_global_recall_search_bar():

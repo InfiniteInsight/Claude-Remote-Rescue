@@ -764,18 +764,29 @@ var sidConfirmArmed = null;
 // process first). Untrusted fields (cwd, last_prompt, sid8) -> textContent.
 function renderSidRow(r, ageIso, actions, onDone) {
   var row = el("div", "u-row");
+  // Same inline field labels as the session cards — a bare uuid8 / path /
+  // relative time doesn't say what it is.
   var id = el("div", "id");
-  id.textContent = r.sid8;
+  id.appendChild(fieldLabel("sid "));
+  id.appendChild(document.createTextNode(r.sid8));
   row.appendChild(id);
   var cwd = el("div", "cwd");
-  cwd.textContent = r.cwd;
+  cwd.appendChild(fieldLabel("dir"));
+  cwd.appendChild(document.createTextNode(r.cwd));
   row.appendChild(cwd);
-  var time = el("div", "time");
-  time.textContent = relTime(ageIso);
-  row.appendChild(time);
-  var prompt = el("div", "prompt");
-  prompt.textContent = r.last_prompt || "";
-  row.appendChild(prompt);
+  var rel = relTime(ageIso);
+  if (rel) {
+    var time = el("div", "time");
+    time.appendChild(fieldLabel("last"));
+    time.appendChild(document.createTextNode(rel));
+    row.appendChild(time);
+  }
+  if (r.last_prompt) {
+    var prompt = el("div", "prompt");
+    prompt.appendChild(fieldLabel("said"));
+    prompt.appendChild(document.createTextNode(r.last_prompt));
+    row.appendChild(prompt);
+  }
   var actionsDiv = el("div", "actions");
   actions.forEach(function (a) {
     var btn = el("button", a.danger ? "danger" : "");
@@ -884,7 +895,7 @@ function loadDiscoverable() {
             var tag = el("span", "badge running-badge");
             tag.textContent = "running now";
             tag.title = "A live `claude --resume` is running for this conversation. Adopting it would start a SECOND copy — use Take over instead.";
-            row.insertBefore(tag, row.firstChild.nextSibling);
+            row.firstChild.appendChild(tag);  // inline beside the sid
           }
           list.appendChild(row);
         });
