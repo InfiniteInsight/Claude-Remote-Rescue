@@ -35,7 +35,8 @@ from typing import Any, Mapping
 # newest-first whole-transcript sweep; see transcript_source.search_all)
 # v7: added discover_exclude_dirs (keep tool-internal transcript dirs out of
 # discovery; see crr.core.discovery.is_excluded)
-CONFIG_DEFAULTS_VERSION = 7
+# v8: added reply_tail_lines (bounds the card's "claude said" lookback)
+CONFIG_DEFAULTS_VERSION = 8
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -81,6 +82,11 @@ DEFAULTS: dict[str, Any] = {
     # — so the model search stops here rather than reading a model-less
     # transcript in full on every poll. See transcript_source.read_tail_facts.
     "model_tail_lines": 200,
+    # How far back past the last prompt to look for claude's preceding reply
+    # (card "claude" line). Measured on real transcripts here: the reply sat
+    # 4-65 records before the prompt, and the prompt itself up to ~124 from
+    # the tail — 400 covers both with headroom, and an honest "" beyond it.
+    "reply_tail_lines": 400,
     # context-pressure badge (Slice A, F2; audit P5): fraction of a model's
     # (prior, unverified for most models) context window at which a session
     # is "tight" vs. expected to compact on revive. See
