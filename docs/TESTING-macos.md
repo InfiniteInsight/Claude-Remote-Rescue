@@ -10,6 +10,10 @@ crr keeps Claude Code sessions alive and remotely rescuable: it tracks every
 terminal/shell/host dies. A local web dashboard (127.0.0.1:8377) shows and
 controls them.
 
+> **Shortcut:** if you use Claude Code, you can skip most of the manual steps
+> below — hand it [docs/AGENT-SETUP.md](AGENT-SETUP.md) and it will do the safe
+> parts of the install for you and prompt you for the rest.
+
 ## 0. Prerequisites
 
 - **macOS** with **Python 3.11+** — check `python3 --version`. If older (or
