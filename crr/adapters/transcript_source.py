@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from crr.core import contracts, transcript
+from crr.core import contracts, discovery, transcript
 from crr.core.config import DEFAULTS
 
 
@@ -299,7 +299,8 @@ def read_takeover_signal(session_id: str, home: Path | None = None) -> dict[str,
 
 
 def search_all(
-    query: str, *, snippet_cap: int, match_cap: int, byte_budget: int, home: Path | None = None,
+    query: str, *, snippet_cap: int, match_cap: int, byte_budget: int,
+    home: Path | None = None, exclude_dirs: list[str] | None = None,
 ) -> dict:
     """Global recall — search EVERY transcript on disk, newest-first, bounded.
 
@@ -313,10 +314,19 @@ def search_all(
     are tagged with their ``session_id`` and ranked most-recent-first (capped
     to ``match_cap``); ``scanned`` is how many transcripts were searched;
     ``skipped`` is how many newest-first transcripts the budget left unsearched
-    (surfaced to the user — no silent truncation).
+    (surfaced to the user — no silent truncation). ``exclude_dirs`` drops
+    tool-internal transcripts before any of that, mirroring discovery.
     """
     home = home or Path.home()
     transcripts = list_all_transcripts(home)
+    if exclude_dirs:
+        # Recall sweeps the SAME pool as discovery, so it honors the SAME
+        # exclusion list (config baseline + dashboard-managed). Otherwise the
+        # byte budget is spent on tool-internal transcripts and one of them
+        # can surface as a match — the exact noise discovery filters out.
+        transcripts = [
+            t for t in transcripts if not discovery.is_excluded(t["cwd"], exclude_dirs)
+        ]
     transcripts.sort(key=lambda t: t["mtime"], reverse=True)
     matches: list[dict] = []
     scanned = 0

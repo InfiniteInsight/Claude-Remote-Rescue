@@ -1990,16 +1990,28 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return res.ok, res.message
 
     def exclusions_provider() -> dict:
+        # Say WHERE the baseline came from, with the full path: on a machine
+        # with no config.toml the "configured" entries are built-in defaults,
+        # and labelling those "from config.toml" would be a lie.
+        toml_path = sd / "config.toml"
+        try:
+            from_file = "discover_exclude_dirs" in cfg.load_toml_overrides(toml_path)
+        except (cfg.ConfigError, ValueError, OSError):
+            from_file = False
         return {
             "configured": list(config.get("discover_exclude_dirs")),
             "managed": exclusions.ExclusionStore(sd).read(),
+            "config_path": str(toml_path),
+            "config_from_file": from_file,
         }
 
     def exclusions_writer(dirs) -> dict:
         # ExclusionError is a ValueError, which handle_request turns into a
         # 400 carrying the message — bounds/type errors reach the user.
         managed = exclusions.ExclusionStore(sd).write(dirs)
-        return {"configured": list(config.get("discover_exclude_dirs")), "managed": managed}
+        out = exclusions_provider()
+        out["managed"] = managed
+        return out
 
     def recall_provider(query: str, sid: str | None) -> dict:
         # Lazy GET (never the poll path): print-only transcript search, the
@@ -2017,6 +2029,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return transcript_source.search_all(
             query, snippet_cap=snippet_cap, match_cap=match_cap,
             byte_budget=config.get("recall_scan_byte_budget"),
+            # Same exclusion list discovery uses: recall sweeps the same pool.
+            exclude_dirs=exclusions.effective(
+                config.get("discover_exclude_dirs"),
+                exclusions.ExclusionStore(sd).read(),
+            ),
         )
 
     # Host allowlist: loopback + this host's name + tailnet suffix + any

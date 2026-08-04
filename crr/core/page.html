@@ -1010,12 +1010,18 @@ function renderAdmin(data) {
     none.textContent = "nothing excluded — every transcript can appear as discoverable";
     list.appendChild(none);
   }
+  // Be precise about provenance: with no config.toml on disk these are
+  // BUILT-IN defaults, and calling them "from config.toml" would be a lie.
+  // Either way, show the full path so the user knows what to edit.
+  var path = data.config_path || "config.toml";
   configured.forEach(function (name) {
     var row = el("div", "adm-row");
     var n = el("span", "adm-name"); n.textContent = name; row.appendChild(n);
     var src = el("span", "adm-src");
-    src.textContent = "from config.toml";
-    src.title = "Edit this one in config.toml — the dashboard never rewrites your TOML.";
+    src.textContent = data.config_from_file ? ("from " + path) : ("built-in default \u00b7 override in " + path);
+    src.title = data.config_from_file
+      ? ("Set in " + path + " — edit it there; the dashboard never rewrites your TOML.")
+      : ("crr's built-in default. To change it, set discover_exclude_dirs in " + path + " (the dashboard never writes that file).");
     row.appendChild(src);
     list.appendChild(row);
   });
