@@ -76,11 +76,15 @@ still-live `claude` at a safe turn boundary, then adopt it — the phone-side of
 earlier conversation from transcripts without re-injecting it into a live
 session.
 
-![The "why did sessions die?" panel](docs/screenshots/diagnostics.png)
+![Discoverable sessions, each with Adopt and Take over](docs/screenshots/discovery.png)
 
-The lazy "Why did sessions die?" panel leads with a **plain-English verdict**
-(out-of-memory, kernel panic, unexpected shutdown, clean reboot, or "looks
-clean") above the raw journald/WinEvent evidence.
+**Discovery** surfaces `claude` transcripts on disk that crr never tracked.
+**Adopt** journals one as a recoverable session; **Take over** — the phone-side
+of `crr adopt --takeover` — stops a still-live `claude` at a safe turn boundary
+first, then adopts it, so no second copy races the first. A separate lazy
+**"Why did sessions die?"** panel (not shown) leads with a plain-English
+verdict — out-of-memory, kernel panic, unexpected shutdown, clean reboot, or
+"looks clean" — above the raw journald/WinEvent evidence.
 
 ## Install
 
