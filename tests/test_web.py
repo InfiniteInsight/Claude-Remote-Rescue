@@ -592,12 +592,27 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
-def test_page_version_is_23():
-    """Explicit version check: v23 adds dashboard recall — a recent-transcripts
-    search bar plus a per-card Search button (the surface of `crr recall`).
-    Labeled "Search recent" (not "all"): the byte budget bounds coverage, so
-    the label must not overclaim (the panel reports what it skipped)."""
-    assert web.PAGE_VERSION == 23
+def test_page_cards_label_every_field():
+    """UX: bare values ('verified', a naked uuid8, a relative time) don't tell
+    a new user what they are. Every card field carries a dim inline label."""
+    page = web.render_page()
+    for label in ('"pid "', '"sid "', '"sid:"', '"dir"', '"last"', '"model"', '"said"'):
+        assert label in page, label
+    assert "fieldLabel" in page  # the shared label-element helper
+
+
+def test_page_legend_explains_sid_provenance():
+    # injected/guessed/verified is load-bearing (it downgrades duplicate
+    # warnings) — the legend must say what the three values mean.
+    page = web.render_page()
+    assert "injected" in page
+    assert "guessed" in page
+    assert "verified" in page
+
+
+def test_page_version_is_24():
+    """v24: inline field labels on cards + a sid-provenance legend entry."""
+    assert web.PAGE_VERSION == 24
 
 
 def test_page_has_global_recall_search_bar():
