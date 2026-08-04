@@ -155,6 +155,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--adopt", default=None, metavar="SID",
         help="adopt this discoverable session id into crr's journal (recoverable, not live)",
     )
+    dsc.add_argument(
+        "-n", dest="limit", type=int, default=20, metavar="N",
+        help="show the N most recent (default 20; reading every transcript is slow)",
+    )
+    dsc.add_argument(
+        "--all", action="store_true",
+        help="list every discoverable transcript (slow on a machine with thousands)",
+    )
     dsc.set_defaults(func=_cmd_discover)
 
     adp = sub.add_parser(
@@ -1096,24 +1104,56 @@ def _discoverable_rows(
     """
     if config is None:
         config = _load_config()
+    candidates, journaled, problems = _discoverable_candidates(store)
+    return discovery.untracked(journaled, _enrich_discoverable(candidates, config)), problems
+
+
+def _discoverable_candidates(store: JournalStore):
+    """The CHEAP half of discovery: which transcripts are untracked, newest first.
+
+    Glob + stat only (``list_all_transcripts``) plus the journal scan — NO
+    transcript content is read here. That split is the whole point: on a
+    machine with thousands of transcripts, reading every one to render a
+    20-row page cost ~10s and 600KB (measured, 2856 rows). Callers that need
+    only one row (``_adopt``) or one page (the dashboard modal) filter these
+    candidates FIRST and enrich only what they will actually use.
+
+    Returns ``(candidates, journaled_sids, scan_problems)``; candidates carry
+    ``{session_id, cwd, mtime}`` where ``cwd`` is the LOSSY project-dir decode
+    (see ``transcript_source._decode_project_dir_name``) — good enough to
+    filter on, replaced with the authoritative stamped cwd during enrichment.
+    """
     scan = store.scan()
     journaled = {
         e["claude"]["session_id"] for e in scan.entries if e.get("claude") is not None
     }
+    candidates = [
+        t for t in transcript_source.list_all_transcripts()
+        if t["session_id"] not in journaled
+    ]
+    # Newest-first by file mtime: a cheap stand-in for conversation recency
+    # (the accurate `last_active` needs the very read we're avoiding), so the
+    # first page is the one a user most likely wants.
+    candidates.sort(key=lambda t: t["mtime"], reverse=True)
+    return candidates, journaled, scan.problems
+
+
+def _enrich_discoverable(candidates, config) -> list[dict]:
+    """The EXPENSIVE half: one tail read + one cwd read per candidate.
+
+    Call this only on the subset actually being shown (see
+    ``_discoverable_candidates``). Adds the fields that need transcript
+    content: the authoritative stamped ``cwd`` (a revive spawn uses it; the
+    project-dir decode is lossy), ``last_active``, ``transcript_bytes``, and
+    ``last_prompt``.
+    """
     cap = config.get("last_prompt_display_cap")
     model_tail_lines = config.get("model_tail_lines")
     enriched = []
-    for t in transcript_source.list_all_transcripts():
-        if t["session_id"] in journaled:
-            continue
+    for t in candidates:
         facts = transcript_source.read_tail_facts(
             t["session_id"], cap, model_tail_lines=model_tail_lines
         )
-        # The transcript's own stamped cwd is authoritative (a revive spawn
-        # uses this cwd; the project-dir-name decode is lossy — see
-        # transcript_source._decode_project_dir_name); fall back to the
-        # decode only when nothing was read (e.g. an unreadable/near-empty
-        # transcript).
         cwd = transcript_source.read_cwd(t["session_id"]) or t["cwd"]
         enriched.append({
             "session_id": t["session_id"],
@@ -1123,7 +1163,26 @@ def _discoverable_rows(
             "last_prompt": facts["last_prompt"],
             "mtime": t["mtime"],
         })
-    return discovery.untracked(journaled, enriched), scan.problems
+    return enriched
+
+
+def _discoverable_row(store: JournalStore, sid: str, config=None) -> dict | None:
+    """One discoverable row by sid, enriching ONLY that transcript.
+
+    ``_adopt``/takeover need a single row's authoritative cwd. Going through
+    the full ``_discoverable_rows`` for that read every untracked transcript
+    on the machine (~10s here) just to use one of them — and, once the
+    dashboard paginates, would also have to be careful never to page. Filter
+    the cheap candidate list first, then enrich exactly one.
+    """
+    if config is None:
+        config = _load_config()
+    candidates, _journaled, _problems = _discoverable_candidates(store)
+    match = next((t for t in candidates if t["session_id"] == sid), None)
+    if match is None:
+        return None
+    rows = _enrich_discoverable([match], config)
+    return rows[0] if rows else None
 
 
 def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = True) -> tuple[bool, str]:
@@ -1140,11 +1199,11 @@ def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = Tr
     across N transcript reads would stall every other op (the revive timer
     included) for the duration of a full enumeration.
     """
-    rows_list, _problems = _discoverable_rows(store)  # a targeted single-sid
-    # lookup; the caller isn't listing, so a scan problem elsewhere in the
-    # journal doesn't get printed here (mirrors `_cmd_retrack --sid`).
-    rows = {r["session_id"]: r for r in rows_list}
-    row = rows.get(sid)
+    # Targeted single-sid lookup: enriches ONLY this transcript rather than
+    # every untracked one on the machine (see _discoverable_row). The caller
+    # isn't listing, so a scan problem elsewhere in the journal isn't printed
+    # here (mirrors `_cmd_retrack --sid`).
+    row = _discoverable_row(store, sid)
     if row is None:
         return False, f"{sid[:8]} is not a discoverable (untracked) session"
     with mutation_lock(sd):
@@ -1395,22 +1454,33 @@ def _cmd_discover(args: argparse.Namespace) -> int:
         print(message, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
 
-    rows, problems = _discoverable_rows(store)
+    # Newest-first, and enrich only what we print: reading every untracked
+    # transcript to list a screenful cost ~10s on a machine with a few
+    # thousand of them. `--all` opts back into the full (slow) listing.
+    config = _load_config()
+    candidates, _journaled, problems = _discoverable_candidates(store)
     # Corrupt journal files are surfaced on stderr, never silently dropped
     # (mirrors _cmd_status/_cmd_retrack/_cmd_gc/_cmd_archive) — a session
     # this listing can't exclude because its journal file failed to parse
     # is a session that would otherwise look falsely "discoverable".
     for name, reason in problems:
         print(f"crr discover: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
-    if not rows:
+    if not candidates:
         print("no discoverable (untracked) transcripts")
         return 0
+    total = len(candidates)
+    shown = candidates if args.all else candidates[: args.limit]
+    rows = _enrich_discoverable(shown, config)
     now_iso = _now()
     for r in rows:
         age = _relative_age(r["last_active"], now_iso)
         age_tag = f" {age}" if age else ""
         prompt = f" — {r['last_prompt']}" if r["last_prompt"] else ""
-        print(f"{r['sid8']} {r['cwd']}{age_tag}{prompt}")
+        print(f"{r['session_id'][:8]} {r['cwd']}{age_tag}{prompt}")
+    # No silent caps: say what was withheld and how to see it.
+    if len(rows) < total:
+        print(f"\n… showing the {len(rows)} most recent of {total} "
+              f"(use -n N for more, or --all for every one)")
     return 0
 
 
@@ -1580,7 +1650,7 @@ def make_web_handler(
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
     untracked_provider: Callable[[], list] | None = None,
-    discoverable_provider: Callable[[], list] | None = None,
+    discoverable_provider: Callable[[str, int, int], dict] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
     poll_seconds: int | None = None,
@@ -1854,13 +1924,24 @@ def _cmd_web(args: argparse.Namespace) -> int:
             for r in _recent_untracked_records(archive.scan().records, 10)
         ]
 
-    def discoverable_provider() -> list[dict]:
-        # Lazy (T-C): reads transcript content per untracked candidate —
-        # never on the poll path, only when the "Discoverable" panel opens.
-        # Scan problems are dropped here (a web handler can't print to
-        # stderr); `crr discover` is where they're surfaced.
-        rows, _problems = _discoverable_rows(store, config)
-        return rows
+    def discoverable_provider(query: str = "", offset: int = 0, limit: int = 20) -> dict:
+        # Lazy (T-C) AND paged: filter/slice the CHEAP candidate list first,
+        # then read transcript content for ONLY the page being shown. Reading
+        # every untracked transcript cost ~10s / 600KB on a machine with a few
+        # thousand of them. Scan problems are dropped here (a web handler
+        # can't print to stderr); `crr discover` is where they're surfaced.
+        candidates, _journaled, _problems = _discoverable_candidates(store)
+        page = discovery.filter_and_page(candidates, query=query, offset=offset, limit=limit)
+        page["rows"] = _enrich_discoverable(page["rows"], config)
+        # One ps snapshot for the whole page: which of these conversations is
+        # ALREADY running? Plain Adopt on a live one starts a second claude on
+        # the same transcript — the row is tagged so the user takes over
+        # instead. Degrades to no tags if the probe is inconclusive.
+        live = controller.resume_session_ids()
+        for row in page["rows"]:
+            row["sid8"] = row["session_id"][:8]
+            row["running"] = row["session_id"] in live
+        return page
 
     def sid_action_provider(op: str, sid: str) -> tuple[bool, str]:
         if op == "adopt":
