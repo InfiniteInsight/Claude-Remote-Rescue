@@ -193,19 +193,19 @@
 <div id="notice" role="status" aria-live="polite"></div>
 <div id="recall">
   <input id="recall-q" type="search" placeholder="Search transcripts…" autocomplete="off" aria-label="Search transcripts">
-  <button id="recall-all-btn" type="button">Search recent</button>
+  <button id="recall-all-btn" type="button" title="Search the most recently active transcripts for this text. Bounded by a byte budget — the results header says how many it searched and skipped.">Search recent</button>
 </div>
 <div id="recall-panel" hidden></div>
 <div id="diag">
-  <button id="diag-btn" type="button">Why did sessions die?</button>
+  <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence.">Why did sessions die?</button>
   <div id="diag-panel" hidden></div>
 </div>
 <div id="untracked">
-  <button id="untracked-btn" type="button">Recently untracked</button>
+  <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management.">Recently untracked</button>
   <div id="untracked-panel" hidden></div>
 </div>
 <div id="discoverable">
-  <button id="discoverable-btn" type="button">Discoverable (untracked)</button>
+  <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable.">Discoverable (untracked)</button>
   <div id="discoverable-panel" hidden>
     <div class="note">Adopting tracks this conversation as recoverable (revive via `crr reopen`). It does NOT attach to a running process — and if the session is still alive elsewhere, the watchdog will start a second `claude --resume` on the same conversation. <strong>Take over</strong> instead stops the live process first (only at a safe turn boundary; if it's mid-turn it refuses — try again in a moment), then adopts, so no second copy runs.</div>
     <div id="discoverable-list"></div>
@@ -239,6 +239,26 @@ function fieldLabel(text) {
 // What the three sid_source values mean (contracts.SID_SOURCES). This is
 // load-bearing, not decoration: a `guessed` id is what downgrades a duplicate
 // warning to "possible duplicate · guessed sid".
+// What each action button actually does. The labels alone ("Kick", "Un-tmux",
+// "Adopt") don't tell a new user what will happen — especially for the
+// destructive ones. Keyed by label (unique across every button we render).
+// NOTE: title= is a desktop hover affordance; on touch the two-tap confirm on
+// destructive buttons is the real safeguard.
+var BUTTON_HELP = {
+  "Reopen": "Revive this crashed session: resume the conversation in a detached tmux session (and open a tab if this host can).",
+  "Restore": "Rescue this orphaned session: stop the dead shell, preserve the conversation, and revive it into tmux.",
+  "Dismiss": "Clean up this crashed session WITHOUT reviving it. The conversation is archived first, so it can still be recovered.",
+  "Remove": "Delist this session from crr and touch nothing else — no process is killed and nothing is archived.",
+  "Kick": "Restart claude in place on the SAME conversation. The shell's repair loop resumes it automatically.",
+  "Close": "End this running session remotely, like typing exit. No revival — use Kick to restart it instead.",
+  "Untrack": "Hand this session back to you: attach its tmux session in a visible tab, archive it, and stop tracking it.",
+  "Un-tmux": "Kill the tmux wrapper and relaunch `claude --resume` directly in a visible tab, with no tmux underneath.",
+  "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
+  "Retrack": "Put this recently-untracked session back under crr's management.",
+  "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, a second copy may start.",
+  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs."
+};
+
 var SID_SOURCE_HELP = {
   injected: "certain — crr generated this session id and passed it to claude",
   guessed: "uncertain — inferred from the newest transcript in this directory; may be the wrong conversation",
@@ -441,6 +461,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   var actions = el("div", "actions");
   function addBtn(label, op, danger, confirm) {
     var b = el("button", danger ? "danger" : "");
+    b.title = BUTTON_HELP[label] || "";
     var isArmed = function () {
       return !!confirmArmed && confirmArmed.pid === s.pid && confirmArmed.op === op;
     };
@@ -487,6 +508,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   // an action) — available in every state, uses the shared search box's text.
   var searchBtn = el("button");
   searchBtn.textContent = "Search";
+  searchBtn.title = BUTTON_HELP["Search"];
   searchBtn.addEventListener("click", function () { runRecall(s.session_id); });
   actions.appendChild(searchBtn);
   addBtn("Remove", "remove", true);
@@ -712,6 +734,7 @@ function renderSidRow(r, ageIso, actions, onDone) {
   var actionsDiv = el("div", "actions");
   actions.forEach(function (a) {
     var btn = el("button", a.danger ? "danger" : "");
+    btn.title = BUTTON_HELP[a.label] || "";
     var isArmed = function () {
       return !!sidConfirmArmed && sidConfirmArmed.sid === r.session_id && sidConfirmArmed.op === a.op;
     };
