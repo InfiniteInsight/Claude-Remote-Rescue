@@ -763,18 +763,20 @@ def test_page_shows_claudes_preceding_reply():
     assert 'fieldLabel("claude")' in page
 
 
-def test_page_version_is_32():
-    """v32: a Settings modal manages discovery exclusions (v31 added the
-    preceding-reply line on cards)."""
-    assert web.PAGE_VERSION == 32
+def test_page_version_is_33():
+    """v33: Settings names the full config.toml path and distinguishes a
+    built-in default from a value actually set in that file."""
+    assert web.PAGE_VERSION == 33
 
 
 def test_page_has_a_settings_modal_for_exclusions():
     page = web.render_page()
     assert 'id="admin-btn"' in page and 'id="admin-modal"' in page
     assert '"/api/exclusions"' in page
-    # config-owned entries are shown but not editable from the web
-    assert "from config.toml" in page
+    # provenance is precise and shows the full path, since with no
+    # config.toml on disk these entries are BUILT-IN defaults
+    assert "data.config_path" in page
+    assert "built-in default" in page
 
 
 def test_page_secondary_views_share_one_toolbar_row():

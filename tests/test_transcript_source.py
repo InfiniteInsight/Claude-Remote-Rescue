@@ -520,3 +520,27 @@ def test_read_tail_facts_reply_is_empty_beyond_the_window(tmp_path):
     facts = transcript_source.read_tail_facts(_SID_B, 200, home=tmp_path, reply_tail_lines=5)
     assert facts["last_prompt"] == "the most recent prompt"
     assert facts["last_reply"] == ""
+
+
+def test_search_all_skips_excluded_dirs(tmp_path):
+    # Recall sweeps the SAME transcript pool as discovery, so it must honor
+    # the same exclusion list — otherwise the byte budget is spent on
+    # tool-internal transcripts and one can surface as a match.
+    _write_dated(tmp_path, _SID_A, [_user("a fox in the project")], "-home-u-proj", 3000)
+    _write_dated(tmp_path, _SID_B, [_user("a fox in the observer log")],
+                 "-home-u--claude-mem-observer-sessions", 4000)  # newest
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=10, byte_budget=10_000_000,
+        home=tmp_path, exclude_dirs=[".claude-mem"],
+    )
+    assert {m["session_id"] for m in res["matches"]} == {_SID_A}
+    assert res["scanned"] == 1  # the excluded one was never read
+
+
+def test_search_all_without_exclusions_scans_everything(tmp_path):
+    _write_dated(tmp_path, _SID_A, [_user("a fox here")], "-home-u-proj", 3000)
+    _write_dated(tmp_path, _SID_B, [_user("a fox there")], "-home-u--claude-mem-x", 4000)
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=10, byte_budget=10_000_000, home=tmp_path,
+    )
+    assert res["scanned"] == 2
