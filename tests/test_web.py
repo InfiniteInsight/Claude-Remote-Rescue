@@ -683,7 +683,7 @@ def test_page_cards_label_every_field():
     """UX: bare values ('verified', a naked uuid8, a relative time) don't tell
     a new user what they are. Every card field carries a dim inline label."""
     page = web.render_page()
-    for label in ('"pid "', '"sid "', '"sid:"', '"dir"', '"last"', '"model"', '"said"'):
+    for label in ('"pid "', '"sid "', '"sid:"', '"dir"', '"last"', '"model"', '"you said"'):
         assert label in page, label
     assert "fieldLabel" in page  # the shared label-element helper
 
@@ -697,11 +697,25 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_29():
-    """v29: Discoverable and Recently untracked share ONE paged, filterable
-    modal (v28 clarified the duplicate tag; v27 labeled the rows; v26 added
-    the modal; v25 tooltips)."""
-    assert web.PAGE_VERSION == 29
+def test_page_version_is_30():
+    """v30: secondary views collapsed into one #tools row, the prompt label
+    reads "you said", and an empty search box now explains itself instead of
+    silently doing nothing (v29 shared the modal; v28 the duplicate tag)."""
+    assert web.PAGE_VERSION == 30
+
+
+def test_page_secondary_views_share_one_toolbar_row():
+    page = web.render_page()
+    assert 'id="tools"' in page
+    # the three stacked one-button sections are gone
+    assert 'id="diag">' not in page
+    assert 'id="untracked">' not in page
+    assert 'id="discoverable">' not in page
+
+
+def test_page_empty_search_explains_itself():
+    page = web.render_page()
+    assert "Type a search term" in page
 
 
 def test_page_untracked_uses_the_same_modal_as_discoverable():

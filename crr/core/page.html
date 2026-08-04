@@ -69,7 +69,8 @@
      up into a column on the card. */
   .flabel {
     color: #6b7280; font-size: 11px; font-family: ui-monospace, monospace;
-    display: inline-block; min-width: 30px; margin-right: 6px; user-select: none;
+    display: inline-block; min-width: 56px; margin-right: 6px; user-select: none;
+    vertical-align: top;
   }
   .id .flabel { min-width: 0; margin-right: 3px; }
   .model {
@@ -107,17 +108,12 @@
   @media (prefers-reduced-motion: reduce) {
     #notice.show { animation: none; }
   }
-  #diag { padding: 4px 16px 0; }
-  #diag-btn {
-    font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 6px;
-    border: 1px solid #2f3745; background: #1c222c; color: #8a93a2; cursor: pointer;
-  }
   #diag-panel {
-    margin-top: 8px; padding: 10px 12px; border: 1px solid #262b36; border-radius: 8px;
+    margin: 8px 16px 0; padding: 10px 12px; border: 1px solid #262b36; border-radius: 8px;
     background: #161a22; font-size: 12px;
   }
   #diag-panel h3 { margin: 8px 0 4px; font-size: 12px; color: #8a93a2; font-weight: 600; }
-  #diag-panel .ev, #untracked-panel .ev, #discoverable-panel .ev, #recall-panel .ev {
+  #diag-panel .ev, #disc-list .ev, #recall-panel .ev {
     font-family: ui-monospace, monospace; color: #cdd3dd; margin: 3px 0; word-break: break-word;
   }
   #recall { display: flex; gap: 8px; padding: 6px 16px 0; }
@@ -134,15 +130,18 @@
     background: #161a22; font-size: 12px;
   }
   #recall-panel .rmeta { color: #8a93a2; }
-  #untracked, #discoverable { padding: 4px 16px 0; }
-  #untracked-btn, #discoverable-btn {
+  /* One row for the secondary views instead of three stacked one-button
+     divs (which read as three unrelated bars). Wraps on narrow screens. */
+  #tools {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 16px 0;
+  }
+  #tools .tools-label { font-size: 12px; color: #6b7280; margin-right: 2px; }
+  #tools button {
     font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 6px;
     border: 1px solid #2f3745; background: #1c222c; color: #8a93a2; cursor: pointer;
   }
-  #untracked-panel, #discoverable-panel {
-    margin-top: 8px; padding: 10px 12px; border: 1px solid #262b36; border-radius: 8px;
-    background: #161a22; font-size: 12px;
-  }
+  #tools button:hover { background: #232b37; color: #cdd3dd; }
   /* Discoverable modal: the list can be thousands of rows on a busy machine,
      so it gets its own scrollable surface with server-side paging + filter
      rather than dumping everything into the page. */
@@ -227,16 +226,13 @@
   <button id="recall-all-btn" type="button" title="Search the most recently active transcripts for this text. Bounded by a byte budget — the results header says how many it searched and skipped.">Search recent</button>
 </div>
 <div id="recall-panel" hidden></div>
-<div id="diag">
-  <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence.">Why did sessions die?</button>
-  <div id="diag-panel" hidden></div>
+<div id="tools">
+  <span class="tools-label">Other views</span>
+  <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management. Opens a searchable list.">Recently untracked</button>
+  <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable. Opens a searchable list.">Discoverable</button>
+  <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
 </div>
-<div id="untracked">
-  <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management.">Recently untracked</button>
-</div>
-<div id="discoverable">
-  <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable.">Discoverable (untracked)</button>
-</div>
+<div id="diag-panel" hidden></div>
 <div id="disc-modal" role="dialog" aria-modal="true" aria-label="Discoverable sessions">
   <div id="disc-box">
     <div id="disc-head">
@@ -497,7 +493,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   }
   if (s.last_prompt) {
     var prompt = el("div", "prompt");
-    prompt.appendChild(fieldLabel("said"));
+    prompt.appendChild(fieldLabel("you said"));
     prompt.appendChild(document.createTextNode(s.last_prompt));
     card.appendChild(prompt);
   }
@@ -782,7 +778,7 @@ function renderSidRow(r, ageIso, actions, onDone) {
   }
   if (r.last_prompt) {
     var prompt = el("div", "prompt");
-    prompt.appendChild(fieldLabel("said"));
+    prompt.appendChild(fieldLabel("you said"));
     prompt.appendChild(document.createTextNode(r.last_prompt));
     row.appendChild(prompt);
   }
@@ -1002,7 +998,14 @@ function renderRecall(data, scopeLabel) {
 function runRecall(sid) {
   var input = document.getElementById("recall-q");
   var q = (input.value || "").trim();
-  if (!q) { input.focus(); return; }
+  if (!q) {
+    // Clicking a card's Search with an empty box did nothing visible. Say
+    // what the button needs — and what it will scope to.
+    input.focus();
+    showNotice(sid ? "Type a search term above, then press Search on a card to search just that session."
+                   : "Type a search term to search your recent transcripts.", "warn");
+    return;
+  }
   var url = "/api/recall?q=" + encodeURIComponent(q) + (sid ? "&sid=" + encodeURIComponent(sid) : "");
   var panel = document.getElementById("recall-panel");
   panel.hidden = false;
