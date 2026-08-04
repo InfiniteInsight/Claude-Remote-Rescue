@@ -634,7 +634,10 @@ def test_page_discoverable_warns_when_a_row_is_still_running():
     a SECOND claude on it. The row must say so and steer to Take over."""
     page = web.render_page()
     assert "r.running" in page
-    assert "running now" in page
+    assert "running (untracked)" in page
+    # the label must say crr is NOT managing it — "running now" alone reads
+    # like "already tracked", which is the opposite of the truth.
+    assert "crr is not tracking" in page
 
 
 def test_page_discoverable_reports_total_and_filtered_counts():
@@ -682,11 +685,11 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_27():
-    """v27: the discoverable/untracked modal rows get the same inline field
-    labels as the session cards (v26 added the modal + paging + filter +
-    "running now" warning; v25 tooltips; v24 the card labels)."""
-    assert web.PAGE_VERSION == 27
+def test_page_version_is_28():
+    """v28: the duplicate tag reads "running (untracked)" — "running now"
+    alone read like "already tracked", the opposite of what it means
+    (v27 labeled the modal rows; v26 the modal itself; v25 tooltips)."""
+    assert web.PAGE_VERSION == 28
 
 
 def test_page_has_global_recall_search_bar():
