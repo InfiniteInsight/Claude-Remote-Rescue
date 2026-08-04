@@ -148,7 +148,17 @@
   /* Discoverable modal: the list can be thousands of rows on a busy machine,
      so it gets its own scrollable surface with server-side paging + filter
      rather than dumping everything into the page. */
-  #disc-modal {
+  #admin-modal { display: none; }
+  #admin-modal.open { display: flex; }
+  #admin-list { overflow-y: auto; padding: 10px 16px; flex: 1; min-height: 80px; }
+  .adm-row {
+    display: flex; align-items: center; gap: 10px; padding: 6px 0;
+    border-bottom: 1px solid #1e232c; font-family: ui-monospace, monospace; font-size: 12px;
+  }
+  .adm-row:last-child { border-bottom: none; }
+  .adm-name { flex: 1; color: #cdd3dd; word-break: break-all; }
+  .adm-src { color: #6b7280; font-size: 11px; }
+  #disc-modal, #admin-modal {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
     display: none; align-items: center; justify-content: center; padding: 16px;
   }
@@ -233,9 +243,24 @@
   <span class="tools-label">Other views</span>
   <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management. Opens a searchable list.">Recently untracked</button>
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable. Opens a searchable list.">Discoverable</button>
+  <button id="admin-btn" type="button" title="Settings: directories discovery should skip.">Settings</button>
   <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
 </div>
 <div id="diag-panel" hidden></div>
+<div id="admin-modal" role="dialog" aria-modal="true" aria-label="Settings">
+  <div id="disc-box">
+    <div id="disc-head">
+      <h2>Settings — excluded directories</h2>
+      <button id="admin-close" type="button" title="Close">&times;</button>
+    </div>
+    <div class="note" style="padding: 10px 16px 0; margin: 0;">Transcripts under these directory names never appear as <strong>Discoverable</strong>. Useful for tools that drive Claude Code themselves and leave transcripts behind (claude-mem's observer sessions are excluded by default). Matching ignores <code>-</code> vs <code>/</code> vs <code>.</code>, so <code>.claude-mem</code> and <code>claude-mem</code> both work.</div>
+    <div id="admin-list"></div>
+    <div id="disc-foot">
+      <input id="admin-add" type="text" placeholder="directory name to exclude" aria-label="Directory name to exclude" style="flex:1; min-width:0; font:inherit; font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid #2f3745; background:#1c222c; color:#cdd3dd;">
+      <button id="admin-add-btn" type="button" title="Add this directory to the exclusion list">Add</button>
+    </div>
+  </div>
+</div>
 <div id="disc-modal" role="dialog" aria-modal="true" aria-label="Discoverable sessions">
   <div id="disc-box">
     <div id="disc-head">
@@ -946,7 +971,10 @@ document.getElementById("disc-modal").addEventListener("click", function (e) {
   if (e.target === this) { closeDisc(); }   // click the backdrop to dismiss
 });
 document.addEventListener("keydown", function (e) {
-  if (e.key === "Escape") { closeDisc(); }
+  if (e.key === "Escape") {
+    closeDisc();
+    document.getElementById("admin-modal").classList.remove("open");
+  }
 });
 document.getElementById("disc-prev").addEventListener("click", function () {
   discState.offset = Math.max(0, discState.offset - discState.limit);
@@ -964,6 +992,97 @@ document.getElementById("disc-filter").addEventListener("input", function () {
     discState.offset = 0;    // a new filter always starts at page 1
     loadDiscoverable();
   }, 250);
+});
+
+// Settings: the excluded-directory list. Two owners — config.toml (shown
+// read-only; the dashboard never rewrites the user's TOML) and the
+// dashboard-managed list this edits. See core/exclusions.py for why they
+// are separate files.
+var adminManaged = [];
+
+function renderAdmin(data) {
+  var list = document.getElementById("admin-list");
+  list.textContent = "";
+  adminManaged = data.managed || [];
+  var configured = data.configured || [];
+  if (!configured.length && !adminManaged.length) {
+    var none = el("div", "ev");
+    none.textContent = "nothing excluded — every transcript can appear as discoverable";
+    list.appendChild(none);
+  }
+  configured.forEach(function (name) {
+    var row = el("div", "adm-row");
+    var n = el("span", "adm-name"); n.textContent = name; row.appendChild(n);
+    var src = el("span", "adm-src");
+    src.textContent = "from config.toml";
+    src.title = "Edit this one in config.toml — the dashboard never rewrites your TOML.";
+    row.appendChild(src);
+    list.appendChild(row);
+  });
+  adminManaged.forEach(function (name, i) {
+    var row = el("div", "adm-row");
+    var n = el("span", "adm-name"); n.textContent = name; row.appendChild(n);
+    var rm = el("button", "danger");
+    rm.textContent = "Remove";
+    rm.title = "Stop excluding this directory";
+    rm.addEventListener("click", function () {
+      var next = adminManaged.slice();
+      next.splice(i, 1);
+      saveAdmin(next, rm);
+    });
+    row.appendChild(rm);
+    list.appendChild(row);
+  });
+}
+
+function loadAdmin() {
+  var list = document.getElementById("admin-list");
+  list.textContent = "loading…";
+  fetch("/api/exclusions")
+    .then(function (r) { return r.json(); })
+    .then(renderAdmin)
+    .catch(function () { list.textContent = "settings unavailable"; });
+}
+
+function saveAdmin(dirs, btn) {
+  if (btn) { btn.disabled = true; }
+  fetch("/api/exclusions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dirs: dirs })
+  })
+    .then(function (r) {
+      if (!r.ok) { return r.text().then(function (t) { throw new Error(t); }); }
+      return r.json();
+    })
+    .then(function (data) {
+      renderAdmin(data);
+      showNotice("excluded directories saved", "ok");
+      pollSessions();
+    })
+    .catch(function (e) { showNotice(String(e.message || "save failed"), "error"); })
+    .finally(function () { if (btn) { btn.disabled = false; } });
+}
+
+document.getElementById("admin-btn").addEventListener("click", function () {
+  document.getElementById("admin-modal").classList.add("open");
+  loadAdmin();
+});
+document.getElementById("admin-close").addEventListener("click", function () {
+  document.getElementById("admin-modal").classList.remove("open");
+});
+document.getElementById("admin-modal").addEventListener("click", function (e) {
+  if (e.target === this) { this.classList.remove("open"); }
+});
+document.getElementById("admin-add-btn").addEventListener("click", function () {
+  var input = document.getElementById("admin-add");
+  var v = (input.value || "").trim();
+  if (!v) { input.focus(); showNotice("Type a directory name to exclude.", "warn"); return; }
+  input.value = "";
+  saveAdmin(adminManaged.concat([v]), this);
+});
+document.getElementById("admin-add").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { document.getElementById("admin-add-btn").click(); }
 });
 
 // Recall (crr recall parity): a GET to /api/recall, NOT sidAction — the

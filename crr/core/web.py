@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 31  # v31: cards show claude's preceding reply (tail-truncated) above the prompt
+PAGE_VERSION = 32  # v32: Settings modal — manage discovery exclusions from the dashboard
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -198,6 +198,8 @@ def handle_request(
     discoverable_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
+    exclusions_provider: Callable[[], dict[str, Any]] | None = None,
+    exclusions_writer: Callable[[Any], dict[str, Any]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -278,6 +280,13 @@ def handle_request(
             if sid is not None and not contracts.valid_session_id(sid):
                 return _plain(400, "recall: invalid session id")
             return _json(200, recall_provider(q, sid))
+        if path == "/api/exclusions":
+            # Admin read: which directories discovery skips, split by owner
+            # (config.toml baseline vs dashboard-managed) so the UI can show
+            # the user which ones it is allowed to edit.
+            if exclusions_provider is None:
+                return _plain(404, "not found")
+            return _json(200, exclusions_provider())
         return _plain(404, "not found")
 
     if method == "POST":
@@ -304,6 +313,28 @@ def handle_request(
                 return _plain(503, "actions unavailable")
             ok, message = action_provider(op, pid)
             return _json(200 if ok else 409, {"ok": ok, "message": message})
+
+        if path == "/api/exclusions":
+            # Same CSRF posture as /api/action (host allowlist already ran;
+            # JSON content-type gate; no CORS headers are ever emitted).
+            # This one WRITES TO DISK, so the gate matters at least as much;
+            # the writer owns validation/bounds and signals a bad list by
+            # raising ValueError, which becomes a 400 with its message.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            if not isinstance(data, dict) or not isinstance(data.get("dirs"), list):
+                return _plain(400, "expected {\"dirs\": [...]}")
+            if exclusions_writer is None:
+                return _plain(503, "exclusions unavailable")
+            try:
+                return _json(200, exclusions_writer(data["dirs"]))
+            except ValueError as exc:
+                return _plain(400, str(exc))
 
         if path == "/api/sid-action":
             # Same CSRF posture as /api/action (JSON content-type gate; the

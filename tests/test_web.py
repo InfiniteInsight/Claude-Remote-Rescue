@@ -57,7 +57,8 @@ def _payload():
 def _handle(method="GET", path="/", host="localhost", provider=None,
             body=b"", headers=None, action_provider=None,
             untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
-            recall_provider=None, query=""):
+            recall_provider=None, exclusions_provider=None, exclusions_writer=None,
+            query=""):
     h = {"Host": host}
     if headers:
         h.update(headers)
@@ -69,6 +70,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
         recall_provider=recall_provider,
+        exclusions_provider=exclusions_provider,
+        exclusions_writer=exclusions_writer,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -142,6 +145,63 @@ def test_recall_bad_sid_is_400():
 
 def test_recall_404_without_provider():
     assert _handle(path="/api/recall", query="q=fox").status == 404
+
+
+# --------------------------------------------------------------------------
+# /api/exclusions — the admin section's read/write (C: dashboard-managed
+# discovery exclusions; config.toml stays the user-owned baseline)
+# --------------------------------------------------------------------------
+
+def test_exclusions_get_returns_both_owners():
+    resp = _handle(path="/api/exclusions",
+                   exclusions_provider=lambda: {"configured": [".claude-mem"], "managed": ["scratch"]})
+    assert resp.status == 200
+    body = json.loads(resp.body)
+    # both listed separately: the user must be able to tell which ones the
+    # dashboard may edit and which come from their config.toml.
+    assert body == {"configured": [".claude-mem"], "managed": ["scratch"]}
+
+
+def test_exclusions_get_404_without_provider():
+    assert _handle(path="/api/exclusions").status == 404
+
+
+def test_exclusions_post_writes_and_returns_the_stored_list():
+    seen = []
+    resp = _handle(method="POST", path="/api/exclusions", headers=_JSON,
+                   body=b'{"dirs": ["scratch", " tmp "]}',
+                   exclusions_writer=lambda dirs: seen.append(dirs) or {
+                       "configured": [".claude-mem"], "managed": ["scratch", "tmp"]})
+    assert resp.status == 200
+    assert seen == [["scratch", " tmp "]]
+    assert json.loads(resp.body)["managed"] == ["scratch", "tmp"]
+
+
+def test_exclusions_post_requires_json_content_type():
+    # Same CSRF posture as /api/action — this one WRITES TO DISK, so the
+    # gate matters at least as much.
+    resp = _handle(method="POST", path="/api/exclusions",
+                   headers={"Content-Type": "text/plain"}, body=b'{"dirs": []}',
+                   exclusions_writer=lambda dirs: {})
+    assert resp.status == 415
+
+
+def test_exclusions_post_rejects_a_bad_payload():
+    w = lambda dirs: {}
+    assert _handle(method="POST", path="/api/exclusions", headers=_JSON,
+                   body=b'not json', exclusions_writer=w).status == 400
+    assert _handle(method="POST", path="/api/exclusions", headers=_JSON,
+                   body=b'{"dirs": "nope"}', exclusions_writer=w).status == 400
+
+
+def test_exclusions_post_surfaces_a_writer_rejection_as_400():
+    def writer(dirs):
+        raise ValueError("too many exclusions (max 100)")
+
+    resp = _handle(method="POST", path="/api/exclusions", headers=_JSON,
+                   body=b'{"dirs": ["x"]}', exclusions_writer=writer)
+    assert resp.status == 400
+    assert b"too many" in resp.body
 
 
 def test_disallowed_host_is_403_before_anything_else():
@@ -703,9 +763,18 @@ def test_page_shows_claudes_preceding_reply():
     assert 'fieldLabel("claude")' in page
 
 
-def test_page_version_is_31():
-    """v31: cards show claude's preceding reply above the user's prompt."""
-    assert web.PAGE_VERSION == 31
+def test_page_version_is_32():
+    """v32: a Settings modal manages discovery exclusions (v31 added the
+    preceding-reply line on cards)."""
+    assert web.PAGE_VERSION == 32
+
+
+def test_page_has_a_settings_modal_for_exclusions():
+    page = web.render_page()
+    assert 'id="admin-btn"' in page and 'id="admin-modal"' in page
+    assert '"/api/exclusions"' in page
+    # config-owned entries are shown but not editable from the web
+    assert "from config.toml" in page
 
 
 def test_page_secondary_views_share_one_toolbar_row():
