@@ -246,3 +246,26 @@ def test_filter_and_page_still_matches_a_hyphenated_session_id():
     rows = [_row("aaaaaaaa-1111-4000-8000-000000000000", "/home/u/p")]
     out = discovery.filter_and_page(rows, query="aaaaaaaa-1111", offset=0, limit=10)
     assert len(out["rows"]) == 1
+
+
+# --- is_excluded (keep tool-internal transcripts out of discovery) --------
+
+def test_is_excluded_matches_a_dotted_dir_through_the_lossy_decode():
+    # Claude Code encodes "/home/u/.claude-mem/observer-sessions" as
+    # "-home-u--claude-mem-observer-sessions" (both '/' and '.' become '-'),
+    # which decodes back to "/home/u//claude/mem/observer/sessions" — so a
+    # literal ".claude-mem" substring match finds nothing. Separators are
+    # normalized on both sides so the configured name still matches.
+    cwd = "/home/u//claude/mem/observer/sessions"
+    assert discovery.is_excluded(cwd, [".claude-mem"]) is True
+    assert discovery.is_excluded(cwd, ["claude-mem"]) is True
+
+
+def test_is_excluded_leaves_real_projects_alone():
+    assert discovery.is_excluded("/home/u/projects/my-app", [".claude-mem"]) is False
+    assert discovery.is_excluded("/home/u/Claude/Remote/Rescue", [".claude-mem"]) is False
+
+
+def test_is_excluded_empty_patterns_excludes_nothing():
+    assert discovery.is_excluded("/home/u//claude/mem/x", []) is False
+    assert discovery.is_excluded("/anything", [""]) is False  # blank pattern is not a wildcard

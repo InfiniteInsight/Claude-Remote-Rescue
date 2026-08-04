@@ -233,7 +233,6 @@
 </div>
 <div id="untracked">
   <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management.">Recently untracked</button>
-  <div id="untracked-panel" hidden></div>
 </div>
 <div id="discoverable">
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable.">Discoverable (untracked)</button>
@@ -241,13 +240,13 @@
 <div id="disc-modal" role="dialog" aria-modal="true" aria-label="Discoverable sessions">
   <div id="disc-box">
     <div id="disc-head">
-      <h2>Discoverable (untracked) conversations</h2>
+      <h2 id="disc-title">Discoverable (untracked) conversations</h2>
       <button id="disc-close" type="button" title="Close">&times;</button>
     </div>
     <div id="disc-tools">
       <input id="disc-filter" type="search" placeholder="Filter by directory or id" autocomplete="off" aria-label="Filter discoverable sessions by directory or id">
     </div>
-    <div class="note" style="padding: 8px 16px 0; margin: 0;"><strong>Adopt</strong> tracks a conversation as recoverable (revive via `crr reopen`); it does NOT attach to a running process. Everything listed here is <em>untracked</em> — crr is not managing it. A row marked <strong>running (untracked)</strong> also has a live `claude --resume` going right now, so adopting it would start a SECOND copy on the same transcript — use <strong>Take over</strong>, which stops the live one first (only at a safe turn boundary) and then adopts.</div>
+    <div class="note" id="disc-note" style="padding: 8px 16px 0; margin: 0;"></div>
     <div id="disc-list"></div>
     <div id="disc-foot">
       <span id="disc-count"></span>
@@ -816,56 +815,65 @@ function renderSidRow(r, ageIso, actions, onDone) {
   return row;
 }
 
-// Lazy "Recently untracked" panel — fetched from /api/untracked only when
-// opened, never on the 5s sessions poll path (that's the actual lazy-panel
-// constraint the diagnostics panel established). Unlike diagnostics (static
-// previous-boot evidence, fetched once and cached), this list mutates as
-// the user acts (untrack/retrack), so every open re-fetches rather than
-// reusing a stale cached render.
-function loadUntracked() {
-  var panel = document.getElementById("untracked-panel");
-  panel.textContent = "loading…";
-  fetch("/api/untracked")
-    .then(function (r) { return r.json(); })
-    .then(function (rows) {
-      panel.textContent = "";
-      if (!rows.length) {
-        var none = el("div", "ev");
-        none.textContent = "no recently untracked sessions";
-        panel.appendChild(none);
-      } else {
-        rows.forEach(function (r) {
-          panel.appendChild(renderSidRow(r, r.archived_at, [{ label: "Retrack", op: "retrack" }], loadUntracked));
-        });
-      }
-    })
-    .catch(function () { panel.textContent = "untracked list unavailable"; });
-}
-document.getElementById("untracked-btn").addEventListener("click", function () {
-  var panel = document.getElementById("untracked-panel");
-  if (!panel.hidden) { panel.hidden = true; return; }
-  panel.hidden = false;
-  loadUntracked();
-});
+// Shared modal for BOTH sid-keyed lists (Discoverable and Recently
+// untracked). They differ only in title/note/endpoint/actions, so one
+// server-side-paged, filterable surface serves both rather than two panels
+// that drift apart. On a busy machine Discoverable can be thousands of rows,
+// and enriching them all cost ~10s — the server filters/slices first and
+// reads transcript content only for the page shown here.
+var MODAL_KINDS = {
+  discoverable: {
+    title: "Discoverable (untracked) conversations",
+    url: "/api/discoverable",
+    ageField: "last_active",
+    empty: "no discoverable transcripts",
+    note: function (note) {
+      note.textContent = "";
+      note.appendChild(document.createTextNode("Everything here is untracked — crr is not managing it. "));
+      var b1 = el("strong"); b1.textContent = "Adopt";
+      note.appendChild(b1);
+      note.appendChild(document.createTextNode(" tracks a conversation as recoverable (revive via `crr reopen`); it does NOT attach to a running process. A row marked "));
+      var b2 = el("strong"); b2.textContent = "running (untracked)";
+      note.appendChild(b2);
+      note.appendChild(document.createTextNode(" also has a live `claude --resume` going right now, so adopting it would start a SECOND copy on the same transcript — use "));
+      var b3 = el("strong"); b3.textContent = "Take over";
+      note.appendChild(b3);
+      note.appendChild(document.createTextNode(", which stops the live one first (only at a safe turn boundary) and then adopts."));
+    },
+    actions: function (r) {
+      // A conversation that is STILL RUNNING can't be plain-Adopted without
+      // starting a second claude on the same transcript — promote Take over.
+      return r.running
+        ? [{ label: "Take over", op: "takeover", danger: true, confirm: true },
+           { label: "Adopt", op: "adopt", confirm: true }]
+        : [{ label: "Adopt", op: "adopt" },
+           { label: "Take over", op: "takeover", danger: true, confirm: true }];
+    }
+  },
+  untracked: {
+    title: "Recently untracked conversations",
+    url: "/api/untracked",
+    ageField: "archived_at",
+    empty: "no recently untracked sessions",
+    note: function (note) {
+      note.textContent = "Sessions you stopped tracking (untrack / de-tmux). Their conversations are preserved in the archive — Retrack puts one back under crr's management, exactly as it was.";
+    },
+    actions: function () { return [{ label: "Retrack", op: "retrack" }]; }
+  }
+};
 
-// Lazy "Discoverable (untracked)" panel — fetched from /api/discoverable
-// only when opened, never on the poll path; re-fetched on every open for
-// the same reason as loadUntracked (adopt mutates what's discoverable).
-// The static adoption note lives outside the re-rendered list div
-// (#discoverable-list) so it survives every refresh.
-// Discoverable modal: server-side paged + filtered. On a busy machine there
-// can be thousands of untracked transcripts, and enriching them all cost ~10s
-// and 600KB — so the server filters/slices the cheap candidate list and reads
-// transcript content only for the page shown here.
-var discState = { query: "", offset: 0, limit: 20, total: 0, filtered: 0 };
+var discState = { kind: "discoverable", query: "", offset: 0, limit: 20, total: 0, filtered: 0 };
 var discTimer = null;
 
+function discKind() { return MODAL_KINDS[discState.kind]; }
+
 function discUrl() {
-  return "/api/discoverable?q=" + encodeURIComponent(discState.query) +
+  return discKind().url + "?q=" + encodeURIComponent(discState.query) +
          "&offset=" + discState.offset + "&limit=" + discState.limit;
 }
 
 function loadDiscoverable() {
+  var kind = discKind();
   var list = document.getElementById("disc-list");
   list.textContent = "loading…";
   fetch(discUrl())
@@ -878,19 +886,11 @@ function loadDiscoverable() {
       var rows = data.rows || [];
       if (!rows.length) {
         var none = el("div", "ev");
-        none.textContent = discState.query ? "no matches for this filter" : "no discoverable transcripts";
+        none.textContent = discState.query ? "no matches for this filter" : kind.empty;
         list.appendChild(none);
       } else {
         rows.forEach(function (r) {
-          // A conversation that is STILL RUNNING can't be plain-Adopted without
-          // starting a second claude on the same transcript — tag it and make
-          // Take over the primary action for that row.
-          var actions = r.running
-            ? [{ label: "Take over", op: "takeover", danger: true, confirm: true },
-               { label: "Adopt", op: "adopt", confirm: true }]
-            : [{ label: "Adopt", op: "adopt" },
-               { label: "Take over", op: "takeover", danger: true, confirm: true }];
-          var row = renderSidRow(r, r.last_active, actions, loadDiscoverable);
+          var row = renderSidRow(r, r[kind.ageField], kind.actions(r), loadDiscoverable);
           if (r.running) {
             var tag = el("span", "badge running-badge");
             tag.textContent = "running (untracked)";
@@ -915,17 +915,24 @@ function loadDiscoverable() {
       document.getElementById("disc-next").disabled =
         discState.offset + discState.limit >= discState.filtered;
     })
-    .catch(function () { list.textContent = "discoverable list unavailable"; });
+    .catch(function () { list.textContent = "list unavailable"; });
 }
 
-function openDisc() {
+function openDisc(kind) {
+  discState.kind = kind;
+  discState.query = "";
+  discState.offset = 0;
+  document.getElementById("disc-filter").value = "";
+  document.getElementById("disc-title").textContent = MODAL_KINDS[kind].title;
+  MODAL_KINDS[kind].note(document.getElementById("disc-note"));
   document.getElementById("disc-modal").classList.add("open");
   loadDiscoverable();
 }
 function closeDisc() {
   document.getElementById("disc-modal").classList.remove("open");
 }
-document.getElementById("discoverable-btn").addEventListener("click", openDisc);
+document.getElementById("discoverable-btn").addEventListener("click", function () { openDisc("discoverable"); });
+document.getElementById("untracked-btn").addEventListener("click", function () { openDisc("untracked"); });
 document.getElementById("disc-close").addEventListener("click", closeDisc);
 document.getElementById("disc-modal").addEventListener("click", function (e) {
   if (e.target === this) { closeDisc(); }   // click the backdrop to dismiss

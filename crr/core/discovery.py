@@ -127,8 +127,30 @@ def _recency_key(transcript: Mapping[str, Any]) -> float:
     return float("-inf")
 
 
+def is_excluded(cwd: str, patterns: Sequence[str]) -> bool:
+    """True if ``cwd`` sits under one of the excluded directory names.
+
+    Some tools drive Claude Code themselves and leave transcripts behind that
+    are not the user's conversations — on the author's machine, claude-mem's
+    ``.claude-mem/observer-sessions`` accounted for 2809 of 2856 discoverable
+    rows (98%), burying the real ones. Those directory names are configurable
+    (``discover_exclude_dirs``) and filtered out before anything is read.
+
+    Matching normalizes separators on BOTH sides (see ``_norm_sep``) because
+    the only cwd available pre-read is the lossy project-dir decode: Claude
+    Code encodes both ``/`` and ``.`` as ``-``, so
+    ``/home/u/.claude-mem/observer-sessions`` comes back as
+    ``/home/u//claude/mem/observer/sessions`` and a literal ``.claude-mem``
+    substring test would never match. A blank pattern matches nothing rather
+    than everything — an empty config entry must not silently hide the whole
+    list.
+    """
+    haystack = _norm_sep(cwd)
+    return any(_norm_sep(p) in haystack for p in patterns if p.strip())
+
+
 def _norm_sep(text: str) -> str:
-    """Lowercase and collapse ``-``/``/`` to one separator, for filtering.
+    """Lowercase and collapse ``-``/``.``/``/`` to one separator, for matching.
 
     Discovery filters run BEFORE the transcript read, so the only cwd
     available is the project-dir decode — which turns every ``-`` into ``/``
@@ -138,8 +160,12 @@ def _norm_sep(text: str) -> str:
     finds nothing — a live bug for any hyphenated project (this repo
     included). Normalizing both sides makes either spelling match, and is
     harmless for session ids (their hyphens normalize consistently too).
+
+    ``.`` normalizes too, because the encoder maps it to ``-`` as well —
+    without that, a dotted directory like ``.claude-mem`` could not be
+    matched at all (see ``is_excluded``).
     """
-    return text.lower().replace("-", "/")
+    return text.lower().replace("-", "/").replace(".", "/")
 
 
 def filter_and_page(

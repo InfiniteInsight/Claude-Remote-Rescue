@@ -212,20 +212,32 @@ _UNTRACKED_ITEM = {
 def test_untracked_endpoint_uses_provider_lazily():
     calls = []
 
-    def untracked():
+    def untracked(query, offset, limit):
         calls.append(1)
-        return [_UNTRACKED_ITEM]
+        return {"rows": [_UNTRACKED_ITEM], "total": 1, "filtered": 1,
+                "offset": offset, "limit": limit}
 
     resp = _handle(path="/api/untracked", untracked_provider=untracked)
     assert resp.status == 200
     assert resp.headers["Content-Type"] == "application/json"
     body = json.loads(resp.body)
-    assert body == [_UNTRACKED_ITEM]
+    assert body["rows"] == [_UNTRACKED_ITEM]
     # last_prompt IS present now: cli._untracked_view reads it from the
     # untracked session's on-disk transcript (parity with the discoverable
     # panel), so the retrack panel can show what each candidate was about.
-    assert set(body[0]) == {"session_id", "sid8", "cwd", "archived_at", "last_prompt"}
+    assert set(body["rows"][0]) == {"session_id", "sid8", "cwd", "archived_at", "last_prompt"}
     assert calls == [1]  # only called when the endpoint is hit
+
+
+def test_untracked_endpoint_pages_and_filters_like_discoverable():
+    seen = []
+    prov = lambda q, o, l: seen.append((q, o, l)) or {"rows": [], "total": 30, "filtered": 2,
+                                                     "offset": o, "limit": l}
+    resp = _handle(path="/api/untracked", query="q=proj&offset=20&limit=20",
+                   untracked_provider=prov)
+    assert seen == [("proj", 20, 20)]
+    body = json.loads(resp.body)
+    assert body["total"] == 30 and body["filtered"] == 2   # no silent cap
 
 
 def test_untracked_endpoint_404_without_provider():
@@ -685,11 +697,20 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_28():
-    """v28: the duplicate tag reads "running (untracked)" — "running now"
-    alone read like "already tracked", the opposite of what it means
-    (v27 labeled the modal rows; v26 the modal itself; v25 tooltips)."""
-    assert web.PAGE_VERSION == 28
+def test_page_version_is_29():
+    """v29: Discoverable and Recently untracked share ONE paged, filterable
+    modal (v28 clarified the duplicate tag; v27 labeled the rows; v26 added
+    the modal; v25 tooltips)."""
+    assert web.PAGE_VERSION == 29
+
+
+def test_page_untracked_uses_the_same_modal_as_discoverable():
+    page = web.render_page()
+    assert "MODAL_KINDS" in page
+    assert 'openDisc("untracked")' in page and 'openDisc("discoverable")' in page
+    assert '"/api/untracked"' in page
+    # both lists paged through the same shell
+    assert page.count('id="disc-modal"') == 1
 
 
 def test_page_has_global_recall_search_bar():
@@ -805,7 +826,8 @@ def test_page_has_discoverable_section_lazy_with_adopt_note():
     # (adoption != a live process attachment).
     page = web.render_page()
     assert "Discoverable (untracked)" in page
-    assert '"/api/discoverable?q="' in page  # paged/filtered fetch
+    assert '"/api/discoverable"' in page   # the kind's endpoint
+    assert '"?q=" + encodeURIComponent' in page  # paged/filtered fetch
     assert "Adopt" in page
     assert '"adopt"' in page
     # Discloses the competing-resume hazard: an adopted entry is always a

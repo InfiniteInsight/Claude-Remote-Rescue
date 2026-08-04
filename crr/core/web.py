@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 28  # v28: clearer duplicate tag — "running (untracked)", not "running now"
+PAGE_VERSION = 29  # v29: one shared modal for Discoverable + Recently untracked (paged, filterable)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -194,7 +194,7 @@ def handle_request(
     sessions_provider: Callable[[], dict[str, Any]],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
-    untracked_provider: Callable[[], list[Any]] | None = None,
+    untracked_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     discoverable_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
@@ -235,7 +235,13 @@ def handle_request(
             # opened, never on the poll path.
             if untracked_provider is None:
                 return _plain(404, "not found")
-            return _json(200, untracked_provider())
+            # Paged + filtered exactly like /api/discoverable (same modal, so
+            # the same contract) — see that branch for the param handling.
+            params = parse_qs(query)
+            unt_q = (params.get("q", [""])[0]).strip()
+            offset = _positive_int(params.get("offset", [""])[0], 0)
+            limit = _positive_int(params.get("limit", [""])[0], DISCOVERABLE_PAGE) or DISCOVERABLE_PAGE
+            return _json(200, untracked_provider(unt_q, offset, limit))
         if path == "/api/discoverable":
             # Lazy (T-C): the untracked-transcript scan reads transcript
             # content per candidate — never on the poll path, only when the
