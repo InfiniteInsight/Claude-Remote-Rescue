@@ -236,6 +236,40 @@ class PsProcessController:
                 return ResumeProcess(pid, ppid, pgid)
         return None
 
+    def resume_session_ids(self) -> set[str]:
+        """Every session id that a live ``claude --resume <sid>`` is running.
+
+        The batch counterpart to ``find_resume_process`` (and the direct
+        parallel to ``controlling_ttys``): ONE ``ps`` snapshot answers "is this
+        conversation already running?" for a whole page of discoverable rows,
+        instead of one snapshot per row. The dashboard uses it to warn that
+        plain Adopt would start a SECOND claude on a transcript that is still
+        live, and to steer to Take over instead.
+
+        Same degrade-to-empty policy as the other probes here: an
+        inconclusive ``ps`` yields an empty set (no warnings shown) rather
+        than a fabricated answer — the adopt path's own competing-resume
+        disclosure remains the backstop.
+        """
+        try:
+            result = subprocess.run(
+                _ps_snapshot_argv(),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return set()
+        if result.returncode != 0:
+            return set()
+        sids: set[str] = set()
+        for _pid, _ppid, _pgid, args in _parse_ps_rows_full_args(result.stdout):
+            tokens = args.split()
+            if not tokens or not _is_claude_argv0(tokens[0]):
+                continue
+            for i, tok in enumerate(tokens):
+                if tok == "--resume" and i + 1 < len(tokens):
+                    sids.add(tokens[i + 1])
+        return sids
+
     def terminate_group(self, pgid: int, grace_seconds: float) -> None:
         os.killpg(pgid, signal.SIGTERM)  # raises OSError if undeliverable
         deadline = time.monotonic() + grace_seconds

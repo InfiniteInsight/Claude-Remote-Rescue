@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 25  # v25: explanatory tooltips on every action button + panel toggle
+PAGE_VERSION = 26  # v26: discoverable modal — server-side paging + filter + "running now" duplicate warning
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -160,6 +160,23 @@ ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", 
 SID_ACTIONS = ("retrack", "adopt", "takeover")
 
 
+# Rows per page in the dashboard's discoverable modal.
+DISCOVERABLE_PAGE = 20
+
+
+def _positive_int(raw: str, default: int) -> int:
+    """Parse a non-negative int from a query param, falling back on junk.
+
+    A browse surface must not 400 because a hand-edited URL had
+    ``offset=-5`` or ``limit=abc``; it degrades to the default instead.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
 def _plain(status: int, text: str) -> Response:
     return _resp(status, "text/plain; charset=utf-8", text.encode("utf-8"))
 
@@ -178,7 +195,7 @@ def handle_request(
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
     untracked_provider: Callable[[], list[Any]] | None = None,
-    discoverable_provider: Callable[[], list[Any]] | None = None,
+    discoverable_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
     allowed_hosts: set[str],
@@ -227,7 +244,16 @@ def handle_request(
             #   last_prompt}, ...] — see crr.core.discovery.untracked.
             if discoverable_provider is None:
                 return _plain(404, "not found")
-            return _json(200, discoverable_provider())
+            # Paged + filtered server-side: enriching every untracked
+            # transcript to render one page cost ~10s on a machine with a few
+            # thousand of them. Junk/absent paging params fall back to the
+            # defaults rather than erroring — this is a browse surface, and a
+            # 400 here would just blank the panel.
+            params = parse_qs(query)
+            disc_q = (params.get("q", [""])[0]).strip()
+            offset = _positive_int(params.get("offset", [""])[0], 0)
+            limit = _positive_int(params.get("limit", [""])[0], DISCOVERABLE_PAGE) or DISCOVERABLE_PAGE
+            return _json(200, discoverable_provider(disc_q, offset, limit))
         if path == "/api/recall":
             # Lazy GET (never the poll path): transcript search. The query
             # string is parsed here (the composition root passes it in as

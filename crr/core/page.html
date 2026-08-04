@@ -143,6 +143,37 @@
     margin-top: 8px; padding: 10px 12px; border: 1px solid #262b36; border-radius: 8px;
     background: #161a22; font-size: 12px;
   }
+  /* Discoverable modal: the list can be thousands of rows on a busy machine,
+     so it gets its own scrollable surface with server-side paging + filter
+     rather than dumping everything into the page. */
+  #disc-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+    display: none; align-items: center; justify-content: center; padding: 16px;
+  }
+  #disc-modal.open { display: flex; }
+  #disc-box {
+    background: #12161d; border: 1px solid #2f3745; border-radius: 12px;
+    width: min(760px, 100%); max-height: min(85vh, 900px); display: flex; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
+  #disc-head { padding: 12px 16px; border-bottom: 1px solid #262b36; display: flex; gap: 10px; align-items: center; }
+  #disc-head h2 { font-size: 14px; margin: 0; font-weight: 600; flex: 1; }
+  #disc-close { font-size: 16px; line-height: 1; padding: 4px 10px; }
+  #disc-tools { padding: 10px 16px 0; display: flex; gap: 8px; align-items: center; }
+  #disc-filter {
+    flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 6px 10px;
+    border-radius: 6px; border: 1px solid #2f3745; background: #1c222c; color: #cdd3dd;
+  }
+  #disc-list { overflow-y: auto; padding: 0 16px; flex: 1; }
+  #disc-foot {
+    padding: 10px 16px; border-top: 1px solid #262b36; display: flex; gap: 10px;
+    align-items: center; font-size: 12px; color: #8a93a2;
+  }
+  #disc-count { flex: 1; }
+  .badge.running-badge {
+    margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none;
+    letter-spacing: 0; font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600;
+  }
   .note { color: #8a93a2; font-size: 12px; margin: 0 0 8px; }
   .u-row { padding: 8px 0; border-bottom: 1px solid #1e232c; }
   .u-row:last-child { border-bottom: none; }
@@ -206,9 +237,23 @@
 </div>
 <div id="discoverable">
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable.">Discoverable (untracked)</button>
-  <div id="discoverable-panel" hidden>
-    <div class="note">Adopting tracks this conversation as recoverable (revive via `crr reopen`). It does NOT attach to a running process — and if the session is still alive elsewhere, the watchdog will start a second `claude --resume` on the same conversation. <strong>Take over</strong> instead stops the live process first (only at a safe turn boundary; if it's mid-turn it refuses — try again in a moment), then adopts, so no second copy runs.</div>
-    <div id="discoverable-list"></div>
+</div>
+<div id="disc-modal" role="dialog" aria-modal="true" aria-label="Discoverable sessions">
+  <div id="disc-box">
+    <div id="disc-head">
+      <h2>Discoverable (untracked) conversations</h2>
+      <button id="disc-close" type="button" title="Close">&times;</button>
+    </div>
+    <div id="disc-tools">
+      <input id="disc-filter" type="search" placeholder="Filter by directory or id" autocomplete="off" aria-label="Filter discoverable sessions by directory or id">
+    </div>
+    <div class="note" style="padding: 8px 16px 0; margin: 0;"><strong>Adopt</strong> tracks a conversation as recoverable (revive via `crr reopen`); it does NOT attach to a running process. If a row is marked <strong>running now</strong>, adopting it would start a SECOND `claude --resume` on the same conversation — use <strong>Take over</strong>, which stops the live one first (only at a safe turn boundary) and then adopts.</div>
+    <div id="disc-list"></div>
+    <div id="disc-foot">
+      <span id="disc-count"></span>
+      <button id="disc-prev" type="button" title="Previous page">Prev</button>
+      <button id="disc-next" type="button" title="Next page">Next</button>
+    </div>
   </div>
 </div>
 <div id="sessions"></div>
@@ -797,33 +842,102 @@ document.getElementById("untracked-btn").addEventListener("click", function () {
 // the same reason as loadUntracked (adopt mutates what's discoverable).
 // The static adoption note lives outside the re-rendered list div
 // (#discoverable-list) so it survives every refresh.
+// Discoverable modal: server-side paged + filtered. On a busy machine there
+// can be thousands of untracked transcripts, and enriching them all cost ~10s
+// and 600KB — so the server filters/slices the cheap candidate list and reads
+// transcript content only for the page shown here.
+var discState = { query: "", offset: 0, limit: 20, total: 0, filtered: 0 };
+var discTimer = null;
+
+function discUrl() {
+  return "/api/discoverable?q=" + encodeURIComponent(discState.query) +
+         "&offset=" + discState.offset + "&limit=" + discState.limit;
+}
+
 function loadDiscoverable() {
-  var list = document.getElementById("discoverable-list");
+  var list = document.getElementById("disc-list");
   list.textContent = "loading…";
-  fetch("/api/discoverable")
+  fetch(discUrl())
     .then(function (r) { return r.json(); })
-    .then(function (rows) {
+    .then(function (data) {
+      discState.total = data.total || 0;
+      discState.filtered = data.filtered || 0;
+      discState.offset = data.offset || 0;
       list.textContent = "";
+      var rows = data.rows || [];
       if (!rows.length) {
         var none = el("div", "ev");
-        none.textContent = "no discoverable transcripts";
+        none.textContent = discState.query ? "no matches for this filter" : "no discoverable transcripts";
         list.appendChild(none);
       } else {
         rows.forEach(function (r) {
-          list.appendChild(renderSidRow(r, r.last_active, [
-            { label: "Adopt", op: "adopt" },
-            { label: "Take over", op: "takeover", danger: true, confirm: true }
-          ], loadDiscoverable));
+          // A conversation that is STILL RUNNING can't be plain-Adopted without
+          // starting a second claude on the same transcript — tag it and make
+          // Take over the primary action for that row.
+          var actions = r.running
+            ? [{ label: "Take over", op: "takeover", danger: true, confirm: true },
+               { label: "Adopt", op: "adopt", confirm: true }]
+            : [{ label: "Adopt", op: "adopt" },
+               { label: "Take over", op: "takeover", danger: true, confirm: true }];
+          var row = renderSidRow(r, r.last_active, actions, loadDiscoverable);
+          if (r.running) {
+            var tag = el("span", "badge running-badge");
+            tag.textContent = "running now";
+            tag.title = "A live `claude --resume` is running for this conversation. Adopting it would start a SECOND copy — use Take over instead.";
+            row.insertBefore(tag, row.firstChild.nextSibling);
+          }
+          list.appendChild(row);
         });
       }
+      // Report BOTH counts: a filtered/paged view must never read as
+      // "that's all there is" (same no-silent-caps rule as recall).
+      var shownFrom = discState.filtered ? discState.offset + 1 : 0;
+      var shownTo = Math.min(discState.offset + discState.limit, discState.filtered);
+      var count = discState.filtered
+        ? ("showing " + shownFrom + "\u2013" + shownTo + " of " + discState.filtered)
+        : "no rows";
+      if (discState.filtered !== discState.total) {
+        count += " (filtered from " + discState.total + ")";
+      }
+      document.getElementById("disc-count").textContent = count;
+      document.getElementById("disc-prev").disabled = discState.offset <= 0;
+      document.getElementById("disc-next").disabled =
+        discState.offset + discState.limit >= discState.filtered;
     })
     .catch(function () { list.textContent = "discoverable list unavailable"; });
 }
-document.getElementById("discoverable-btn").addEventListener("click", function () {
-  var panel = document.getElementById("discoverable-panel");
-  if (!panel.hidden) { panel.hidden = true; return; }
-  panel.hidden = false;
+
+function openDisc() {
+  document.getElementById("disc-modal").classList.add("open");
   loadDiscoverable();
+}
+function closeDisc() {
+  document.getElementById("disc-modal").classList.remove("open");
+}
+document.getElementById("discoverable-btn").addEventListener("click", openDisc);
+document.getElementById("disc-close").addEventListener("click", closeDisc);
+document.getElementById("disc-modal").addEventListener("click", function (e) {
+  if (e.target === this) { closeDisc(); }   // click the backdrop to dismiss
+});
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") { closeDisc(); }
+});
+document.getElementById("disc-prev").addEventListener("click", function () {
+  discState.offset = Math.max(0, discState.offset - discState.limit);
+  loadDiscoverable();
+});
+document.getElementById("disc-next").addEventListener("click", function () {
+  discState.offset = discState.offset + discState.limit;
+  loadDiscoverable();
+});
+document.getElementById("disc-filter").addEventListener("input", function () {
+  var v = this.value;
+  clearTimeout(discTimer);   // debounce: each keystroke would otherwise re-scan
+  discTimer = setTimeout(function () {
+    discState.query = v;
+    discState.offset = 0;    // a new filter always starts at page 1
+    loadDiscoverable();
+  }, 250);
 });
 
 // Recall (crr recall parity): a GET to /api/recall, NOT sidAction — the

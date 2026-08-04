@@ -381,3 +381,39 @@ def test_all_diagnostics_sources_satisfy_the_port():
         assert callable(module.collect)
         sig = inspect.signature(module.collect)
         assert len(sig.parameters) == 1   # collect(config)
+
+
+# --- resume_session_ids (batch liveness for the discoverable modal) -------
+
+def test_resume_session_ids_collects_every_live_resume_sid(monkeypatch):
+    stdout = (
+        f"796194    916 796194 claude --resume {_SID}\n"
+        f"797238 459365 797238 claude --resume {_OTHER_SID}\n"
+        "659246 169702 659246 claude\n"                 # no --resume: ignored
+        "123456      1 123456 sleep 3000\n"             # not claude: ignored
+    )
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).resume_session_ids() == {_SID, _OTHER_SID}
+
+
+def test_resume_session_ids_is_one_ps_call_not_one_per_sid(monkeypatch):
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        return _Result(0, stdout=f"796194 916 796194 claude --resume {_SID}\n")
+
+    monkeypatch.setattr(pp.subprocess, "run", fake_run)
+    pp.PsProcessController(2.0).resume_session_ids()
+    assert calls == [1]  # a per-row probe would be O(rows) ps snapshots
+
+
+def test_resume_session_ids_degrades_to_empty_on_probe_failure(monkeypatch):
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(1, stdout=""))
+    assert pp.PsProcessController(2.0).resume_session_ids() == set()
+
+    def boom(*a, **k):
+        raise OSError("no ps")
+
+    monkeypatch.setattr(pp.subprocess, "run", boom)
+    assert pp.PsProcessController(2.0).resume_session_ids() == set()

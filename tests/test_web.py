@@ -78,6 +78,31 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
 _RECALL_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 
+def test_discoverable_endpoint_passes_paging_and_filter_to_provider():
+    seen = []
+
+    def disc(query, offset, limit):
+        seen.append((query, offset, limit))
+        return {"rows": [], "total": 2856, "filtered": 3, "offset": offset, "limit": limit}
+
+    resp = _handle(path="/api/discoverable", query="q=payments&offset=40&limit=20",
+                   discoverable_provider=disc)
+    assert resp.status == 200
+    assert seen == [("payments", 40, 20)]
+    body = json.loads(resp.body)
+    assert body["total"] == 2856 and body["filtered"] == 3  # both reported, no silent cap
+
+
+def test_discoverable_endpoint_defaults_and_rejects_junk_paging():
+    seen = []
+    disc = lambda q, o, l: seen.append((q, o, l)) or {"rows": [], "total": 0, "filtered": 0,
+                                                      "offset": o, "limit": l}
+    _handle(path="/api/discoverable", discoverable_provider=disc)          # no params
+    assert seen[-1][1] == 0 and seen[-1][2] > 0                            # sane defaults
+    _handle(path="/api/discoverable", query="offset=-5&limit=abc", discoverable_provider=disc)
+    assert seen[-1][1] >= 0 and seen[-1][2] > 0                            # junk -> defaults
+
+
 def test_recall_endpoint_passes_query_and_sid_to_provider():
     seen = []
 
@@ -224,16 +249,17 @@ _DISCOVERABLE_ITEM = {
 def test_discoverable_endpoint_uses_provider_lazily():
     calls = []
 
-    def discoverable():
+    def discoverable(query, offset, limit):
         calls.append(1)
-        return [_DISCOVERABLE_ITEM]
+        return {"rows": [_DISCOVERABLE_ITEM], "total": 1, "filtered": 1,
+                "offset": offset, "limit": limit}
 
     resp = _handle(path="/api/discoverable", discoverable_provider=discoverable)
     assert resp.status == 200
     assert resp.headers["Content-Type"] == "application/json"
     body = json.loads(resp.body)
-    assert body == [_DISCOVERABLE_ITEM]
-    assert set(body[0]) == {
+    assert body["rows"] == [_DISCOVERABLE_ITEM]
+    assert set(body["rows"][0]) == {
         "session_id", "sid8", "cwd", "last_active", "transcript_bytes", "last_prompt",
     }
     assert calls == [1]  # only called when the endpoint is hit
@@ -592,6 +618,32 @@ def test_handle_request_serves_configured_timing_and_cap():
 # node --check gate: every <script> in the served page must parse.
 # --------------------------------------------------------------------------
 
+def test_page_discoverable_is_a_modal_with_paging_and_filter():
+    page = web.render_page()
+    assert 'id="disc-modal"' in page          # modal shell
+    assert 'id="disc-filter"' in page         # filter input
+    assert 'id="disc-prev"' in page and 'id="disc-next"' in page   # pagination
+    assert "discState" in page                # {query, offset} paging state
+    assert "offset=" in page and "limit=" in page                  # server-side paging
+    # filter placeholder must say WHAT it filters (it is not full-text search)
+    assert "directory or id" in page
+
+
+def test_page_discoverable_warns_when_a_row_is_still_running():
+    """The duplicate hazard: adopting a conversation that is still live starts
+    a SECOND claude on it. The row must say so and steer to Take over."""
+    page = web.render_page()
+    assert "r.running" in page
+    assert "running now" in page
+
+
+def test_page_discoverable_reports_total_and_filtered_counts():
+    # no silent caps: a paged/filtered view must never read as "that's all"
+    page = web.render_page()
+    assert ".total" in page
+    assert ".filtered" in page
+
+
 def test_page_buttons_have_explanatory_tooltips():
     """Every action button explains itself on hover — the labels alone
     ('Kick', 'Un-tmux', 'Adopt') don't tell a new user what will happen."""
@@ -630,10 +682,11 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_25():
-    """v25: explanatory tooltips on every action button and panel toggle
-    (v24 added the inline field labels + sid-provenance legend)."""
-    assert web.PAGE_VERSION == 25
+def test_page_version_is_26():
+    """v26: the discoverable list became a modal with server-side paging +
+    filter and a "running now" duplicate warning (v25 added button tooltips;
+    v24 the inline field labels + sid-provenance legend)."""
+    assert web.PAGE_VERSION == 26
 
 
 def test_page_has_global_recall_search_bar():
@@ -744,12 +797,12 @@ def test_page_has_recently_untracked_section_lazy_like_diagnostics():
 
 
 def test_page_has_discoverable_section_lazy_with_adopt_note():
-    # C4: a second collapsible section, lazy-fetched from /api/discoverable,
-    # with an Adopt action and a static clarifying note (adoption != a live
-    # process attachment).
+    # C4 (now a modal, v26): lazy-fetched from /api/discoverable — never on
+    # the poll path — with an Adopt action and a static clarifying note
+    # (adoption != a live process attachment).
     page = web.render_page()
     assert "Discoverable (untracked)" in page
-    assert '"/api/discoverable"' in page
+    assert '"/api/discoverable?q="' in page  # paged/filtered fetch
     assert "Adopt" in page
     assert '"adopt"' in page
     # Discloses the competing-resume hazard: an adopted entry is always a

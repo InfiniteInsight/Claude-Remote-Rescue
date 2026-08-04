@@ -188,3 +188,43 @@ def test_adopted_pid_is_well_above_any_real_linux_pid():
     # pid_max defaults to 4194304 (2**22); the synthetic range starts well
     # above even a raised ceiling.
     assert discovery.adopted_pid(_SID_A) >= 100_000_000
+
+
+# --- filter_and_page (dashboard discoverable modal: search + pagination) ---
+
+def _row(sid, cwd, prompt=""):
+    return {"session_id": sid, "sid8": sid[:8], "cwd": cwd, "last_active": "",
+            "transcript_bytes": 0, "last_prompt": prompt}
+
+
+def _rows(n):
+    return [_row(f"{i:08d}-0000-4000-8000-000000000000", f"/home/u/p{i}") for i in range(n)]
+
+
+def test_filter_and_page_slices_a_page_and_reports_the_total():
+    out = discovery.filter_and_page(_rows(50), query="", offset=0, limit=20)
+    assert len(out["rows"]) == 20
+    assert out["total"] == 50      # how many exist in all
+    assert out["filtered"] == 50   # how many matched the query
+    assert out["offset"] == 0 and out["limit"] == 20
+
+
+def test_filter_and_page_respects_offset():
+    out = discovery.filter_and_page(_rows(50), query="", offset=40, limit=20)
+    assert len(out["rows"]) == 10  # last partial page
+    assert out["rows"][0]["cwd"] == "/home/u/p40"
+
+
+def test_filter_and_page_filters_on_cwd_and_sid_case_insensitively():
+    rows = [_row("aaaaaaaa-0000-4000-8000-000000000000", "/home/u/Storefront"),
+            _row("bbbbbbbb-0000-4000-8000-000000000000", "/home/u/payments")]
+    by_cwd = discovery.filter_and_page(rows, query="STOREFRONT", offset=0, limit=10)
+    assert [r["cwd"] for r in by_cwd["rows"]] == ["/home/u/Storefront"]
+    assert by_cwd["total"] == 2 and by_cwd["filtered"] == 1  # total is unfiltered
+    by_sid = discovery.filter_and_page(rows, query="bbbbbbbb", offset=0, limit=10)
+    assert len(by_sid["rows"]) == 1
+
+
+def test_filter_and_page_offset_past_the_end_is_empty_not_an_error():
+    out = discovery.filter_and_page(_rows(5), query="", offset=99, limit=20)
+    assert out["rows"] == [] and out["filtered"] == 5

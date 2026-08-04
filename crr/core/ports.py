@@ -91,6 +91,16 @@ class ProcessController(Protocol):
         window. Raises OSError if the initial signal cannot be delivered."""
         ...
 
+    def resume_session_ids(self) -> set[str]:
+        """Every session id with a live ``claude --resume <sid>`` process.
+
+        The BATCH counterpart to ``find_resume_process`` (parallel to
+        ``controlling_ttys`` vs ``has_controlling_tty``): one probe answers
+        "already running?" for a whole page of discoverable rows. An
+        inconclusive probe degrades to an empty set, never a fabricated
+        answer."""
+        ...
+
     def find_resume_process(self, session_id: str) -> "ResumeProcess | None":
         """Locate a live ``claude --resume <session_id>`` process (`crr
         adopt --takeover`'s live-process resolver), or None if none is

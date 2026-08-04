@@ -127,6 +127,42 @@ def _recency_key(transcript: Mapping[str, Any]) -> float:
     return float("-inf")
 
 
+def filter_and_page(
+    rows: Sequence[Mapping[str, Any]], *, query: str, offset: int, limit: int
+) -> dict[str, Any]:
+    """Filter discoverable rows by ``query`` and slice one page out.
+
+    Pure paging//filtering for the dashboard's discoverable modal, kept out of
+    the cli so both the shape and the honesty rules are testable. The filter
+    matches ``cwd`` or ``session_id`` as a case-insensitive substring —
+    deliberately NOT the prompt text, because these two fields are known
+    BEFORE the expensive per-transcript read (the caller enriches only the
+    page it is about to show); prompt-content search is what ``crr recall``
+    is for.
+
+    Reports ``total`` (how many exist at all) separately from ``filtered``
+    (how many matched), so a filtered or paged view can never be mistaken for
+    "that's all there is" — the same no-silent-caps rule the recall sweep
+    follows. An ``offset`` past the end yields an empty page, not an error.
+    """
+    q = query.strip().lower()
+    if q:
+        matched = [
+            r for r in rows
+            if q in str(r.get("cwd", "")).lower() or q in str(r.get("session_id", "")).lower()
+        ]
+    else:
+        matched = list(rows)
+    start = max(0, offset)
+    return {
+        "rows": matched[start:start + max(0, limit)],
+        "total": len(rows),
+        "filtered": len(matched),
+        "offset": start,
+        "limit": limit,
+    }
+
+
 def untracked(
     journaled_sids: set[str], transcripts: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
