@@ -228,3 +228,21 @@ def test_filter_and_page_filters_on_cwd_and_sid_case_insensitively():
 def test_filter_and_page_offset_past_the_end_is_empty_not_an_error():
     out = discovery.filter_and_page(_rows(5), query="", offset=99, limit=20)
     assert out["rows"] == [] and out["filtered"] == 5
+
+
+def test_filter_and_page_matches_hyphenated_dirs_despite_the_lossy_decode():
+    # Candidates carry the project-dir decode, which turns EVERY '-' into '/'
+    # (lossy: "-home-u-Claude-Remote-Rescue" -> "/home/u/Claude/Remote/Rescue").
+    # A user filtering by the real directory name types the hyphens, so a
+    # naive substring match finds nothing. Separators are normalized on both
+    # sides so either spelling matches.
+    rows = [_row("aaaaaaaa-0000-4000-8000-000000000000", "/home/u/Claude/Remote/Rescue")]
+    for query in ("Claude-Remote-Rescue", "Claude/Remote/Rescue", "claude-remote"):
+        out = discovery.filter_and_page(rows, query=query, offset=0, limit=10)
+        assert len(out["rows"]) == 1, query
+
+
+def test_filter_and_page_still_matches_a_hyphenated_session_id():
+    rows = [_row("aaaaaaaa-1111-4000-8000-000000000000", "/home/u/p")]
+    out = discovery.filter_and_page(rows, query="aaaaaaaa-1111", offset=0, limit=10)
+    assert len(out["rows"]) == 1

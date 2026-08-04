@@ -127,6 +127,21 @@ def _recency_key(transcript: Mapping[str, Any]) -> float:
     return float("-inf")
 
 
+def _norm_sep(text: str) -> str:
+    """Lowercase and collapse ``-``/``/`` to one separator, for filtering.
+
+    Discovery filters run BEFORE the transcript read, so the only cwd
+    available is the project-dir decode — which turns every ``-`` into ``/``
+    (``-home-u-Claude-Remote-Rescue`` -> ``/home/u/Claude/Remote/Rescue``;
+    see ``transcript_source._decode_project_dir_name``). A user filtering by
+    the real directory name types the hyphens, so a naive substring match
+    finds nothing — a live bug for any hyphenated project (this repo
+    included). Normalizing both sides makes either spelling match, and is
+    harmless for session ids (their hyphens normalize consistently too).
+    """
+    return text.lower().replace("-", "/")
+
+
 def filter_and_page(
     rows: Sequence[Mapping[str, Any]], *, query: str, offset: int, limit: int
 ) -> dict[str, Any]:
@@ -145,11 +160,12 @@ def filter_and_page(
     "that's all there is" — the same no-silent-caps rule the recall sweep
     follows. An ``offset`` past the end yields an empty page, not an error.
     """
-    q = query.strip().lower()
+    q = _norm_sep(query.strip())
     if q:
         matched = [
             r for r in rows
-            if q in str(r.get("cwd", "")).lower() or q in str(r.get("session_id", "")).lower()
+            if q in _norm_sep(str(r.get("cwd", "")))
+            or q in _norm_sep(str(r.get("session_id", "")))
         ]
     else:
         matched = list(rows)
