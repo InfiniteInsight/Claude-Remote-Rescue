@@ -26,6 +26,13 @@ def _user(content, **extra):
     return r
 
 
+def _user_tool_result():
+    """A mid-turn tool-result record — the noise that fills the gap between a
+    prompt and the reply before it on an agentic session."""
+    return {"type": "user", "toolUseResult": {"ok": True},
+            "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}}
+
+
 def _assistant(text, model=None):
     msg = {"role": "assistant", "content": text}
     if model is not None:
@@ -113,7 +120,8 @@ def test_model_tail_lines_is_the_named_config_default():
 
 def test_read_tail_facts_missing_transcript_is_empty(tmp_path):
     assert transcript_source.read_tail_facts("nope", cap=100, home=tmp_path) == {
-        "last_prompt": "", "model": "", "last_active": "", "transcript_bytes": 0,
+        "last_prompt": "", "model": "", "last_active": "",
+        "last_reply": "", "transcript_bytes": 0,
     }
 
 
@@ -488,3 +496,27 @@ def test_search_transcript_survives_invalid_utf8_bytes(tmp_path):
     matches = transcript_source.search_transcript(sid, "fox", cap=100, home=tmp_path)
     assert len(matches) == 2
     assert all(m["text"] == "a fox prompt" for m in matches)
+
+
+def test_read_tail_facts_returns_the_reply_before_the_last_prompt(tmp_path):
+    _write_transcript(tmp_path, _SID_A, [
+        _assistant("an older answer"),
+        _user("first question"),
+        _assistant("the answer that preceded the last prompt"),
+        _user("the most recent prompt"),
+    ])
+    facts = transcript_source.read_tail_facts(_SID_A, 200, home=tmp_path)
+    assert facts["last_prompt"] == "the most recent prompt"
+    assert facts["last_reply"] == "the answer that preceded the last prompt"
+
+
+def test_read_tail_facts_reply_is_empty_beyond_the_window(tmp_path):
+    # A reply further back than reply_tail_lines is honestly "" rather than
+    # forcing a whole-file read on the 5s poll path.
+    records = [_assistant("a very old answer")]
+    records += [_user_tool_result() for _ in range(30)]
+    records += [_user("the most recent prompt")]
+    _write_transcript(tmp_path, _SID_B, records)
+    facts = transcript_source.read_tail_facts(_SID_B, 200, home=tmp_path, reply_tail_lines=5)
+    assert facts["last_prompt"] == "the most recent prompt"
+    assert facts["last_reply"] == ""

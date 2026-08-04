@@ -125,6 +125,7 @@ def test_tail_facts_returns_last_prompt_and_last_model():
         "last_prompt": "the most recent prompt",
         "model": "claude-opus-5",
         "last_active": "",
+        "last_reply": "answer",
     }
 
 
@@ -139,7 +140,7 @@ def test_tail_facts_skips_synthetic_to_find_the_real_model():
 
 def test_tail_facts_honest_empties_when_absent():
     facts = transcript.tail_facts([_user([{"type": "tool_result", "content": "x"}])], cap=100)
-    assert facts == {"last_prompt": "", "model": "", "last_active": ""}
+    assert facts == {"last_prompt": "", "model": "", "last_active": "", "last_reply": ""}
 
 
 def test_tail_facts_returns_last_active_from_the_newest_timestamped_record():
@@ -410,3 +411,54 @@ def test_turn_boundary_meta_user_record_is_other():
 @pytest.mark.parametrize("bad", [None, [], "not a record", 42])
 def test_turn_boundary_non_mapping_input_is_other(bad):
     assert transcript.turn_boundary(bad) == "other"
+
+
+# --- clean_display_tail + last_reply (claude's preceding response) --------
+
+def test_clean_display_tail_keeps_the_END_of_a_long_message():
+    # Deliberately the OPPOSITE of clean_display's head cap: a reply's
+    # payoff is its conclusion, so we drop the beginning and mark it.
+    raw = "x" * 300 + " and so the fix is to bump the timeout."
+    out = transcript.clean_display_tail(raw, 40)
+    assert out.endswith("the fix is to bump the timeout.")
+    assert out.startswith("…")
+    assert len(out) == 41  # cap + the ellipsis marker
+
+
+def test_clean_display_tail_short_text_is_untouched():
+    assert transcript.clean_display_tail("all done", 40) == "all done"
+    assert "…" not in transcript.clean_display_tail("all done", 40)
+
+
+def test_tail_facts_returns_the_reply_preceding_the_last_prompt():
+    records = [
+        _assistant("an older answer"),
+        _user("first question"),
+        _assistant("the reply that came before the last prompt"),
+        _user("the most recent prompt"),
+    ]
+    facts = transcript.tail_facts(records, cap=200)
+    assert facts["last_prompt"] == "the most recent prompt"
+    assert facts["last_reply"] == "the reply that came before the last prompt"
+
+
+def test_tail_facts_reply_skips_tool_use_and_thinking_blocks():
+    # Only real text counts: a tool_use-only turn and a thinking-only turn
+    # are not a reply the user would recognize.
+    tool_only = {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Bash", "input": {}}]}}
+    thinking_only = {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "hmm, let me consider"}]}}
+    records = [
+        _assistant("the real text reply"),
+        thinking_only,
+        tool_only,
+        _user("the most recent prompt"),
+    ]
+    facts = transcript.tail_facts(records, cap=200)
+    assert facts["last_reply"] == "the real text reply"
+
+
+def test_tail_facts_reply_is_empty_when_the_prompt_is_the_first_turn():
+    facts = transcript.tail_facts([_user("the only prompt")], cap=200)
+    assert facts["last_reply"] == ""

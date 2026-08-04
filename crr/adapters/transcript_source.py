@@ -185,6 +185,7 @@ def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
 # entry is the injectable prior; this constant only supplies the default
 # argument below for callers that don't have a Config to hand).
 MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
+REPLY_TAIL_LINES = DEFAULTS["reply_tail_lines"]
 
 
 def _read_records(path: Path) -> list[dict]:
@@ -351,6 +352,7 @@ def search_all(
 def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,
+    reply_tail_lines: int = REPLY_TAIL_LINES,
 ) -> dict[str, str | int]:
     """Most recent real prompt + model + activity + size, in ONE backward read.
 
@@ -365,9 +367,17 @@ def read_tail_facts(
     crr.core.config's ``model_tail_lines``); the prompt and timestamp
     searches are not. Missing/absent transcript degrades to honest empty
     strings / zero, never a fabricated value.
+
+    ``last_reply`` — claude's answer immediately BEFORE that prompt — is the
+    one field that forces the walk to continue past the prompt, and on an
+    agentic session everything in between is tool_use/tool_result noise. It
+    is therefore bounded by ``reply_tail_lines`` (measured here: the reply
+    sat 4-65 records before the prompt), and left an honest "" when it isn't
+    found inside that window rather than reading the whole file on a 5s poll.
     """
     facts: dict[str, str | int] = {
-        "last_prompt": "", "model": "", "last_active": "", "transcript_bytes": 0,
+        "last_prompt": "", "model": "", "last_active": "",
+        "last_reply": "", "transcript_bytes": 0,
     }
     path = find_transcript(session_id, home)
     if path is None:
@@ -379,14 +389,17 @@ def read_tail_facts(
     try:
         for i, line in enumerate(_reversed_lines(path)):
             in_model_window = i < model_tail_lines
+            in_reply_window = i < reply_tail_lines
             try:
                 record = json.loads(line)
             except (ValueError, TypeError):
                 record = None
+            found_prompt_here = False
             if record is not None and not facts["last_prompt"]:
                 prompt = transcript.extract_prompt(record)
                 if prompt is not None:
                     facts["last_prompt"] = transcript.clean_display(prompt, cap)
+                    found_prompt_here = True
             if record is not None and not facts["model"] and in_model_window:
                 model = transcript.extract_model(record)
                 if model is not None:
@@ -395,12 +408,21 @@ def read_tail_facts(
                 ts = transcript.extract_timestamp(record)
                 if ts is not None:
                     facts["last_active"] = ts
-            # Stop once the prompt and timestamp are found and the model is
-            # either found or can no longer appear (past the tail window).
+            # The reply is the first real assistant text AFTER the prompt on
+            # this backward walk (i.e. just before it chronologically);
+            # _assistant_text already drops tool_use/thinking/<synthetic>.
+            if (record is not None and facts["last_prompt"] and not facts["last_reply"]
+                    and not found_prompt_here and in_reply_window):
+                reply = transcript._assistant_text(record)
+                if reply is not None:
+                    facts["last_reply"] = transcript.clean_display_tail(reply, cap)
+            # Stop once prompt+timestamp are found, and model and reply are
+            # each either found or past their windows.
             if (
                 facts["last_prompt"]
                 and facts["last_active"]
                 and (facts["model"] or not in_model_window)
+                and (facts["last_reply"] or not in_reply_window)
             ):
                 break
     except OSError:

@@ -78,6 +78,9 @@
     color: #9fb0f5; background: #1a2030; padding: 1px 8px; border-radius: 999px;
   }
   .prompt { margin-top: 6px; color: #cdd3dd; font-size: 13px; }
+  /* claude's preceding reply: dimmer than the user's prompt, so the card
+     still reads "what I asked" first at a glance. */
+  .prompt.reply { color: #98a1b0; }
   .prompt:empty { display: none; }
   .src { font-size: 11px; color: #6b7280; margin-left: 6px; }
   .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
@@ -490,6 +493,15 @@ function renderCard(s, uncertain, groupColor, latest) {
     model.textContent = s.model;
     modelRow.appendChild(model);
     card.appendChild(modelRow);
+  }
+  // Chronological: claude's preceding reply, then the user's latest prompt.
+  // The reply is TAIL-truncated (its payoff is the conclusion) while the
+  // prompt is head-capped — see transcript.clean_display_tail.
+  if (s.last_reply) {
+    var reply = el("div", "prompt reply");
+    reply.appendChild(fieldLabel("claude"));
+    reply.appendChild(document.createTextNode(s.last_reply));
+    card.appendChild(reply);
   }
   if (s.last_prompt) {
     var prompt = el("div", "prompt");

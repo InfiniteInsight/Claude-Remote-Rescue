@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 30  # v30: one #tools row for secondary views; "you said" label; empty-search guidance
+PAGE_VERSION = 31  # v31: cards show claude's preceding reply (tail-truncated) above the prompt
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

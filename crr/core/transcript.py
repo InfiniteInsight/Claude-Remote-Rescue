@@ -98,6 +98,21 @@ def clean_display(text: str, cap: int) -> str:
     return " ".join(text.split())[:cap]
 
 
+def clean_display_tail(text: str, cap: int) -> str:
+    """Collapse whitespace and keep the LAST ``cap`` chars, marking the cut.
+
+    Deliberately the mirror image of ``clean_display``'s head cap, and the
+    inconsistency is the point: a user's prompt states its subject up front,
+    so the head is the useful part; an assistant reply builds to its
+    conclusion, so the tail is ("…so the fix is to bump the timeout"). Text
+    already within ``cap`` is returned untouched, with no marker.
+    """
+    flat = " ".join(text.split())
+    if len(flat) <= cap:
+        return flat
+    return "…" + flat[-cap:]
+
+
 def center_snippet(text: str, query: str, cap: int) -> str:
     """Whitespace-collapse ``text`` and return a ``cap``-wide window that keeps
     the ``query`` match VISIBLE (F1 — ``crr recall``).
@@ -313,12 +328,28 @@ def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, s
     necessarily the record that supplies the prompt/model. Each field is an
     honest ``""`` when absent — never fabricated.
     """
-    prompt = model = last_active = ""
+    prompt = model = last_active = reply = ""
+    seen_prompt = False
     for record in reversed(list(records)):
+        # The prompt's OWN record still has to be considered for
+        # model/last_active below — skipping the rest of the loop here would
+        # drop the newest timestamp (a real regression the suite caught).
+        is_prompt_record = False
         if not prompt:
             found = extract_prompt(record)
             if found is not None:
                 prompt = clean_display(found, cap)
+                seen_prompt = True
+                is_prompt_record = True
+        if not reply and seen_prompt and not is_prompt_record:
+            # First real assistant text encountered after passing the last
+            # prompt on this backward walk = the reply that preceded it.
+            # ``_assistant_text`` already drops tool_use-only, thinking-only
+            # and <synthetic> turns, so only text a human would recognize
+            # as the answer qualifies.
+            found = _assistant_text(record)
+            if found is not None:
+                reply = clean_display_tail(found, cap)
         if not model:
             found = extract_model(record)
             if found is not None:
@@ -327,6 +358,9 @@ def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, s
             found = extract_timestamp(record)
             if found is not None:
                 last_active = found
-        if prompt and model and last_active:
+        if prompt and model and last_active and reply:
             break
-    return {"last_prompt": prompt, "model": model, "last_active": last_active}
+    return {
+        "last_prompt": prompt, "model": model,
+        "last_active": last_active, "last_reply": reply,
+    }

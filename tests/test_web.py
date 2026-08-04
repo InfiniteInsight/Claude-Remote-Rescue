@@ -697,11 +697,15 @@ def test_page_legend_explains_sid_provenance():
     assert "verified" in page
 
 
-def test_page_version_is_30():
-    """v30: secondary views collapsed into one #tools row, the prompt label
-    reads "you said", and an empty search box now explains itself instead of
-    silently doing nothing (v29 shared the modal; v28 the duplicate tag)."""
-    assert web.PAGE_VERSION == 30
+def test_page_shows_claudes_preceding_reply():
+    page = web.render_page()
+    assert "s.last_reply" in page
+    assert 'fieldLabel("claude")' in page
+
+
+def test_page_version_is_31():
+    """v31: cards show claude's preceding reply above the user's prompt."""
+    assert web.PAGE_VERSION == 31
 
 
 def test_page_secondary_views_share_one_toolbar_row():

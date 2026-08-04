@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 7
+    assert cfg.CONFIG_DEFAULTS_VERSION == 8
 
 
 def test_context_pressure_fraction_defaults():
@@ -107,6 +107,7 @@ def test_recall_caps_defaults():
     assert cfg.Config().get("recall_scan_byte_budget") == 50_000_000
     assert cfg.DEFAULTS["discover_exclude_dirs"] == [".claude-mem"]
     assert cfg.Config().get("discover_exclude_dirs") == [".claude-mem"]
+    assert cfg.DEFAULTS["reply_tail_lines"] == 400
 
 
 def test_terminal_prior_defaults_to_auto():
