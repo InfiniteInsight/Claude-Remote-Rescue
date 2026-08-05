@@ -2029,6 +2029,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return transcript_source.search_all(
             query, snippet_cap=snippet_cap, match_cap=match_cap,
             byte_budget=config.get("recall_scan_byte_budget"),
+            per_session_cap=config.get("recall_per_session_cap"),
             # Same exclusion list discovery uses: recall sweeps the same pool.
             exclude_dirs=exclusions.effective(
                 config.get("discover_exclude_dirs"),
