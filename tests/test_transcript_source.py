@@ -544,3 +544,62 @@ def test_search_all_without_exclusions_scans_everything(tmp_path):
         "fox", snippet_cap=100, match_cap=10, byte_budget=10_000_000, home=tmp_path,
     )
     assert res["scanned"] == 2
+
+
+# --- raw-bytes prefilter (recall coverage without the parse cost) ---------
+
+def test_prefilter_skips_files_that_cannot_match(tmp_path, monkeypatch):
+    # A transcript whose bytes don't contain the term can't possibly match,
+    # so it must never be parsed. Proven by making the parser explode.
+    _write_transcript(tmp_path, _SID_A, [_user("nothing relevant here")])
+    def boom(path):
+        raise AssertionError("parsed a file that cannot match: %s" % path)
+    monkeypatch.setattr(transcript_source, "_read_records", boom)
+    assert transcript_source.search_transcript(_SID_A, "dokploy", cap=100, home=tmp_path) == []
+
+
+def test_prefilter_still_finds_a_real_match(tmp_path):
+    _write_transcript(tmp_path, _SID_A, [_user("let's try dokploy today")])
+    out = transcript_source.search_transcript(_SID_A, "dokploy", cap=100, home=tmp_path)
+    assert len(out) == 1 and "dokploy" in out[0]["text"]
+
+
+def test_prefilter_is_case_insensitive_like_the_matcher(tmp_path):
+    _write_transcript(tmp_path, _SID_A, [_user("Let's try DOKPLOY today")])
+    assert len(transcript_source.search_transcript(_SID_A, "dokploy", cap=100, home=tmp_path)) == 1
+
+
+def test_prefilter_finds_a_term_spanning_a_read_chunk_boundary(tmp_path):
+    # FALSE-NEGATIVE TRAP: a chunked scan must overlap, or a term split
+    # across two reads is silently lost.
+    filler = "x" * 70000
+    _write_transcript(tmp_path, _SID_A, [_user(filler + " dokploy " + filler)])
+    out = transcript_source.search_transcript(_SID_A, "dokploy", cap=200000, home=tmp_path)
+    assert len(out) == 1
+
+
+def test_query_with_json_escaped_chars_is_not_prefiltered(tmp_path):
+    # FALSE-NEGATIVE TRAP: a quote is stored ESCAPED in JSON (\"), so a raw
+    # byte test for it would wrongly skip the file. Such queries must bypass
+    # the prefilter and be parsed normally.
+    _write_transcript(tmp_path, _SID_A, [_user('he said "hello" loudly')])
+    out = transcript_source.search_transcript(_SID_A, 'said "hello"', cap=200, home=tmp_path)
+    assert len(out) == 1
+
+
+def test_non_ascii_query_is_not_prefiltered(tmp_path):
+    # Byte-level lowercasing only folds ASCII, so a non-ASCII query must not
+    # rely on the prefilter (it would risk a false negative).
+    _write_transcript(tmp_path, _SID_A, [_user("réunion notes")])
+    out = transcript_source.search_transcript(_SID_A, "RÉUNION", cap=200, home=tmp_path)
+    assert len(out) == 1
+
+
+def test_search_all_zero_budget_means_unlimited(tmp_path):
+    _write_dated(tmp_path, _SID_A, [_user("a fox")], "-home-u-a", 3000)
+    _write_dated(tmp_path, _SID_B, [_user("a fox")], "-home-u-b", 2000)
+    _write_dated(tmp_path, _SID_C, [_user("a fox")], "-home-u-c", 1000)
+    res = transcript_source.search_all(
+        "fox", snippet_cap=100, match_cap=10, byte_budget=0, home=tmp_path)
+    assert res["scanned"] == 3 and res["skipped"] == 0
+    assert len(res["matches"]) == 3

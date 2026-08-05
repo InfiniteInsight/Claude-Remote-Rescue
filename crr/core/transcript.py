@@ -246,8 +246,16 @@ def search(
     return matches
 
 
-def rank_matches(matches: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+def rank_matches(
+    matches: list[dict[str, Any]], *, limit: int, per_session: int | None = None,
+) -> list[dict[str, Any]]:
     """Order recall matches most-recent-first and truncate to ``limit``.
+
+    ``per_session`` caps how many matches ONE session may contribute, so a
+    single chatty transcript cannot fill every slot and hide the session the
+    user is actually looking for (found live: a search returned five matches
+    all from the newest session). Recency still orders the result; the cap
+    only decides who gets a seat. ``None`` disables it.
 
     Timestamp is the primary key (ISO-8601 strings sort lexically); ``index``
     breaks ties within a single transcript (and orders an untimestamped
@@ -256,9 +264,22 @@ def rank_matches(matches: list[dict[str, Any]], *, limit: int) -> list[dict[str,
     recent. Shared by ``crr recall`` (cli) and the dashboard's recall provider
     (per-session and global), so the two surfaces can't drift on ordering.
     """
-    return sorted(
+    ordered = sorted(
         matches, key=lambda m: (m.get("timestamp", ""), m.get("index", 0)), reverse=True
-    )[:limit]
+    )
+    if per_session is None:
+        return ordered[:limit]
+    seen: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for m in ordered:
+        sid = str(m.get("session_id", ""))
+        if seen.get(sid, 0) >= per_session:
+            continue
+        seen[sid] = seen.get(sid, 0) + 1
+        out.append(m)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def turn_boundary(record: Mapping[str, Any]) -> str:

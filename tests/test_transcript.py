@@ -462,3 +462,25 @@ def test_tail_facts_reply_skips_tool_use_and_thinking_blocks():
 def test_tail_facts_reply_is_empty_when_the_prompt_is_the_first_turn():
     facts = transcript.tail_facts([_user("the only prompt")], cap=200)
     assert facts["last_reply"] == ""
+
+
+def test_rank_matches_caps_per_session_so_one_session_cannot_monopolize():
+    # Found live: searching "dokploy" returned 5 matches ALL from the newest
+    # session, so the session actually being looked for never appeared.
+    # Recency still orders results, but no single session may take every slot.
+    matches = [
+        {"text": "chatty %d" % i, "index": i, "timestamp": "2026-03-%02dT00:00:00Z" % (i + 1),
+         "session_id": "chatty"} for i in range(6)
+    ]
+    matches.append({"text": "the one you want", "index": 0,
+                    "timestamp": "2026-01-01T00:00:00Z", "session_id": "wanted"})
+    out = transcript.rank_matches(matches, limit=5, per_session=2)
+    sids = [m["session_id"] for m in out]
+    assert sids.count("chatty") == 2          # capped
+    assert "wanted" in sids                    # the older session still surfaces
+
+
+def test_rank_matches_per_session_none_keeps_old_behaviour():
+    matches = [{"text": "a", "index": i, "timestamp": "2026-01-0%dT00:00:00Z" % (i + 1),
+                "session_id": "s"} for i in range(4)]
+    assert len(transcript.rank_matches(matches, limit=3)) == 3

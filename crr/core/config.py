@@ -36,7 +36,11 @@ from typing import Any, Mapping
 # v7: added discover_exclude_dirs (keep tool-internal transcript dirs out of
 # discovery; see crr.core.discovery.is_excluded)
 # v8: added reply_tail_lines (bounds the card's "claude said" lookback)
-CONFIG_DEFAULTS_VERSION = 8
+# v9: recall_scan_byte_budget defaults to 0 (unlimited) — the raw-bytes
+# prefilter makes a full sweep cheap, so the budget no longer caps coverage;
+# recall_match_cap 5 -> 10 and new recall_per_session_cap so one chatty
+# session can't fill every result slot
+CONFIG_DEFAULTS_VERSION = 10
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -95,12 +99,23 @@ DEFAULTS: dict[str, Any] = {
     "context_compact_fraction": 1.0,
     # `crr recall` (Slice B, F1): query-scoped, capped transcript search — a
     # grep for your own history, not a transcript dump (never uncapped).
-    "recall_match_cap": 5,      # max matches printed, most-recent-first (-n)
+    "recall_match_cap": 10,     # max matches printed, most-recent-first (-n)
+    # Max matches ONE session may contribute to a multi-session search. Found
+    # live: a "dokploy" search returned 5 matches all from the newest (very
+    # chatty) session, so the session actually being looked for never
+    # appeared. Recency still orders results; this only stops one transcript
+    # taking every slot. 0 = no per-session cap.
+    "recall_per_session_cap": 2,
     "recall_snippet_cap": 500,  # chars of matched text shown per match
-    # dashboard global recall: cap the cumulative bytes of transcript read in
-    # one newest-first sweep (a whole-file read per transcript is unbounded
-    # otherwise; multi-MB transcripts exist). Reports what it skipped.
-    "recall_scan_byte_budget": 50_000_000,
+    # Backstop only: cap the cumulative transcript bytes one global recall
+    # sweep may read. 0 = unlimited (the default). A raw-bytes prefilter
+    # skips files that cannot match before any parsing, so a FULL sweep of
+    # this author's 411 MB / 48-transcript corpus takes ~0.75s — a budget
+    # small enough to matter would cost coverage (50 MB reached only 5 of
+    # 48 transcripts here, hiding older sessions from search) for a saving
+    # measured in fractions of a second. Raise above 0 only for a corpus
+    # large enough that a full read is genuinely too slow.
+    "recall_scan_byte_budget": 0,
     # Directory names whose transcripts are NOT the user's own conversations
     # and so never appear as "discoverable". Default: claude-mem's observer
     # sessions, which on a busy machine can be >98% of all transcripts.

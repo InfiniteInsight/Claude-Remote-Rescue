@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 8
+    assert cfg.CONFIG_DEFAULTS_VERSION == 10
 
 
 def test_context_pressure_fraction_defaults():
@@ -99,12 +99,13 @@ def test_context_pressure_fraction_defaults():
 def test_recall_caps_defaults():
     # Slice B / F1 (`crr recall`): print caps are named config, never a
     # magic number in cli.py or the search path.
-    assert cfg.DEFAULTS["recall_match_cap"] == 5
+    assert cfg.DEFAULTS["recall_match_cap"] == 10
     assert cfg.DEFAULTS["recall_snippet_cap"] == 500
-    assert cfg.DEFAULTS["recall_scan_byte_budget"] == 50_000_000
-    assert cfg.Config().get("recall_match_cap") == 5
+    assert cfg.DEFAULTS["recall_scan_byte_budget"] == 0  # 0 = unlimited
+    assert cfg.Config().get("recall_match_cap") == 10
+    assert cfg.DEFAULTS["recall_per_session_cap"] == 2
     assert cfg.Config().get("recall_snippet_cap") == 500
-    assert cfg.Config().get("recall_scan_byte_budget") == 50_000_000
+    assert cfg.Config().get("recall_scan_byte_budget") == 0
     assert cfg.DEFAULTS["discover_exclude_dirs"] == [".claude-mem"]
     assert cfg.Config().get("discover_exclude_dirs") == [".claude-mem"]
     assert cfg.DEFAULTS["reply_tail_lines"] == 400
