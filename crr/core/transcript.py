@@ -93,6 +93,37 @@ def extract_model(record: Mapping[str, Any]) -> str | None:
     return model
 
 
+def extract_ai_title(record: Mapping[str, Any]) -> str | None:
+    """The session title Claude Code shows in its mobile/remote list.
+
+    Claude Code writes ``{"type": "ai-title", "aiTitle": ...}`` records as
+    the conversation develops, and the newest one is what the phone
+    displays. Reading it is what lets a crr card and the mobile list show
+    the SAME string, so a user can match one to the other without a session
+    id (the mobile list shows no id and no cwd).
+
+    Undocumented internal format: absent/blank/malformed degrades to None,
+    never raises.
+    """
+    if not isinstance(record, Mapping) or record.get("type") != "ai-title":
+        return None
+    title = record.get("aiTitle")
+    return title if isinstance(title, str) and title.strip() else None
+
+
+def extract_slug(record: Mapping[str, Any]) -> str | None:
+    """The memorable per-session slug (``majestic-zooming-wren``).
+
+    Carried on ordinary records, not a record type of its own. This is NOT
+    what the mobile app displays — the AI-chosen title is — so it serves
+    only as a fallback label for a session that has no title yet.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    slug = record.get("slug")
+    return slug if isinstance(slug, str) and slug.strip() else None
+
+
 def clean_display(text: str, cap: int) -> str:
     """Collapse whitespace to one line and cap the length for a card."""
     return " ".join(text.split())[:cap]
@@ -349,7 +380,7 @@ def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, s
     necessarily the record that supplies the prompt/model. Each field is an
     honest ``""`` when absent — never fabricated.
     """
-    prompt = model = last_active = reply = ""
+    prompt = model = last_active = reply = title = slug = ""
     seen_prompt = False
     for record in reversed(list(records)):
         # The prompt's OWN record still has to be considered for
@@ -379,9 +410,17 @@ def tail_facts(records: Iterable[Mapping[str, Any]], *, cap: int) -> dict[str, s
             found = extract_timestamp(record)
             if found is not None:
                 last_active = found
-        if prompt and model and last_active and reply:
+        if not title:
+            found = extract_ai_title(record)
+            if found is not None:
+                title = found
+        if not slug:
+            found = extract_slug(record)
+            if found is not None:
+                slug = found
+        if prompt and model and last_active and reply and title and slug:
             break
     return {
-        "last_prompt": prompt, "model": model,
-        "last_active": last_active, "last_reply": reply,
+        "last_prompt": prompt, "model": model, "last_active": last_active,
+        "last_reply": reply, "title": title, "slug": slug,
     }

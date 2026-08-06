@@ -453,7 +453,7 @@ def read_tail_facts(
     """
     facts: dict[str, str | int] = {
         "last_prompt": "", "model": "", "last_active": "",
-        "last_reply": "", "transcript_bytes": 0,
+        "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
     }
     path = find_transcript(session_id, home)
     if path is None:
@@ -484,6 +484,18 @@ def read_tail_facts(
                 ts = transcript.extract_timestamp(record)
                 if ts is not None:
                     facts["last_active"] = ts
+            # Session identity for mobile<->dashboard matching. Both sit near
+            # the tail (measured: title <=39 lines back, slug <=18), so the
+            # existing model window already covers them — no extra read, no
+            # new knob. Undocumented format: absent degrades to "".
+            if record is not None and not facts["title"] and in_model_window:
+                found = transcript.extract_ai_title(record)
+                if found is not None:
+                    facts["title"] = found
+            if record is not None and not facts["slug"] and in_model_window:
+                found = transcript.extract_slug(record)
+                if found is not None:
+                    facts["slug"] = found
             # The reply is the first real assistant text AFTER the prompt on
             # this backward walk (i.e. just before it chronologically);
             # _assistant_text already drops tool_use/thinking/<synthetic>.
@@ -499,6 +511,7 @@ def read_tail_facts(
                 and facts["last_active"]
                 and (facts["model"] or not in_model_window)
                 and (facts["last_reply"] or not in_reply_window)
+                and ((facts["title"] and facts["slug"]) or not in_model_window)
             ):
                 break
     except OSError:

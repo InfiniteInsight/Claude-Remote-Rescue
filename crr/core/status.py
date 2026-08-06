@@ -33,7 +33,7 @@ from crr.core.ports import BootIdentity, ProcessProbe
 
 def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
     return {"last_prompt": "", "model": "", "last_active": "",
-            "last_reply": "", "transcript_bytes": 0}
+            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0}
 
 
 class _MemoTtyProbe:
@@ -103,6 +103,8 @@ def assemble_sessions(
                 "sid8": sid[:8],
                 "last_prompt": facts["last_prompt"],
                 "last_reply": facts["last_reply"],
+                "title": facts["title"],
+                "slug": facts["slug"],
                 "model": facts["model"],
                 "duplicate_group": sid if sid_counts[sid] > 1 else None,
                 "tmux_session": entry["tmux_session"],

@@ -50,6 +50,8 @@ def _session_card():
         "sid8": "8a1b2c3d",
         "last_prompt": "fix the reviver give-up guard",
         "last_reply": "…so the guard now caps at two attempts.",
+        "title": "Fix the reviver give-up guard",
+        "slug": "majestic-zooming-wren",
         "model": "claude-opus-4-8",
         "duplicate_group": None,
         "tmux_session": None,
@@ -227,9 +229,9 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_5():
+def test_sessions_contract_version_is_6():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 5
+    assert contracts.SESSIONS_CONTRACT_VERSION == 6
 
 
 def test_sessions_wrong_contract_version_rejected():
