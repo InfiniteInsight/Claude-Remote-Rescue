@@ -121,7 +121,7 @@ def test_model_tail_lines_is_the_named_config_default():
 def test_read_tail_facts_missing_transcript_is_empty(tmp_path):
     assert transcript_source.read_tail_facts("nope", cap=100, home=tmp_path) == {
         "last_prompt": "", "model": "", "last_active": "",
-        "last_reply": "", "transcript_bytes": 0,
+        "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
     }
 
 

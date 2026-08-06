@@ -40,7 +40,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, status, takeover, transcript, web
+from crr.core import contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -164,6 +164,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="list every discoverable transcript (slow on a machine with thousands)",
     )
     dsc.set_defaults(func=_cmd_discover)
+
+    who = sub.add_parser(
+        "whoami",
+        help="which crr session is this shell/claude running inside?",
+    )
+    who.add_argument("--json", action="store_true", help="machine-readable output")
+    who.set_defaults(func=_cmd_whoami)
+
+    hk = sub.add_parser(
+        "hook",
+        help="[hooks] emit crr context for a Claude Code hook event",
+    )
+    hk.add_argument("event", choices=["session-start"])
+    hk.set_defaults(func=_cmd_hook)
 
     adp = sub.add_parser(
         "adopt",
@@ -1494,6 +1508,87 @@ def _cmd_discover(args: argparse.Namespace) -> int:
     if len(rows) < total:
         print(f"\n… showing the {len(rows)} most recent of {total} "
               f"(use -n N for more, or --all for every one)")
+    return 0
+
+
+def _whoami_card(config=None) -> dict | None:
+    """The session card this process is running inside, or None.
+
+    Walks up the process tree to the nearest journaled shell (see
+    crr.core.whoami), then assembles that one session so the answer carries
+    the same title/slug/state the dashboard shows.
+    """
+    if config is None:
+        config = _load_config()
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    scan = store.scan()
+    journaled = {e["pid"] for e in scan.entries}
+    shell_pid = whoami.journaled_ancestor(
+        os.getpid(), journaled,
+        lambda pid: process_probe.parent_of(pid, config.get("interop_timeout_seconds")),
+    )
+    if shell_pid is None:
+        return None
+    try:
+        boot = boot_identity.detect()
+    except NotImplementedError:
+        return None
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    payload = status.assemble_sessions(
+        [e for e in scan.entries if e["pid"] == shell_pid], boot, probe,
+        tail_facts=_tail_facts_extractor(config),
+        context_tight_fraction=config.get("context_tight_fraction"),
+        context_compact_fraction=config.get("context_compact_fraction"),
+    )
+    sessions = payload.get("sessions") or []
+    return sessions[0] if sessions else None
+
+
+def _cmd_whoami(args: argparse.Namespace) -> int:
+    """Identify this session — the bridge from a Claude mobile conversation
+    to a crr dashboard card (the mobile list shows a title but no session
+    id and no cwd, so the answer has to come from inside)."""
+    card = _whoami_card()
+    if card is None:
+        print("crr whoami: this process has no crr-journaled shell in its "
+              "ancestry — not a tracked session", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(card, ensure_ascii=False, indent=2))
+        return 0
+    label = card["title"] or card["slug"] or "(no title yet)"
+    print(f"crr session: {label}")
+    print(f"  state  {card['state']}")
+    print(f"  sid    {card['session_id']}")
+    print(f"  pid    {card['pid']}")
+    print(f"  dir    {card['cwd']}")
+    if card["slug"] and card["title"]:
+        print(f"  slug   {card['slug']}")
+    print(f"  find it on the dashboard by searching: {label}")
+    return 0
+
+
+def _cmd_hook(args: argparse.Namespace) -> int:
+    """[hooks] Emit crr identity for a Claude Code hook event.
+
+    ``session-start`` prints one line that Claude Code injects into the
+    session context, so claude always knows which crr session it is and can
+    answer without running a command. Silent no-op when this shell isn't
+    tracked — a hook must never break session startup.
+    """
+    if args.event != "session-start":
+        return 0
+    try:
+        card = _whoami_card()
+    except Exception:
+        return 0  # a hook must never break startup
+    if card is None:
+        return 0
+    label = card["title"] or card["slug"] or card["sid8"]
+    print(f"crr: this session is tracked as \"{label}\" "
+          f"(sid {card['sid8']}, pid {card['pid']}, {card['cwd']}). "
+          "Find it on the crr dashboard by that name.")
     return 0
 
 

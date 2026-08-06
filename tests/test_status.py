@@ -138,6 +138,8 @@ def test_tail_facts_extractor_is_used_for_prompt_and_model():
         tail_facts=lambda entry: {
             "last_prompt": f"prompt-for-{entry['pid']}",
             "last_reply": f"reply-for-{entry['pid']}",
+            "title": f"title-for-{entry['pid']}",
+            "slug": "some-memorable-slug",
             "model": "claude-opus-5",
             "last_active": "2026-08-01T00:00:00Z",
             "transcript_bytes": 0,
@@ -167,6 +169,8 @@ def test_card_carries_last_active_from_tail_facts():
         tail_facts=lambda entry: {
             "last_prompt": "",
             "last_reply": "",
+            "title": "",
+            "slug": "",
             "model": "",
             "last_active": "2026-08-01T12:34:56Z",
             "transcript_bytes": 0,
@@ -194,6 +198,8 @@ def test_card_context_pressure_will_compact_when_over_window():
         tail_facts=lambda entry: {
             "last_prompt": "",
             "last_reply": "",
+            "title": "",
+            "slug": "",
             "model": "some-unmapped-model",
             "last_active": "",
             "transcript_bytes": 200_000 * 4,
@@ -211,6 +217,8 @@ def test_card_context_pressure_thresholds_are_configurable():
         tail_facts=lambda entry: {
             "last_prompt": "",
             "last_reply": "",
+            "title": "",
+            "slug": "",
             "model": "some-unmapped-model",
             "last_active": "",
             "transcript_bytes": 100_000 * 4,  # fraction 0.5 of 200_000 default window

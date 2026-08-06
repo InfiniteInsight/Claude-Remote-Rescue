@@ -163,6 +163,29 @@ def _child_groups(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list
     return groups
 
 
+def parent_of(pid: int, timeout: float = 5.0) -> int | None:
+    """The parent pid of ``pid`` via ``ps``, or None if unknown.
+
+    Backs `crr whoami`'s walk up to the journaled shell. Portable (``ps``,
+    not /proc, so it also works on macOS) and degrades to None on any probe
+    failure — the walk then reports "not found" rather than guessing.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _group_alive(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)

@@ -763,10 +763,26 @@ def test_page_shows_claudes_preceding_reply():
     assert 'fieldLabel("claude")' in page
 
 
-def test_page_version_is_33():
-    """v33: Settings names the full config.toml path and distinguishes a
-    built-in default from a value actually set in that file."""
-    assert web.PAGE_VERSION == 33
+def test_page_version_is_34():
+    """v34: cards headline the session title — the same string Claude Code
+    shows in its mobile list — and search shows animated progress (v33
+    named the full config.toml path in Settings)."""
+    assert web.PAGE_VERSION == 34
+
+
+def test_page_cards_headline_the_session_title():
+    # The mobile list shows a title but no session id and no cwd, so the
+    # title is the only string both views can share.
+    page = web.render_page()
+    assert "s.title || s.slug" in page   # title first, slug only as fallback
+    assert "stitle" in page
+
+
+def test_page_search_shows_animated_progress():
+    page = web.render_page()
+    assert "searching" in page
+    assert "@keyframes pulse" in page
+    assert "prefers-reduced-motion" in page
 
 
 def test_page_has_a_settings_modal_for_exclusions():

@@ -22,7 +22,7 @@ from typing import Any, Iterable, Mapping
 
 JOURNAL_SCHEMA_VERSION = 1
 # v4 adds `last_active` (T-A — true recency) + `context_pressure` (F2 — compaction badge)
-SESSIONS_CONTRACT_VERSION = 5
+SESSIONS_CONTRACT_VERSION = 6
 DIAGNOSTICS_CONTRACT_VERSION = 3  # v3 adds `params` — the generating caps/lookback/timeout
 ARCHIVE_CONTRACT_VERSION = 1
 
@@ -66,6 +66,8 @@ SESSION_CARD_KEYS = (
     "sid8",
     "last_prompt",
     "last_reply",
+    "title",
+    "slug",
     "model",
     "duplicate_group",
     "tmux_session",
@@ -223,6 +225,8 @@ def validate_session_card(card: Any) -> None:
     _require_type(card["sid8"], str, "session 'sid8'")
     _require_type(card["last_prompt"], str, "session 'last_prompt'")
     _require_type(card["last_reply"], str, "session 'last_reply'")
+    _require_type(card["title"], str, "session 'title'")
+    _require_type(card["slug"], str, "session 'slug'")
     _require_type(card["model"], str, "session 'model'")
     _require_type(card["updated"], str, "session 'updated'")
     # duplicate_group is nullable: None (not in a group) or a group id string.

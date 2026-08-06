@@ -126,6 +126,8 @@ def test_tail_facts_returns_last_prompt_and_last_model():
         "model": "claude-opus-5",
         "last_active": "",
         "last_reply": "answer",
+        "title": "",
+        "slug": "",
     }
 
 
@@ -140,7 +142,8 @@ def test_tail_facts_skips_synthetic_to_find_the_real_model():
 
 def test_tail_facts_honest_empties_when_absent():
     facts = transcript.tail_facts([_user([{"type": "tool_result", "content": "x"}])], cap=100)
-    assert facts == {"last_prompt": "", "model": "", "last_active": "", "last_reply": ""}
+    assert facts == {"last_prompt": "", "model": "", "last_active": "",
+                     "last_reply": "", "title": "", "slug": ""}
 
 
 def test_tail_facts_returns_last_active_from_the_newest_timestamped_record():
@@ -484,3 +487,45 @@ def test_rank_matches_per_session_none_keeps_old_behaviour():
     matches = [{"text": "a", "index": i, "timestamp": "2026-01-0%dT00:00:00Z" % (i + 1),
                 "session_id": "s"} for i in range(4)]
     assert len(transcript.rank_matches(matches, limit=3)) == 3
+
+
+# --- session identity: ai-title + slug (mobile <-> dashboard matching) ----
+
+def _ai_title(text, sid="s1"):
+    return {"type": "ai-title", "aiTitle": text, "sessionId": sid}
+
+
+def test_extract_ai_title_reads_the_mobile_title():
+    assert transcript.extract_ai_title(_ai_title("Install CUDA paths")) == "Install CUDA paths"
+
+
+def test_extract_ai_title_ignores_other_records():
+    assert transcript.extract_ai_title(_user("a prompt")) is None
+    assert transcript.extract_ai_title({"type": "ai-title"}) is None      # no aiTitle
+    assert transcript.extract_ai_title({"type": "ai-title", "aiTitle": ""}) is None
+    assert transcript.extract_ai_title("not a record") is None
+
+
+def test_extract_slug_reads_a_slug_off_any_record():
+    assert transcript.extract_slug(_user("hi", slug="majestic-zooming-wren")) == "majestic-zooming-wren"
+    assert transcript.extract_slug(_user("hi")) is None
+    assert transcript.extract_slug({"slug": ""}) is None
+    assert transcript.extract_slug("not a record") is None
+
+
+def test_tail_facts_returns_the_newest_title_and_slug():
+    # The title EVOLVES during a conversation; the newest wins, which is
+    # what the mobile app shows.
+    records = [
+        _ai_title("an early working title"),
+        _user("a prompt", slug="majestic-zooming-wren"),
+        _ai_title("the current title"),
+    ]
+    facts = transcript.tail_facts(records, cap=100)
+    assert facts["title"] == "the current title"
+    assert facts["slug"] == "majestic-zooming-wren"
+
+
+def test_tail_facts_title_and_slug_are_honestly_empty_when_absent():
+    facts = transcript.tail_facts([_user("just a prompt")], cap=100)
+    assert facts["title"] == "" and facts["slug"] == ""

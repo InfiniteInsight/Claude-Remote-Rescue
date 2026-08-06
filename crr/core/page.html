@@ -61,6 +61,11 @@
   .badge.pressure-tight { margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none; letter-spacing: 0; }
   .badge.pressure-will-compact { margin-left: 8px; background: #3a1616; color: #e05252; text-transform: none; letter-spacing: 0; }
   .badge.latest-badge { margin-left: 8px; background: #123a3a; color: #46c2b0; text-transform: none; letter-spacing: 0; }
+  /* Session title: the card's headline, matching the mobile list. */
+  .stitle {
+    font-size: 14px; font-weight: 600; color: #e6e6e6; margin-bottom: 6px;
+    word-break: break-word;
+  }
   .cwd { color: #8a93a2; font-size: 12px; margin-top: 6px; font-family: ui-monospace, monospace; word-break: break-all; }
   .time { color: #8a93a2; font-size: 12px; margin-top: 4px; }
   .time:empty { display: none; }
@@ -133,6 +138,18 @@
     background: #161a22; font-size: 12px;
   }
   #recall-panel .rmeta { color: #8a93a2; }
+  /* Animated progress while a search is in flight — a full-corpus sweep
+     takes ~0.7s, long enough that static text reads as "nothing happened". */
+  .searching::after {
+    content: "…"; display: inline-block; width: 1.2em; text-align: left;
+    animation: dots 1.2s steps(4, end) infinite;
+  }
+  .searching { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes dots { 0% { content: "."; } 33% { content: ".."; } 66% { content: "…"; } }
+  @keyframes pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .searching, .searching::after { animation: none; }
+  }
   /* One row for the secondary views instead of three stacked one-button
      divs (which read as three unrelated bars). Wraps on narrow screens. */
   #tools {
@@ -454,6 +471,17 @@ function renderCard(s, uncertain, groupColor, latest) {
     var gd = el("span", "gdot");
     gd.style.background = groupColor;
     top.appendChild(gd);
+  }
+  // Session title — the SAME string Claude Code shows in its mobile list,
+  // so a conversation on the phone can be matched to a card here. Falls
+  // back to the memorable slug; shows nothing when neither exists (never a
+  // fabricated name). Untrusted -> textContent.
+  var label = s.title || s.slug;
+  if (label) {
+    var head = el("div", "stitle");
+    head.textContent = label;
+    if (!s.title && s.slug) { head.title = "no session title yet — showing the session slug"; }
+    card.appendChild(head);
   }
   var id = el("span", "id");
   id.appendChild(fieldLabel("pid "));
@@ -1146,7 +1174,10 @@ function runRecall(sid) {
   var url = "/api/recall?q=" + encodeURIComponent(q) + (sid ? "&sid=" + encodeURIComponent(sid) : "");
   var panel = document.getElementById("recall-panel");
   panel.hidden = false;
-  panel.textContent = "searching…";
+  panel.textContent = "";
+  var busy = el("div", "ev searching");
+  busy.textContent = "searching";
+  panel.appendChild(busy);
   fetch(url)
     .then(function (r) { return r.json(); })
     .then(function (data) { renderRecall(data, sid ? ("session " + sid.slice(0, 8)) : "recent sessions"); })
