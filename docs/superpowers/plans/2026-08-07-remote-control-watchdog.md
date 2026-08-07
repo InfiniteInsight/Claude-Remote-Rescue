@@ -27,10 +27,12 @@ table.
 2. Adapter: extend the existing backward walk in `read_tail_facts` to also
    report `bridge_since` (records seen before the newest `bridge-session`
    record) and `bridge_seen` (bool). Measured: the newest marker sits 0–11
-   records from the tail on healthy sessions and never more than 67 behind,
-   so bound the search with a new config key `bridge_scan_lines` (default
-   400, same shape as `reply_tail_lines`) and report `bridge_seen=False`
-   beyond it — an honest "unknown", never a fabricated drop.
+   records from the tail on healthy sessions and never more than 107 behind
+   (corrected, review fix-wave 2026-08-07 — a larger 54-transcript sample
+   superseded the original 20-transcript figure of 67), so bound the search
+   with a new config key `bridge_scan_lines` (default 400, same shape as
+   `reply_tail_lines`) and report `bridge_seen=False` beyond it — an honest
+   "unknown", never a fabricated drop.
 3. Config keys: `remote_control_watch` (bool, True), `remote_control_autokick`
    (bool, True), `bridge_stale_records` (int, 150), `bridge_scan_lines`
    (int, 400). Bump `CONFIG_DEFAULTS_VERSION` 11 -> 12.

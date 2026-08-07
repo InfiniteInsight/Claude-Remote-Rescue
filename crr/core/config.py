@@ -48,7 +48,10 @@ from typing import Any, Mapping
 # Remote-Control watchdog, Slice 1: detection + the global kill switch; see
 # crr.core.bridge and crr.adapters.transcript_source's bridge_seen/
 # bridge_since)
-CONFIG_DEFAULTS_VERSION = 12
+# v13: added bridge_kick_cooldown_seconds / bridge_kick_max_attempts (review
+# fix-wave 2026-08-07, FIX 1 — a failed reconnect must not become an
+# indefinite restart loop; see crr.core.bridge_kicks)
+CONFIG_DEFAULTS_VERSION = 13
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -150,20 +153,35 @@ DEFAULTS: dict[str, Any] = {
     # session whose mobile Remote Control link has gone quiet while claude
     # keeps working locally, by counting transcript records since the
     # newest `bridge-session` marker. See crr.core.bridge.bridge_state.
-    "remote_control_watch": True,      # do the detection and show the badge; also gates the watchdog step (cli._kick_dropped_bridges)
+    # False turns off detection, the card badge, AND the per-poll transcript
+    # scan cost, not just the watchdog's kick step — cli._tail_facts_extractor
+    # passes bridge_scan_lines=0 downstream when this is False, which reads
+    # as an honest "off" card state, never a stale "dropped"/"ok". The kick
+    # step (cli._kick_dropped_bridges) also gates on this directly.
+    "remote_control_watch": True,
     "remote_control_autokick": True,   # GLOBAL hard switch for auto-kicking a dropped session (consumed from Slice 2's watchdog step)
     # Threshold (records, not seconds — see crr.core.bridge's docstring for
-    # why): measured across the 20 most recent real transcripts, the worst
-    # LEGITIMATE gap between consecutive bridge markers was 67 records.
-    # 150 is a >2x margin over that — a session past it has produced ~4
-    # turns' worth of records with no marker, not a slow-but-normal gap.
+    # why): measured across 54 real transcripts / 6991 marker-to-marker
+    # gaps, the worst LEGITIMATE gap between consecutive bridge markers was
+    # 107 records (a 1.4x margin under 150); no legitimate gap in that
+    # corpus exceeded 150. A session past it has produced several turns'
+    # worth of records with no marker, not a slow-but-normal gap.
     "bridge_stale_records": 150,
     # How far back the bridge-marker search walks before giving up and
     # reporting "unseen" (never a fabricated drop). Same shape as
     # `model_tail_lines`/`reply_tail_lines`: measured, the newest marker
     # sits 0-11 records from the tail on a healthy session and never more
-    # than 67 behind, so 400 covers the worst observed case with headroom.
+    # than 107 behind, so 400 covers the worst observed case with headroom.
     "bridge_scan_lines": 400,
+    # Watchdog restart-loop guards (review fix-wave 2026-08-07, FIX 1 —
+    # CRITICAL). Without these, a failed reconnect (host briefly offline,
+    # auth expired, Remote Control unavailable) re-qualifies for a kick on
+    # every 30s `crr revive` pass forever: a kick does not itself advance
+    # the bridge marker, and the session stays LIVE at a clean turn
+    # boundary, so every guard clears again next pass. See
+    # crr.core.bridge_kicks for the per-sid history this reads/writes.
+    "bridge_kick_cooldown_seconds": 600,  # never re-kick the same sid within this many seconds
+    "bridge_kick_max_attempts": 3,        # consecutive attempts before giving up; resets only on a confirmed "ok"
 }
 
 

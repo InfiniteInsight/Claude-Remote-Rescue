@@ -40,7 +40,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import bridge, classifier, contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
+from crr.core import bridge, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -72,10 +72,23 @@ def _tail_facts_extractor(config: cfg.Config):
     One backward transcript read per card yields all these facts. Only
     called for claude-bearing entries (assemble_sessions filters the
     rest), so entry["claude"] is always present here.
+
+    ``remote_control_watch`` (review fix-wave 2026-08-07, FIX 2 — IMPORTANT)
+    gates the bridge scan itself, not just the watchdog's kick step: False
+    passes ``bridge_scan_lines=0``, which short-circuits
+    ``read_tail_facts``'s backward walk for the bridge marker (it never
+    finds one within a zero-length window), so ``bridge_seen`` stays honestly
+    False and ``bridge.bridge_state`` resolves the card's ``remote_control``
+    field to ``"off"`` — never a stale ``"dropped"``/``"ok"`` computed from a
+    feature the user turned off, and no scan cost paid on every poll. This
+    is the single choke point every card-building call site
+    (``_cmd_status``, ``_cmd_web``'s provider, ``_whoami_card``) reads
+    through, so gating here covers detection + the badge + the scan cost at
+    once.
     """
     cap = config.get("last_prompt_display_cap")
     model_tail_lines = config.get("model_tail_lines")
-    bridge_scan_lines = config.get("bridge_scan_lines")
+    bridge_scan_lines = config.get("bridge_scan_lines") if config.get("remote_control_watch") else 0
     return lambda entry: transcript_source.read_tail_facts(
         entry["claude"]["session_id"], cap,
         model_tail_lines=model_tail_lines, bridge_scan_lines=bridge_scan_lines,
@@ -919,6 +932,7 @@ def _kick_dropped_bridges(
     read_takeover_signal=transcript_source.read_takeover_signal,
     kick=ops.kick,
     clock=time.time,
+    kick_store: "bridge_kicks.KickHistoryStore | None" = None,
 ) -> None:
     """Watchdog step (spec 2026-08-07, Slice 2): restart a LIVE session
     whose Remote Control bridge has dropped, so the relaunch (which always
@@ -934,7 +948,9 @@ def _kick_dropped_bridges(
          reconnect on).
       3. its bridge state (``bridge.bridge_state`` over the same tail-facts
          walk Slice 1 added) must be ``"dropped"`` — not ``"off"`` (never
-         enabled) and not ``"ok"``.
+         enabled) and not ``"ok"``. A transition TO ``"ok"`` resets this
+         sid's kick history (see ``kick_store`` below) — that is the only
+         thing that resets it; nothing here does it on a timer.
       4. ``settings.autokick_for`` must resolve True for this sid, given
          the config default, the dashboard's global override, and this
          session's own override.
@@ -942,11 +958,27 @@ def _kick_dropped_bridges(
          at a completed assistant turn — a kick mid-turn destroys the
          in-flight turn, so a not-yet-ready session is simply left for the
          next pass rather than kicked now.
+      6. ``bridge_kicks.kick_eligible`` (review fix-wave 2026-08-07, FIX 1
+         — CRITICAL): this sid must be past its cooldown AND under its
+         attempt cap. Without this the pass is stateless across sweeps —
+         a FAILED reconnect (host briefly offline, auth expired, Remote
+         Control unavailable) does not advance the bridge marker, so every
+         guard above clears again next pass, re-kicking the same sid every
+         ``watchdog_interval_seconds`` forever. ``kick_store`` persists the
+         per-sid attempt count + last-kick time in the state dir
+         (``crr.core.bridge_kicks.KickHistoryStore``) so this guard has
+         memory across sweeps, not just within one.
 
     Only once every guard clears does ``kick`` run, and only then under
     ``mutation_lock`` — mirroring ``crr kick``'s own locking. Everything
     before that is lock-free, so a slow transcript scan on one session
-    never stalls the others or the dashboard.
+    never stalls the others or the dashboard. ``kick_store.record_kick``
+    happens inside the same lock, right after ``kick`` returns — it is
+    part of the same mutating step, not a separate one.
+
+    Fails CLOSED (mirrors the settings-store guard) when ``kick_store`` is
+    degraded: a corrupt kick-history file must not silently read as "no
+    history", which would erase the very protection FIX 1 exists to add.
 
     Two journal entries CAN carry the same session id (duplicate_group on
     the card; the crashed-session revival above has its own analogous
@@ -970,6 +1002,13 @@ def _kick_dropped_bridges(
               f"{state_dir.state_dir() / settings.FILENAME}", file=sys.stderr)
         return
 
+    kick_store = kick_store or bridge_kicks.KickHistoryStore(sd)
+    if kick_store.is_degraded():
+        print("crr revive: kick history file unreadable — not auto-kicking anything "
+              "(the restart-loop cooldown/cap cannot be honoured); fix or delete "
+              f"{state_dir.state_dir() / bridge_kicks.FILENAME}", file=sys.stderr)
+        return
+
     global_override = settings_store.read_global_autokick()
     config_default = config.get("remote_control_autokick")
     bridge_stale_records = config.get("bridge_stale_records")
@@ -978,6 +1017,8 @@ def _kick_dropped_bridges(
     cap = config.get("last_prompt_display_cap")
     idle_window = config.get("takeover_idle_seconds")
     grace = config.get("close_grace_seconds")
+    cooldown_seconds = config.get("bridge_kick_cooldown_seconds")
+    max_attempts = config.get("bridge_kick_max_attempts")
     kicked_sids: set[str] = set()
 
     for entry in entries:
@@ -999,6 +1040,11 @@ def _kick_dropped_bridges(
             facts["bridge_since"], facts["bridge_seen"], stale_after=bridge_stale_records,
         )
         if remote_control != "dropped":
+            if remote_control == "ok":
+                # The confirmed signal that a prior kick actually worked (or
+                # the bridge never needed one) — the ONLY thing that resets
+                # the attempt counter, per bridge_kicks's docstring.
+                kick_store.reset(sid)
             continue  # "off" (never enabled) or "ok" — nothing to reconnect
 
         session_override = settings_store.read_session_autokick(sid)
@@ -1018,8 +1064,27 @@ def _kick_dropped_bridges(
             print(f"crr revive: skipping {sid8} (dropped bridge, mid-turn — waiting for a clean boundary)")
             continue
 
+        now = clock()
+        eligible, ineligible_reason = bridge_kicks.kick_eligible(
+            attempts=kick_store.attempts(sid), last_kick_ts=kick_store.last_kick_ts(sid),
+            now=now, cooldown_seconds=cooldown_seconds, max_attempts=max_attempts,
+        )
+        if not eligible:
+            print(f"crr revive: skipping {sid8} (dropped bridge, {ineligible_reason})")
+            continue
+
         with mutation_lock(sd):
-            res = kick(store, controller, flags, boot, probe, pid, grace=grace)
+            try:
+                res = kick(store, controller, flags, boot, probe, pid, grace=grace)
+            finally:
+                # Record the ATTEMPT, not the outcome — even if `kick` raises
+                # (a subprocess/signal error, not just an OpResult(False,...)),
+                # the attempt must count. Recording only on a normal return
+                # would let an exception silently skip the counter, reopening
+                # the exact restart-loop hole this guard exists to close: the
+                # next pass, with no recorded attempt and no cooldown, would
+                # retry immediately.
+                kick_store.record_kick(sid, now)
         kicked_sids.add(sid)  # at most one kick attempt per sid per sweep, success or not
         outcome_word = "kicked" if res.ok else "kick failed for"
         print(f"crr revive: {outcome_word} {sid8} (dropped bridge): {res.message}")
@@ -2157,6 +2222,67 @@ def _cmd_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+def _settings_payload(sd: Path, config: cfg.Config) -> dict:
+    """The Settings modal's global auto-kick row (spec 2026-08-07, Slice 3),
+    mirroring exclusions_provider's shape: the dashboard's own stored value
+    plus enough of config.toml's baseline that the UI can show the resolved
+    outcome without duplicating the global/session truth table client-side.
+
+    ``resolved`` (review fix-wave 2026-08-07, FIX 4 — MINOR, same principle
+    as commit b4fe3b6) uses ``effective_global_autokick()``, NOT the raw
+    stored override: while the settings store is degraded, the watchdog
+    auto-kicks NOTHING at all (fail-closed, FIX 1/Slice 2's
+    ``_kick_dropped_bridges`` guard), so the checkbox this field drives
+    (``page.html``'s ``cb.checked = !!data.resolved``) must not render
+    CHECKED — a state the system is not honouring — while every session
+    card (built from the same ``effective_global_autokick()``, per b4fe3b6)
+    renders ``global-off``. ``degraded`` is still surfaced separately so the
+    Settings modal states the reason, not just the honest-off outcome.
+    """
+    settings_store = settings.SettingsStore(sd)
+    config_default = config.get("remote_control_autokick")
+    resolved = settings_store.effective_global_autokick()
+    if resolved is None:
+        resolved = config_default
+    return {
+        "autokick": settings_store.read_global_autokick(),
+        "resolved": resolved,
+        "config_default": config_default,
+        "degraded": settings_store.is_degraded(),
+    }
+
+
+def _write_global_autokick_locked(sd: Path, value: bool | None) -> None:
+    """Set (or clear) the dashboard's global auto-kick override, under
+    ``mutation_lock`` (review fix-wave 2026-08-07, FIX 3 — IMPORTANT).
+
+    ``SettingsStore.write_global_autokick``/``write_session_autokick`` are
+    each individually atomic (tmp file + rename), but that only makes ONE
+    call safe — it does not make two CONCURRENT calls safe together.
+    ``ThreadingHTTPServer`` serves POSTs on separate threads, so without a
+    shared lock around the whole read-modify-write, this interleaving is
+    possible: a per-session write reads ``{"autokick": true}``, THEN the
+    global switch flips to False, THEN the per-session write lands —
+    carrying its stale ``autokick: true`` read forward and silently
+    reverting the panic switch back on. See
+    ``_write_session_autokick_locked`` (the other half of this pair) and
+    ``test_cli.py``'s FIX 3 tests, which prove the lock is actually held
+    for the FULL operation via a non-blocking probe.
+    """
+    with mutation_lock(sd):
+        settings.SettingsStore(sd).write_global_autokick(value)
+
+
+def _write_session_autokick_locked(sd: Path, sid: str, value: bool) -> None:
+    """Set one session's auto-kick override, under ``mutation_lock`` — the
+    other half of the FIX 3 pair; see ``_write_global_autokick_locked``'s
+    docstring for the race this closes. Raises ``settings.SettingsError``
+    on a non-UUID ``sid`` or a non-bool ``value``, same as the underlying
+    store."""
+    with mutation_lock(sd):
+        settings.SettingsStore(sd).write_session_autokick(sid, value)
+
+
 def _cmd_web(args: argparse.Namespace) -> int:
     config = _load_config()
     try:
@@ -2279,17 +2405,18 @@ def _cmd_web(args: argparse.Namespace) -> int:
             return _web_takeover(store, sd, config, controller, flags, sid)
         if op in ("autokick-on", "autokick-off"):
             # Pins ONE session's auto-kick opt-in/opt-out (spec 2026-08-07,
-            # Slice 3). Writes settings.json directly — no mutation_lock:
-            # this file is disjoint from the journal/archive state that
-            # lock protects, and SettingsStore's write is already atomic
-            # (tmp file + rename). The value is written even when the
-            # global switch currently resolves off: per-session overrides
-            # must SURVIVE a global off/on cycle (spec's truth table), so
-            # this is not gated on the current global state — only the
-            # dashboard's disabled-toggle rendering is.
+            # Slice 3). `_write_session_autokick_locked` holds `mutation_lock`
+            # for the WHOLE read-modify-write (review fix-wave 2026-08-07,
+            # FIX 3 — per-call atomicity is not enough against a concurrent
+            # global-switch write; see that function's docstring). The value
+            # is written even when the global switch currently resolves off:
+            # per-session overrides must SURVIVE a global off/on cycle
+            # (spec's truth table), so this is not gated on the current
+            # global state — only the dashboard's disabled-toggle rendering
+            # is.
             value = op == "autokick-on"
             try:
-                settings.SettingsStore(sd).write_session_autokick(sid, value)
+                _write_session_autokick_locked(sd, sid, value)
             except settings.SettingsError as exc:
                 return False, str(exc)
             return True, f"auto-kick {'enabled' if value else 'disabled'} for this session"
@@ -2327,33 +2454,16 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return out
 
     def settings_provider() -> dict:
-        # The Settings modal's global auto-kick row (spec 2026-08-07,
-        # Slice 3), mirroring exclusions_provider's shape: the dashboard's
-        # own stored value plus enough of config.toml's baseline that the
-        # UI can show the resolved outcome without duplicating the
-        # global/session truth table client-side. `degraded` matters more
-        # here than anywhere else in the dashboard: while it is True the
-        # watchdog auto-kicks NOTHING at all (fail-closed, Slice 2's
-        # `_kick_dropped_bridges` guard), and the user — likely on their
-        # phone, away from the machine — needs to see why nothing is
-        # reconnecting rather than just a `resolved: true` that quietly
-        # isn't being honoured.
-        settings_store = settings.SettingsStore(sd)
-        config_default = config.get("remote_control_autokick")
-        global_override = settings_store.read_global_autokick()
-        resolved = config_default if global_override is None else global_override
-        return {
-            "autokick": global_override,
-            "resolved": resolved,
-            "config_default": config_default,
-            "degraded": settings_store.is_degraded(),
-        }
+        return _settings_payload(sd, config)
 
     def settings_writer(value) -> dict:
         # write_global_autokick raises SettingsError (a ValueError) on
         # anything but a bool or None — handle_request turns that into a
         # 400 carrying the message, same contract as exclusions_writer.
-        settings.SettingsStore(sd).write_global_autokick(value)
+        # `_write_global_autokick_locked` holds `mutation_lock` for the
+        # WHOLE read-modify-write (review fix-wave 2026-08-07, FIX 3 — see
+        # that function's docstring for the race this closes).
+        _write_global_autokick_locked(sd, value)
         return settings_provider()
 
     def recall_provider(query: str, sid: str | None) -> dict:

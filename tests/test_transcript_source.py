@@ -572,8 +572,9 @@ def test_read_tail_facts_no_marker_is_honestly_unseen(tmp_path):
 
 def test_read_tail_facts_marker_beyond_bridge_scan_lines_is_unseen(tmp_path):
     # Measured: a healthy marker sits 0-11 records from the tail and never
-    # more than 67 behind. A marker further back than the configured scan
-    # window must report an honest "unseen" rather than a fabricated drop.
+    # more than 107 behind (54 transcripts / 6991 gaps). A marker further
+    # back than the configured scan window must report an honest "unseen"
+    # rather than a fabricated drop.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     noise = [_user_tool_result() for _ in range(10)]
     _write_transcript(tmp_path, sid, [_bridge_marker(), *noise, _user("the most recent prompt")])

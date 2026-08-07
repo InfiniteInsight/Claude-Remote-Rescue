@@ -461,9 +461,11 @@ def read_tail_facts(
     Control watchdog): whether a ``bridge-session`` marker was found on
     THIS SAME walk, and how many records sit between it and the tail.
     Bounded by ``bridge_scan_lines`` (measured: a healthy marker sits 0-11
-    records from the tail, never more than 67 behind) — beyond the window
-    this reports the honest "unknown" ``bridge_seen=False`` rather than a
-    fabricated drop; it never triggers a second file read to look further.
+    records from the tail, never more than 107 behind — 54 transcripts /
+    6991 gaps, review fix-wave 2026-08-07 correction of an earlier
+    20-transcript figure) — beyond the window this reports the honest
+    "unknown" ``bridge_seen=False`` rather than a fabricated drop; it never
+    triggers a second file read to look further.
     """
     facts: dict[str, str | int] = {
         "last_prompt": "", "model": "", "last_active": "",

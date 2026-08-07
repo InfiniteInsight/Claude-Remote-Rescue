@@ -33,11 +33,20 @@ excluded):
 | sessions with bridge markers | 18 |
 | sessions with none (Remote Control never enabled) | 2 |
 | median records between consecutive markers | 13–21 (per session) |
-| **worst legitimate gap observed** | **67 records** |
 | newest marker's distance from the tail, healthy sessions | 0–11 records |
 
+**Correction (review fix-wave 2026-08-07):** the 20-transcript sample's
+"worst legitimate gap observed" (67 records) and the ">2x margin" claim
+below were superseded by a larger measurement — 54 transcripts, 6991
+marker-to-marker gaps — which found a worst legitimate gap of **107
+records** (a 1.4x margin under 150) and zero gaps exceeding 150. See
+`crr/core/bridge.py`'s docstring for a related calibration note: markers
+are written as part of the per-user-prompt metadata block, so this really
+counts "records since the last user prompt", not "records since the
+bridge was last seen".
+
 So on a live, bridged session the newest marker sits within ~11 records of
-the tail, and never more than 67 behind.
+the tail, and never more than 107 behind (54-transcript measurement).
 
 **Detection rule:** count records newer than the newest `bridge-session`
 record. If that count exceeds a threshold while the session is LIVE, the
@@ -49,9 +58,11 @@ away from. Counting records is self-normalising — the counter only grows
 when claude is actually producing work, which is exactly the "dropped
 mid-work" case worth acting on.
 
-**Threshold:** `bridge_stale_records`, default **150** — a >2x margin over
-the worst legitimate gap (67). Measured, not guessed; a session that
-exceeds it has produced ~4 turns' worth of records with no bridge marker.
+**Threshold:** `bridge_stale_records`, default **150** — a 1.4x margin
+over the worst legitimate gap measured across 54 transcripts / 6991 gaps
+(107 records); no legitimate gap in that corpus exceeded 150. Measured,
+not guessed; a session that exceeds it has produced several turns' worth
+of records with no bridge marker.
 
 ## The two cases that must not fire
 

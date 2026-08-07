@@ -15,6 +15,19 @@ overwhelming common case, not a drop. Counting records is self-
 normalising: the counter only advances when claude is actually producing
 work, which is exactly the "dropped mid-work" case worth acting on, and it
 falls silent (never climbs) on a merely idle one.
+
+Honest calibration note: ``bridge-session`` markers are written as part of
+the per-user-prompt metadata block (``user, attachment, last-prompt,
+ai-title, mode, permission-mode, pr-link, bridge-session``), NOT on some
+independent bridge-health cadence. So this really measures "records since
+the last user prompt", not "records since the bridge was last seen" — a
+subtle but real difference. One very long agentic turn (a subagent
+fan-out, a long tool-call loop) followed by idle can accumulate many
+records with no NEW prompt (and so no new marker) while the bridge itself
+never dropped, and would read as ``dropped`` all the same. The threshold
+(``bridge_stale_records``, see ``crr.core.config``) is measured against
+real gaps and still holds with margin — this note documents what the
+number actually counts, not a change to it.
 """
 
 from __future__ import annotations
