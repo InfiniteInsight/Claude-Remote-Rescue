@@ -16,7 +16,7 @@ import pytest
 
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
-from crr.core.reviver import attach_argv, revive_crashed, session_name
+from crr.core.reviver import attach_argv, revival_argv, revive_crashed, session_name
 
 _ENTRY_BOOT = "entry-boot-0000"
 _NOW = "2026-07-24T00:00:00Z"
@@ -65,12 +65,13 @@ class FakeTmux:
         self._live.add(name)
 
 
-def _run(entries_store, tmux, max_strikes=3, archive=None):
+def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enabled=True):
     scan = entries_store.scan()
     return revive_crashed(
         scan.entries, FakeBoot(), FakeProbe(), tmux, entries_store,
         archive if archive is not None else ArchiveStore(entries_store._state_dir),
         max_strikes=max_strikes, now=_NOW,
+        remote_control_enabled=remote_control_enabled,
     )
 
 
@@ -78,6 +79,64 @@ def test_attach_argv_is_word_form_tmux_attach():
     # A visible tab attaches to the detached session by name — word-form,
     # never a shell string (the name is crr-<8hex>, metacharacter-free).
     assert attach_argv("crr-8a1b2c3d") == ["tmux", "attach", "-t", "crr-8a1b2c3d"]
+
+
+# --- Remote Control on revival (a revived session must stay phone-reachable) --
+
+from crr.core.reviver import remote_control_flag_argv, remote_control_name
+
+
+def test_remote_control_name_sanitizes_the_cwd_basename():
+    # Spaces, parens, and punctuation collapse to single dashes; the token
+    # is otherwise letters/digits/dash/underscore only.
+    assert remote_control_name("/home/u/my project (v2)!") == "my-project-v2"
+
+
+def test_remote_control_name_keeps_safe_characters_untouched():
+    assert remote_control_name("/home/u/My_Project-2") == "My_Project-2"
+
+
+def test_remote_control_name_falls_back_to_crr_for_empty_or_odd_cwd():
+    assert remote_control_name("") == "crr"
+    assert remote_control_name("/") == "crr"
+    assert remote_control_name("///") == "crr"
+    assert remote_control_name("/home/u/!!!") == "crr"
+
+
+def test_remote_control_name_is_capped_at_forty_chars():
+    long_dir = "x" * 500
+    name = remote_control_name(f"/home/u/{long_dir}")
+    assert len(name) <= 40
+
+
+def test_remote_control_flag_argv_always_carries_an_explicit_name():
+    # THE HAZARD: --remote-control takes an OPTIONAL value, so anything
+    # bare risks swallowing whatever follows as the session name. An
+    # explicit name is unambiguous regardless of what follows it.
+    argv = remote_control_flag_argv("/home/u/proj")
+    assert argv == ["--remote-control", "proj"]
+    assert argv[1] and not argv[1].startswith("-")
+
+
+def test_revival_argv_includes_remote_control_with_a_derived_name():
+    entry = {"claude": _claude(), "cwd": "/home/u/my-proj"}
+    argv = revival_argv(entry, remote_control=True)
+    assert argv == ["claude", "--resume", _claude()["session_id"], "--remote-control", "my-proj"]
+
+
+def test_revival_argv_omits_remote_control_when_disabled():
+    entry = {"claude": _claude(), "cwd": "/home/u/my-proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert argv == ["claude", "--resume", _claude()["session_id"]]
+
+
+def test_revival_argv_places_remote_control_last_so_nothing_follows_the_name():
+    # Nothing can be swallowed as the name when the name is the final argv
+    # element — this holds regardless of the sanitizer's output.
+    entry = {"claude": _claude(), "cwd": "/home/u/my-proj"}
+    argv = revival_argv(entry, remote_control=True)
+    assert argv[-2] == "--remote-control"
+    assert argv[-1] == "my-proj"
 
 
 def test_crashed_claude_session_is_revived(tmp_path):
@@ -88,10 +147,25 @@ def test_crashed_claude_session_is_revived(tmp_path):
 
     assert outcome.revived == [42]
     name = session_name({"claude": _claude()})
-    assert tmux.created == [(name, "/home/u/p42", ["claude", "--resume", _claude()["session_id"]])]
+    assert tmux.created == [(
+        name, "/home/u/p42",
+        ["claude", "--resume", _claude()["session_id"], "--remote-control", "p42"],
+    )]
     entry = store.read(42)
     assert entry["tmux_session"] == name
     assert entry["revive_strikes"] == 1
+
+
+def test_revive_crashed_omits_remote_control_when_disabled(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+    _run(store, tmux, remote_control_enabled=False)
+
+    assert tmux.created == [(
+        session_name({"claude": _claude()}), "/home/u/p42",
+        ["claude", "--resume", _claude()["session_id"]],
+    )]
 
 
 def test_non_crashed_entries_are_left_alone(tmp_path):

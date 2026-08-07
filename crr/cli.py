@@ -338,6 +338,14 @@ def _build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--pid", type=int, required=True)
     ce.set_defaults(func=_cmd_claude_exit)
 
+    rca = sub.add_parser(
+        "remote-control-args",
+        help="[shim] print the args (one per line) that enable Remote Control on this "
+             "launch, or nothing when disabled/untracked",
+    )
+    rca.add_argument("--pid", type=int, required=True, help="the shell's pid")
+    rca.set_defaults(func=_cmd_remote_control_args)
+
     repair = sub.add_parser(
         "repair-check",
         help="[shim] read/clear a session's relaunch/close flag",
@@ -746,6 +754,29 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_remote_control_args(args: argparse.Namespace) -> int:
+    """[shim] The argv (one token per line, so an unquoted shell/fish
+    command substitution splits it into the right words — see the shims)
+    that enables Claude Code's Remote Control on this launch, or nothing.
+
+    Called by the shim immediately before every launch/resume of claude
+    (`--remote-control` is per-invocation, not sticky, so every launch has
+    to ask fresh). Prints nothing when disabled or the shell is untracked
+    (no cwd to derive a name from) — and on ANY error: a Remote Control
+    label must never be able to break a claude launch.
+    """
+    try:
+        config = _load_config()
+        if not config.get("remote_control"):
+            return 0
+        entry = JournalStore(state_dir.state_dir()).read(args.pid)
+        for token in reviver.remote_control_flag_argv(entry.get("cwd", "")):
+            print(token)
+    except Exception:
+        return 0
+    return 0
+
+
 def _cmd_repair_check(args: argparse.Namespace) -> int:
     """[shim] Print the pid's relaunch/close flag for the repair loop, or
     clear it. Output: 'relaunch <sid>' | 'close' | '' (absent)."""
@@ -826,6 +857,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             scan.entries, boot, probe, tmux_spawner, store, archive,
             max_strikes=config.get("zombie_strikes"),
             now=_now(),
+            remote_control_enabled=config.get("remote_control"),
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -921,6 +953,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         res = ops.reopen(JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
                          boot, probe, args.pid, _now(),
                          grace=config.get("close_grace_seconds"),
+                         remote_control=config.get("remote_control"),
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 2
@@ -999,6 +1032,7 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
         res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
+                         remote_control=config.get("remote_control"),
                          tab_spawner=_tab_spawner(config))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
@@ -2008,6 +2042,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "reopen":
                 res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                                   pid, _now(), grace=config.get("close_grace_seconds"),
+                                  remote_control=config.get("remote_control"),
                                   tab_spawner=tab)
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
@@ -2018,7 +2053,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op in ("untrack", "detmux"):  # detmux: deprecated alias, same op
                 res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
             elif op == "untmux":
-                res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+                res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
+                                  remote_control=config.get("remote_control"), tab_spawner=tab)
             else:
                 return False, f"unknown op {op}"
         return res.ok, res.message

@@ -40,7 +40,10 @@ from typing import Any, Mapping
 # prefilter makes a full sweep cheap, so the budget no longer caps coverage;
 # recall_match_cap 5 -> 10 and new recall_per_session_cap so one chatty
 # session can't fill every result slot
-CONFIG_DEFAULTS_VERSION = 10
+# v11: added remote_control (every claude launch/revival enables Claude
+# Code's Remote Control by default, so a session stays reachable from the
+# phone; see crr.core.reviver.revival_argv and the shims)
+CONFIG_DEFAULTS_VERSION = 11
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -91,6 +94,12 @@ DEFAULTS: dict[str, Any] = {
     # 4-65 records before the prompt, and the prompt itself up to ~124 from
     # the tail — 400 covers both with headroom, and an honest "" beyond it.
     "reply_tail_lines": 400,
+    # Every claude launch/resume/revival crr is involved in passes
+    # `--remote-control <name>` (an explicit name — never a bare flag; see
+    # the reviver/shim comments on why) so the session is always reachable
+    # from Claude Code's mobile Remote Control. False disables it
+    # everywhere at once (reviver.py + all three shims ask this key).
+    "remote_control": True,
     # context-pressure badge (Slice A, F2; audit P5): fraction of a model's
     # (prior, unverified for most models) context window at which a session
     # is "tight" vs. expected to compact on revive. See

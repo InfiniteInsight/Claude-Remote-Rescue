@@ -18,6 +18,25 @@ function _crr
     "$_CRR_BIN" $argv 2>/dev/null
 end
 
+# Args to add to every claude launch so a session is always reachable
+# from Claude Code's mobile Remote Control (`--remote-control` is
+# per-invocation, not sticky — every launch has to ask fresh, not just
+# fresh ones). Printed one token per line by `crr`, so an unquoted fish
+# command substitution here splits into exactly the right list elements;
+# the token itself is sanitized to letters/digits/dash/underscore
+# (crr.core.reviver). Silent no-op (empty list) when disabled, untracked,
+# or crr is missing — same "never break a launch" contract as `_crr` itself.
+#
+# Placed BEFORE $argv at every call site, never after: $argv can be a bare
+# prompt (`claude "fix the bug"`), and claude's parser mode for flags
+# after a positional argument is undocumented — putting our flag first
+# keeps it unambiguously a flag regardless. Safe under THE HAZARD too: the
+# name is always explicit, so `--remote-control proj --resume abc123`
+# reads `proj` as the name and leaves `--resume` alone.
+function _crr_rc_args
+    _crr remote-control-args --pid $fish_pid
+end
+
 function _crr_host
     if set -q TMUX
         echo -n tmux
@@ -105,14 +124,14 @@ function claude
         else
             _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
         end
-        command claude $argv
+        command claude (_crr_rc_args) $argv
     else
         set -l _crr_sid (_crr claude-launch --pid $fish_pid)
         if test -n "$_crr_sid"
             set _cur_sid $_crr_sid
-            command claude --session-id $_crr_sid $argv
+            command claude --session-id $_crr_sid (_crr_rc_args) $argv
         else
-            command claude $argv
+            command claude (_crr_rc_args) $argv
         end
     end
     set -l _code $status
@@ -129,7 +148,7 @@ function claude
         if test "$_flag[1]" = relaunch; and test -n "$_flag[2]"
             set _cur_sid $_flag[2]
             set _crashes 0
-            command claude --resume $_flag[2]
+            command claude --resume $_flag[2] (_crr_rc_args)
             set _code $status
             continue
         end
@@ -160,10 +179,10 @@ function claude
         end
         set _crashes (math $_crashes + 1)
         if test -n "$_cur_sid"
-            command claude --resume $_cur_sid
+            command claude --resume $_cur_sid (_crr_rc_args)
         else
             _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
-            command claude --continue
+            command claude --continue (_crr_rc_args)
         end
         set _code $status
     end

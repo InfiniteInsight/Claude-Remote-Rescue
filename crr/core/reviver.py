@@ -26,12 +26,22 @@ fully testable with fakes and touches no OS directly.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, NamedTuple, Sequence
 
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TmuxSpawner
+
+# Remote Control session names: letters, digits, dash, underscore only.
+# Runs of anything else collapse to a single dash so an odd basename (a
+# path with spaces, parens, unicode punctuation, ...) still yields one
+# clean token rather than a run of separators.
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+# ~40 chars: plenty to identify a project directory in the mobile list,
+# short enough that it can't be mistaken for the rest of the command line.
+_MAX_NAME_LEN = 40
 
 
 class RevivalOutcome(NamedTuple):
@@ -46,9 +56,55 @@ def session_name(entry: Mapping[str, Any]) -> str:
     return f"crr-{entry['claude']['session_id'][:8]}"
 
 
-def revival_argv(entry: Mapping[str, Any]) -> list[str]:
-    """Word-form argv to resume the session (never a shell string)."""
-    return ["claude", "--resume", entry["claude"]["session_id"]]
+def remote_control_name(cwd: str) -> str:
+    """A safe Claude Code Remote Control session name derived from a
+    session's working directory (its basename), so the mobile session list
+    shows a meaningful name instead of an auto-generated one.
+
+    Sanitized to letters/digits/dash/underscore (the claude CLI's session
+    name has no documented character restrictions, but a shell-word-safe,
+    metacharacter-free token is what makes it safe to interpolate into a
+    shim's argv without quoting gymnastics — same rationale as the
+    ``crr-<8hex>`` tmux session names elsewhere in this module). An empty,
+    root, or entirely-punctuation cwd falls back to ``"crr"`` rather than
+    an empty name (Remote Control's own auto-naming would kick in for an
+    empty value, defeating the point of naming it at all).
+    """
+    trimmed = cwd.rstrip("/")
+    base = trimmed.rsplit("/", 1)[-1] if trimmed else ""
+    token = _UNSAFE_NAME_CHARS.sub("-", base).strip("-")
+    return token[:_MAX_NAME_LEN].rstrip("-") or "crr"
+
+
+def remote_control_flag_argv(cwd: str) -> list[str]:
+    """The ``--remote-control <name>`` pair for a session's cwd.
+
+    Always an explicit name, never a bare ``--remote-control``: the flag's
+    value is OPTIONAL on the claude CLI, so anything that followed an
+    unnamed flag on the command line risks being swallowed as the session
+    name (e.g. ``--remote-control --resume <sid>`` reading ``--resume`` as
+    the name). An explicit name is unambiguous regardless of what follows
+    it — callers are free to place this pair anywhere in their argv.
+    """
+    return ["--remote-control", remote_control_name(cwd)]
+
+
+def revival_argv(entry: Mapping[str, Any], *, remote_control: bool) -> list[str]:
+    """Word-form argv to resume the session (never a shell string).
+
+    ``remote_control`` is injected rather than read from config here (core
+    stays pure) — the caller (the CLI's ``revive`` command) resolves it
+    from the ``remote_control`` config key. Required, not defaulted: a
+    forgotten wire-up at the call site should fail loudly, not silently
+    revive sessions unreachable from the phone.
+    """
+    argv = ["claude", "--resume", entry["claude"]["session_id"]]
+    if remote_control:
+        # Appended last so nothing on the line can follow (and be swallowed
+        # by) the name — belt-and-suspenders on top of the explicit name
+        # remote_control_flag_argv already guarantees.
+        argv += remote_control_flag_argv(entry["cwd"])
+    return argv
 
 
 def attach_argv(name: str) -> list[str]:
@@ -93,6 +149,7 @@ def revive_crashed(
     *,
     max_strikes: int,
     now: str,
+    remote_control_enabled: bool,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -127,7 +184,9 @@ def revive_crashed(
             store.remove(pid)
             gave_up.append(pid)
         else:  # revive
-            tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+            tmux.new_detached_session(
+                name, entry["cwd"], revival_argv(entry, remote_control=remote_control_enabled)
+            )
             live.add(name)  # dedupe within the pass: a shared sid is now "live"
             store.write(updated)
             revived.append(pid)
@@ -163,7 +222,9 @@ def revive_crashed(
             archive.write(record)
             gave_up.append(pid)
         else:  # revive
-            tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+            tmux.new_detached_session(
+                name, entry["cwd"], revival_argv(entry, remote_control=remote_control_enabled)
+            )
             live.add(name)  # dedupe within the pass (shared sid)
             record["entry"] = updated
             archive.write(record)

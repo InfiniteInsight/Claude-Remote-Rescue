@@ -141,18 +141,28 @@ def test_reopen_spawns_for_crashed_claude(tmp_path):
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux = FakeTmux()
     ctrl, flags = _idle_ctrl_flags()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok
     name = f"crr-{_SID[:8]}"
     assert tmux.created and tmux.created[0][0] == name
     assert store.read(42)["tmux_session"] == name
 
 
+def test_reopen_omits_remote_control_when_disabled(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1, remote_control=False)
+    assert res.ok
+    assert tmux.created[0][2] == ["claude", "--resume", _SID]
+
+
 def test_reopen_refuses_claude_less(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=None)
     ctrl, flags = _idle_ctrl_flags()
-    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1, remote_control=True)
     assert not res.ok
 
 
@@ -163,7 +173,7 @@ def test_reopen_live_refused(tmp_path):
     _seed(store, 42, boot="same-boot", claude=_claude())
     ctrl, flags = FakeController(groups=[200]), FakeFlags()
     res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
-                     FakeProbe(alive=True, tty=True), 42, _NOW, grace=0.1)
+                     FakeProbe(alive=True, tty=True), 42, _NOW, grace=0.1, remote_control=True)
     assert not res.ok
     assert "is live" in res.message
     assert ctrl.terminated == []
@@ -178,7 +188,7 @@ def test_reopen_already_running_does_not_respawn(tmp_path):
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux = FakeTmux(live={f"crr-{_SID[:8]}"})
     ctrl, flags = _idle_ctrl_flags()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok
     assert tmux.created == []  # already up
 
@@ -190,7 +200,7 @@ def test_reopen_crashed_path_unchanged(tmp_path):
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux = FakeTmux()
     ctrl, flags = FakeController(groups=[200]), FakeFlags()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok
     assert ctrl.terminated == []
     assert flags.armed == {}
@@ -206,7 +216,7 @@ def test_reopen_opens_a_visible_tab_attaching_to_the_revived_session(tmp_path):
     tmux, tab = FakeTmux(), FakeTabSpawner()
     ctrl, flags = _idle_ctrl_flags()
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
-                     grace=0.1, tab_spawner=tab)
+                     grace=0.1, tab_spawner=tab, remote_control=True)
     name = f"crr-{_SID[:8]}"
     assert res.ok
     assert tmux.created  # revived detached first (durable)
@@ -221,7 +231,7 @@ def test_reopen_opens_a_tab_even_when_already_running(tmp_path):
     tmux, tab = FakeTmux(live={name}), FakeTabSpawner()
     ctrl, flags = _idle_ctrl_flags()
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
-                     grace=0.1, tab_spawner=tab)
+                     grace=0.1, tab_spawner=tab, remote_control=True)
     assert res.ok
     assert tmux.created == []                 # not respawned
     assert tab.opened[0][0] == ["tmux", "attach", "-t", name]  # but a tab is opened
@@ -236,7 +246,7 @@ def test_reopen_tab_failure_does_not_fail_the_op(tmp_path):
     tmux, tab = FakeTmux(), FakeTabSpawner(fail=True)
     ctrl, flags = _idle_ctrl_flags()
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
-                     grace=0.1, tab_spawner=tab)
+                     grace=0.1, tab_spawner=tab, remote_control=True)
     assert res.ok
     assert "tab" in res.message.lower() and "fail" in res.message.lower()
     assert store.read(42)["tmux_session"] == f"crr-{_SID[:8]}"  # revival persisted
@@ -248,7 +258,7 @@ def test_reopen_unavailable_spawner_stays_detached(tmp_path):
     tmux, tab = FakeTmux(), FakeTabSpawner(available=False)
     ctrl, flags = _idle_ctrl_flags()
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
-                     grace=0.1, tab_spawner=tab)
+                     grace=0.1, tab_spawner=tab, remote_control=True)
     assert res.ok
     assert tab.opened == []  # never consulted an unavailable spawner
     # [live bug, 2026-07-31] "did nothing" honesty: an unavailable spawner
@@ -263,7 +273,7 @@ def test_reopen_refuses_when_tmux_liveness_is_unknown(tmp_path):
     _seed(store, 42, boot="entry-boot", claude=_claude())
     tmux = FakeTmux(live=None)
     ctrl, flags = _idle_ctrl_flags()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW, grace=0.1, remote_control=True)
     assert not res.ok
     assert "cannot determine" in res.message.lower()
     assert tmux.created == []
@@ -297,7 +307,7 @@ def test_reopen_ghost_kills_flags_archives_and_spawns(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     boot, probe = _ghost(store, 42)
     ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok, res.message
     assert flags.read(42) == ("close", None)          # armed and retained
     assert ctrl.terminated == [(200, 0.1)]
@@ -306,7 +316,10 @@ def test_reopen_ghost_kills_flags_archives_and_spawns(tmp_path):
     assert rec["entry"]["tmux_session"] == f"crr-{_SID[:8]}"
     with pytest.raises(KeyError):
         store.read(42)                                # delisted
-    assert tmux.created == [(f"crr-{_SID[:8]}", "/p42", ["claude", "--resume", _SID])]
+    assert tmux.created == [(
+        f"crr-{_SID[:8]}", "/p42",
+        ["claude", "--resume", _SID, "--remote-control", "p42"],
+    )]
 
 
 def test_reopen_ghost_without_claude_group_spawns_without_flag(tmp_path):
@@ -315,7 +328,7 @@ def test_reopen_ghost_without_claude_group_spawns_without_flag(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     boot, probe = _ghost(store, 42)
     ctrl, flags, tmux = FakeController(groups=[]), FakeFlags(), FakeTmux()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok, res.message
     assert flags.read(42) is None
     assert archive.read(_SID)["reason"] == "ghost-restored"
@@ -331,7 +344,7 @@ def test_reopen_ghost_kill_failure_leaves_everything_untouched(tmp_path):
     boot, probe = _ghost(store, 42)
     ctrl = FakeController(groups=[200], raise_for={200: OSError("nope")})
     flags, tmux = FakeFlags(), FakeTmux()
-    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert not res.ok
     assert flags.read(42) is None            # rolled back: no kill landed
     assert store.read(42)                    # entry untouched
@@ -348,7 +361,7 @@ def test_reopen_ghost_spawn_failure_still_preserves(tmp_path):
     boot, probe = _ghost(store, 42)
     ctrl, flags = FakeController(groups=[200]), FakeFlags()
     tmux = FakeTmux(fail_spawn=True)
-    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok is True
     assert "watchdog" in res.message.lower()
     assert archive.read(_SID)["reason"] == "ghost-restored"
@@ -361,7 +374,7 @@ def test_reopen_ghost_already_running_does_not_respawn(tmp_path):
     boot, probe = _ghost(store, 42)
     name = f"crr-{_SID[:8]}"
     ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux(live={name})
-    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok, res.message
     assert tmux.created == []  # already up, not respawned
     assert archive.read(_SID)["reason"] == "ghost-restored"
@@ -374,7 +387,7 @@ def test_reopen_ghost_refuses_when_tmux_liveness_is_unknown(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     boot, probe = _ghost(store, 42)
     ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux(live=None)
-    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1)
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert not res.ok
     assert "cannot determine" in res.message.lower()
     assert ctrl.terminated == []          # never reached the kill step
@@ -444,7 +457,7 @@ def test_detmux_leaves_the_reviver_nothing_to_repark(tmp_path):
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     outcome = revive_crashed(
         store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
-        max_strikes=3, now=_NOW,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
     )
     assert outcome.revived == []
     assert tmux.created == []
@@ -537,9 +550,26 @@ def test_untmux_kills_spawns_archives_and_delists(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     tab = FakeTabSpawner()
-    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=True)
     assert res.ok, res.message
     assert tmux.killed == ["crr-8a1b2c3d"]
+    assert tab.opened == [(["claude", "--resume", _SID, "--remote-control", "p42"], f"/p42")]
+    with pytest.raises(KeyError):
+        store.read(42)
+    records = archive.scan().records
+    assert len(records) == 1
+    assert records[0]["reason"] == "untmuxed"
+    assert records[0]["entry"]["pid"] == 42
+    assert "un-tmuxed 42" in res.message
+
+
+def test_untmux_omits_remote_control_when_disabled(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    tab = FakeTabSpawner()
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=False)
+    assert res.ok, res.message
     assert tab.opened == [(["claude", "--resume", _SID], f"/p42")]
     with pytest.raises(KeyError):
         store.read(42)
@@ -554,7 +584,7 @@ def test_untmux_kills_spawns_archives_and_delists(tmp_path):
 def test_untmux_refuses_missing_entry(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     res = ops.untmux(store, archive, FakeTmux(), FakeBoot(), FakeProbe(), 999, _NOW,
-                      tab_spawner=FakeTabSpawner())
+                      tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok and "no session" in res.message
 
 
@@ -563,7 +593,7 @@ def test_untmux_refuses_live_session(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d", boot="same-boot")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     res = ops.untmux(store, archive, tmux, FakeBoot("same-boot"),
-                      FakeProbe(alive=True, tty=True), 42, _NOW, tab_spawner=FakeTabSpawner())
+                      FakeProbe(alive=True, tty=True), 42, _NOW, tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok
     assert "not crashed" in res.message
     assert tmux.killed == []
@@ -574,7 +604,7 @@ def test_untmux_refuses_unparked_session(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=_claude())
     res = ops.untmux(store, archive, FakeTmux(), FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner())
+                      tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok and "not tmux-parked" in res.message
 
 
@@ -582,7 +612,7 @@ def test_untmux_refuses_when_tmux_session_is_gone(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     res = ops.untmux(store, archive, FakeTmux(live=set()), FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner())
+                      tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok and "gone" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
 
@@ -592,7 +622,7 @@ def test_untmux_refuses_when_tmux_liveness_is_unknown(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live=None)
     res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner())
+                      tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok
     assert "cannot determine" in res.message.lower()
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
@@ -605,7 +635,7 @@ def test_untmux_requires_a_tab_spawner_before_killing(tmp_path):
     for tab in (None, FakeTabSpawner(available=False)):
         _seed_parked(store, 42, "crr-8a1b2c3d")
         tmux = FakeTmux(live={"crr-8a1b2c3d"})
-        res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+        res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=True)
         assert not res.ok and "no terminal tab spawner" in res.message
         assert tmux.killed == []
         assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
@@ -616,7 +646,7 @@ def test_untmux_kill_failure_leaves_entry_untouched(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"}, fail_kill=True)
     res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner())
+                      tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok
     assert "failed to kill" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
@@ -631,7 +661,7 @@ def test_untmux_spawn_failure_after_kill_leaves_entry_for_the_watchdog(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     tab = FakeTabSpawner(fail=True)
-    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=True)
     assert not res.ok
     assert tmux.killed == ["crr-8a1b2c3d"]
     assert "watchdog" in res.message
