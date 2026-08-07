@@ -1400,6 +1400,50 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
     assert "crr revive: tmux state unknown — pass skipped (no strikes accrued)" in err
 
 
+def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, monkeypatch, capsys):
+    # Slice 2 (dropped-Remote-Control watchdog): the deliverable is the
+    # WIRING in `_cmd_revive`, not just the standalone `_kick_dropped_bridges`
+    # helper (that is covered exhaustively, with fakes, in
+    # test_revive_bridge.py). Pin here that `crr revive` actually calls it
+    # exactly once, with a JournalStore and `sd` rooted at the real state
+    # dir, and only AFTER the crashed-session summary line — so deleting the
+    # call site, or wiring the wrong sd/store, fails a test.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+
+    calls = []
+
+    def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags):
+        calls.append((sd, store))
+        print("watchdog pass ran")
+
+    monkeypatch.setattr(cli, "_kick_dropped_bridges", fake_watchdog)
+
+    rc = cli.main(["revive"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(calls) == 1
+    sd, store = calls[0]
+    assert sd == tmp_path
+    assert isinstance(store, JournalStore)
+    lines = out.splitlines()
+    assert lines.index("revived 0, gave up 0, already running 0") < lines.index("watchdog pass ran")
+
+
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
 
 # --- session ops: remove / dismiss / reopen -----------------------------

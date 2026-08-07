@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
@@ -40,7 +40,7 @@ from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, 
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, status, takeover, transcript, web, whoami
+from crr.core import bridge, classifier, contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -882,7 +882,132 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     )
     if outcome.gave_up:
         print(f"gave up: {outcome.gave_up}")
+
+    # --- separate pass: reconnect LIVE sessions whose Remote Control
+    # bridge has dropped (spec 2026-08-07, Slice 2). Deliberately AFTER and
+    # APART from the crashed-session revival above — that pass raises the
+    # dead; this one restarts something still running, a materially more
+    # dangerous action that deserves its own gate, its own re-scan (the
+    # revival above may have changed journal state), and its own reasoning
+    # trail. See `_kick_dropped_bridges` for the full guard chain.
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    flags = FlagStore(sd)
+    settings_store = settings.SettingsStore(sd)
+    _kick_dropped_bridges(
+        store.scan().entries, boot, probe, config, settings_store, store, sd,
+        controller, flags,
+    )
     return 0
+
+
+def _kick_dropped_bridges(
+    entries: Sequence[Mapping[str, Any]],
+    boot,
+    probe,
+    config: cfg.Config,
+    settings_store: "settings.SettingsStore",
+    store: JournalStore,
+    sd: Path,
+    controller,
+    flags: FlagStore,
+    *,
+    read_tail_facts=transcript_source.read_tail_facts,
+    read_takeover_signal=transcript_source.read_takeover_signal,
+    kick=ops.kick,
+    clock=time.time,
+) -> None:
+    """Watchdog step (spec 2026-08-07, Slice 2): restart a LIVE session
+    whose Remote Control bridge has dropped, so the relaunch (which always
+    carries ``--remote-control``) reconnects it on the phone.
+
+    THIS KILLS LIVE PROCESSES. Every guard below is load-bearing and
+    checked in this exact order; every skip is printed with its reason —
+    a watchdog that silently restarts things is unauditable:
+
+      1. ``remote_control_watch`` must be on — the whole step's gate.
+      2. the session must classify LIVE — never CRASHED (that is the
+         reviver's job, above), never GHOST (no controlling terminal to
+         reconnect on).
+      3. its bridge state (``bridge.bridge_state`` over the same tail-facts
+         walk Slice 1 added) must be ``"dropped"`` — not ``"off"`` (never
+         enabled) and not ``"ok"``.
+      4. ``settings.autokick_for`` must resolve True for this sid, given
+         the config default, the dashboard's global override, and this
+         session's own override.
+      5. ``takeover.ready_to_take_over`` must say the transcript is quiet
+         at a completed assistant turn — a kick mid-turn destroys the
+         in-flight turn, so a not-yet-ready session is simply left for the
+         next pass rather than kicked now.
+
+    Only once every guard clears does ``kick`` run, and only then under
+    ``mutation_lock`` — mirroring ``crr kick``'s own locking. Everything
+    before that is lock-free, so a slow transcript scan on one session
+    never stalls the others or the dashboard.
+
+    Two journal entries CAN carry the same session id (duplicate_group on
+    the card; the crashed-session revival above has its own analogous
+    guard — see ``test_duplicate_sids_spawn_one_session_not_two``). Such
+    entries share a transcript, so they'd share every verdict above: if
+    one qualifies, both would, deterministically double-kicking one live
+    conversation. ``kicked_sids`` makes this pass kick each sid at most
+    once per sweep.
+    """
+    if not config.get("remote_control_watch"):
+        return
+
+    global_override = settings_store.read_global_autokick()
+    config_default = config.get("remote_control_autokick")
+    bridge_stale_records = config.get("bridge_stale_records")
+    bridge_scan_lines = config.get("bridge_scan_lines")
+    model_tail_lines = config.get("model_tail_lines")
+    cap = config.get("last_prompt_display_cap")
+    idle_window = config.get("takeover_idle_seconds")
+    grace = config.get("close_grace_seconds")
+    kicked_sids: set[str] = set()
+
+    for entry in entries:
+        if entry.get("claude") is None:
+            continue
+        pid = entry["pid"]
+        sid = entry["claude"]["session_id"]
+        sid8 = sid[:8]
+        if sid in kicked_sids:
+            continue  # already kicked once this sweep via a duplicate entry
+
+        if classifier.classify(entry, boot, probe) != classifier.LIVE:
+            continue  # CRASHED is the reviver's job above; GHOST has no terminal to reconnect
+
+        facts = read_tail_facts(
+            sid, cap, model_tail_lines=model_tail_lines, bridge_scan_lines=bridge_scan_lines,
+        )
+        remote_control = bridge.bridge_state(
+            facts["bridge_since"], facts["bridge_seen"], stale_after=bridge_stale_records,
+        )
+        if remote_control != "dropped":
+            continue  # "off" (never enabled) or "ok" — nothing to reconnect
+
+        session_override = settings_store.read_session_autokick(sid)
+        if not settings.autokick_for(
+            config_default=config_default,
+            global_override=global_override,
+            session_override=session_override,
+        ):
+            global_resolved = config_default if global_override is None else global_override
+            reason = "autokick globally off" if not global_resolved else "autokick opted out for this session"
+            print(f"crr revive: skipping {sid8} (dropped bridge, {reason})")
+            continue
+
+        sig = read_takeover_signal(sid)
+        seconds_idle = clock() - sig["mtime"]
+        if not takeover.ready_to_take_over(seconds_idle, sig["tail_kind"], idle_window=idle_window):
+            print(f"crr revive: skipping {sid8} (dropped bridge, mid-turn — waiting for a clean boundary)")
+            continue
+
+        with mutation_lock(sd):
+            res = kick(store, controller, flags, boot, probe, pid, grace=grace)
+        kicked_sids.add(sid)  # at most one kick attempt per sid per sweep, success or not
+        outcome_word = "kicked" if res.ok else "kick failed for"
+        print(f"crr revive: {outcome_word} {sid8} (dropped bridge): {res.message}")
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
