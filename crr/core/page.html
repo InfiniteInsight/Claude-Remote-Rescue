@@ -408,7 +408,11 @@ function passesFilter(s) {
 function jumpToSession(sid) {
   var el0 = document.querySelector('[data-sid="' + sid + '"]');
   if (!el0) {
-    showNotice("That session isn't tracked — look under Discoverable.", "warn");
+    // Not a tracked card — but the match came from a real transcript, so
+    // open Discoverable filtered to it. A search result you can click
+    // should lead somewhere you can act, not to a dead-end toast.
+    showNotice("Not tracked — opening Discoverable for this session.", "warn");
+    openDisc("discoverable", sid);
     return;
   }
   el0.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1070,7 +1074,10 @@ function loadDiscoverable() {
       var rows = data.rows || [];
       if (!rows.length) {
         var none = el("div", "ev");
-        none.textContent = discState.query ? "no matches for this filter" : kind.empty;
+        none.textContent = discState.query
+          ? ("no match for \"" + discState.query + "\" here — it may be tracked already, "
+             + "archived, or excluded in Settings")
+          : kind.empty;
         list.appendChild(none);
       } else {
         rows.forEach(function (r) {
@@ -1102,11 +1109,11 @@ function loadDiscoverable() {
     .catch(function () { list.textContent = "list unavailable"; });
 }
 
-function openDisc(kind) {
+function openDisc(kind, query) {
   discState.kind = kind;
-  discState.query = "";
+  discState.query = query || "";
   discState.offset = 0;
-  document.getElementById("disc-filter").value = "";
+  document.getElementById("disc-filter").value = discState.query;
   document.getElementById("disc-title").textContent = MODAL_KINDS[kind].title;
   MODAL_KINDS[kind].note(document.getElementById("disc-note"));
   document.getElementById("disc-modal").classList.add("open");
