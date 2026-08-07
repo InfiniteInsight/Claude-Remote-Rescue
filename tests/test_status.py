@@ -143,6 +143,8 @@ def test_tail_facts_extractor_is_used_for_prompt_and_model():
             "model": "claude-opus-5",
             "last_active": "2026-08-01T00:00:00Z",
             "transcript_bytes": 0,
+            "bridge_seen": False,
+            "bridge_since": 0,
         },
     )
     card = payload["sessions"][0]
@@ -174,6 +176,8 @@ def test_card_carries_last_active_from_tail_facts():
             "model": "",
             "last_active": "2026-08-01T12:34:56Z",
             "transcript_bytes": 0,
+            "bridge_seen": False,
+            "bridge_since": 0,
         },
     )
     card = payload["sessions"][0]
@@ -203,6 +207,8 @@ def test_card_context_pressure_will_compact_when_over_window():
             "model": "some-unmapped-model",
             "last_active": "",
             "transcript_bytes": 200_000 * 4,
+            "bridge_seen": False,
+            "bridge_since": 0,
         },
     )
     assert payload["sessions"][0]["context_pressure"] == "will-compact"
@@ -222,6 +228,8 @@ def test_card_context_pressure_thresholds_are_configurable():
             "model": "some-unmapped-model",
             "last_active": "",
             "transcript_bytes": 100_000 * 4,  # fraction 0.5 of 200_000 default window
+            "bridge_seen": False,
+            "bridge_since": 0,
         },
         context_tight_fraction=0.4,
         context_compact_fraction=0.9,
@@ -237,6 +245,65 @@ def test_card_carries_tmux_session():
     by_pid = {c["pid"]: c for c in payload["sessions"]}
     assert by_pid[1]["tmux_session"] == "crr-deadbeef"
     assert by_pid[2]["tmux_session"] is None
+
+
+def _facts(**over):
+    base = {
+        "last_prompt": "", "last_reply": "", "title": "", "slug": "",
+        "model": "", "last_active": "", "transcript_bytes": 0,
+        "bridge_seen": False, "bridge_since": 0,
+    }
+    base.update(over)
+    return base
+
+
+def test_card_remote_control_off_when_no_marker_ever_seen():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)], FakeBoot(), FakeProbe(),
+        tail_facts=lambda entry: _facts(bridge_seen=False, bridge_since=0),
+    )
+    assert payload["sessions"][0]["remote_control"] == "off"
+
+
+def test_card_remote_control_ok_within_threshold():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)], FakeBoot(), FakeProbe(),
+        tail_facts=lambda entry: _facts(bridge_seen=True, bridge_since=10),
+        bridge_stale_records=150,
+    )
+    assert payload["sessions"][0]["remote_control"] == "ok"
+
+
+def test_card_remote_control_dropped_past_threshold():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)], FakeBoot(), FakeProbe(),
+        tail_facts=lambda entry: _facts(bridge_seen=True, bridge_since=151),
+        bridge_stale_records=150,
+    )
+    assert payload["sessions"][0]["remote_control"] == "dropped"
+
+
+def test_card_remote_control_threshold_is_configurable():
+    # Same bridge_since, a tighter threshold flips ok -> dropped: the
+    # caller-injected value is actually honoured, not a hardcoded 150.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)], FakeBoot(), FakeProbe(),
+        tail_facts=lambda entry: _facts(bridge_seen=True, bridge_since=20),
+        bridge_stale_records=10,
+    )
+    assert payload["sessions"][0]["remote_control"] == "dropped"
+
+
+def test_card_remote_control_defaults_to_off_with_no_tail_facts_wired():
+    # No extractor: the default _empty_facts reports bridge_seen=False, so
+    # remote_control degrades to "off" rather than a fabricated state.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
+    assert payload["sessions"][0]["remote_control"] == "off"
 
 
 def test_claude_less_shells_are_not_cards():

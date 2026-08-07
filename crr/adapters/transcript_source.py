@@ -186,6 +186,11 @@ def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
 # argument below for callers that don't have a Config to hand).
 MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
 REPLY_TAIL_LINES = DEFAULTS["reply_tail_lines"]
+# Bound for the bridge-marker search (see crr.core.config's
+# `bridge_scan_lines` for the empirical justification — that DEFAULTS entry
+# is the injectable prior; this constant only supplies the default argument
+# below for callers that don't have a Config to hand).
+BRIDGE_SCAN_LINES = DEFAULTS["bridge_scan_lines"]
 
 
 def _read_records(path: Path) -> list[dict]:
@@ -429,6 +434,7 @@ def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,
     reply_tail_lines: int = REPLY_TAIL_LINES,
+    bridge_scan_lines: int = BRIDGE_SCAN_LINES,
 ) -> dict[str, str | int]:
     """Most recent real prompt + model + activity + size, in ONE backward read.
 
@@ -450,10 +456,19 @@ def read_tail_facts(
     is therefore bounded by ``reply_tail_lines`` (measured here: the reply
     sat 4-65 records before the prompt), and left an honest "" when it isn't
     found inside that window rather than reading the whole file on a 5s poll.
+
+    ``bridge_seen``/``bridge_since`` (spec 2026-08-07 — dropped-Remote-
+    Control watchdog): whether a ``bridge-session`` marker was found on
+    THIS SAME walk, and how many records sit between it and the tail.
+    Bounded by ``bridge_scan_lines`` (measured: a healthy marker sits 0-11
+    records from the tail, never more than 67 behind) — beyond the window
+    this reports the honest "unknown" ``bridge_seen=False`` rather than a
+    fabricated drop; it never triggers a second file read to look further.
     """
     facts: dict[str, str | int] = {
         "last_prompt": "", "model": "", "last_active": "",
         "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
+        "bridge_seen": False, "bridge_since": 0,
     }
     path = find_transcript(session_id, home)
     if path is None:
@@ -466,6 +481,7 @@ def read_tail_facts(
         for i, line in enumerate(_reversed_lines(path)):
             in_model_window = i < model_tail_lines
             in_reply_window = i < reply_tail_lines
+            in_bridge_window = i < bridge_scan_lines
             try:
                 record = json.loads(line)
             except (ValueError, TypeError):
@@ -504,14 +520,21 @@ def read_tail_facts(
                 reply = transcript._assistant_text(record)
                 if reply is not None:
                     facts["last_reply"] = transcript.clean_display_tail(reply, cap)
-            # Stop once prompt+timestamp are found, and model and reply are
-            # each either found or past their windows.
+            # The NEWEST bridge-session marker: the first one hit walking
+            # backward from the tail IS the newest, so stop looking once found.
+            if (record is not None and not facts["bridge_seen"] and in_bridge_window
+                    and transcript.is_bridge_marker(record)):
+                facts["bridge_seen"] = True
+                facts["bridge_since"] = i
+            # Stop once prompt+timestamp are found, and model/reply/title+slug/
+            # bridge are each either found or past their windows.
             if (
                 facts["last_prompt"]
                 and facts["last_active"]
                 and (facts["model"] or not in_model_window)
                 and (facts["last_reply"] or not in_reply_window)
                 and ((facts["title"] and facts["slug"]) or not in_model_window)
+                and (facts["bridge_seen"] or not in_bridge_window)
             ):
                 break
     except OSError:

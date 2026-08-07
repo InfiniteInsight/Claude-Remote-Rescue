@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 11
+    assert cfg.CONFIG_DEFAULTS_VERSION == 12
 
 
 def test_context_pressure_fraction_defaults():
@@ -136,6 +136,19 @@ def test_takeover_defaults():
     assert cfg.Config().get("takeover_idle_seconds") == 20.0
     assert cfg.Config().get("takeover_max_wait_seconds") == 180.0
     assert cfg.Config().get("takeover_poll_seconds") == 2.0
+
+
+def test_remote_control_watchdog_defaults():
+    # Part B (dropped-Remote-Control watchdog): detection + kill-switch
+    # priors, measured against 20 real transcripts (spec 2026-08-07).
+    assert cfg.DEFAULTS["remote_control_watch"] is True
+    assert cfg.DEFAULTS["remote_control_autokick"] is True
+    assert cfg.DEFAULTS["bridge_stale_records"] == 150  # >2x the worst observed gap (67)
+    assert cfg.DEFAULTS["bridge_scan_lines"] == 400
+    assert cfg.Config().get("remote_control_watch") is True
+    assert cfg.Config().get("remote_control_autokick") is True
+    assert cfg.Config().get("bridge_stale_records") == 150
+    assert cfg.Config().get("bridge_scan_lines") == 400
 
 
 def test_no_overrides_all_default():

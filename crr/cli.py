@@ -66,17 +66,19 @@ def _load_config() -> cfg.Config:
 
 
 def _tail_facts_extractor(config: cfg.Config):
-    """A tail_facts(entry)->{last_prompt, model, last_active, transcript_bytes}
-    closure for assemble_sessions.
+    """A tail_facts(entry)->{last_prompt, model, last_active, transcript_bytes,
+    bridge_seen, bridge_since, ...} closure for assemble_sessions.
 
-    One backward transcript read per card yields all four facts. Only
+    One backward transcript read per card yields all these facts. Only
     called for claude-bearing entries (assemble_sessions filters the
     rest), so entry["claude"] is always present here.
     """
     cap = config.get("last_prompt_display_cap")
     model_tail_lines = config.get("model_tail_lines")
+    bridge_scan_lines = config.get("bridge_scan_lines")
     return lambda entry: transcript_source.read_tail_facts(
-        entry["claude"]["session_id"], cap, model_tail_lines=model_tail_lines
+        entry["claude"]["session_id"], cap,
+        model_tail_lines=model_tail_lines, bridge_scan_lines=bridge_scan_lines,
     )
 
 
@@ -498,6 +500,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         tail_facts=_tail_facts_extractor(config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
+        bridge_stale_records=config.get("bridge_stale_records"),
     )
     # Validate our own output before emitting it (the P7 validator doubles
     # as a debug guard — both surfaces validate their own output; the web
@@ -1069,7 +1072,13 @@ def _untracked_view(record: dict, cap: int, model_tail_lines: int) -> dict:
     """
     entry = record["entry"]
     sid = entry["claude"]["session_id"]
-    facts = transcript_source.read_tail_facts(sid, cap, model_tail_lines=model_tail_lines)
+    # This view has no use for bridge facts, so bridge_scan_lines=0 keeps
+    # the walk's early exit exactly as cheap as before Slice 1 added the
+    # bridge search (0 means the bridge window is never "in", so the break
+    # clause is satisfied immediately and bridge_seen/bridge_since default).
+    facts = transcript_source.read_tail_facts(
+        sid, cap, model_tail_lines=model_tail_lines, bridge_scan_lines=0
+    )
     return {
         "session_id": sid,
         "sid8": sid[:8],
@@ -1212,8 +1221,11 @@ def _enrich_discoverable(candidates, config) -> list[dict]:
     model_tail_lines = config.get("model_tail_lines")
     enriched = []
     for t in candidates:
+        # No use for bridge facts here either; bridge_scan_lines=0 keeps
+        # this walk's early exit as cheap as before Slice 1 (see
+        # _untracked_view's comment on the same pattern).
         facts = transcript_source.read_tail_facts(
-            t["session_id"], cap, model_tail_lines=model_tail_lines
+            t["session_id"], cap, model_tail_lines=model_tail_lines, bridge_scan_lines=0
         )
         cwd = transcript_source.read_cwd(t["session_id"]) or t["cwd"]
         enriched.append({
@@ -1574,6 +1586,7 @@ def _whoami_card(config=None) -> dict | None:
         tail_facts=_tail_facts_extractor(config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
+        bridge_stale_records=config.get("bridge_stale_records"),
     )
     sessions = payload.get("sessions") or []
     return sessions[0] if sessions else None
@@ -2026,6 +2039,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             tail_facts=extract,
             context_tight_fraction=config.get("context_tight_fraction"),
             context_compact_fraction=config.get("context_compact_fraction"),
+            bridge_stale_records=config.get("bridge_stale_records"),
         )
         contracts.validate_sessions_payload(payload)
         return payload

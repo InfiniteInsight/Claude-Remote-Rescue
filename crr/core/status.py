@@ -26,6 +26,7 @@ from collections import Counter
 from typing import Any, Callable, Mapping, Sequence
 
 from crr.core import contracts
+from crr.core.bridge import bridge_state as _bridge_state
 from crr.core.classifier import classify
 from crr.core.context_pressure import pressure as _pressure
 from crr.core.ports import BootIdentity, ProcessProbe
@@ -33,7 +34,8 @@ from crr.core.ports import BootIdentity, ProcessProbe
 
 def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
     return {"last_prompt": "", "model": "", "last_active": "",
-            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0}
+            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
+            "bridge_seen": False, "bridge_since": 0}
 
 
 class _MemoTtyProbe:
@@ -66,6 +68,7 @@ def assemble_sessions(
     tail_facts: Callable[[Mapping[str, Any]], dict[str, Any]] = _empty_facts,
     context_tight_fraction: float = 0.7,
     context_compact_fraction: float = 1.0,
+    bridge_stale_records: int = 150,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -78,6 +81,13 @@ def assemble_sessions(
     a card's pressure moves from "ok" to "tight" to "will-compact"; the
     caller (cli) reads these from config so this stays pure core with no
     config import (audit: core never imports adapters/cli).
+
+    ``bridge_stale_records`` is the same kind of injected threshold, for
+    the dropped-Remote-Control badge (spec 2026-08-07): the caller reads
+    ``bridge_stale_records`` from config and passes it in here, and
+    ``bridge.bridge_state`` turns it plus ``tail_facts``'s
+    ``bridge_seen``/``bridge_since`` into the card's ``remote_control``
+    value.
     """
     sessions = [e for e in entries if e.get("claude") is not None]
     sid_counts = Counter(e["claude"]["session_id"] for e in sessions)
@@ -115,6 +125,11 @@ def assemble_sessions(
                     facts["model"],
                     tight=context_tight_fraction,
                     compact=context_compact_fraction,
+                ),
+                "remote_control": _bridge_state(
+                    facts["bridge_since"],
+                    facts["bridge_seen"],
+                    stale_after=bridge_stale_records,
                 ),
             }
         )

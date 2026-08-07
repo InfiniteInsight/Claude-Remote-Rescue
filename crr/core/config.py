@@ -43,7 +43,12 @@ from typing import Any, Mapping
 # v11: added remote_control (every claude launch/revival enables Claude
 # Code's Remote Control by default, so a session stays reachable from the
 # phone; see crr.core.reviver.revival_argv and the shims)
-CONFIG_DEFAULTS_VERSION = 11
+# v12: added remote_control_watch / remote_control_autokick /
+# bridge_stale_records / bridge_scan_lines (spec 2026-08-07 — dropped-
+# Remote-Control watchdog, Slice 1: detection + the global kill switch; see
+# crr.core.bridge and crr.adapters.transcript_source's bridge_seen/
+# bridge_since)
+CONFIG_DEFAULTS_VERSION = 12
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -141,6 +146,24 @@ DEFAULTS: dict[str, Any] = {
     "takeover_idle_seconds": 20.0,       # transcript quiet + clean tail this long
     "takeover_max_wait_seconds": 180.0,  # give up (refuse, never kill) after this
     "takeover_poll_seconds": 2.0,        # wait-loop poll cadence
+    # Dropped-Remote-Control watchdog (spec 2026-08-07, Part B). Detects a
+    # session whose mobile Remote Control link has gone quiet while claude
+    # keeps working locally, by counting transcript records since the
+    # newest `bridge-session` marker. See crr.core.bridge.bridge_state.
+    "remote_control_watch": True,      # do the detection and show the badge (not yet wired — a later slice's on/off gate)
+    "remote_control_autokick": True,   # GLOBAL hard switch for auto-kicking a dropped session (consumed from Slice 2's watchdog step)
+    # Threshold (records, not seconds — see crr.core.bridge's docstring for
+    # why): measured across the 20 most recent real transcripts, the worst
+    # LEGITIMATE gap between consecutive bridge markers was 67 records.
+    # 150 is a >2x margin over that — a session past it has produced ~4
+    # turns' worth of records with no marker, not a slow-but-normal gap.
+    "bridge_stale_records": 150,
+    # How far back the bridge-marker search walks before giving up and
+    # reporting "unseen" (never a fabricated drop). Same shape as
+    # `model_tail_lines`/`reply_tail_lines`: measured, the newest marker
+    # sits 0-11 records from the tail on a healthy session and never more
+    # than 67 behind, so 400 covers the worst observed case with headroom.
+    "bridge_scan_lines": 400,
 }
 
 
