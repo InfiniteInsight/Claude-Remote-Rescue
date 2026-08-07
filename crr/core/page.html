@@ -45,8 +45,26 @@
   .card {
     border: 1px solid #262b36; border-radius: 10px; padding: 12px 14px; background: #161a22;
   }
+  /* Duplicate edge: the colour is derived per duplicate_group (colorFor),
+     so two cards of the SAME conversation share a hue and different
+     duplicate pairs don't. A fixed colour made every duplicate look
+     related. Uncertain groups override to amber — the weaker claim wins
+     over the identity hue. */
+  /* A collapsed stack sits on a faint offset "pile" so it reads as more
+     than one card without rendering them all. */
+  .dup-stack { position: relative; }
+  .dup-stack:not(.open) > .card {
+    box-shadow: 3px 3px 0 -1px #12161d, 4px 4px 0 -1px #2f3745,
+                7px 7px 0 -1px #12161d, 8px 8px 0 -1px #262b36;
+  }
+  .dup-stack.open { display: grid; gap: 10px; }
+  .dup-toggle {
+    margin-top: 6px; font-size: 11px; padding: 3px 10px; color: #8a93a2;
+    background: transparent; border: 1px dashed #2f3745;
+  }
+  .dup-stack.open .dup-toggle { justify-self: start; }
   .card.dup { border-left: 3px solid #6f7cf5; }
-  .card.dup-uncertain { border-left-color: #e0a53b; }
+  .card.dup-uncertain { border-left-color: #e0a53b !important; }
   .card .top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .id { font-family: ui-monospace, monospace; font-size: 13px; color: #b9c1cf; }
   .badge {
@@ -466,6 +484,11 @@ function renderCard(s, uncertain, groupColor, latest) {
   var isDup = !!s.duplicate_group;
   var isUncertain = isDup && uncertain[s.duplicate_group];
   var card = el("div", "card" + (isDup ? (isUncertain ? " dup dup-uncertain" : " dup") : ""));
+  if (isDup && !isUncertain) {
+    // Same conversation -> same hue; different duplicate groups -> different
+    // hues. (Uncertain keeps amber via the CSS override.)
+    card.style.borderLeftColor = colorFor(s.duplicate_group);
+  }
   var top = el("div", "top");
   if (groupColor) {  // a group dot, distinct from the duplicate left-border channel
     var gd = el("span", "gdot");
@@ -652,6 +675,66 @@ function action(op, pid, btn) {
 
 // render(payload) on a poll; render(null) to re-apply sort/group to the cached
 // sessions without a fetch (control changes).
+// Which duplicate stacks the user has fanned open (by duplicate_group).
+// Kept across polls so a 5s refresh doesn't collapse what you just opened.
+var expandedDups = {};
+
+// Cards of the SAME conversation are collapsed into one stack: several
+// identical-looking cards is noise, and the pile itself is the signal
+// ("this conversation has 3 entries"). Click to fan out, click to restack.
+// The card shown on top is the one you would act on: a live/ghost entry
+// before a crashed one, then most-recent.
+function stackTop(members) {
+  var rank = { live: 0, ghost: 1, crashed: 2 };
+  return members.slice().sort(function (a, b) {
+    var d = (rank[a.state] === undefined ? 9 : rank[a.state]) -
+            (rank[b.state] === undefined ? 9 : rank[b.state]);
+    if (d) return d;
+    return recencyMs(b) - recencyMs(a);
+  })[0];
+}
+
+function renderStacked(list, sessions, uncertain, groupColor, latest) {
+  var order = [], byDup = {};
+  sessions.forEach(function (s) {
+    var k = s.duplicate_group;
+    if (!k) { order.push({ single: s }); return; }
+    if (!byDup[k]) { byDup[k] = []; order.push({ dup: k }); }
+    byDup[k].push(s);
+  });
+  order.forEach(function (item) {
+    if (item.single) {
+      list.appendChild(renderCard(item.single, uncertain, groupColor, latest));
+      return;
+    }
+    var members = byDup[item.dup];
+    if (members.length === 1) {   // "duplicate" of something filtered out
+      list.appendChild(renderCard(members[0], uncertain, groupColor, latest));
+      return;
+    }
+    var open = !!expandedDups[item.dup];
+    var wrap = el("div", "dup-stack" + (open ? " open" : ""));
+    var shown = open ? members : [stackTop(members)];
+    shown.forEach(function (s) {
+      wrap.appendChild(renderCard(s, uncertain, groupColor, latest));
+    });
+    var toggle = el("button", "dup-toggle");
+    var hidden = members.length - 1;
+    toggle.textContent = open
+      ? ("collapse " + members.length + " copies")
+      : ("+" + hidden + (hidden === 1 ? " more copy" : " more copies"));
+    toggle.title = open
+      ? "Restack these cards"
+      : (members.length + " journal entries for this same conversation — fan them out");
+    toggle.addEventListener("click", function () {
+      expandedDups[item.dup] = !open;
+      render(null);   // re-render from cache; no fetch
+    });
+    wrap.appendChild(toggle);
+    list.appendChild(wrap);
+  });
+}
+
 function render(payload) {
   if (payload) lastSessions = (payload.sessions) || [];
   var total = lastSessions;
@@ -676,7 +759,7 @@ function render(payload) {
   var latest = latestPerCwd(total);
   var sorted = sortSessions(visible);
   if (groupKey === "none") {
-    sorted.forEach(function (s) { list.appendChild(renderCard(s, uncertain, null, latest)); });
+    renderStacked(list, sorted, uncertain, null, latest);
     return;
   }
   // Group, preserving group order by first appearance in the sorted list.
@@ -694,7 +777,7 @@ function render(payload) {
     var lbl = el("span"); lbl.textContent = k; head.appendChild(lbl);  // cwd/host -> textContent
     var cnt = el("span", "gcount"); cnt.textContent = "(" + groups[k].length + ")"; head.appendChild(cnt);
     list.appendChild(head);
-    groups[k].forEach(function (s) { list.appendChild(renderCard(s, uncertain, color, latest)); });
+    renderStacked(list, groups[k], uncertain, color, latest);
   });
 }
 
