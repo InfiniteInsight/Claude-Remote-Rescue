@@ -122,6 +122,34 @@ revival path's reasoning intact.
   to get the badge without the restart.
 - `bridge_stale_records` (int, default **150**) — the measured threshold.
 
+### Turning auto-kick off — from the phone, not just the machine
+
+`config.toml` is only editable on the host. That is the wrong place for the
+kill switch on the one behaviour in crr that restarts a live session by
+itself: the moment you most want it off is when it is misfiring while you
+are away from the machine.
+
+So **auto-kick gets a toggle in the dashboard's Settings modal**, alongside
+the excluded-directories editor, using the same mechanism that already
+ships:
+
+- Stored in the dashboard-owned JSON in the state dir (the store behind
+  `crr.core.exclusions` generalises to a small settings file — the web must
+  never rewrite the user's hand-maintained TOML, since the stdlib has no
+  TOML writer and a generated file would lose their comments).
+- Read as: `config.toml` supplies the default, the dashboard-managed value
+  overrides it when present. Same layering as the exclusion list.
+- Served/written through the existing `/api/exclusions`-style endpoint
+  pattern: host allowlist, JSON content-type gate, atomic write, validated
+  type.
+- The Settings row states plainly what it does and that turning it off
+  keeps the badge — so the diagnosis stays even when the action stops.
+
+A CLI equivalent (`crr config --set remote_control_autokick=false`) is
+explicitly NOT part of this: crr does not write `config.toml`, and adding a
+second writer for it is out of scope. Editing the file by hand still works
+and remains the machine-side path.
+
 ## Risks accepted
 
 - **`bridge-session` is undocumented internal format** and may change. Like
@@ -137,6 +165,7 @@ revival path's reasoning intact.
 ## Non-goals
 
 - Watching a port (none exists).
+- A CLI writer for `config.toml` (crr does not write that file).
 - Reconnecting without restarting claude — no local mechanism exists to
   re-establish the bridge in place.
 - Acting on CRASHED or GHOST sessions (that is the reviver's job).
@@ -152,3 +181,6 @@ revival path's reasoning intact.
   `dropped` but mid-turn session is NOT kicked this pass; an `off` session
   is never kicked; a CRASHED session is untouched by this path;
   `remote_control_autokick=false` shows the badge and kicks nothing.
+- Settings toggle: the dashboard-managed value overrides the config default;
+  absent means fall back to config; a bad stored value degrades to the
+  config default rather than raising; turning it off leaves the badge.
