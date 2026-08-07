@@ -822,29 +822,3 @@ def test_rescue_check_is_silent_no_op_when_crr_binary_is_absent(shell, tmp_path,
     assert result.returncode == 0, result.stderr
     assert "/nonexistent/crr" not in result.stderr
     assert "rescue-check" not in result.stderr
-
-
-# --- tab title: the shim names the terminal tab while claude runs --------
-
-def _shim_text(name):
-    from importlib import resources
-    return resources.files("crr.shims").joinpath(name).read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize("shim", ["crr.bash", "crr.zsh", "crr.fish"])
-def test_shim_sets_the_tab_title_before_launching_claude(shim):
-    text = _shim_text(shim)
-    assert "_crr_set_tab" in text
-    # emits an OSC title sequence
-    assert "033]0;" in text
-    # and asks crr for the label rather than composing it itself
-    assert "tab-title --pid" in text
-
-
-@pytest.mark.parametrize("shim", ["crr.bash", "crr.zsh", "crr.fish"])
-def test_shim_tab_title_never_breaks_a_launch(shim):
-    # stderr suppressed, so a missing/failed crr is silent
-    text = _shim_text(shim)
-    idx = text.index("_crr_set_tab")
-    body = text[idx:idx + 400]
-    assert "2>/dev/null" in body

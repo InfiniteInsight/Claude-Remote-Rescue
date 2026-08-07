@@ -38,37 +38,3 @@ def test_gives_up_after_a_bounded_number_of_hops():
     # A pathological deep chain must terminate.
     parent = _chain({i: i + 1 for i in range(0, 500)})
     assert whoami.journaled_ancestor(0, {9999}, parent) is None
-
-
-# --- tab title (shim sets the terminal tab while claude runs) -------------
-
-from crr.core import whoami as _w
-
-
-def test_tab_title_is_dir_then_title():
-    assert _w.tab_title("/home/evan/projects/Claude-Remote-Rescue", "Implement project specs") \
-        == "Claude-Remote-Rescue · Implement project specs"
-
-
-def test_tab_title_falls_back_to_dir_alone_before_a_title_exists():
-    # A fresh session has no ai-title yet; the tab still names the project.
-    assert _w.tab_title("/home/evan/projects/Offramp", "") == "Offramp"
-
-
-def test_tab_title_handles_a_root_or_empty_cwd():
-    assert _w.tab_title("/", "Some title") == "/ · Some title"
-    assert _w.tab_title("", "Some title") == "Some title"
-    assert _w.tab_title("", "") == ""
-
-
-def test_tab_title_strips_control_characters():
-    # The string is emitted inside an OSC escape; a stray ESC or BEL in a
-    # title would break out of the sequence and corrupt the terminal.
-    out = _w.tab_title("/home/u/proj", "bad\x1b]0;pwned\x07title\n")
-    assert "\x1b" not in out and "\x07" not in out and "\n" not in out
-    assert out.startswith("proj · ")
-
-
-def test_tab_title_is_length_capped():
-    long = "x" * 500
-    assert len(_w.tab_title("/home/u/proj", long)) <= _w.TAB_TITLE_CAP

@@ -179,13 +179,6 @@ def _build_parser() -> argparse.ArgumentParser:
     hk.add_argument("event", choices=["session-start"])
     hk.set_defaults(func=_cmd_hook)
 
-    tt = sub.add_parser(
-        "tab-title",
-        help="[shim] print this session's terminal-tab label (empty if disabled)",
-    )
-    tt.add_argument("--pid", type=int, required=True, help="the shell's pid")
-    tt.set_defaults(func=_cmd_tab_title)
-
     adp = sub.add_parser(
         "adopt",
         help="adopt a discoverable session id (--takeover stops a still-live one first)",
@@ -1596,37 +1589,6 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     print(f"crr: this session is tracked as \"{label}\" "
           f"(sid {card['sid8']}, pid {card['pid']}, {card['cwd']}). "
           "Find it on the crr dashboard by that name.")
-    return 0
-
-
-def _cmd_tab_title(args: argparse.Namespace) -> int:
-    """[shim] The tab label for this shell's session, or nothing.
-
-    Printed by the shim immediately before it launches claude, so the tab
-    names the conversation for as long as claude runs (the shell's own
-    title takes back over at the next prompt — deliberately not fought).
-    Prints nothing when disabled, untracked, or on any error: a tab label
-    must never be able to break a claude launch.
-    """
-    try:
-        config = _load_config()
-        if not config.get("tab_title"):
-            return 0
-        entry = JournalStore(state_dir.state_dir()).read(args.pid)
-        claude = entry.get("claude") or {}
-        sid = claude.get("session_id")
-        title = ""
-        if sid:
-            facts = transcript_source.read_tail_facts(
-                sid, config.get("last_prompt_display_cap"),
-                model_tail_lines=config.get("model_tail_lines"),
-            )
-            title = str(facts.get("title") or facts.get("slug") or "")
-        label = whoami.tab_title(entry.get("cwd", ""), title)
-        if label:
-            print(label)
-    except Exception:
-        return 0  # never break a launch over a cosmetic label
     return 0
 
 

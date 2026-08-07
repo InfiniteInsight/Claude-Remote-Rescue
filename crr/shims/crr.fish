@@ -18,19 +18,6 @@ function _crr
     "$_CRR_BIN" $argv 2>/dev/null
 end
 
-# Name the terminal tab after the session while claude runs ("<dir> ·
-# <title>"). Set just before each launch: the shell's own title takes back
-# over at the next prompt, which is deliberate — fighting the prompt would
-# mean writing escapes to a tty claude is drawing on. Silent no-op when
-# disabled, untracked, or crr is missing (a tab label must never break a
-# launch).
-function _crr_set_tab
-    set -l _t (_crr tab-title --pid $fish_pid 2>/dev/null)
-    if test -n "$_t"
-        printf '\033]0;%s\007' "$_t"
-    end
-end
-
 function _crr_host
     if set -q TMUX
         echo -n tmux
@@ -118,13 +105,11 @@ function claude
         else
             _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
         end
-        _crr_set_tab
         command claude $argv
     else
         set -l _crr_sid (_crr claude-launch --pid $fish_pid)
         if test -n "$_crr_sid"
             set _cur_sid $_crr_sid
-            _crr_set_tab
             command claude --session-id $_crr_sid $argv
         else
             command claude $argv
@@ -144,7 +129,6 @@ function claude
         if test "$_flag[1]" = relaunch; and test -n "$_flag[2]"
             set _cur_sid $_flag[2]
             set _crashes 0
-            _crr_set_tab
             command claude --resume $_flag[2]
             set _code $status
             continue

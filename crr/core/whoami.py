@@ -22,32 +22,6 @@ from typing import Callable, Iterable
 # rather than hang.
 MAX_HOPS = 64
 
-# Terminal tabs are narrow (often <20 visible chars with several open), and
-# the string is emitted inside an escape sequence, so it is capped rather
-# than left unbounded.
-TAB_TITLE_CAP = 120
-
-
-def tab_title(cwd: str, title: str) -> str:
-    """The terminal tab label for a session: ``<dir> · <title>``.
-
-    The directory comes first deliberately: it is short, stable, and (per
-    the user) usually what a tab was manually named anyway, so it survives
-    truncation in a narrow tab while the title fills whatever space is
-    left. A session with no ``ai-title`` yet — every session for its first
-    few turns — falls back to the directory alone rather than showing a
-    placeholder.
-
-    Control characters are stripped: this string is emitted inside an OSC
-    escape sequence, and a stray ESC/BEL/newline in a title would terminate
-    the sequence early and corrupt the terminal.
-    """
-    base = cwd.rstrip("/").rsplit("/", 1)[-1] if cwd.rstrip("/") else (cwd or "")
-    clean = "".join(ch for ch in title if ch.isprintable())
-    clean = " ".join(clean.split())
-    parts = [p for p in (base, clean) if p]
-    return " · ".join(parts)[:TAB_TITLE_CAP]
-
 
 def journaled_ancestor(
     pid: int, journaled_pids: Iterable[int], parent_of: Callable[[int], int | None]
