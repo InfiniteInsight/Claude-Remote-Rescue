@@ -150,7 +150,7 @@ DEFAULTS: dict[str, Any] = {
     # session whose mobile Remote Control link has gone quiet while claude
     # keeps working locally, by counting transcript records since the
     # newest `bridge-session` marker. See crr.core.bridge.bridge_state.
-    "remote_control_watch": True,      # do the detection and show the badge (not yet wired — a later slice's on/off gate)
+    "remote_control_watch": True,      # do the detection and show the badge; also gates the watchdog step (cli._kick_dropped_bridges)
     "remote_control_autokick": True,   # GLOBAL hard switch for auto-kicking a dropped session (consumed from Slice 2's watchdog step)
     # Threshold (records, not seconds — see crr.core.bridge's docstring for
     # why): measured across the 20 most recent real transcripts, the worst

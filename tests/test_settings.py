@@ -61,6 +61,44 @@ def test_global_override_true_beats_a_false_config_default():
 
 
 # --------------------------------------------------------------------------
+# autokick_card_state — the card-facing 3-state view (spec 2026-08-07,
+# Slice 3), distinguishing "global-off" from a plain per-session "off" so
+# the dashboard toggle knows when to render disabled-with-reason.
+# --------------------------------------------------------------------------
+
+def test_card_state_global_off_via_explicit_override():
+    assert settings.autokick_card_state(
+        config_default=True, global_override=False, session_override=True
+    ) == "global-off"
+
+
+def test_card_state_global_off_via_config_default():
+    assert settings.autokick_card_state(
+        config_default=False, global_override=None, session_override=True
+    ) == "global-off"
+
+
+def test_card_state_on_when_global_on_and_session_unset():
+    assert settings.autokick_card_state(
+        config_default=True, global_override=None, session_override=None
+    ) == "on"
+
+
+def test_card_state_off_when_session_opted_out_but_global_still_on():
+    # A DIFFERENT reason from global-off: the toggle must stay live here,
+    # because flipping it back on works immediately (global is fine).
+    assert settings.autokick_card_state(
+        config_default=True, global_override=None, session_override=False
+    ) == "off"
+
+
+def test_card_state_on_when_session_opted_in():
+    assert settings.autokick_card_state(
+        config_default=True, global_override=True, session_override=True
+    ) == "on"
+
+
+# --------------------------------------------------------------------------
 # SettingsStore — round-trip, degrade-to-default, bounds.
 # --------------------------------------------------------------------------
 

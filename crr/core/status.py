@@ -26,6 +26,7 @@ from collections import Counter
 from typing import Any, Callable, Mapping, Sequence
 
 from crr.core import contracts
+from crr.core import settings as _settings
 from crr.core.bridge import bridge_state as _bridge_state
 from crr.core.classifier import classify
 from crr.core.context_pressure import pressure as _pressure
@@ -69,6 +70,9 @@ def assemble_sessions(
     context_tight_fraction: float = 0.7,
     context_compact_fraction: float = 1.0,
     bridge_stale_records: int = 150,
+    autokick_config_default: bool = True,
+    autokick_global_override: bool | None = None,
+    autokick_session_overrides: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -88,7 +92,26 @@ def assemble_sessions(
     ``bridge.bridge_state`` turns it plus ``tail_facts``'s
     ``bridge_seen``/``bridge_since`` into the card's ``remote_control``
     value.
+
+    ``autokick_config_default``/``autokick_global_override``/
+    ``autokick_session_overrides`` are the same injection pattern (Slice 3):
+    the cli reads ``config.toml``'s ``remote_control_autokick`` and the
+    dashboard-managed ``SettingsStore`` (both filesystem reads — core must
+    not do either) and passes the resolved values in here, where
+    ``settings.autokick_card_state`` turns them into the card's ``autokick``
+    field (``"on"``/``"off"``/``"global-off"`` — see
+    ``contracts.AUTOKICK_STATES``).
+
+    Known gap, accepted for this slice: when the dashboard's settings file
+    is unreadable, ``SettingsStore.is_degraded()`` is True and the watchdog
+    auto-kicks NOTHING (fail-closed, Slice 2) — but that degraded state is
+    not plumbed into this function, so a card can still read ``autokick:
+    "on"`` while nothing is actually being kicked. The Settings modal
+    surfaces ``is_degraded()`` directly (Slice 3 deliverable #2) so the user
+    sees the real reason there; teaching every card about it too was judged
+    out of scope for this slice.
     """
+    autokick_session_overrides = autokick_session_overrides or {}
     sessions = [e for e in entries if e.get("claude") is not None]
     sid_counts = Counter(e["claude"]["session_id"] for e in sessions)
 
@@ -130,6 +153,11 @@ def assemble_sessions(
                     facts["bridge_since"],
                     facts["bridge_seen"],
                     stale_after=bridge_stale_records,
+                ),
+                "autokick": _settings.autokick_card_state(
+                    config_default=autokick_config_default,
+                    global_override=autokick_global_override,
+                    session_override=autokick_session_overrides.get(sid),
                 ),
             }
         )

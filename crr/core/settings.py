@@ -72,6 +72,30 @@ def autokick_for(
     return session_override
 
 
+def autokick_card_state(
+    *, config_default: bool, global_override: bool | None, session_override: bool | None,
+) -> str:
+    """The session card's ``autokick`` field (spec 2026-08-07, Slice 3):
+    ``"on"`` / ``"off"`` / ``"global-off"`` — see ``contracts.AUTOKICK_STATES``
+    for what each means and why a bool is not enough.
+
+    Layered directly on ``autokick_for``: the effective yes/no decision is
+    unchanged, this only adds the distinction the per-session dashboard
+    toggle needs to render disabled-with-reason instead of a lying "on" —
+    when the GLOBAL switch resolves off, the reason is different (and more
+    urgent — the panic switch itself is off) from a session that opted out
+    while global stays on.
+    """
+    global_resolved = config_default if global_override is None else global_override
+    if not global_resolved:
+        return "global-off"
+    return "on" if autokick_for(
+        config_default=config_default,
+        global_override=global_override,
+        session_override=session_override,
+    ) else "off"
+
+
 def _normalize_sessions(value: Any) -> dict[str, bool]:
     """Validate a stored/incoming sessions mapping, or raise ``SettingsError``.
 

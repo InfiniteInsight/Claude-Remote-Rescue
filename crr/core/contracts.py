@@ -23,7 +23,8 @@ from typing import Any, Iterable, Mapping
 JOURNAL_SCHEMA_VERSION = 1
 # v4 adds `last_active` (T-A — true recency) + `context_pressure` (F2 — compaction badge)
 # v7 adds `remote_control` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 1)
-SESSIONS_CONTRACT_VERSION = 7
+# v8 adds `autokick` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 3)
+SESSIONS_CONTRACT_VERSION = 8
 DIAGNOSTICS_CONTRACT_VERSION = 3  # v3 adds `params` — the generating caps/lookback/timeout
 ARCHIVE_CONTRACT_VERSION = 1
 
@@ -39,6 +40,20 @@ CONTEXT_PRESSURE_LEVELS = ("ok", "tight", "will-compact")
 # Remote-Control bridge state (spec 2026-08-07 — dropped-Remote-Control
 # watchdog): "off" = never enabled; "ok"/"dropped" from crr.core.bridge.
 REMOTE_CONTROL_STATES = ("off", "ok", "dropped")
+# The per-session auto-kick toggle's resolved state (spec 2026-08-07,
+# Slice 3), from crr.core.settings.autokick_card_state. THREE values, not
+# a bool, because the dashboard toggle must distinguish two different
+# reasons a session would not be auto-kicked:
+#   "on"         - this session would be auto-kicked (global is on, and
+#                  this session either opted in or left it unset).
+#   "off"        - this session opted out, but the global switch is ON —
+#                  the per-session toggle stays live; flipping it back on
+#                  works immediately.
+#   "global-off" - the GLOBAL hard switch is off, so nothing is
+#                  auto-kicked regardless of this session's own value. The
+#                  per-session toggle must render DISABLED with this
+#                  reason, never a lying "on" it cannot honour.
+AUTOKICK_STATES = ("on", "off", "global-off")
 
 # --------------------------------------------------------------------------
 # Canonical key lists.
@@ -79,6 +94,7 @@ SESSION_CARD_KEYS = (
     "last_active",
     "context_pressure",
     "remote_control",
+    "autokick",
 )
 SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
 
@@ -244,6 +260,7 @@ def validate_session_card(card: Any) -> None:
     _require_type(card["last_active"], str, "session 'last_active'")
     _require_enum(card["context_pressure"], CONTEXT_PRESSURE_LEVELS, "session 'context_pressure'")
     _require_enum(card["remote_control"], REMOTE_CONTROL_STATES, "session 'remote_control'")
+    _require_enum(card["autokick"], AUTOKICK_STATES, "session 'autokick'")
 
 
 def validate_sessions_payload(payload: Any) -> None:

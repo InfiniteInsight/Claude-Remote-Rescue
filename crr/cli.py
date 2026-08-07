@@ -493,6 +493,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             _verify_guessed_sids(store, now)
 
     scan = store.scan()
+    settings_store = settings.SettingsStore(sd)
     payload = status.assemble_sessions(
         scan.entries,
         boot,
@@ -501,6 +502,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
         bridge_stale_records=config.get("bridge_stale_records"),
+        autokick_config_default=config.get("remote_control_autokick"),
+        autokick_global_override=settings_store.read_global_autokick(),
+        autokick_session_overrides=settings_store.read_session_overrides(),
     )
     # Validate our own output before emitting it (the P7 validator doubles
     # as a debug guard — both surfaces validate their own output; the web
@@ -1717,12 +1721,16 @@ def _whoami_card(config=None) -> dict | None:
     except NotImplementedError:
         return None
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    settings_store = settings.SettingsStore(sd)
     payload = status.assemble_sessions(
         [e for e in scan.entries if e["pid"] == shell_pid], boot, probe,
         tail_facts=_tail_facts_extractor(config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
         bridge_stale_records=config.get("bridge_stale_records"),
+        autokick_config_default=config.get("remote_control_autokick"),
+        autokick_global_override=settings_store.read_global_autokick(),
+        autokick_session_overrides=settings_store.read_session_overrides(),
     )
     sessions = payload.get("sessions") or []
     return sessions[0] if sessions else None
@@ -1946,6 +1954,8 @@ def make_web_handler(
     recall_provider: Callable[[str, str | None], dict] | None = None,
     exclusions_provider: Callable[[], dict] | None = None,
     exclusions_writer: Callable[[object], dict] | None = None,
+    settings_provider: Callable[[], dict] | None = None,
+    settings_writer: Callable[[object], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -1975,6 +1985,8 @@ def make_web_handler(
                 recall_provider=recall_provider,
                 exclusions_provider=exclusions_provider,
                 exclusions_writer=exclusions_writer,
+                settings_provider=settings_provider,
+                settings_writer=settings_writer,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -2168,6 +2180,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         if _guessed_upgradable(store, now):
             with mutation_lock(sd):
                 _verify_guessed_sids(store, now)
+        settings_store = settings.SettingsStore(sd)
         payload = status.assemble_sessions(
             store.scan().entries,
             boot,
@@ -2176,6 +2189,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
             context_tight_fraction=config.get("context_tight_fraction"),
             context_compact_fraction=config.get("context_compact_fraction"),
             bridge_stale_records=config.get("bridge_stale_records"),
+            autokick_config_default=config.get("remote_control_autokick"),
+            autokick_global_override=settings_store.read_global_autokick(),
+            autokick_session_overrides=settings_store.read_session_overrides(),
         )
         contracts.validate_sessions_payload(payload)
         return payload
@@ -2261,6 +2277,22 @@ def _cmd_web(args: argparse.Namespace) -> int:
             # _web_takeover uses max_wait=0.0 (non-blocking) and manages its
             # own mutation_lock for the kill, like _adopt — do NOT wrap it.
             return _web_takeover(store, sd, config, controller, flags, sid)
+        if op in ("autokick-on", "autokick-off"):
+            # Pins ONE session's auto-kick opt-in/opt-out (spec 2026-08-07,
+            # Slice 3). Writes settings.json directly — no mutation_lock:
+            # this file is disjoint from the journal/archive state that
+            # lock protects, and SettingsStore's write is already atomic
+            # (tmp file + rename). The value is written even when the
+            # global switch currently resolves off: per-session overrides
+            # must SURVIVE a global off/on cycle (spec's truth table), so
+            # this is not gated on the current global state — only the
+            # dashboard's disabled-toggle rendering is.
+            value = op == "autokick-on"
+            try:
+                settings.SettingsStore(sd).write_session_autokick(sid, value)
+            except settings.SettingsError as exc:
+                return False, str(exc)
+            return True, f"auto-kick {'enabled' if value else 'disabled'} for this session"
         # Same mutation lock as action_provider — a sid-keyed op racing the
         # pid-keyed ops or the revive timer must not interleave.
         with mutation_lock(sd):
@@ -2293,6 +2325,36 @@ def _cmd_web(args: argparse.Namespace) -> int:
         out = exclusions_provider()
         out["managed"] = managed
         return out
+
+    def settings_provider() -> dict:
+        # The Settings modal's global auto-kick row (spec 2026-08-07,
+        # Slice 3), mirroring exclusions_provider's shape: the dashboard's
+        # own stored value plus enough of config.toml's baseline that the
+        # UI can show the resolved outcome without duplicating the
+        # global/session truth table client-side. `degraded` matters more
+        # here than anywhere else in the dashboard: while it is True the
+        # watchdog auto-kicks NOTHING at all (fail-closed, Slice 2's
+        # `_kick_dropped_bridges` guard), and the user — likely on their
+        # phone, away from the machine — needs to see why nothing is
+        # reconnecting rather than just a `resolved: true` that quietly
+        # isn't being honoured.
+        settings_store = settings.SettingsStore(sd)
+        config_default = config.get("remote_control_autokick")
+        global_override = settings_store.read_global_autokick()
+        resolved = config_default if global_override is None else global_override
+        return {
+            "autokick": global_override,
+            "resolved": resolved,
+            "config_default": config_default,
+            "degraded": settings_store.is_degraded(),
+        }
+
+    def settings_writer(value) -> dict:
+        # write_global_autokick raises SettingsError (a ValueError) on
+        # anything but a bool or None — handle_request turns that into a
+        # 400 carrying the message, same contract as exclusions_writer.
+        settings.SettingsStore(sd).write_global_autokick(value)
+        return settings_provider()
 
     def recall_provider(query: str, sid: str | None) -> dict:
         # Lazy GET (never the poll path): print-only transcript search, the
@@ -2332,6 +2394,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         recall_provider=recall_provider,
         exclusions_provider=exclusions_provider,
         exclusions_writer=exclusions_writer,
+        settings_provider=settings_provider,
+        settings_writer=settings_writer,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),
