@@ -18,6 +18,19 @@ _crr() {
   "$_CRR_BIN" "$@" 2>/dev/null
 }
 
+# Name the terminal tab after the session while claude runs ("<dir> ·
+# <title>"). Set just before each launch: the shell's own title takes back
+# over at the next prompt, which is deliberate — fighting the prompt would
+# mean writing escapes to a tty claude is drawing on. Silent no-op when
+# disabled, untracked, or crr is missing (a tab label must never break a
+# launch).
+_crr_set_tab() {
+  local _t
+  _t="$(_crr tab-title --pid $$ 2>/dev/null)"
+  [ -n "$_t" ] && printf '\033]0;%s\007' "$_t"
+  return 0
+}
+
 _crr_host() {
   if [ -n "$TMUX" ]; then printf tmux
   elif [ -n "$SSH_TTY" ] || [ -n "$SSH_CONNECTION" ]; then printf ssh
@@ -97,12 +110,14 @@ claude() {
     else
       _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
     fi
+    _crr_set_tab
     command claude "$@"
   else
     local _crr_sid
     _crr_sid="$(_crr claude-launch --pid "$$")"
     if [ -n "$_crr_sid" ]; then
       _cur_sid="$_crr_sid"
+      _crr_set_tab
       command claude --session-id "$_crr_sid" "$@"
     else
       command claude "$@"
@@ -122,6 +137,7 @@ claude() {
     if [ "$_kind" = relaunch ] && [ -n "$_fsid" ]; then
       _cur_sid="$_fsid"
       _crashes=0
+      _crr_set_tab
       command claude --resume "$_fsid"
       _code=$?
       continue

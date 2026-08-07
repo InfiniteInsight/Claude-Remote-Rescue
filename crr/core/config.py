@@ -36,11 +36,12 @@ from typing import Any, Mapping
 # v7: added discover_exclude_dirs (keep tool-internal transcript dirs out of
 # discovery; see crr.core.discovery.is_excluded)
 # v8: added reply_tail_lines (bounds the card's "claude said" lookback)
+# v10: added tab_title (shim names the terminal tab after the session)
 # v9: recall_scan_byte_budget defaults to 0 (unlimited) — the raw-bytes
 # prefilter makes a full sweep cheap, so the budget no longer caps coverage;
 # recall_match_cap 5 -> 10 and new recall_per_session_cap so one chatty
 # session can't fill every result slot
-CONFIG_DEFAULTS_VERSION = 10
+CONFIG_DEFAULTS_VERSION = 11
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -91,6 +92,10 @@ DEFAULTS: dict[str, Any] = {
     # 4-65 records before the prompt, and the prompt itself up to ~124 from
     # the tail — 400 covers both with headroom, and an honest "" beyond it.
     "reply_tail_lines": 400,
+    # Shim sets the terminal tab to "<dir> · <session title>" just before
+    # launching claude, so a tab names the conversation while it runs. Set
+    # false to leave your terminal's own title alone.
+    "tab_title": True,
     # context-pressure badge (Slice A, F2; audit P5): fraction of a model's
     # (prior, unverified for most models) context window at which a session
     # is "tight" vs. expected to compact on revive. See
