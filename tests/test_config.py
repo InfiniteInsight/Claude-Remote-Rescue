@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 11
+    assert cfg.CONFIG_DEFAULTS_VERSION == 13
 
 
 def test_context_pressure_fraction_defaults():
@@ -136,6 +136,30 @@ def test_takeover_defaults():
     assert cfg.Config().get("takeover_idle_seconds") == 20.0
     assert cfg.Config().get("takeover_max_wait_seconds") == 180.0
     assert cfg.Config().get("takeover_poll_seconds") == 2.0
+
+
+def test_remote_control_watchdog_defaults():
+    # Part B (dropped-Remote-Control watchdog): detection + kill-switch
+    # priors. bridge_stale_records=150 is a 1.4x margin over the worst
+    # legitimate gap measured across 54 real transcripts / 6991 gaps (107;
+    # spec 2026-08-07, corrected from an earlier 20-transcript sample).
+    assert cfg.DEFAULTS["remote_control_watch"] is True
+    assert cfg.DEFAULTS["remote_control_autokick"] is True
+    assert cfg.DEFAULTS["bridge_stale_records"] == 150  # 1.4x the worst observed gap (107)
+    assert cfg.DEFAULTS["bridge_scan_lines"] == 400
+    assert cfg.Config().get("remote_control_watch") is True
+    assert cfg.Config().get("remote_control_autokick") is True
+    assert cfg.Config().get("bridge_stale_records") == 150
+    assert cfg.Config().get("bridge_scan_lines") == 400
+
+
+def test_bridge_kick_restart_loop_guard_defaults():
+    # Review fix-wave 2026-08-07, FIX 1 (CRITICAL): a failed reconnect must
+    # not become an indefinite restart loop. See crr.core.bridge_kicks.
+    assert cfg.DEFAULTS["bridge_kick_cooldown_seconds"] == 600
+    assert cfg.DEFAULTS["bridge_kick_max_attempts"] == 3
+    assert cfg.Config().get("bridge_kick_cooldown_seconds") == 600
+    assert cfg.Config().get("bridge_kick_max_attempts") == 3
 
 
 def test_no_overrides_all_default():

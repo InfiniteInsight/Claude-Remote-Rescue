@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 38  # v38: key grouped by kind, explanations on hover AND tap
+PAGE_VERSION = 39  # v39: dropped-Remote-Control badge + auto-kick toggles (Slice 3)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -157,7 +157,12 @@ ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", 
 # journals a transcript crr never tracked (T-C discovery); "takeover" stops
 # a still-live claude for that sid, then adopts (non-blocking on the web —
 # see cli._web_takeover), giving `crr adopt --takeover` a dashboard button.
-SID_ACTIONS = ("retrack", "adopt", "takeover")
+# "autokick-on"/"autokick-off" (spec 2026-08-07, Slice 3) pin ONE session's
+# auto-kick opt-in/opt-out, keyed by sid (never pid — see settings.py's
+# module docstring for why). Two explicit ops rather than one op carrying a
+# bool value, matching every other op here: the shape stays "op + sid",
+# nothing more to validate.
+SID_ACTIONS = ("retrack", "adopt", "takeover", "autokick-on", "autokick-off")
 
 
 # Rows per page in the dashboard's discoverable modal.
@@ -200,6 +205,8 @@ def handle_request(
     recall_provider: Callable[[str, str | None], dict] | None = None,
     exclusions_provider: Callable[[], dict[str, Any]] | None = None,
     exclusions_writer: Callable[[Any], dict[str, Any]] | None = None,
+    settings_provider: Callable[[], dict[str, Any]] | None = None,
+    settings_writer: Callable[[Any], dict[str, Any]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -287,6 +294,19 @@ def handle_request(
             if exclusions_provider is None:
                 return _plain(404, "not found")
             return _json(200, exclusions_provider())
+        if path == "/api/settings":
+            # The Settings modal's global auto-kick row (spec 2026-08-07,
+            # Slice 3): the dashboard's stored override (nullable — None
+            # means "unset, fall back to config"), the resolved effective
+            # value, config.toml's own default, and whether the settings
+            # file itself is unreadable — that last one matters because a
+            # degraded file means the watchdog auto-kicks NOTHING regardless
+            # of what this toggle shows (fail-closed, Slice 2), and the user
+            # needs to see why from the phone. Shape is the provider's call;
+            # see cli._cmd_web's settings_provider for the concrete keys.
+            if settings_provider is None:
+                return _plain(404, "not found")
+            return _json(200, settings_provider())
         return _plain(404, "not found")
 
     if method == "POST":
@@ -333,6 +353,30 @@ def handle_request(
                 return _plain(503, "exclusions unavailable")
             try:
                 return _json(200, exclusions_writer(data["dirs"]))
+            except ValueError as exc:
+                return _plain(400, str(exc))
+
+        if path == "/api/settings":
+            # Same CSRF posture as /api/exclusions (host allowlist already
+            # ran; JSON content-type gate; no CORS headers are ever
+            # emitted) — this one writes to disk too. The writer
+            # (SettingsStore.write_global_autokick) owns the bool-or-None
+            # validation and signals a rejection by raising ValueError,
+            # which becomes a 400 carrying its message — same contract as
+            # exclusions_writer.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            if not isinstance(data, dict) or "autokick" not in data:
+                return _plain(400, 'expected {"autokick": true|false|null}')
+            if settings_writer is None:
+                return _plain(503, "settings unavailable")
+            try:
+                return _json(200, settings_writer(data["autokick"]))
             except ValueError as exc:
                 return _plain(400, str(exc))
 

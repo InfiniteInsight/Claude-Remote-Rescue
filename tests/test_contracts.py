@@ -58,6 +58,8 @@ def _session_card():
         "updated": "2026-07-23T00:00:00Z",
         "last_active": "2026-07-23T00:00:00Z",
         "context_pressure": "ok",
+        "remote_control": "ok",
+        "autokick": "on",
     }
 
 
@@ -229,9 +231,11 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_6():
+def test_sessions_contract_version_is_8():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 6
+    # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
+    # v8 adds autokick (same spec, Slice 3).
+    assert contracts.SESSIONS_CONTRACT_VERSION == 8
 
 
 def test_sessions_wrong_contract_version_rejected():
@@ -313,6 +317,44 @@ def test_sessions_card_bad_context_pressure_enum_rejected():
     p["sessions"][0]["context_pressure"] = "overflowing"
     with pytest.raises(contracts.ContractError):
         contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_missing_remote_control_rejected():
+    # remote_control (spec 2026-08-07) is a contracted card field.
+    p = _sessions_payload()
+    del p["sessions"][0]["remote_control"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_bad_remote_control_enum_rejected():
+    p = _sessions_payload()
+    p["sessions"][0]["remote_control"] = "connected"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_remote_control_states_enum():
+    assert contracts.REMOTE_CONTROL_STATES == ("off", "ok", "dropped")
+
+
+def test_sessions_card_missing_autokick_rejected():
+    # autokick (spec 2026-08-07, Slice 3) is a contracted card field.
+    p = _sessions_payload()
+    del p["sessions"][0]["autokick"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_bad_autokick_enum_rejected():
+    p = _sessions_payload()
+    p["sessions"][0]["autokick"] = "yes"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_autokick_states_enum():
+    assert contracts.AUTOKICK_STATES == ("on", "off", "global-off")
 
 
 def test_sessions_payload_rejects_previous_contract_version():

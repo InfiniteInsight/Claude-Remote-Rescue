@@ -86,6 +86,15 @@
   .badge.pressure-tight { margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none; letter-spacing: 0; }
   .badge.pressure-will-compact { margin-left: 8px; background: #3a1616; color: #e05252; text-transform: none; letter-spacing: 0; }
   .badge.latest-badge { margin-left: 8px; background: #123a3a; color: #46c2b0; text-transform: none; letter-spacing: 0; }
+  /* Same family as the pressure badges (alarming-red tier): the phone's
+     Remote Control link to this session has gone quiet while claude keeps
+     working locally. "off"/"ok" render no badge at all — see renderCard. */
+  .badge.remote-control-badge { margin-left: 8px; background: #3a1616; color: #e05252; text-transform: none; letter-spacing: 0; }
+  /* Per-session auto-kick toggle button (spec 2026-08-07, Slice 3): visually
+     distinct from the destructive/neutral action buttons so it doesn't read
+     as "Kick" or "Close" at a glance. Disabled state (global switch off)
+     falls back to the shared button:disabled styling above. */
+  button.autokick-btn { color: #9fb0f5; }
   /* Session title: the card's headline, matching the mobile list. */
   .stitle {
     font-size: 14px; font-weight: 600; color: #e6e6e6; margin-bottom: 6px;
@@ -251,6 +260,7 @@
 <div id="key">
   <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span></span>
   <span class="kgroup"><span class="klabel">context</span><span class="k-tight kterm" data-help="Estimated past 70% of this model's context window. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">tight</span><span class="k-will-compact kterm" data-help="Estimated at or over the window, so resuming will compact and lose detail. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">will compact on revive</span></span>
+  <span class="kgroup"><span class="klabel">remote control</span><span class="kterm" data-help="This session's Remote Control link to the phone has gone quiet while claude keeps working locally — the mobile app shows it as Disconnected. Kick restarts claude so it reconnects, or turn on auto-kick in Settings to have crr do that for you.">remote control dropped</span></span>
   <span class="kgroup"><span class="klabel">sid</span><span class="kterm" data-help="How sure crr is that it identified the right conversation. injected = certain: crr generated the session id and passed it to claude.">injected</span><span class="kterm" data-help="Uncertain: the id was inferred from the newest transcript in that directory, so it may be the wrong conversation.">guessed</span><span class="kterm" data-help="Confirmed: a guessed id whose transcript has been written to since the session started.">verified</span></span>
 </div>
 <div id="controls">
@@ -289,17 +299,27 @@
   <span class="tools-label">Other views</span>
   <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management. Opens a searchable list.">Recently untracked</button>
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable. Opens a searchable list.">Discoverable</button>
-  <button id="admin-btn" type="button" title="Settings: directories discovery should skip.">Settings</button>
+  <button id="admin-btn" type="button" title="Settings: directories discovery should skip, and the dropped-Remote-Control auto-kick switch.">Settings</button>
   <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
 </div>
 <div id="diag-panel" hidden></div>
 <div id="admin-modal" role="dialog" aria-modal="true" aria-label="Settings">
   <div id="disc-box">
     <div id="disc-head">
-      <h2>Settings — excluded directories</h2>
+      <h2>Settings</h2>
       <button id="admin-close" type="button" title="Close">&times;</button>
     </div>
-    <div class="note" style="padding: 10px 16px 0; margin: 0;">Transcripts under these directory names never appear as <strong>Discoverable</strong>. Useful for tools that drive Claude Code themselves and leave transcripts behind (claude-mem's observer sessions are excluded by default). Matching ignores <code>-</code> vs <code>/</code> vs <code>.</code>, so <code>.claude-mem</code> and <code>claude-mem</code> both work.</div>
+    <div id="autokick-section" style="padding: 10px 16px 0;">
+      <h3 style="margin:0 0 6px; font-size:12px; color:#8a93a2; font-weight:600;">Auto-kick dropped Remote Control sessions</h3>
+      <div class="note" style="margin: 0 0 8px;">When a session's Remote Control link to the phone drops while claude keeps working, crr can restart it (at a safe turn boundary) so it reconnects. <strong>Turning this off keeps the badge</strong> — you lose the automatic action, not the diagnosis. A session can also opt itself out individually on its card; this switch is a hard override that beats every per-session choice.</div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#cdd3dd;">
+        <input type="checkbox" id="autokick-toggle">
+        <span>Auto-kick dropped sessions</span>
+      </label>
+      <div id="autokick-degraded" class="note" hidden style="margin: 8px 0 0; color:#e0a53b;"></div>
+    </div>
+    <h3 style="padding: 14px 16px 0; margin:0; font-size:12px; color:#8a93a2; font-weight:600;">Excluded directories</h3>
+    <div class="note" style="padding: 6px 16px 0; margin: 0;">Transcripts under these directory names never appear as <strong>Discoverable</strong>. Useful for tools that drive Claude Code themselves and leave transcripts behind (claude-mem's observer sessions are excluded by default). Matching ignores <code>-</code> vs <code>/</code> vs <code>.</code>, so <code>.claude-mem</code> and <code>claude-mem</code> both work.</div>
     <div id="admin-list"></div>
     <div id="disc-foot">
       <input id="admin-add" type="text" placeholder="directory name to exclude" aria-label="Directory name to exclude" style="flex:1; min-width:0; font:inherit; font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid #2f3745; background:#1c222c; color:#cdd3dd;">
@@ -587,6 +607,14 @@ function renderCard(s, uncertain, groupColor, latest) {
     pb2.textContent = "will compact on revive";
     top.appendChild(pb2);
   }
+  // Slice 3: dropped-Remote-Control badge. "off" (never enabled) and "ok"
+  // render NOTHING — that is nearly every session, and a badge on the
+  // common case is clutter, not signal. See the #key legend for the term.
+  if (s.remote_control === "dropped") {
+    var rcb = el("span", "badge remote-control-badge");
+    rcb.textContent = "remote control dropped";
+    top.appendChild(rcb);
+  }
   // T-B: latest-per-cwd marker.
   var cwdInfo = latest && latest[s.cwd];
   if (cwdInfo && cwdInfo.count > 1 && recencyMs(s) === cwdInfo.max) {
@@ -686,6 +714,31 @@ function renderCard(s, uncertain, groupColor, latest) {
   searchBtn.title = BUTTON_HELP["Search"];
   searchBtn.addEventListener("click", function () { runRecall(s.session_id); });
   actions.appendChild(searchBtn);
+  // Per-session auto-kick toggle (spec 2026-08-07, Slice 3): reflects the
+  // resolved 3-state `autokick` card field. Shown on every card regardless
+  // of state — the sid-keyed preference outlives a crash/revive cycle, so
+  // hiding it on a non-live card would make it disappear right when a
+  // dropped-bridge kick is most likely to matter. DISABLED, with the
+  // reason spelled out in the button's own VISIBLE text (not title= —
+  // that never fires on a touch screen, and a disabled button doesn't
+  // fire click either way), whenever the global switch resolves off:
+  // never an ON state this button cannot honour.
+  var akBtn = el("button", "autokick-btn");
+  if (s.autokick === "global-off") {
+    akBtn.textContent = "Auto-kick off (global switch is off)";
+    akBtn.title = "The global auto-kick switch in Settings is off, so nothing is auto-kicked regardless of this session's own setting. Turn it on in Settings first.";
+    akBtn.disabled = true;
+  } else {
+    var akOn = s.autokick === "on";
+    akBtn.textContent = akOn ? "Auto-kick: on" : "Auto-kick: off";
+    akBtn.title = akOn
+      ? "This session will be auto-kicked (restarted) if its Remote Control bridge drops. Tap to opt out."
+      : "This session will NOT be auto-kicked even if its Remote Control bridge drops. Tap to opt back in.";
+    akBtn.addEventListener("click", function () {
+      sidAction(akOn ? "autokick-off" : "autokick-on", s.session_id, akBtn);
+    });
+  }
+  actions.appendChild(akBtn);
   addBtn("Remove", "remove", true);
   card.appendChild(actions);
   return card;
@@ -1231,9 +1284,64 @@ function saveAdmin(dirs, btn) {
     .finally(function () { if (btn) { btn.disabled = false; } });
 }
 
+// Global auto-kick toggle (spec 2026-08-07, Slice 3), same GET/POST +
+// content-type-gate + ValueError->400 discipline as the exclusions editor
+// above, through a SEPARATE endpoint (/api/settings) — see core/settings.py
+// for why this is a distinct dashboard-managed file rather than another key
+// in exclusions.json.
+function renderAutokick(data) {
+  var cb = document.getElementById("autokick-toggle");
+  cb.checked = !!data.resolved;
+  var warn = document.getElementById("autokick-degraded");
+  if (data.degraded) {
+    warn.hidden = false;
+    // Fail-closed (Slice 2): while the settings file is unreadable the
+    // watchdog auto-kicks NOTHING, no matter what this checkbox shows —
+    // the user (often on their phone, away from the machine) needs to
+    // know why nothing is reconnecting.
+    warn.textContent = "The settings file is unreadable — auto-kick is NOT running for ANY session until this is fixed, regardless of the switch above (fails closed).";
+  } else {
+    warn.hidden = true;
+    warn.textContent = "";
+  }
+}
+
+function loadAutokick() {
+  fetch("/api/settings")
+    .then(function (r) { return r.json(); })
+    .then(renderAutokick)
+    .catch(function () { showNotice("auto-kick setting unavailable", "warn"); });
+}
+
+document.getElementById("autokick-toggle").addEventListener("change", function () {
+  var cb = this;
+  var value = cb.checked;
+  cb.disabled = true;
+  fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ autokick: value })
+  })
+    .then(function (r) {
+      if (!r.ok) { return r.text().then(function (t) { throw new Error(t); }); }
+      return r.json();
+    })
+    .then(function (data) {
+      renderAutokick(data);
+      showNotice("auto-kick " + (data.resolved ? "on" : "off"), "ok");
+      pollSessions();
+    })
+    .catch(function (e) {
+      showNotice(String(e.message || "save failed"), "error");
+      loadAutokick();  // resync the checkbox with the real stored value
+    })
+    .finally(function () { cb.disabled = false; });
+});
+
 document.getElementById("admin-btn").addEventListener("click", function () {
   document.getElementById("admin-modal").classList.add("open");
   loadAdmin();
+  loadAutokick();
 });
 document.getElementById("admin-close").addEventListener("click", function () {
   document.getElementById("admin-modal").classList.remove("open");

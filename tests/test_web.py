@@ -58,6 +58,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             body=b"", headers=None, action_provider=None,
             untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
+            settings_provider=None, settings_writer=None,
             query=""):
     h = {"Host": host}
     if headers:
@@ -72,6 +73,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         recall_provider=recall_provider,
         exclusions_provider=exclusions_provider,
         exclusions_writer=exclusions_writer,
+        settings_provider=settings_provider,
+        settings_writer=settings_writer,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -202,6 +205,83 @@ def test_exclusions_post_surfaces_a_writer_rejection_as_400():
                    body=b'{"dirs": ["x"]}', exclusions_writer=writer)
     assert resp.status == 400
     assert b"too many" in resp.body
+
+
+def test_settings_get_404_without_provider():
+    assert _handle(path="/api/settings").status == 404
+
+
+def test_settings_get_returns_global_value_and_degraded_flag():
+    resp = _handle(path="/api/settings", settings_provider=lambda: {
+        "autokick": False, "resolved": False, "config_default": True, "degraded": False,
+    })
+    assert resp.status == 200
+    body = json.loads(resp.body)
+    assert body == {"autokick": False, "resolved": False, "config_default": True, "degraded": False}
+
+
+def test_settings_get_surfaces_degraded_so_the_phone_knows_why():
+    # A degraded settings store means the watchdog auto-kicks NOTHING
+    # (fail-closed, Slice 2) regardless of what `resolved` says here — the
+    # modal must be able to tell the user that, not just show a number.
+    resp = _handle(path="/api/settings", settings_provider=lambda: {
+        "autokick": None, "resolved": True, "config_default": True, "degraded": True,
+    })
+    assert json.loads(resp.body)["degraded"] is True
+
+
+def test_settings_post_writes_and_returns_the_stored_value():
+    seen = []
+    resp = _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'{"autokick": false}',
+                   settings_writer=lambda v: seen.append(v) or {
+                       "autokick": False, "resolved": False, "config_default": True, "degraded": False})
+    assert resp.status == 200
+    assert seen == [False]
+    assert json.loads(resp.body)["resolved"] is False
+
+
+def test_settings_post_null_clears_the_override():
+    seen = []
+    resp = _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'{"autokick": null}',
+                   settings_writer=lambda v: seen.append(v) or {
+                       "autokick": None, "resolved": True, "config_default": True, "degraded": False})
+    assert resp.status == 200
+    assert seen == [None]
+
+
+def test_settings_post_requires_json_content_type():
+    resp = _handle(method="POST", path="/api/settings",
+                   headers={"Content-Type": "text/plain"}, body=b'{"autokick": true}',
+                   settings_writer=lambda v: {})
+    assert resp.status == 415
+
+
+def test_settings_post_rejects_a_bad_payload():
+    w = lambda v: {}
+    assert _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'not json', settings_writer=w).status == 400
+    assert _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'{}', settings_writer=w).status == 400
+    assert _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'{"nope": true}', settings_writer=w).status == 400
+
+
+def test_settings_post_surfaces_a_writer_rejection_as_400():
+    def writer(value):
+        raise ValueError("autokick must be a bool or None")
+
+    resp = _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'{"autokick": "yes"}', settings_writer=writer)
+    assert resp.status == 400
+    assert b"bool" in resp.body
+
+
+def test_settings_post_missing_writer_is_503():
+    resp = _handle(method="POST", path="/api/settings", headers=_JSON,
+                   body=b'{"autokick": true}')
+    assert resp.status == 503
 
 
 def test_disallowed_host_is_403_before_anything_else():
@@ -526,6 +606,43 @@ def test_sid_actions_include_adopt():
     assert "adopt" in web.SID_ACTIONS
 
 
+def test_sid_actions_include_autokick_on_and_off():
+    assert "autokick-on" in web.SID_ACTIONS
+    assert "autokick-off" in web.SID_ACTIONS
+
+
+def test_post_sid_action_autokick_on_dispatches_and_returns_result():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, "auto-kick enabled for this session"
+
+    resp = _post_sid({"op": "autokick-on", "sid": _VALID_SID}, sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("autokick-on", _VALID_SID)
+    assert json.loads(resp.body)["ok"] is True
+
+
+def test_post_sid_action_autokick_off_dispatches_and_returns_result():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, "auto-kick disabled for this session"
+
+    resp = _post_sid({"op": "autokick-off", "sid": _VALID_SID}, sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("autokick-off", _VALID_SID)
+    assert json.loads(resp.body)["ok"] is True
+
+
+def test_post_sid_action_autokick_rejects_non_uuid_sid():
+    resp = _post_sid({"op": "autokick-on", "sid": "not-a-uuid"},
+                     sid_action_provider=lambda o, s: (True, "should-not-run"))
+    assert resp.status == 400
+
+
 def test_post_sid_action_adopt_dispatches_and_returns_result():
     seen = {}
 
@@ -780,10 +897,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_38():
-    """v38: the key is grouped by kind with per-term help (v37 routed
-    untracked search hits into Discoverable)."""
-    assert web.PAGE_VERSION == 38
+def test_page_version_is_39():
+    """v39: dropped-Remote-Control badge + global/per-session auto-kick
+    toggles (v38 grouped the key by kind with per-term help)."""
+    assert web.PAGE_VERSION == 39
 
 
 def test_page_cards_still_headline_the_title():
@@ -921,6 +1038,50 @@ def test_page_has_compaction_badge_and_legend_note():
     assert "context_pressure" in page
     assert "will compact on revive" in page
     assert "estimate" in page
+
+
+def test_page_has_remote_control_dropped_badge_and_legend():
+    # Slice 3: the badge only renders for "dropped" (off/ok render nothing —
+    # the common case), and the key legend explains the term with per-term
+    # help text (both hover title AND tap->toast, like every other term —
+    # the same `.kterm` mechanism the other groups already use).
+    page = web.render_page()
+    assert 'remote_control === "dropped"' in page
+    assert "remote-control-badge" in page
+    assert 'kterm" data-help="' in page
+    # The legend term's own text doubles as the badge label, matching the
+    # existing groups (e.g. "will compact on revive") so the tap->toast
+    # ("<term>: <help>") reads as a complete sentence.
+    assert page.count("remote control dropped") >= 2
+
+
+def test_page_remote_control_badge_off_and_ok_render_nothing():
+    # "off"/"ok" must not produce a badge element — no clutter on the
+    # common case (nearly every session).
+    page = web.render_page()
+    assert 'if (s.remote_control === "off")' not in page
+    assert 'else if (s.remote_control === "ok")' not in page
+
+
+def test_page_settings_modal_states_autokick_keeps_the_badge():
+    # Deliverable #2's required copy: turning the global switch off must
+    # not read as "the badge goes away too" — the diagnosis stays.
+    page = web.render_page()
+    assert "keeps the badge" in page
+
+
+def test_page_settings_modal_surfaces_degraded_settings_file():
+    page = web.render_page()
+    assert "degraded" in page.lower()
+
+
+def test_page_per_session_toggle_renders_disabled_when_global_is_off():
+    # Deliverable #3: never an ON it cannot honour — the button must be
+    # disabled, with the reason in visible text (not just title=, which
+    # never fires on a touch screen).
+    page = web.render_page()
+    assert '"global-off"' in page
+    assert ".disabled = true" in page
 
 
 def test_page_has_latest_per_cwd_marker():

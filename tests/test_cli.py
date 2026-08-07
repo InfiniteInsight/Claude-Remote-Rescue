@@ -847,6 +847,83 @@ def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsy
     assert payload["sessions"][0]["state"] == "crashed"
 
 
+# --------------------------------------------------------------------------
+# Review fix-wave 2026-08-07, FIX 2 (IMPORTANT) — `remote_control_watch`
+# must gate detection/badge/scan cost, not just the watchdog's kick step.
+# `_tail_facts_extractor` is the single choke point every card-building
+# call site (`_cmd_status`, `_cmd_web`'s provider, `_whoami_card`) reads
+# through, so gating there covers all three at once.
+# --------------------------------------------------------------------------
+
+def test_tail_facts_extractor_scans_for_the_bridge_marker_when_watch_is_on():
+    config = cfg.Config({"remote_control_watch": True, "bridge_scan_lines": 400})
+    seen = {}
+
+    def fake_read_tail_facts(sid, cap, *, model_tail_lines, bridge_scan_lines):
+        seen["bridge_scan_lines"] = bridge_scan_lines
+        return {"bridge_seen": False, "bridge_since": 0}
+
+    import crr.adapters.transcript_source as ts
+    orig = ts.read_tail_facts
+    ts.read_tail_facts = fake_read_tail_facts
+    try:
+        extract = cli._tail_facts_extractor(config)
+        extract({"claude": {"session_id": "sid"}})
+    finally:
+        ts.read_tail_facts = orig
+
+    assert seen["bridge_scan_lines"] == 400
+
+
+def test_tail_facts_extractor_skips_the_bridge_scan_when_watch_is_off():
+    config = cfg.Config({"remote_control_watch": False, "bridge_scan_lines": 400})
+    seen = {}
+
+    def fake_read_tail_facts(sid, cap, *, model_tail_lines, bridge_scan_lines):
+        seen["bridge_scan_lines"] = bridge_scan_lines
+        return {"bridge_seen": False, "bridge_since": 0}
+
+    import crr.adapters.transcript_source as ts
+    orig = ts.read_tail_facts
+    ts.read_tail_facts = fake_read_tail_facts
+    try:
+        extract = cli._tail_facts_extractor(config)
+        extract({"claude": {"session_id": "sid"}})
+    finally:
+        ts.read_tail_facts = orig
+
+    # 0 short-circuits the adapter's bridge scan entirely (verified
+    # separately in test_transcript_source.py) — no scan cost is paid on
+    # every 5s dashboard poll while the feature is off.
+    assert seen["bridge_scan_lines"] == 0
+
+
+def test_status_json_remote_control_reads_off_when_watch_is_disabled(tmp_path, monkeypatch, capsys):
+    # End-to-end through `crr status --json`: even a session with a real,
+    # long-dropped bridge marker must read "off" (never a stale "dropped"),
+    # once remote_control_watch is False — the badge and the field agree.
+    boot_id = boot_identity.detect().current()
+    store = JournalStore(tmp_path)
+    store.write(_live_entry(pid=os.getpid(), boot_id=boot_id))
+    (tmp_path / "config.toml").write_text("remote_control_watch = false\n", encoding="utf-8")
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    # Even if a bridge scan somehow ran and found a wildly stale marker...
+    monkeypatch.setattr(
+        cli.transcript_source, "read_tail_facts",
+        lambda sid, cap, **kw: {
+            "last_prompt": "", "model": "", "last_active": "", "last_reply": "",
+            "title": "", "slug": "", "transcript_bytes": 0,
+            "bridge_seen": kw.get("bridge_scan_lines", 0) > 0,  # honest: only "sees" it if allowed to scan
+            "bridge_since": 9999,
+        },
+    )
+
+    rc = cli.main(["status", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["remote_control"] == "off"
+
+
 def _human_card(model, duplicate_group=None, sid_source="injected"):
     return {
         "pid": 42, "sid8": "8a1b2c3d", "state": "live", "cwd": "/home/u/proj",
@@ -1398,6 +1475,50 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
     assert rc == 0
     assert out == ""  # no success-shaped summary line for a skipped pass
     assert "crr revive: tmux state unknown — pass skipped (no strikes accrued)" in err
+
+
+def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, monkeypatch, capsys):
+    # Slice 2 (dropped-Remote-Control watchdog): the deliverable is the
+    # WIRING in `_cmd_revive`, not just the standalone `_kick_dropped_bridges`
+    # helper (that is covered exhaustively, with fakes, in
+    # test_revive_bridge.py). Pin here that `crr revive` actually calls it
+    # exactly once, with a JournalStore and `sd` rooted at the real state
+    # dir, and only AFTER the crashed-session summary line — so deleting the
+    # call site, or wiring the wrong sd/store, fails a test.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+
+    calls = []
+
+    def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags):
+        calls.append((sd, store))
+        print("watchdog pass ran")
+
+    monkeypatch.setattr(cli, "_kick_dropped_bridges", fake_watchdog)
+
+    rc = cli.main(["revive"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(calls) == 1
+    sd, store = calls[0]
+    assert sd == tmp_path
+    assert isinstance(store, JournalStore)
+    lines = out.splitlines()
+    assert lines.index("revived 0, gave up 0, already running 0") < lines.index("watchdog pass ran")
 
 
 # --- revive: crashed claude session -> detached tmux (end to end) ---------
@@ -3296,3 +3417,133 @@ def test_adopt_takeover_refusal_prints_to_stderr_and_returns_1(tmp_path, monkeyp
     rc = cli.main(["adopt", _TAKEOVER_SID, "--takeover"])
     assert rc == 1
     assert "refused stub" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Review fix-wave 2026-08-07, FIX 3 (IMPORTANT) — settings.json's global and
+# per-session writers must share one lock around the WHOLE read-modify-write,
+# not just each call's own atomic tmp-file-rename. `ThreadingHTTPServer`
+# serves POSTs concurrently, so without this a per-session write can read a
+# stale global value, then land AFTER a concurrent global-off write,
+# silently reverting the panic switch back on.
+#
+# Sequential calls can never exhibit the lost update itself (there is no
+# concurrency in a single thread to interleave), so instead these tests
+# prove the load-bearing PRECONDITION for the fix: that the lock is held
+# for the entire operation. A non-blocking probe acquisition of the SAME
+# lock file, taken from inside a monkeypatched read hook that fires
+# mid-operation (after the store's read, before its write), must fail with
+# BlockingIOError — proving no other writer could land in that window.
+# Deleting `with mutation_lock(sd):` from either wrapper turns this red.
+# --------------------------------------------------------------------------
+
+def _probe_lock_held(tmp_path) -> bool:
+    """True if the shared mutation lock is currently held by someone else
+    (probed via a fresh, independent file descriptor — flock contends
+    across descriptions even within one process)."""
+    import fcntl
+
+    from crr.adapters.locking import _LOCK_NAME
+    fd = os.open(str(tmp_path / _LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def test_session_autokick_write_holds_the_lock_for_the_whole_operation(tmp_path, monkeypatch):
+    from crr.core import settings
+
+    held = []
+    orig_read_raw = settings.SettingsStore._read_raw
+
+    def probing_read_raw(self):
+        # Fires from INSIDE write_session_autokick, after the lock (if any)
+        # is acquired but before the write lands — exactly the window a
+        # concurrent global write would need to land in for the bug.
+        held.append(_probe_lock_held(tmp_path))
+        return orig_read_raw(self)
+
+    monkeypatch.setattr(settings.SettingsStore, "_read_raw", probing_read_raw)
+    cli._write_session_autokick_locked(tmp_path, _TAKEOVER_SID, True)
+
+    assert held == [True]  # the lock WAS held throughout — no window for the race
+
+
+def test_global_autokick_write_holds_the_lock_for_the_whole_operation(tmp_path, monkeypatch):
+    from crr.core import settings
+
+    held = []
+    orig_read_raw = settings.SettingsStore._read_raw
+
+    def probing_read_raw(self):
+        held.append(_probe_lock_held(tmp_path))
+        return orig_read_raw(self)
+
+    monkeypatch.setattr(settings.SettingsStore, "_read_raw", probing_read_raw)
+    cli._write_global_autokick_locked(tmp_path, False)
+
+    assert held == [True]
+
+
+def test_unlocked_store_writes_do_not_hold_the_lock_control_case(tmp_path, monkeypatch):
+    # Control: calling the STORE directly (bypassing the FIX 3 wrappers)
+    # must NOT show the lock held — proves the probe technique above is
+    # actually discriminating locked from unlocked, not a false positive.
+    from crr.core import settings
+
+    held = []
+    orig_read_raw = settings.SettingsStore._read_raw
+
+    def probing_read_raw(self):
+        held.append(_probe_lock_held(tmp_path))
+        return orig_read_raw(self)
+
+    monkeypatch.setattr(settings.SettingsStore, "_read_raw", probing_read_raw)
+    settings.SettingsStore(tmp_path).write_session_autokick(_TAKEOVER_SID, True)
+
+    assert held == [False]
+
+
+# --------------------------------------------------------------------------
+# Review fix-wave 2026-08-07, FIX 4 (MINOR, same principle as b4fe3b6) —
+# the Settings modal's checkbox must not render CHECKED while the store is
+# degraded and every card renders `global-off` (b4fe3b6's fix covered the
+# cards but not this provider).
+# --------------------------------------------------------------------------
+
+def test_settings_payload_resolved_is_false_when_degraded_even_if_config_default_true(tmp_path):
+    from crr.core import settings as settings_mod
+    (tmp_path / settings_mod.FILENAME).write_text("{not json", encoding="utf-8")
+    config = cfg.Config({"remote_control_autokick": True})
+
+    payload = cli._settings_payload(tmp_path, config)
+
+    assert payload["degraded"] is True
+    assert payload["resolved"] is False  # matches effective_global_autokick(), not a lying True
+
+
+def test_settings_payload_resolved_falls_back_to_config_default_when_unset_and_healthy(tmp_path):
+    config = cfg.Config({"remote_control_autokick": True})
+    payload = cli._settings_payload(tmp_path, config)
+    assert payload["degraded"] is False
+    assert payload["resolved"] is True
+
+    config_off = cfg.Config({"remote_control_autokick": False})
+    payload_off = cli._settings_payload(tmp_path, config_off)
+    assert payload_off["resolved"] is False
+
+
+def test_settings_payload_resolved_reflects_a_healthy_stored_override(tmp_path):
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_global_autokick(False)
+    config = cfg.Config({"remote_control_autokick": True})  # default True, override wins
+
+    payload = cli._settings_payload(tmp_path, config)
+
+    assert payload["degraded"] is False
+    assert payload["resolved"] is False
