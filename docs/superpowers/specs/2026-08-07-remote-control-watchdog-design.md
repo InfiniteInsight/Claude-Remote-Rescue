@@ -87,7 +87,8 @@ rendered as a **"remote control dropped"** badge, in the same family as the
 existing pressure badges. This is valuable on its own: even with auto-kick
 off, the dashboard tells you which sessions have gone dark on the phone.
 
-Card contract gains one field -> `SESSIONS_CONTRACT_VERSION` bump.
+Card contract gains `remote_control` and `autokick` ->
+`SESSIONS_CONTRACT_VERSION` bump.
 
 ### Acting (opt-out) — reconnect by kicking
 
@@ -118,9 +119,34 @@ revival path's reasoning intact.
 
 - `remote_control_watch` (bool, default **true**) — do the detection and
   show the badge.
-- `remote_control_autokick` (bool, default **true**) — act on it. Set false
-  to get the badge without the restart.
+- `remote_control_autokick` (bool, default **true**) — the GLOBAL hard
+  switch. False means nothing is ever auto-kicked, whatever a session says.
 - `bridge_stale_records` (int, default **150**) — the measured threshold.
+
+### Two levels of auto-kick control: global switch, per-session opt-out
+
+Auto-kick is controllable at both levels, and the global one is a **hard
+switch** — not a default that a session can override:
+
+| global | per-session | result |
+| --- | --- | --- |
+| OFF | (anything) | **never auto-kicked.** Per-session values are ignored but RETAINED, so flipping global back on restores them. |
+| ON | unset | auto-kicked (per-session defaults to on) |
+| ON | off | not auto-kicked — this one session is pinned out |
+| ON | on | auto-kicked |
+
+The asymmetry is deliberate. Global OFF is the panic switch: when the
+feature is misbehaving you need one action that stops all of it, with no
+per-session exception able to keep restarting things behind your back.
+Global ON is permissive, because at that point you have opted in and the
+interesting control is "all except this one session I'm babysitting".
+
+Per-session state is keyed by **session id**, not pid — a pid is recycled
+and would silently transfer your opt-out to an unrelated session.
+
+The card carries an `autokick` field so the toggle renders its true current
+state, including "off because global is off" (shown disabled, with the
+reason, rather than a lying ON).
 
 ### Turning auto-kick off — from the phone, not just the machine
 
@@ -129,9 +155,9 @@ kill switch on the one behaviour in crr that restarts a live session by
 itself: the moment you most want it off is when it is misfiring while you
 are away from the machine.
 
-So **auto-kick gets a toggle in the dashboard's Settings modal**, alongside
-the excluded-directories editor, using the same mechanism that already
-ships:
+So **both toggles live in the dashboard** — the global one in the Settings
+modal alongside the excluded-directories editor, the per-session one on the
+card itself — using the same mechanism that already ships:
 
 - Stored in the dashboard-owned JSON in the state dir (the store behind
   `crr.core.exclusions` generalises to a small settings file — the web must
@@ -144,6 +170,9 @@ ships:
   type.
 - The Settings row states plainly what it does and that turning it off
   keeps the badge — so the diagnosis stays even when the action stops.
+- The per-session toggle is a card action (POST by session id, the existing
+  `/api/sid-action` namespace), and renders disabled with a reason when the
+  global switch is off rather than showing a state it cannot honour.
 
 A CLI equivalent (`crr config --set remote_control_autokick=false`) is
 explicitly NOT part of this: crr does not write `config.toml`, and adding a
@@ -184,3 +213,9 @@ and remains the machine-side path.
 - Settings toggle: the dashboard-managed value overrides the config default;
   absent means fall back to config; a bad stored value degrades to the
   config default rather than raising; turning it off leaves the badge.
+- The four rows of the global/per-session truth table, including that
+  per-session values SURVIVE a global off/on cycle.
+- Per-session state keyed by sid: a recycled pid must not inherit another
+  session's opt-out.
+- The card toggle renders disabled (with the reason) when global is off,
+  never a state it cannot honour.
