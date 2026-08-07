@@ -763,11 +763,33 @@ def test_page_shows_claudes_preceding_reply():
     assert 'fieldLabel("claude")' in page
 
 
-def test_page_version_is_34():
-    """v34: cards headline the session title — the same string Claude Code
-    shows in its mobile list — and search shows animated progress (v33
-    named the full config.toml path in Settings)."""
-    assert web.PAGE_VERSION == 34
+def test_page_duplicate_edge_colour_is_per_group():
+    """Every duplicate used to share one hardcoded hue, so unrelated pairs
+    looked related. The edge colour now derives from duplicate_group."""
+    page = web.render_page()
+    assert "colorFor(s.duplicate_group)" in page
+    # uncertain still overrides to amber — the weaker claim wins
+    assert ".card.dup-uncertain { border-left-color: #e0a53b !important; }" in page
+
+
+def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
+    page = web.render_page()
+    assert "function renderStacked(" in page
+    assert "dup-stack" in page and "dup-toggle" in page
+    assert "expandedDups" in page          # open/closed survives the 5s poll
+    assert "function stackTop(" in page    # the actionable card sits on top
+
+
+def test_page_version_is_35():
+    """v35: duplicate cards stack (click to fan out) and each duplicate
+    group gets its own edge colour."""
+    assert web.PAGE_VERSION == 35
+
+
+def test_page_cards_still_headline_the_title():
+    """v34 behaviour, still required: the card headline is the same string
+    Claude Code shows in its mobile list."""
+    assert "s.title || s.slug" in web.render_page()
 
 
 def test_page_cards_headline_the_session_title():
@@ -1024,3 +1046,10 @@ def test_cmd_web_warms_the_page_snapshot_before_serving(monkeypatch):
 
     monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
     assert cli.main(["web", "--port", "1"]) == 0
+
+
+def test_page_stack_toggle_pluralises_correctly():
+    # "+2 more copyies" was the first cut.
+    page = web.render_page()
+    assert "copyies" not in page
+    assert '" more copy" : " more copies"' in page
