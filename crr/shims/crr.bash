@@ -18,6 +18,26 @@ _crr() {
   "$_CRR_BIN" "$@" 2>/dev/null
 }
 
+# Args to add to every claude launch so a session is always reachable
+# from Claude Code's mobile Remote Control (`--remote-control` is
+# per-invocation, not sticky — every launch has to ask fresh, not just
+# fresh ones). Printed one token per line by `crr`, so an unquoted
+# expansion here splits into exactly the right words; the token itself is
+# sanitized to letters/digits/dash/underscore (crr.core.reviver), so
+# splitting it unquoted never risks pathname expansion either. Silent
+# no-op (empty expansion) when disabled, untracked, or crr is missing —
+# same "never break a launch" contract as `_crr` itself.
+#
+# Placed BEFORE "$@" at every call site, never after: "$@" can be a bare
+# prompt (`claude "fix the bug"`), and claude's parser mode for flags
+# after a positional argument is undocumented — putting our flag first
+# keeps it unambiguously a flag regardless. Safe under THE HAZARD too: the
+# name is always explicit, so `--remote-control proj --resume abc123`
+# reads `proj` as the name and leaves `--resume` alone.
+_crr_rc_args() {
+  _crr remote-control-args --pid "$$"
+}
+
 _crr_host() {
   if [ -n "$TMUX" ]; then printf tmux
   elif [ -n "$SSH_TTY" ] || [ -n "$SSH_CONNECTION" ]; then printf ssh
@@ -97,15 +117,15 @@ claude() {
     else
       _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
     fi
-    command claude "$@"
+    command claude $(_crr_rc_args) "$@"
   else
     local _crr_sid
     _crr_sid="$(_crr claude-launch --pid "$$")"
     if [ -n "$_crr_sid" ]; then
       _cur_sid="$_crr_sid"
-      command claude --session-id "$_crr_sid" "$@"
+      command claude --session-id "$_crr_sid" $(_crr_rc_args) "$@"
     else
-      command claude "$@"
+      command claude $(_crr_rc_args) "$@"
     fi
   fi
   local _code=$?
@@ -122,7 +142,7 @@ claude() {
     if [ "$_kind" = relaunch ] && [ -n "$_fsid" ]; then
       _cur_sid="$_fsid"
       _crashes=0
-      command claude --resume "$_fsid"
+      command claude --resume "$_fsid" $(_crr_rc_args)
       _code=$?
       continue
     fi
@@ -141,11 +161,11 @@ claude() {
     case "$_ans" in n|N|no|No|NO) break ;; esac
     _crashes=$((_crashes + 1))
     if [ -n "$_cur_sid" ]; then
-      command claude --resume "$_cur_sid"
+      command claude --resume "$_cur_sid" $(_crr_rc_args)
       _code=$?
     else
       _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
-      command claude --continue
+      command claude --continue $(_crr_rc_args)
       _code=$?
     fi
   done

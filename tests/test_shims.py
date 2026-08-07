@@ -236,6 +236,97 @@ def test_wrapper_passes_resume_through_untouched(shell, tmp_path, capsys):
     assert "--resume" in argv and "abc123" in argv
 
 
+# --- Remote Control: every claude launch crr is involved in enables it ---
+#
+# THE HAZARD: claude's `--remote-control` takes an OPTIONAL value, so a
+# bare flag risks swallowing whatever follows it on the command line as
+# the session name. crr always passes an explicit name (see
+# crr.core.reviver.remote_control_flag_argv), printed by `crr
+# remote-control-args` as one token per line so an UNQUOTED shell/fish
+# command substitution splits it into exactly two argv words. That
+# splitting behavior differs enough across bash/zsh/fish that it has to be
+# proven empirically per shell (a text grep can't tell "--remote-control
+# name" arrived as one word vs. two) — these two tests are the ones that
+# discriminate; test_shim_enables_remote_control_on_every_launch_path
+# below covers the remaining branches by presence, which is safe once the
+# splitting itself is proven here (same shell, same substitution syntax).
+
+def _remote_control_script(shim, proj_dir, cmdline):
+    # cd BEFORE sourcing the shim so `register`'s $PWD (and therefore the
+    # journaled cwd remote-control-args reads its name from) is the
+    # controlled, all-safe-characters "proj" directory, not the test
+    # runner's own (unpredictable) working directory.
+    return f'cd "{proj_dir}"\nsource "{shim}"\nclaude {cmdline}\n'
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_enables_remote_control_on_fresh_launch(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_bindir(tmp_path)
+    record = tmp_path / "argv"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    script = _remote_control_script(shim, proj, "my-prompt")
+    result = _run_with_fake_claude(shell, script, state, bindir, record)
+    assert result.returncode == 0, result.stderr
+
+    argv = record.read_text().split("\n")
+    assert "--remote-control" in argv, f"{shell}: fresh launch did not enable Remote Control"
+    idx = argv.index("--remote-control")
+    # The name must land as its OWN argv word — proves the shim's
+    # unquoted-substitution splitting is correct in this shell, not merely
+    # that the literal text "--remote-control" appears somewhere.
+    assert argv[idx + 1] == "proj", f"{shell}: name did not arrive as a separate argv word: {argv}"
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_wrapper_enables_remote_control_on_explicit_resume(shell, tmp_path, capsys):
+    # The top-of-wrapper passthrough branch (user typed --resume/--continue
+    # themselves) — a different code shape than the fresh-launch branch
+    # above, so it gets its own real-shell proof.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_bindir(tmp_path)
+    record = tmp_path / "argv"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    script = _remote_control_script(shim, proj, "--resume abc123")
+    result = _run_with_fake_claude(shell, script, state, bindir, record)
+    assert result.returncode == 0, result.stderr
+
+    argv = record.read_text().split("\n")
+    assert "--resume" in argv and "abc123" in argv  # untouched
+    assert "--remote-control" in argv
+    idx = argv.index("--remote-control")
+    assert argv[idx + 1] == "proj", f"{shell}: name did not arrive as a separate argv word: {argv}"
+
+
+def _shim_text(name):
+    from importlib import resources
+    return resources.files("crr.shims").joinpath(name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("shim", ["crr.bash", "crr.zsh", "crr.fish"])
+def test_shim_enables_remote_control_on_every_launch_path(shim):
+    # Six `command claude` invocations per shim: the top-level resuming
+    # passthrough, the fresh launch's --session-id branch and its no-sid
+    # fallback, and the repair loop's three relaunch paths (silent kick,
+    # crash-retry with a known sid, crash-retry via --continue). Every one
+    # has to ask for and append the Remote Control args, or a
+    # revived/relaunched/resumed session comes back unreachable from the
+    # phone (the Goal this whole feature exists for).
+    text = _shim_text(shim)
+    assert "remote-control-args --pid" in text
+    invocations = [line for line in text.splitlines() if "command claude" in line]
+    assert len(invocations) == 6, invocations
+    assert all("_crr_rc_args" in line for line in invocations), invocations
+
+
 _RESUME_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 
@@ -438,7 +529,10 @@ def test_repair_relaunch_flag_resumes_silently(shell, tmp_path, capsys):
     assert result.returncode == 0, result.stderr
     lines = _record_lines(tmp_path)
     assert len(lines) == 2
-    assert lines[1] == "--resume test-sid-123"
+    # startswith, not ==: the relaunch also carries the appended Remote
+    # Control args (see the "Remote Control" test block below) — this test
+    # is about the relaunch sid, not that.
+    assert lines[1].startswith("--resume test-sid-123")
     assert _OFFER not in result.stderr  # silent — no offer on a kick
     assert "AFTER-MARKER" in result.stdout  # shell survives a kick
     recorded = (state / "shellpid").read_text().strip()
@@ -522,7 +616,7 @@ def test_repair_crash_without_tty_resumes_with_known_sid(shell, tmp_path, capsys
     assert len(lines) == 2
     first = lines[0].split()
     sid = first[first.index("--session-id") + 1]
-    assert lines[1] == f"--resume {sid}"
+    assert lines[1].startswith(f"--resume {sid}")  # + Remote Control args
     assert _OFFER not in result.stderr  # no tty → no prompt
     assert "AFTER-MARKER" in result.stdout
 
@@ -595,7 +689,7 @@ def test_repair_crash_with_unknown_sid_falls_back_to_continue(shell, tmp_path, c
     assert result.returncode == 0, result.stderr
     lines = _record_lines(tmp_path)
     assert len(lines) == 2
-    assert lines[1] == "--continue"
+    assert lines[1].startswith("--continue")  # + Remote Control args
     assert "AFTER-MARKER" in result.stdout
 
 
@@ -658,8 +752,8 @@ def test_repair_crash_after_kick_resumes_the_kicked_sid(shell, tmp_path, capsys)
     assert result.returncode == 0, result.stderr
     lines = _record_lines(tmp_path)
     assert len(lines) == 3
-    assert lines[1] == "--resume kicked-sid-xyz"
-    assert lines[2] == "--resume kicked-sid-xyz"
+    assert lines[1].startswith("--resume kicked-sid-xyz")  # + Remote Control args
+    assert lines[2].startswith("--resume kicked-sid-xyz")
     assert "AFTER-MARKER" in result.stdout
 
 

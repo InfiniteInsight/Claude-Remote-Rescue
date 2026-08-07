@@ -1074,6 +1074,39 @@ def test_claude_launch_missing_entry_still_prints_a_sid(tmp_path, monkeypatch, c
     assert rc == 0 and len(sid) == 36
 
 
+# --- claude() wrapper support: remote-control-args (shim-facing) ---------
+
+def test_remote_control_args_prints_the_flag_and_derived_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242, cwd="/home/u/my project")
+    rc = cli.main(["remote-control-args", "--pid", "4242"])
+    out = capsys.readouterr().out.splitlines()
+    assert rc == 0
+    assert out == ["--remote-control", "my-project"]
+
+
+def test_remote_control_args_is_empty_when_disabled(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text("remote_control = false\n", encoding="utf-8")
+    store = JournalStore(tmp_path)
+    _seed(store, 4242, cwd="/home/u/my-project")
+    rc = cli.main(["remote-control-args", "--pid", "4242"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == ""
+
+
+def test_remote_control_args_is_empty_when_untracked(tmp_path, monkeypatch, capsys):
+    # No entry journaled for this pid: a shim-facing command must degrade
+    # to silence, never an error into the prompt.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["remote-control-args", "--pid", "999"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == ""
+
+
 def test_claude_exit_clears_claude_field(tmp_path, monkeypatch, capsys):
     # Clean exit clears claude -> a live shell with no active session. A
     # crash would skip this, leaving claude set for the reviver.

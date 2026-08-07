@@ -72,6 +72,7 @@ def reopen(
     now: str,
     *,
     grace: float,
+    remote_control: bool,
     tab_spawner: TabSpawner | None = None,
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
@@ -119,7 +120,7 @@ def reopen(
     if state == GHOST:
         return _reopen_ghost(
             store, archive, tmux, controller, flags, entry, pid, now,
-            live=live, grace=grace, tab_spawner=tab_spawner,
+            live=live, grace=grace, remote_control=remote_control, tab_spawner=tab_spawner,
         )
 
     # CRASHED — original path, unchanged.
@@ -127,7 +128,9 @@ def reopen(
     if name in live:
         base = f"already running as {name}"
     else:
-        tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+        tmux.new_detached_session(
+            name, entry["cwd"], revival_argv(entry, remote_control=remote_control)
+        )
         entry["tmux_session"] = name
         entry["updated"] = now
         store.write(entry)
@@ -147,6 +150,7 @@ def _reopen_ghost(
     *,
     live: set[str],
     grace: float,
+    remote_control: bool,
     tab_spawner: TabSpawner | None,
 ) -> OpResult:
     """The GHOST branch of ``reopen`` (see its docstring for the "why").
@@ -199,7 +203,9 @@ def _reopen_ghost(
             + _open_tab(tab_spawner, name)
         )
     try:
-        tmux.new_detached_session(name, entry["cwd"], revival_argv(entry))
+        tmux.new_detached_session(
+            name, entry["cwd"], revival_argv(entry, remote_control=remote_control)
+        )
     except Exception as exc:  # adapter subprocess failure
         return OpResult(
             True,
@@ -360,6 +366,7 @@ def untmux(
     pid: int,
     now: str,
     *,
+    remote_control: bool,
     tab_spawner: TabSpawner | None,
 ) -> OpResult:
     """Genuinely un-tmux a parked session: kill the tmux wrapper, relaunch
@@ -413,7 +420,9 @@ def untmux(
     except Exception as exc:  # adapter subprocess failure
         return OpResult(False, f"untmux {pid} failed to kill tmux session {name}: {exc}")
     try:
-        tab_spawner.open_tab(revival_argv(entry), cwd=entry["cwd"])
+        tab_spawner.open_tab(
+            revival_argv(entry, remote_control=remote_control), cwd=entry["cwd"]
+        )
     except Exception as exc:  # adapter subprocess/osascript failure
         return OpResult(
             False,
