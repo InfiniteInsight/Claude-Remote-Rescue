@@ -780,10 +780,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_37():
-    """v37: a search hit with no card opens Discoverable filtered to it
-    (v36 scoped the card list; v35 stacked duplicates)."""
-    assert web.PAGE_VERSION == 37
+def test_page_version_is_38():
+    """v38: the key is grouped by kind with per-term help (v37 routed
+    untracked search hits into Discoverable)."""
+    assert web.PAGE_VERSION == 38
 
 
 def test_page_cards_still_headline_the_title():
@@ -1092,3 +1092,23 @@ def test_page_untracked_search_hit_opens_the_discoverable_modal():
     assert "function openDisc(kind, query)" in page
     # and a prefiltered-but-empty view explains itself
     assert "it may be tracked already" in page
+
+
+def test_page_key_is_grouped_with_tap_and_hover_help():
+    """The key was a flat run of 5 dots plus two prose paragraphs, mixing
+    three different kinds of information. It is now grouped by kind, with
+    the prose moved into per-term help."""
+    page = web.render_page()
+    for group in (">state<", ">context<", ">sid<"):
+        assert group in page, group
+    assert "kgroup" in page and "klabel" in page and "kterm" in page
+    assert "data-help" in page
+    # the old always-on prose blocks are gone
+    assert "k-note" not in page
+
+
+def test_page_key_help_works_on_touch_not_just_hover():
+    # title= never fires on a phone, and this dashboard is used from one.
+    page = web.render_page()
+    assert '#key .kterm' in page
+    assert 'showNotice(t.textContent + ": " + help' in page
