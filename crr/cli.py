@@ -955,6 +955,17 @@ def _kick_dropped_bridges(
     if not config.get("remote_control_watch"):
         return
 
+    # Fail CLOSED on an unreadable settings file. A corrupt store reads as
+    # "no overrides", which would silently drop every per-session opt-out
+    # and make a session the user explicitly excluded eligible again — and
+    # the action here restarts a LIVE process. An absent file is not
+    # degraded (never configured is the normal case).
+    if settings_store.is_degraded():
+        print("crr revive: settings file unreadable — not auto-kicking anything "
+              "(per-session opt-outs cannot be honoured); fix or delete "
+              f"{state_dir.state_dir() / settings.FILENAME}", file=sys.stderr)
+        return
+
     global_override = settings_store.read_global_autokick()
     config_default = config.get("remote_control_autokick")
     bridge_stale_records = config.get("bridge_stale_records")

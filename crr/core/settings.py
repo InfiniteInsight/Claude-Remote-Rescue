@@ -103,15 +103,42 @@ class SettingsStore:
         """The stored file as a dict, or ``{}`` on any read failure.
 
         Consulted on every watchdog pass (and every dashboard render), so a
-        missing OR corrupt file must degrade rather than raise.
+        missing OR corrupt file must degrade rather than raise. Callers that
+        gate a DESTRUCTIVE action must additionally consult ``is_degraded``
+        — see its docstring for why an empty read is not safe on its own.
         """
+        data, _degraded = self._read_checked()
+        return data
+
+    def _read_checked(self) -> tuple[dict[str, Any], bool]:
+        """``(data, degraded)``. ``degraded`` is True only when the file
+        EXISTS but could not be understood — never for a missing file."""
+        if not self._path.exists():
+            return {}, False          # never configured: the normal case
         try:
             data = read_json_file(self._path)
         except (OSError, ValueError):
-            return {}
+            return {}, True
         if not isinstance(data, dict):
-            return {}
-        return data
+            return {}, True
+        try:
+            _normalize_sessions(data.get("sessions", {}))
+        except SettingsError:
+            return data, True
+        return data, False
+
+    def is_degraded(self) -> bool:
+        """True when a stored settings file exists but cannot be understood.
+
+        An absent file and a corrupt one both read as "no overrides", which
+        is fine for display but NOT for licensing a destructive action: a
+        corrupt file silently drops every per-session opt-out, so a session
+        the user explicitly excluded would become eligible for auto-kick
+        again. The watchdog therefore refuses to auto-kick anything while
+        this is true — fail closed, because the cost of being wrong is
+        restarting a live session the user asked crr to leave alone.
+        """
+        return self._read_checked()[1]
 
     def read_global_autokick(self) -> bool | None:
         """The dashboard's global override, or ``None`` (fall back to config)."""

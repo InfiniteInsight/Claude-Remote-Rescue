@@ -161,3 +161,28 @@ def test_store_write_session_autokick_refuses_past_the_bound(tmp_path):
         store.write_session_autokick(f"{i:08x}-0000-4000-8000-000000000000", True)
     with pytest.raises(settings.SettingsError):
         store.write_session_autokick(_SID, True)
+
+
+# --- corrupt store must FAIL CLOSED for a destructive action -------------
+
+def test_absent_store_is_not_degraded(tmp_path):
+    # Never configured is the normal case: defaults apply, nothing is wrong.
+    store = settings.SettingsStore(tmp_path)
+    assert store.is_degraded() is False
+
+
+def test_corrupt_store_reports_degraded(tmp_path):
+    (tmp_path / settings.FILENAME).write_text("{not json", encoding="utf-8")
+    assert settings.SettingsStore(tmp_path).is_degraded() is True
+
+
+def test_wrong_shape_store_reports_degraded(tmp_path):
+    (tmp_path / settings.FILENAME).write_text('["not", "a", "dict"]', encoding="utf-8")
+    assert settings.SettingsStore(tmp_path).is_degraded() is True
+
+
+def test_corrupt_session_map_reports_degraded(tmp_path):
+    # A broken sessions map means the user's opt-outs are unreadable — the
+    # exact state in which auto-kick must NOT be licensed to restart things.
+    (tmp_path / settings.FILENAME).write_text('{"sessions": "nope"}', encoding="utf-8")
+    assert settings.SettingsStore(tmp_path).is_degraded() is True

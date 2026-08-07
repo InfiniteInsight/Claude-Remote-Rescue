@@ -313,3 +313,25 @@ def test_duplicate_sids_are_kicked_at_most_once_per_sweep(tmp_path):
     )
 
     assert len(recorder.calls) == 1
+
+
+def test_a_corrupt_settings_file_kicks_nothing(tmp_path, capsys):
+    """Fail CLOSED: an unreadable store reads as "no overrides", which would
+    silently drop every per-session opt-out — and this step restarts LIVE
+    processes. An absent file is fine; a corrupt one must stop the pass."""
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    (tmp_path / settings.FILENAME).write_text("{not json", encoding="utf-8")
+    settings_store = settings.SettingsStore(tmp_path)
+    recorder = _Recorder()
+
+    cli._kick_dropped_bridges(
+        store.scan().entries, FakeBoot(), FakeProbe(), cfg.Config(), settings_store,
+        store, tmp_path, controller=None, flags=None,
+        read_tail_facts=lambda sid, cap, **kw: _facts(),
+        read_takeover_signal=lambda sid: _signal(),
+        kick=recorder, clock=lambda: 10_000.0,
+    )
+
+    assert recorder.calls == []
+    assert "not auto-kicking anything" in capsys.readouterr().err
