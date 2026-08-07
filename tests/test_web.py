@@ -780,10 +780,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_36():
-    """v36: search scopes the card list and results click through to the
-    matching card (v35 stacked duplicates)."""
-    assert web.PAGE_VERSION == 36
+def test_page_version_is_37():
+    """v37: a search hit with no card opens Discoverable filtered to it
+    (v36 scoped the card list; v35 stacked duplicates)."""
+    assert web.PAGE_VERSION == 37
 
 
 def test_page_cards_still_headline_the_title():
@@ -1081,3 +1081,14 @@ def test_page_jump_highlight_survives_the_poll_rerender():
     # class would vanish mid-animation and look like the click did nothing.
     page = web.render_page()
     assert "flashSid" in page and "flashUntil" in page
+
+
+def test_page_untracked_search_hit_opens_the_discoverable_modal():
+    """Clicking a result for a session with no card used to dead-end in a
+    toast. It now opens Discoverable pre-filtered to that session, where
+    Adopt / Take over live."""
+    page = web.render_page()
+    assert 'openDisc("discoverable", sid)' in page
+    assert "function openDisc(kind, query)" in page
+    # and a prefiltered-but-empty view explains itself
+    assert "it may be tracked already" in page
