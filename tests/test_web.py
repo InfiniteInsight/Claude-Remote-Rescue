@@ -780,10 +780,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_35():
-    """v35: duplicate cards stack (click to fan out) and each duplicate
-    group gets its own edge colour."""
-    assert web.PAGE_VERSION == 35
+def test_page_version_is_36():
+    """v36: search scopes the card list and results click through to the
+    matching card (v35 stacked duplicates)."""
+    assert web.PAGE_VERSION == 36
 
 
 def test_page_cards_still_headline_the_title():
@@ -1053,3 +1053,31 @@ def test_page_stack_toggle_pluralises_correctly():
     page = web.render_page()
     assert "copyies" not in page
     assert '" more copy" : " more copies"' in page
+
+
+def test_page_search_scopes_the_card_list_and_results_are_clickable():
+    """A search that leaves every non-matching card on screen isn't a
+    search. Results scope the list AND jump to the card when clicked."""
+    page = web.render_page()
+    assert "searchMatchSids" in page          # scoping state
+    assert "function jumpToSession(" in page  # click a result -> its card
+    assert 'data-sid' in page                 # cards are addressable
+    assert "@keyframes flash" in page         # the jumped-to card is flagged
+
+
+def test_page_clearing_the_search_unscopes_the_list():
+    page = web.render_page()
+    assert 'addEventListener("input"' in page
+    assert "searchMatchSids = null" in page
+
+
+def test_page_search_does_not_blank_the_list_for_untracked_matches():
+    page = web.render_page()
+    assert "none of these sessions are tracked" in page
+
+
+def test_page_jump_highlight_survives_the_poll_rerender():
+    # The 5s poll rebuilds every card; a highlight tracked only as a DOM
+    # class would vanish mid-animation and look like the click did nothing.
+    page = web.render_page()
+    assert "flashSid" in page and "flashUntil" in page

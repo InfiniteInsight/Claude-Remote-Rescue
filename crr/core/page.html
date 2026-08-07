@@ -156,6 +156,14 @@
     background: #161a22; font-size: 12px;
   }
   #recall-panel .rmeta { color: #8a93a2; }
+  #recall-panel .hit { cursor: pointer; border-radius: 6px; padding: 4px 6px; margin: 2px -6px; }
+  #recall-panel .hit:hover { background: #1c222c; }
+  .card.flash { animation: flash 1.4s ease-out; }
+  @keyframes flash {
+    0%   { box-shadow: 0 0 0 2px #6f7cf5; }
+    100% { box-shadow: 0 0 0 2px rgba(111,124,245,0); }
+  }
+  @media (prefers-reduced-motion: reduce) { .card.flash { animation: none; } }
   /* Animated progress while a search is in flight — a full-corpus sweep
      takes ~0.7s, long enough that static text reads as "nothing happened". */
   .searching::after {
@@ -378,10 +386,40 @@ var filterKey = "all", sortKey = "updated", groupKey = "none", lastSessions = []
 // ...?" label across a rebuild. {pid, op} — matched by both fields.
 var confirmArmed = null;
 
+// Sids the last search matched. Non-null means the card list is scoped to
+// the search: a search that shows results but leaves 16 unrelated cards on
+// screen isn't a search, it's a footnote.
+var searchMatchSids = null;
+
+// The card most recently jumped to, and how long its highlight lasts.
+// Survives a re-render (see jumpToSession).
+var flashSid = null, flashUntil = 0;
+var FLASH_MS = 1400;
+
 function passesFilter(s) {
+  if (searchMatchSids && !searchMatchSids[s.session_id]) return false;
   if (filterKey === "crashed") return s.state === "crashed";
   if (filterKey === "active") return s.state !== "crashed";
   return true;  // "all"
+}
+
+// Scroll to a card and flash it. Used when a search result is clicked: the
+// result says WHY it matched, the card is what you act on.
+function jumpToSession(sid) {
+  var el0 = document.querySelector('[data-sid="' + sid + '"]');
+  if (!el0) {
+    showNotice("That session isn't tracked — look under Discoverable.", "warn");
+    return;
+  }
+  el0.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Remember WHICH card is flashing, not just the DOM class: the 5s poll
+  // rebuilds every card, and a poll landing mid-flash would otherwise wipe
+  // the highlight and make the click look like it did nothing.
+  flashSid = sid;
+  flashUntil = Date.now() + FLASH_MS;
+  el0.classList.remove("flash");
+  void el0.offsetWidth;      // restart the animation on a repeat click
+  el0.classList.add("flash");
 }
 var STATE_ORDER = { crashed: 0, ghost: 1, live: 2 };  // crashed floats to the top
 
@@ -484,6 +522,8 @@ function renderCard(s, uncertain, groupColor, latest) {
   var isDup = !!s.duplicate_group;
   var isUncertain = isDup && uncertain[s.duplicate_group];
   var card = el("div", "card" + (isDup ? (isUncertain ? " dup dup-uncertain" : " dup") : ""));
+  card.setAttribute("data-sid", s.session_id);
+  if (flashSid === s.session_id && Date.now() < flashUntil) { card.classList.add("flash"); }
   if (isDup && !isUncertain) {
     // Same conversation -> same hue; different duplicate groups -> different
     // hues. (Uncertain keeps amber via the CSS override.)
@@ -1228,8 +1268,25 @@ function renderRecall(data, scopeLabel) {
     panel.appendChild(none);
     return;
   }
+  // Scope the card list to what matched, so a search hides non-matches
+  // like any other search box. Cleared by the X / an empty query.
+  var sids = {};
+  matches.forEach(function (m) { if (m.session_id) { sids[m.session_id] = true; } });
+  // Only scope if at least one match is a TRACKED session — a search that
+  // only hit untracked transcripts would otherwise blank the card list.
+  var tracked = lastSessions.some(function (s) { return sids[s.session_id]; });
+  searchMatchSids = (Object.keys(sids).length && tracked) ? sids : null;
+  if (Object.keys(sids).length && !tracked) {
+    var note = el("div", "ev rmeta");
+    note.textContent = "none of these sessions are tracked — look under Discoverable";
+    panel.appendChild(note);
+  }
+  render(null);
+
   matches.forEach(function (m) {
-    var row = el("div", "ev");
+    var row = el("div", "ev hit");
+    row.title = "Jump to this session's card";
+    row.addEventListener("click", function () { jumpToSession(m.session_id); });
     var meta = el("span", "rmeta");
     var tag = "[" + (m.role || "?") + "] ";
     if (m.timestamp) { tag += relTime(m.timestamp) + " "; }
@@ -1247,6 +1304,8 @@ function runRecall(sid) {
   var input = document.getElementById("recall-q");
   var q = (input.value || "").trim();
   if (!q) {
+    searchMatchSids = null;   // empty query un-scopes the card list
+    render(null);
     // Clicking a card's Search with an empty box did nothing visible. Say
     // what the button needs — and what it will scope to.
     input.focus();
@@ -1269,6 +1328,16 @@ function runRecall(sid) {
 document.getElementById("recall-all-btn").addEventListener("click", function () { runRecall(null); });
 document.getElementById("recall-q").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { runRecall(null); }
+});
+// Clearing the box (the native X, or deleting the text) un-scopes the card
+// list and hides the results — otherwise the list stays filtered by a search
+// that is no longer on screen.
+document.getElementById("recall-q").addEventListener("input", function () {
+  if (!(this.value || "").trim()) {
+    searchMatchSids = null;
+    document.getElementById("recall-panel").hidden = true;
+    render(null);
+  }
 });
 
 document.getElementById("filter").addEventListener("change", function () { filterKey = this.value; render(null); });
