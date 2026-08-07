@@ -224,3 +224,26 @@ def test_corrupt_session_map_reports_degraded(tmp_path):
     # exact state in which auto-kick must NOT be licensed to restart things.
     (tmp_path / settings.FILENAME).write_text('{"sessions": "nope"}', encoding="utf-8")
     assert settings.SettingsStore(tmp_path).is_degraded() is True
+
+
+def test_degraded_store_reports_global_off_for_display():
+    """A degraded store means the watchdog kicks NOTHING (fail-closed). The
+    card must therefore not render 'auto-kick on' — a state the system is
+    not honouring. The effective read is False, matching reality."""
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d)
+        (p / settings.FILENAME).write_text("{not json", encoding="utf-8")
+        store = settings.SettingsStore(p)
+        assert store.read_global_autokick() is None      # raw read: no override
+        assert store.effective_global_autokick() is False  # display: off, honestly
+
+
+def test_healthy_store_effective_read_is_the_stored_override():
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d)
+        store = settings.SettingsStore(p)
+        assert store.effective_global_autokick() is None   # unset -> config default
+        store.write_global_autokick(True)
+        assert store.effective_global_autokick() is True

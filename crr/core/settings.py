@@ -169,6 +169,20 @@ class SettingsStore:
         value = self._read_raw().get("autokick")
         return value if isinstance(value, bool) else None
 
+    def effective_global_autokick(self) -> bool | None:
+        """The global override AS THE SYSTEM WILL ACT ON IT.
+
+        Identical to ``read_global_autokick`` except that a degraded store
+        reports ``False``. While degraded the watchdog auto-kicks nothing
+        (fail closed — see ``is_degraded``), so a card rendered from the raw
+        read would claim "auto-kick on" for a system that is kicking
+        nothing. Display must not promise behaviour that is not happening;
+        the Settings modal surfaces the degraded reason itself.
+        """
+        if self.is_degraded():
+            return False
+        return self.read_global_autokick()
+
     def read_session_overrides(self) -> dict[str, bool]:
         """The full per-session map, or ``{}`` on a missing/corrupt entry."""
         try:

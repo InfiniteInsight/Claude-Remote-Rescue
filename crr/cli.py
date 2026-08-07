@@ -503,7 +503,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         context_compact_fraction=config.get("context_compact_fraction"),
         bridge_stale_records=config.get("bridge_stale_records"),
         autokick_config_default=config.get("remote_control_autokick"),
-        autokick_global_override=settings_store.read_global_autokick(),
+        autokick_global_override=settings_store.effective_global_autokick(),
         autokick_session_overrides=settings_store.read_session_overrides(),
     )
     # Validate our own output before emitting it (the P7 validator doubles
@@ -1729,7 +1729,7 @@ def _whoami_card(config=None) -> dict | None:
         context_compact_fraction=config.get("context_compact_fraction"),
         bridge_stale_records=config.get("bridge_stale_records"),
         autokick_config_default=config.get("remote_control_autokick"),
-        autokick_global_override=settings_store.read_global_autokick(),
+        autokick_global_override=settings_store.effective_global_autokick(),
         autokick_session_overrides=settings_store.read_session_overrides(),
     )
     sessions = payload.get("sessions") or []
@@ -2190,7 +2190,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             context_compact_fraction=config.get("context_compact_fraction"),
             bridge_stale_records=config.get("bridge_stale_records"),
             autokick_config_default=config.get("remote_control_autokick"),
-            autokick_global_override=settings_store.read_global_autokick(),
+            autokick_global_override=settings_store.effective_global_autokick(),
             autokick_session_overrides=settings_store.read_session_overrides(),
         )
         contracts.validate_sessions_payload(payload)
