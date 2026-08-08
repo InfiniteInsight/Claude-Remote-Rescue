@@ -41,6 +41,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from crr.core import contracts
 from crr.core.journal import read_json_file, write_json_atomic
 
 FILENAME = "bridge_kicks.json"
@@ -98,6 +99,11 @@ class KickHistoryStore:
             return {}, True
         if not isinstance(data, dict) or not isinstance(data.get("sessions", {}), dict):
             return {}, True
+        if not contracts.store_version_ok(data, contracts.KICKS_STORE_VERSION):
+            # Degraded, not empty (#36). Reading a version this build does
+            # not understand as "no history" would erase the cooldown and
+            # attempt cap — which IS the restart-loop protection.
+            return {}, True
         return data, False
 
     def is_degraded(self) -> bool:
@@ -146,7 +152,8 @@ class KickHistoryStore:
                 key=lambda s: sessions[s].get("last_kick_ts", 0),
             )
             del sessions[oldest_sid]
-        write_json_atomic(self._path, {"sessions": sessions})
+        write_json_atomic(
+            self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
 
     def reset(self, sid: str) -> None:
         """Clear ``sid``'s attempt history — call this ONLY when its bridge
@@ -164,4 +171,5 @@ class KickHistoryStore:
         sessions = dict(self._sessions())
         if sid in sessions:
             del sessions[sid]
-            write_json_atomic(self._path, {"sessions": sessions})
+            write_json_atomic(
+            self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})

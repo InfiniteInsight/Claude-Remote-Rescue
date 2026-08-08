@@ -25,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from crr.core import contracts
 from crr.core.journal import read_json_file, write_json_atomic
 
 # Bounds on what a POST may store: a malformed or hostile request must not
@@ -93,12 +94,21 @@ class ExclusionStore:
         A missing OR corrupt file degrades to an empty list rather than
         raising: this is consulted on every discovery pass, and a bad file
         must not take the panel (or `crr discover`) down with it.
+
+        A file stamped with a version this build does not understand (#36)
+        also degrades to ``[]`` rather than being partially read. Degrading
+        is safe HERE specifically because the failure direction is benign:
+        forgetting an exclusion shows the user extra rows in a panel, it
+        does not act on anything. The sibling stores (settings, kicks) gate
+        destructive work and so surface ``is_degraded()`` instead.
         """
         try:
             data = read_json_file(self._path)
         except (OSError, ValueError):
             return []
         if not isinstance(data, dict):
+            return []
+        if not contracts.store_version_ok(data, contracts.EXCLUSIONS_STORE_VERSION):
             return []
         try:
             return normalize(data.get("dirs", []))
@@ -108,5 +118,7 @@ class ExclusionStore:
     def write(self, dirs: Any) -> list[str]:
         """Validate, store atomically, and return the normalized list."""
         cleaned = normalize(dirs)
-        write_json_atomic(self._path, {"dirs": cleaned})
+        write_json_atomic(
+            self._path, {"v": contracts.EXCLUSIONS_STORE_VERSION, "dirs": cleaned}
+        )
         return cleaned

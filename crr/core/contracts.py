@@ -42,6 +42,53 @@ DIAGNOSTICS_CONTRACT_VERSION = 3
 ARCHIVE_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
+# The five lazy API payloads (#36). Every one of these shipped unversioned:
+# a consumer of `/api/discoverable` depended on whatever shape it happened
+# to have that day, and a dropped field would surface as a wrong answer
+# downstream rather than an error at the boundary. All start at v1 — the
+# shapes are unchanged, only now they are declared.
+# --------------------------------------------------------------------------
+DISCOVERABLE_CONTRACT_VERSION = 1
+UNTRACKED_CONTRACT_VERSION = 1
+RECALL_CONTRACT_VERSION = 1
+EXCLUSIONS_CONTRACT_VERSION = 1
+SETTINGS_CONTRACT_VERSION = 1
+
+# --------------------------------------------------------------------------
+# The three dashboard-managed STORES (#36). These matter more than the
+# payloads above: a served payload breaks visibly against a page of a known
+# version, but a file in the state dir is read back by whatever crr is
+# installed later — including an older one after a rollback. Each store
+# stamps `v` on write; each accepts an unstamped file as legacy v1 (every
+# file already on disk predates this) and REFUSES a version from the
+# future, degrading rather than half-reading a shape it does not know.
+# --------------------------------------------------------------------------
+EXCLUSIONS_STORE_VERSION = 1
+SETTINGS_STORE_VERSION = 1
+KICKS_STORE_VERSION = 1
+
+
+def store_version_ok(raw: Any, current: int) -> bool:
+    """Is this stored mapping's ``v`` one this build can read?
+
+    True for an absent ``v`` (legacy: written before stores were versioned,
+    and otherwise the current shape) and for any int ``v <= current``.
+    False for a non-int, a bool (an int subclass — same exclusion every
+    other numeric field here makes), or a version from the future.
+
+    Shared by all three stores so "what does a version mean" is answered in
+    one place rather than three subtly different ones.
+    """
+    if not isinstance(raw, Mapping):
+        return False
+    if "v" not in raw:
+        return True
+    version = raw["v"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        return False
+    return version <= current
+
+# --------------------------------------------------------------------------
 # Enumerations shared across contracts (single source of truth).
 # --------------------------------------------------------------------------
 
@@ -372,3 +419,125 @@ def validate_archive_record(record: Any) -> None:
     validate_journal_entry(record["entry"])
     if record["entry"]["claude"] is None:
         raise ContractError("archive 'entry' must carry a claude session (nothing to revive otherwise)")
+
+
+# --------------------------------------------------------------------------
+# The five lazy API payloads (#36 — run-3 P7). Canonical key lists +
+# validators, matching the shape /api/sessions and /api/diagnostics have
+# had all along. Exact-key checks in both directions: a DROPPED field is
+# the regression these exist to catch, and an unexpected extra one usually
+# means a shape changed without its version moving.
+# --------------------------------------------------------------------------
+
+DISCOVERABLE_ROW_KEYS = (
+    "session_id", "sid8", "cwd", "last_active", "transcript_bytes",
+    "last_prompt", "mtime", "running",
+)
+UNTRACKED_ROW_KEYS = ("session_id", "sid8", "cwd", "archived_at", "last_prompt")
+PAGED_PAYLOAD_KEYS = ("contract", "rows", "total", "filtered", "offset", "limit")
+RECALL_MATCH_KEYS = ("session_id", "role", "text", "index", "timestamp")
+RECALL_PAYLOAD_KEYS = ("contract", "matches", "scanned", "skipped")
+EXCLUSIONS_PAYLOAD_KEYS = (
+    "contract", "configured", "managed", "config_path", "config_from_file",
+)
+SETTINGS_PAYLOAD_KEYS = ("contract", "autokick", "resolved", "config_default", "degraded")
+
+
+def _require_contract(payload: Mapping[str, Any], expected: int, what: str) -> None:
+    got = payload["contract"]
+    if isinstance(got, bool) or not isinstance(got, int):
+        raise ContractError(f"{what} 'contract' must be an int, got {type(got).__name__}")
+    if got != expected:
+        raise ContractError(
+            f"{what} 'contract' is {got}, this build serves {expected}"
+        )
+
+
+def _validate_paged(payload: Any, expected: int, row_keys: tuple[str, ...], what: str) -> None:
+    """Shared validator for the two paged, row-bearing panels.
+
+    `/api/discoverable` and `/api/untracked` back the SAME dashboard modal
+    and were deliberately built to the same paging shape, so they share a
+    validator rather than carrying two copies that could drift apart —
+    which is the failure mode this whole file exists to prevent.
+    """
+    payload = _require_mapping(payload, f"{what} payload")
+    _require_exact_keys(payload, PAGED_PAYLOAD_KEYS, f"{what} payload")
+    _require_contract(payload, expected, what)
+    _require_type(payload["rows"], list, f"{what} 'rows'")
+    for field in ("total", "filtered", "offset", "limit"):
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ContractError(f"{what} '{field}' must be an int, got {type(value).__name__}")
+        if value < 0:
+            raise ContractError(f"{what} '{field}' must be >= 0, got {value}")
+    for row in payload["rows"]:
+        row = _require_mapping(row, f"{what} row")
+        _require_exact_keys(row, row_keys, f"{what} row")
+        if not valid_session_id(row["session_id"]):
+            raise ContractError(f"{what} row 'session_id' is not a session id")
+        _require_type(row["sid8"], str, f"{what} row 'sid8'")
+        _require_type(row["cwd"], str, f"{what} row 'cwd'")
+        _require_type(row["last_prompt"], str, f"{what} row 'last_prompt'")
+
+
+def validate_discoverable_payload(payload: Any) -> None:
+    _validate_paged(payload, DISCOVERABLE_CONTRACT_VERSION,
+                    DISCOVERABLE_ROW_KEYS, "/api/discoverable")
+
+
+def validate_untracked_payload(payload: Any) -> None:
+    _validate_paged(payload, UNTRACKED_CONTRACT_VERSION,
+                    UNTRACKED_ROW_KEYS, "/api/untracked")
+
+
+def validate_recall_payload(payload: Any) -> None:
+    """`scanned`/`skipped` are the lineage half of this payload: how many
+    transcripts were actually searched, and how many the budget left
+    unsearched. They are contracted for that reason — dropping them would
+    turn a partial sweep into a silently complete-looking one."""
+    payload = _require_mapping(payload, "/api/recall payload")
+    _require_exact_keys(payload, RECALL_PAYLOAD_KEYS, "/api/recall payload")
+    _require_contract(payload, RECALL_CONTRACT_VERSION, "/api/recall")
+    _require_type(payload["matches"], list, "/api/recall 'matches'")
+    for field in ("scanned", "skipped"):
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ContractError(f"/api/recall '{field}' must be an int, got {type(value).__name__}")
+        if value < 0:
+            raise ContractError(f"/api/recall '{field}' must be >= 0, got {value}")
+    for match in payload["matches"]:
+        match = _require_mapping(match, "/api/recall match")
+        _require_exact_keys(match, RECALL_MATCH_KEYS, "/api/recall match")
+        _require_type(match["role"], str, "/api/recall match 'role'")
+        _require_type(match["text"], str, "/api/recall match 'text'")
+
+
+def validate_exclusions_payload(payload: Any) -> None:
+    """`configured` vs `managed` is this payload's provenance split — which
+    entries came from the user's own config.toml and which the dashboard
+    wrote. Contracted so the two can never be merged into one anonymous
+    list, which would lose which ones the web is allowed to edit."""
+    payload = _require_mapping(payload, "/api/exclusions payload")
+    _require_exact_keys(payload, EXCLUSIONS_PAYLOAD_KEYS, "/api/exclusions payload")
+    _require_contract(payload, EXCLUSIONS_CONTRACT_VERSION, "/api/exclusions")
+    for field in ("configured", "managed"):
+        _require_type(payload[field], list, f"/api/exclusions '{field}'")
+        for entry in payload[field]:
+            _require_type(entry, str, f"/api/exclusions '{field}' entry")
+    _require_type(payload["config_path"], str, "/api/exclusions 'config_path'")
+    _require_type(payload["config_from_file"], bool, "/api/exclusions 'config_from_file'")
+
+
+def validate_settings_payload(payload: Any) -> None:
+    """`autokick` is NULLABLE on purpose: None means "never set, falls back
+    to config", which is a different state from an explicit False. `degraded`
+    is contracted because a Settings modal that cannot say the store is
+    unreadable would show a switch that does nothing."""
+    payload = _require_mapping(payload, "/api/settings payload")
+    _require_exact_keys(payload, SETTINGS_PAYLOAD_KEYS, "/api/settings payload")
+    _require_contract(payload, SETTINGS_CONTRACT_VERSION, "/api/settings")
+    if payload["autokick"] is not None:
+        _require_type(payload["autokick"], bool, "/api/settings 'autokick'")
+    for field in ("resolved", "config_default", "degraded"):
+        _require_type(payload[field], bool, f"/api/settings '{field}'")
