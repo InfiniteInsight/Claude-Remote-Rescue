@@ -897,10 +897,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_40():
-    """v40: "unknown" chips for remote control (#33) and context (#39)
-    (v39 added the dropped-Remote-Control badge + auto-kick toggles)."""
-    assert web.PAGE_VERSION == 40
+def test_page_version_is_41():
+    """v41: flash + filter-debounce timings injected from config (#37)
+    (v40 added the "unknown" chips for remote control and context)."""
+    assert web.PAGE_VERSION == 41
 
 
 def test_page_renders_both_unknown_chips():
