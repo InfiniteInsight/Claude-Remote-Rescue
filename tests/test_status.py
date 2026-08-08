@@ -184,16 +184,20 @@ def test_card_carries_last_active_from_tail_facts():
     assert card["last_active"] == "2026-08-01T12:34:56Z"
 
 
-def test_card_context_pressure_default_is_ok_with_no_transcript():
+def test_card_context_pressure_is_unknown_with_no_transcript():
+    # #39: the default extractor reports model="" (nothing extracted), so
+    # there is no confirmed context window to divide by. Previously this
+    # read "ok" — a reassuring claim derived from a fabricated 200K.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
-    assert payload["sessions"][0]["context_pressure"] == "ok"
+    assert payload["sessions"][0]["context_pressure"] == "unknown"
 
 
 def test_card_context_pressure_will_compact_when_over_window():
-    # DEFAULT_WINDOW is 200_000 tokens; estimate_tokens is bytes // 4, so
-    # 200_000 * 4 bytes clears the compact fraction (default 1.0) for an
-    # unmapped model.
+    # haiku-4.5's confirmed window is 200_000 tokens; estimate_tokens is
+    # bytes // 4, so 200_000 * 4 bytes clears the compact fraction
+    # (default 1.0). A MAPPED model is required since #39 — an unmapped one
+    # now yields "unknown" rather than borrowing DEFAULT_WINDOW.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions(
         [_entry(42, sid)],
@@ -204,7 +208,7 @@ def test_card_context_pressure_will_compact_when_over_window():
             "last_reply": "",
             "title": "",
             "slug": "",
-            "model": "some-unmapped-model",
+            "model": "claude-haiku-4-5-20251001",
             "last_active": "",
             "transcript_bytes": 200_000 * 4,
             "bridge_seen": False,
@@ -225,9 +229,9 @@ def test_card_context_pressure_thresholds_are_configurable():
             "last_reply": "",
             "title": "",
             "slug": "",
-            "model": "some-unmapped-model",
+            "model": "claude-haiku-4-5-20251001",
             "last_active": "",
-            "transcript_bytes": 100_000 * 4,  # fraction 0.5 of 200_000 default window
+            "transcript_bytes": 100_000 * 4,  # fraction 0.5 of haiku-4.5's 200_000 window
             "bridge_seen": False,
             "bridge_since": 0,
         },
@@ -298,11 +302,28 @@ def test_card_remote_control_threshold_is_configurable():
     assert payload["sessions"][0]["remote_control"] == "dropped"
 
 
-def test_card_remote_control_defaults_to_off_with_no_tail_facts_wired():
-    # No extractor: the default _empty_facts reports bridge_seen=False, so
-    # remote_control degrades to "off" rather than a fabricated state.
+def test_card_remote_control_is_unknown_with_no_tail_facts_wired():
+    # #33: no extractor means no transcript was read, so bridge_seen is None
+    # and the card says "unknown". It used to say "off" — asserting Remote
+    # Control was never enabled, on the strength of never having looked.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
+    assert payload["sessions"][0]["remote_control"] == "unknown"
+
+
+def test_card_remote_control_is_off_only_when_the_whole_transcript_was_read():
+    # The one case that licenses the positive claim: the adapter reports
+    # bridge_seen=False, meaning it walked to the start of the transcript
+    # inside its scan window and found no marker.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(
+        [_entry(42, sid)], FakeBoot(), FakeProbe(),
+        tail_facts=lambda entry: {
+            "last_prompt": "", "last_reply": "", "title": "", "slug": "",
+            "model": "", "last_active": "", "transcript_bytes": 0,
+            "bridge_seen": False, "bridge_since": 0,
+        },
+    )
     assert payload["sessions"][0]["remote_control"] == "off"
 
 

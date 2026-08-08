@@ -122,7 +122,7 @@ def test_read_tail_facts_missing_transcript_is_empty(tmp_path):
     assert transcript_source.read_tail_facts("nope", cap=100, home=tmp_path) == {
         "last_prompt": "", "model": "", "last_active": "",
         "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
-        "bridge_seen": False, "bridge_since": 0,
+        "bridge_seen": None, "bridge_since": 0,
     }
 
 
@@ -570,17 +570,40 @@ def test_read_tail_facts_no_marker_is_honestly_unseen(tmp_path):
     assert facts["bridge_since"] == 0
 
 
-def test_read_tail_facts_marker_beyond_bridge_scan_lines_is_unseen(tmp_path):
+def test_read_tail_facts_marker_beyond_bridge_scan_lines_is_unknown(tmp_path):
     # Measured: a healthy marker sits 0-11 records from the tail and never
     # more than 107 behind (54 transcripts / 6991 gaps). A marker further
-    # back than the configured scan window must report an honest "unseen"
-    # rather than a fabricated drop.
+    # back than the configured scan window must report an honest UNKNOWN
+    # (#33) — not `False`, which downstream reads as "Remote Control was
+    # never enabled here", a positive claim this walk never established.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     noise = [_user_tool_result() for _ in range(10)]
     _write_transcript(tmp_path, sid, [_bridge_marker(), *noise, _user("the most recent prompt")])
     facts = transcript_source.read_tail_facts(sid, 200, home=tmp_path, bridge_scan_lines=5)
-    assert facts["bridge_seen"] is False
+    assert facts["bridge_seen"] is None
     assert facts["bridge_since"] == 0
+
+
+def test_read_tail_facts_zero_bridge_scan_lines_is_unknown_not_absent(tmp_path):
+    # `bridge_scan_lines=0` is how every caller that wants no bridge facts
+    # opts out (the discovery/untracked views, and `_tail_facts_extractor`
+    # when `remote_control_watch` is off). Not looking is the textbook
+    # unknown: it must never be reported as "no marker exists", even though
+    # this transcript really does carry one.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [_bridge_marker(), _user("the most recent prompt")])
+    facts = transcript_source.read_tail_facts(sid, 200, home=tmp_path, bridge_scan_lines=0)
+    assert facts["bridge_seen"] is None
+
+
+def test_read_tail_facts_whole_transcript_scanned_without_a_marker_is_absent(tmp_path):
+    # The one case that DOES license `False`: the walk reached the start of
+    # the transcript while still inside the scan window, so every record was
+    # examined. "No marker exists here" is now a fact, not an assumption.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _write_transcript(tmp_path, sid, [_user("a"), _user("b"), _user("c")])
+    facts = transcript_source.read_tail_facts(sid, 200, home=tmp_path, bridge_scan_lines=400)
+    assert facts["bridge_seen"] is False
 
 
 def test_read_tail_facts_marker_within_bridge_scan_lines_is_seen(tmp_path):
@@ -597,8 +620,11 @@ def test_bridge_scan_lines_is_the_named_config_default():
 
 
 def test_read_tail_facts_missing_transcript_bridge_fields_are_honest(tmp_path):
+    # No transcript to read is an unknown, not an "off" (#33): nothing was
+    # examined, so nothing can be claimed about whether Remote Control was
+    # ever enabled for this session.
     facts = transcript_source.read_tail_facts("nope", cap=100, home=tmp_path)
-    assert facts["bridge_seen"] is False
+    assert facts["bridge_seen"] is None
     assert facts["bridge_since"] == 0
 
 

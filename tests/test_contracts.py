@@ -231,11 +231,14 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_8():
+def test_sessions_contract_version_is_9():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
-    assert contracts.SESSIONS_CONTRACT_VERSION == 8
+    # v9 widens both enums with `unknown` (#33 remote_control, #39
+    # context_pressure) — no new key, but a v8 consumer has no case for the
+    # new member, so the version must move.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 9
 
 
 def test_sessions_wrong_contract_version_rejected():
@@ -335,7 +338,19 @@ def test_sessions_card_bad_remote_control_enum_rejected():
 
 
 def test_remote_control_states_enum():
-    assert contracts.REMOTE_CONTROL_STATES == ("off", "ok", "dropped")
+    assert contracts.REMOTE_CONTROL_STATES == ("unknown", "off", "ok", "dropped")
+
+
+def test_remote_control_unknown_and_off_are_both_present_and_distinct():
+    # #33: these were one value. "unknown" = the walk did not finish looking;
+    # "off" = the whole transcript was read and no marker exists.
+    assert "unknown" in contracts.REMOTE_CONTROL_STATES
+    assert "off" in contracts.REMOTE_CONTROL_STATES
+
+
+def test_context_pressure_levels_include_unknown():
+    # #39: a model with no confirmed context window yields no level at all.
+    assert contracts.CONTEXT_PRESSURE_LEVELS == ("unknown", "ok", "tight", "will-compact")
 
 
 def test_sessions_card_missing_autokick_rejected():

@@ -90,6 +90,15 @@
      Remote Control link to this session has gone quiet while claude keeps
      working locally. "off"/"ok" render no badge at all — see renderCard. */
   .badge.remote-control-badge { margin-left: 8px; background: #3a1616; color: #e05252; text-transform: none; letter-spacing: 0; }
+  /* "Unknown" chips (#33, #39): deliberately the QUIETEST badge on the card.
+     They report an absence of evidence, not a problem, so they must not
+     compete with the red/amber chips that report a real one — but they must
+     exist, because rendering nothing reads as reassurance the data cannot
+     support. Muted grey, dashed border: visibly a gap, not a state. */
+  .badge.unknown-badge {
+    margin-left: 8px; background: transparent; color: #6b7280;
+    border: 1px dashed #2f3745; text-transform: none; letter-spacing: 0;
+  }
   /* Per-session auto-kick toggle button (spec 2026-08-07, Slice 3): visually
      distinct from the destructive/neutral action buttons so it doesn't read
      as "Kick" or "Close" at a glance. Disabled state (global switch off)
@@ -259,8 +268,8 @@
 </header>
 <div id="key">
   <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span></span>
-  <span class="kgroup"><span class="klabel">context</span><span class="k-tight kterm" data-help="Estimated past 70% of this model's context window. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">tight</span><span class="k-will-compact kterm" data-help="Estimated at or over the window, so resuming will compact and lose detail. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">will compact on revive</span></span>
-  <span class="kgroup"><span class="klabel">remote control</span><span class="kterm" data-help="This session's Remote Control link to the phone has gone quiet while claude keeps working locally — the mobile app shows it as Disconnected. Kick restarts claude so it reconnects, or turn on auto-kick in Settings to have crr do that for you.">remote control dropped</span></span>
+  <span class="kgroup"><span class="klabel">context</span><span class="k-tight kterm" data-help="Estimated past 70% of this model's context window. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">tight</span><span class="k-will-compact kterm" data-help="Estimated at or over the window, so resuming will compact and lose detail. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">will compact on revive</span><span class="kterm" data-help="crr has no confirmed context window for this session's model — usually because no model could be read from the transcript at all (about 1 in 3 carry none). No badge would read as 'fine'; this says crr genuinely does not know.">context unknown</span></span>
+  <span class="kgroup"><span class="klabel">remote control</span><span class="kterm" data-help="This session's Remote Control link to the phone has gone quiet while claude keeps working locally — the mobile app shows it as Disconnected. Kick restarts claude so it reconnects, or turn on auto-kick in Settings to have crr do that for you.">remote control dropped</span><span class="kterm" data-help="crr did not finish checking this session's Remote Control link — either the marker sits further back than the scan window reaches, or watching is turned off in config. It is not a claim that Remote Control is off; crr never auto-kicks a session in this state.">remote control unknown</span></span>
   <span class="kgroup"><span class="klabel">sid</span><span class="kterm" data-help="How sure crr is that it identified the right conversation. injected = certain: crr generated the session id and passed it to claude.">injected</span><span class="kterm" data-help="Uncertain: the id was inferred from the newest transcript in that directory, so it may be the wrong conversation.">guessed</span><span class="kterm" data-help="Confirmed: a guessed id whose transcript has been written to since the session started.">verified</span></span>
 </div>
 <div id="controls">
@@ -606,14 +615,27 @@ function renderCard(s, uncertain, groupColor, latest) {
     var pb2 = el("span", "badge pressure-will-compact");
     pb2.textContent = "will compact on revive";
     top.appendChild(pb2);
+  } else if (s.context_pressure === "unknown") {
+    // #39: no confirmed context window for this session's model (often
+    // because no model could be extracted at all — measured at ~1 in 3
+    // transcripts). Rendering nothing here would be read as "ok", which is
+    // the fabricated reassurance this state exists to stop.
+    var pb3 = el("span", "badge unknown-badge");
+    pb3.textContent = "context unknown";
+    top.appendChild(pb3);
   }
-  // Slice 3: dropped-Remote-Control badge. "off" (never enabled) and "ok"
-  // render NOTHING — that is nearly every session, and a badge on the
-  // common case is clutter, not signal. See the #key legend for the term.
+  // Slice 3: dropped-Remote-Control badge. "ok" and "off" render NOTHING —
+  // both are settled answers on the common case, and a badge there is
+  // clutter, not signal. "unknown" (#33) DOES render: it is not a settled
+  // answer, and silence would be indistinguishable from "ok".
   if (s.remote_control === "dropped") {
     var rcb = el("span", "badge remote-control-badge");
     rcb.textContent = "remote control dropped";
     top.appendChild(rcb);
+  } else if (s.remote_control === "unknown") {
+    var rcu = el("span", "badge unknown-badge");
+    rcu.textContent = "remote control unknown";
+    top.appendChild(rcu);
   }
   // T-B: latest-per-cwd marker.
   var cwdInfo = latest && latest[s.cwd];

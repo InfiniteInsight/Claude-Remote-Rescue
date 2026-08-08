@@ -50,14 +50,28 @@ def window_for(model: str) -> int:
 
 
 def pressure(transcript_bytes: int, model: str, *, tight: float, compact: float) -> str:
-    """Classify context pressure as ``"ok"``, ``"tight"``, or
+    """Classify context pressure as ``"unknown"``, ``"ok"``, ``"tight"``, or
     ``"will-compact"`` from the estimated token fraction of the model's
     context window.
 
+    - ``"unknown"``: ``model`` is not in ``MODEL_CONTEXT_WINDOWS`` — either
+      the empty string ``read_tail_facts`` reports when no model could be
+      extracted, or a real model this build has no confirmed window for.
     - ``"ok"``: fraction < ``tight``
     - ``"tight"``: ``tight`` <= fraction < ``compact``
     - ``"will-compact"``: fraction >= ``compact``
+
+    The ``"unknown"`` arm is #39. ``window_for`` keeps its conservative
+    ``DEFAULT_WINDOW`` fallback — sensible for a lookup — but letting that
+    fallback flow through here put a fabricated denominator behind a badge
+    the card rendered identically to a confirmed one. That is not a rare
+    edge: ``config.py``'s ``model_tail_lines`` comment records the measured
+    rate as "~1 in 3 transcripts carry NO model at all". A third of badges
+    were claims about a context window nobody had established. An honest
+    null beats a hedged number, so the estimate is simply not made.
     """
+    if model not in MODEL_CONTEXT_WINDOWS:
+        return "unknown"
     fraction = estimate_tokens(transcript_bytes) / window_for(model)
     if fraction >= compact:
         return "will-compact"

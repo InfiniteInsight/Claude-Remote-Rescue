@@ -145,6 +145,53 @@ def test_remote_control_off_is_not_kicked(tmp_path):
     assert recorder.calls == []
 
 
+def test_remote_control_unknown_is_never_kicked(tmp_path):
+    # #33: bridge_seen=None means the scan did not finish looking. There is
+    # no evidence of a drop, and `bridge_since` is meaningless without a
+    # marker to measure from — so a huge count must NOT promote this to a
+    # kick. This is the case where acting would SIGTERM a live process on
+    # the strength of an absence of evidence.
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    settings_store = settings.SettingsStore(tmp_path)
+    recorder = _Recorder()
+
+    cli._kick_dropped_bridges(
+        store.scan().entries, FakeBoot(), FakeProbe(), cfg.Config(), settings_store,
+        store, tmp_path, controller=None, flags=None,
+        read_tail_facts=lambda sid, cap, **kw: _facts(bridge_seen=None, bridge_since=999_999),
+        read_takeover_signal=lambda sid: _signal(),
+        kick=recorder, clock=lambda: 10_000.0,
+    )
+
+    assert recorder.calls == []
+
+
+def test_remote_control_unknown_does_not_reset_the_attempt_counter(tmp_path):
+    # Only a confirmed "ok" is evidence that a reconnect worked. An unknown
+    # is the absence of evidence, so it must leave the cap's memory intact —
+    # otherwise a session whose marker drifts past the scan window would
+    # silently earn itself a fresh set of kick attempts.
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    settings_store = settings.SettingsStore(tmp_path)
+    kick_store = bridge_kicks.KickHistoryStore(tmp_path)
+    sid = _entry()["claude"]["session_id"]
+    kick_store.record_kick(sid, 1_000.0)
+    kick_store.record_kick(sid, 2_000.0)
+    assert kick_store.attempts(sid) == 2
+
+    cli._kick_dropped_bridges(
+        store.scan().entries, FakeBoot(), FakeProbe(), cfg.Config(), settings_store,
+        store, tmp_path, controller=None, flags=None,
+        read_tail_facts=lambda sid_, cap, **kw: _facts(bridge_seen=None, bridge_since=999_999),
+        read_takeover_signal=lambda sid_: _signal(),
+        kick=_Recorder(), clock=lambda: 10_000.0, kick_store=kick_store,
+    )
+
+    assert kick_store.attempts(sid) == 2
+
+
 def test_crashed_session_is_untouched_by_this_path(tmp_path):
     store = JournalStore(tmp_path)
     store.write(_entry(boot="a-boot-that-does-not-match"))  # boot mismatch -> crashed

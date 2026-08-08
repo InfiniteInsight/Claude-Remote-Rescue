@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v4).
+"""Status assembler — journal entries -> /api/sessions payload (contract v9).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -34,9 +34,12 @@ from crr.core.ports import BootIdentity, ProcessProbe
 
 
 def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
+    # bridge_seen is None, not False (#33): no extractor was injected, so
+    # nothing looked at a transcript at all. That is the textbook unknown —
+    # `False` would claim Remote Control was never enabled on the session.
     return {"last_prompt": "", "model": "", "last_active": "",
             "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
-            "bridge_seen": False, "bridge_since": 0}
+            "bridge_seen": None, "bridge_since": 0}
 
 
 class _MemoTtyProbe:
@@ -91,7 +94,9 @@ def assemble_sessions(
     ``bridge_stale_records`` from config and passes it in here, and
     ``bridge.bridge_state`` turns it plus ``tail_facts``'s
     ``bridge_seen``/``bridge_since`` into the card's ``remote_control``
-    value.
+    value. ``bridge_seen`` is tri-state: ``None`` (the adapter did not
+    finish looking) resolves to ``"unknown"``, distinct from the ``"off"``
+    that ``False`` produces — see #33 and ``bridge.bridge_state``.
 
     ``autokick_config_default``/``autokick_global_override``/
     ``autokick_session_overrides`` are the same injection pattern (Slice 3):

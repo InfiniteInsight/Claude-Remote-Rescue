@@ -76,15 +76,19 @@ def _tail_facts_extractor(config: cfg.Config):
     ``remote_control_watch`` (review fix-wave 2026-08-07, FIX 2 — IMPORTANT)
     gates the bridge scan itself, not just the watchdog's kick step: False
     passes ``bridge_scan_lines=0``, which short-circuits
-    ``read_tail_facts``'s backward walk for the bridge marker (it never
-    finds one within a zero-length window), so ``bridge_seen`` stays honestly
-    False and ``bridge.bridge_state`` resolves the card's ``remote_control``
-    field to ``"off"`` — never a stale ``"dropped"``/``"ok"`` computed from a
-    feature the user turned off, and no scan cost paid on every poll. This
-    is the single choke point every card-building call site
+    ``read_tail_facts``'s backward walk for the bridge marker, so no scan
+    cost is paid on every poll and the card can never show a stale
+    ``"dropped"``/``"ok"`` computed from a feature the user turned off.
+    This is the single choke point every card-building call site
     (``_cmd_status``, ``_cmd_web``'s provider, ``_whoami_card``) reads
     through, so gating here covers detection + the badge + the scan cost at
     once.
+
+    With watching off the card reads ``"unknown"``, not ``"off"`` (#33).
+    ``off`` is a positive claim — *Remote Control was never enabled on this
+    session* — and crr cannot support it while declining to look. The
+    honest statement is that it does not know, which is exactly what
+    turning the watch off asked for.
     """
     cap = config.get("last_prompt_display_cap")
     model_tail_lines = config.get("model_tail_lines")
@@ -1039,6 +1043,12 @@ def _kick_dropped_bridges(
         remote_control = bridge.bridge_state(
             facts["bridge_since"], facts["bridge_seen"], stale_after=bridge_stale_records,
         )
+        # Only "dropped" is actionable. "unknown" (#33) in particular must
+        # never be: it means the scan did not finish looking, so there is no
+        # evidence of a drop to act on — and acting would SIGTERM a live
+        # process on the strength of an absence. It also must not reset the
+        # attempt counter: only a confirmed "ok" is evidence a reconnect
+        # worked, and an unknown is by definition not a confirmation.
         if remote_control != "dropped":
             if remote_control == "ok":
                 # The confirmed signal that a prior kick actually worked (or
