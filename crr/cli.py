@@ -242,6 +242,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     arch.set_defaults(func=_cmd_archive)
 
+    kicks = sub.add_parser(
+        "kicks", help="inspect the watchdog's auto-kick history (why a session was restarted)")
+    kicks.add_argument(
+        "--list", action="store_true",
+        help="print every recorded auto-kick attempt (when, why, thresholds, outcome)",
+    )
+    kicks.set_defaults(func=_cmd_kicks)
+
     w = sub.add_parser("web", help="serve the tailnet dashboard (loopback only)")
     w.add_argument("--port", type=int, default=None,
                    help="dashboard bind port (default: config dashboard_port = 8377)")
@@ -1084,6 +1092,7 @@ def _kick_dropped_bridges(
             continue
 
         with mutation_lock(sd):
+            res = None
             try:
                 res = kick(store, controller, flags, boot, probe, pid, grace=grace)
             finally:
@@ -1094,7 +1103,25 @@ def _kick_dropped_bridges(
                 # the exact restart-loop hole this guard exists to close: the
                 # next pass, with no recorded attempt and no cooldown, would
                 # retry immediately.
-                kick_store.record_kick(sid, now)
+                #
+                # `observation` is the lineage (#35): the state that justified
+                # THIS kick, plus the thresholds in force. Without the
+                # thresholds, changing bridge_stale_records later silently
+                # rewrites the history of every decision taken under the old
+                # one. Recorded here rather than after `kick` returns for the
+                # same reason the counter is: it must survive an exception.
+                kick_store.record_kick(sid, now, observation={
+                    "pid": pid,
+                    "bridge_since": facts["bridge_since"],
+                    "bridge_seen": facts["bridge_seen"],
+                    "stale_after": bridge_stale_records,
+                    "scan_lines": bridge_scan_lines,
+                    "cooldown_seconds": cooldown_seconds,
+                    "max_attempts": max_attempts,
+                    "config_defaults_version": cfg.CONFIG_DEFAULTS_VERSION,
+                })
+                if res is not None:
+                    kick_store.record_outcome(sid, ok=res.ok, message=res.message)
         kicked_sids.add(sid)  # at most one kick attempt per sid per sweep, success or not
         outcome_word = "kicked" if res.ok else "kick failed for"
         print(f"crr revive: {outcome_word} {sid8} (dropped bridge): {res.message}")
@@ -2237,6 +2264,57 @@ def _cmd_gc(_args: argparse.Namespace) -> int:
     if removed_sid8s:
         print(f"removed: {removed_sid8s}")
     return 0
+
+
+def _cmd_kicks(args: argparse.Namespace) -> int:
+    """#35: the watchdog's auto-kick lineage had no human read path.
+
+    Same shape and reasoning as `crr archive --list` (run-2 F15): recording
+    the conditions that produced an action is only half of P8 — an operator
+    has to be able to ASK. This is the command that answers "why did crr
+    restart that session, and under what thresholds?".
+
+    Read-only, no mutation_lock (mirrors `archive --list`).
+    """
+    if not args.list:
+        print("usage: crr kicks --list", file=sys.stderr)
+        return 2
+    sd = state_dir.state_dir()
+    store = bridge_kicks.KickHistoryStore(sd)
+    if store.is_degraded():
+        print(f"crr kicks: {sd / bridge_kicks.FILENAME} is unreadable — "
+              "the watchdog is auto-kicking nothing until it is fixed or removed",
+              file=sys.stderr)
+        return 2
+    sids = store.session_ids()
+    if not sids:
+        print("no auto-kick attempts recorded")
+        return 0
+    for sid in sids:
+        log = store.attempt_log(sid)
+        print(f"{sid[:8]}  {store.attempts(sid)} attempt(s) since the last confirmed reconnect")
+        if not log:
+            # A counter-only file written before #35. Say so rather than
+            # printing nothing, which would read as "no attempts".
+            print("    (no lineage recorded — counters predate `crr kicks`)")
+            continue
+        for a in log:
+            when = _iso_or_raw(a.get("at"))
+            since = a.get("bridge_since", "?")
+            stale = a.get("stale_after", "?")
+            outcome = a.get("outcome", "outcome not recorded")
+            mark = "ok" if a.get("outcome_ok") else "FAILED" if "outcome_ok" in a else "?"
+            print(f"    {when}  pid {a.get('pid', '?')}  "
+                  f"{since} records since the bridge marker (threshold {stale})  "
+                  f"-> {mark}: {outcome}")
+    return 0
+
+
+def _iso_or_raw(ts) -> str:
+    """A stored epoch float as a readable UTC stamp, or the raw value."""
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return str(ts)
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
