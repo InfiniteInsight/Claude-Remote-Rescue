@@ -114,14 +114,13 @@ def assemble_sessions(
     field (``"on"``/``"off"``/``"global-off"`` — see
     ``contracts.AUTOKICK_STATES``).
 
-    Known gap, accepted for this slice: when the dashboard's settings file
-    is unreadable, ``SettingsStore.is_degraded()`` is True and the watchdog
-    auto-kicks NOTHING (fail-closed, Slice 2) — but that degraded state is
-    not plumbed into this function, so a card can still read ``autokick:
-    "on"`` while nothing is actually being kicked. The Settings modal
-    surfaces ``is_degraded()`` directly (Slice 3 deliverable #2) so the user
-    sees the real reason there; teaching every card about it too was judged
-    out of scope for this slice.
+    A degraded settings store no longer produces a lying card: the cli
+    passes ``SettingsStore.effective_global_autokick()`` (b4fe3b6), which
+    reports False while degraded, so ``autokick`` renders ``"global-off"``
+    rather than an ``"on"`` the watchdog is not honouring. The card does
+    lose the REASON — the user never turned the global switch off — and the
+    Settings modal remains the place that surfaces ``is_degraded()``
+    itself. That residual gap is tracked in #40, not here.
     """
     autokick_session_overrides = autokick_session_overrides or {}
     sessions = [e for e in entries if e.get("claude") is not None]

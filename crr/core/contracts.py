@@ -21,7 +21,12 @@ from typing import Any, Iterable, Mapping
 # --------------------------------------------------------------------------
 
 JOURNAL_SCHEMA_VERSION = 1
+# v3 adds `tmux_session` (nullable per-session field; `detmux` op — 57195a5).
+#    Restored 2026-08-08 (#38): this line was DELETED by a later edit rather
+#    than superseded, which is how a ledger silently loses its own history.
 # v4 adds `last_active` (T-A — true recency) + `context_pressure` (F2 — compaction badge)
+# v5 adds `last_reply` — claude's answer preceding the last prompt (ec64798)
+# v6 adds `title` + `slug` — session identity for mobile<->dashboard matching (df434fc)
 # v7 adds `remote_control` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 1)
 # v8 adds `autokick` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 3)
 # v9 adds an `unknown` member to BOTH `remote_control` (#33) and
@@ -30,7 +35,10 @@ JOURNAL_SCHEMA_VERSION = 1
 # the same correction: a field that could only ever say "no"/"a level" was
 # asserting one when the underlying read had not established anything.
 SESSIONS_CONTRACT_VERSION = 9
-DIAGNOSTICS_CONTRACT_VERSION = 3  # v3 adds `params` — the generating caps/lookback/timeout
+# v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
+#    entry was deleted rather than superseded when v3 landed)
+# v3 adds `params` — the generating caps/lookback/timeout
+DIAGNOSTICS_CONTRACT_VERSION = 3
 ARCHIVE_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
