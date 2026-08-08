@@ -51,7 +51,12 @@ from typing import Any, Mapping
 # v13: added bridge_kick_cooldown_seconds / bridge_kick_max_attempts (review
 # fix-wave 2026-08-07, FIX 1 — a failed reconnect must not become an
 # indefinite restart loop; see crr.core.bridge_kicks)
-CONFIG_DEFAULTS_VERSION = 13
+# v14: added flash_ms / filter_debounce_ms / cwd_scan_lines /
+# discoverable_page_size / context_bytes_per_token (#37 — six priors the
+# run-3 audit caught, three of them a regression of a class run 2 had
+# already remediated; tests/test_priors.py is the guard that keeps them
+# from coming back a third time)
+CONFIG_DEFAULTS_VERSION = 14
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -91,6 +96,19 @@ DEFAULTS: dict[str, Any] = {
     "notice_seconds": 3,           # transient notice banner display duration
     "reload_delay_ms": 800,        # delay before a stale-page self-heal reload
     "diag_error_display_cap": 20,  # max previous-boot error lines rendered client-side
+    # (#37) Two more page priors, added after run 2 lifted the four above and
+    # missed by nothing until the run-3 audit. `flash_ms` is how long a card
+    # highlights after a search result jumps to it — long enough for the eye
+    # to land on it, short enough not to linger as if it were a state.
+    # `filter_debounce_ms` is the pause after the last keystroke before the
+    # discoverable modal re-queries the server; that request enriches
+    # transcripts, so firing it per keystroke is real work.
+    "flash_ms": 1400,
+    "filter_debounce_ms": 250,
+    # Rows per page in the dashboard's discoverable modal. Enriching every
+    # untracked transcript to render one page cost ~10s on a machine with a
+    # few thousand of them, which is why the panel pages server-side at all.
+    "discoverable_page_size": 20,
     # transcript scan bound (audit 2026-07-31, P5): a real model id always sits
     # within a few lines of the tail (measured on 3243 live transcripts:
     # p50=3, p99=37 lines back), but ~1 in 3 transcripts carry NO model at all
@@ -102,6 +120,13 @@ DEFAULTS: dict[str, Any] = {
     # 4-65 records before the prompt, and the prompt itself up to ~124 from
     # the tail — 400 covers both with headroom, and an honest "" beyond it.
     "reply_tail_lines": 400,
+    # How far into a transcript to look for the AUTHORITATIVE cwd its own
+    # records carry (transcript_source.read_cwd). Observed: the cwd appears
+    # within the first handful of records in every transcript seen — the
+    # session-start/snapshot header lines don't carry it, the first real
+    # turn does. Bounded so a cwd-less transcript is never read end to end.
+    # Same shape as model_tail_lines / reply_tail_lines / bridge_scan_lines.
+    "cwd_scan_lines": 200,
     # Every claude launch/resume/revival crr is involved in passes
     # `--remote-control <name>` (an explicit name — never a bare flag; see
     # the reviver/shim comments on why) so the session is always reachable
@@ -114,6 +139,12 @@ DEFAULTS: dict[str, Any] = {
     # crr.core.context_pressure.pressure.
     "context_tight_fraction": 0.7,
     "context_compact_fraction": 1.0,
+    # Bytes per token — the divisor behind the context estimate (#37). A
+    # rough rule of thumb, NOT a tokenizer: it varies with content (code and
+    # JSON pack denser than prose), so it is the single most load-bearing
+    # assumption behind every compaction badge, and belongs here where it
+    # can be seen and changed rather than buried in a `// 4`.
+    "context_bytes_per_token": 4,
     # `crr recall` (Slice B, F1): query-scoped, capped transcript search — a
     # grep for your own history, not a transcript dump (never uncapped).
     "recall_match_cap": 10,     # max matches printed, most-recent-first (-n)

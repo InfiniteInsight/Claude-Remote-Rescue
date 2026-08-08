@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 40  # v40: "unknown" chips for remote control (#33) and context (#39)
+PAGE_VERSION = 41  # v41: flash + filter-debounce timings injected from config (#37)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -40,6 +40,8 @@ _CONFIRM_ARM_MS_PLACEHOLDER = "@CONFIRM_ARM_MS@"
 _NOTICE_MS_PLACEHOLDER = "@NOTICE_MS@"
 _RELOAD_DELAY_MS_PLACEHOLDER = "@RELOAD_DELAY_MS@"
 _DIAG_ERR_CAP_PLACEHOLDER = "@DIAG_ERR_CAP@"
+_FLASH_MS_PLACEHOLDER = "@FLASH_MS@"
+_FILTER_DEBOUNCE_MS_PLACEHOLDER = "@FILTER_DEBOUNCE_MS@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
 
@@ -101,6 +103,8 @@ def render_page(
     notice_seconds: int | None = None,
     reload_delay_ms: int | None = None,
     diag_error_display_cap: int | None = None,
+    flash_ms: int | None = None,
+    filter_debounce_ms: int | None = None,
 ) -> str:
     """Serve-time substitution of version + configured intervals into the page."""
     poll = cfg.DEFAULTS["dashboard_poll_seconds"] if poll_seconds is None else poll_seconds
@@ -117,6 +121,10 @@ def render_page(
         if diag_error_display_cap is None
         else diag_error_display_cap
     )
+    flash = cfg.DEFAULTS["flash_ms"] if flash_ms is None else flash_ms
+    debounce = (
+        cfg.DEFAULTS["filter_debounce_ms"] if filter_debounce_ms is None else filter_debounce_ms
+    )
     return (
         load_page()
         .replace(_VERSION_PLACEHOLDER, str(version))
@@ -126,6 +134,8 @@ def render_page(
         .replace(_NOTICE_MS_PLACEHOLDER, str(int(notice) * 1000))
         .replace(_RELOAD_DELAY_MS_PLACEHOLDER, str(int(reload_delay)))
         .replace(_DIAG_ERR_CAP_PLACEHOLDER, str(int(diag_err_cap)))
+        .replace(_FLASH_MS_PLACEHOLDER, str(int(flash)))
+        .replace(_FILTER_DEBOUNCE_MS_PLACEHOLDER, str(int(debounce)))
     )
 
 
@@ -165,8 +175,10 @@ ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", 
 SID_ACTIONS = ("retrack", "adopt", "takeover", "autokick-on", "autokick-off")
 
 
-# Rows per page in the dashboard's discoverable modal.
-DISCOVERABLE_PAGE = 20
+# Rows per page in the dashboard's discoverable modal (see crr.core.config's
+# `discoverable_page_size` — that DEFAULTS entry is the injectable prior;
+# this constant only supplies the fallback for the query-param parse below).
+DISCOVERABLE_PAGE = cfg.DEFAULTS["discoverable_page_size"]
 
 
 def _positive_int(raw: str, default: int) -> int:
@@ -217,6 +229,8 @@ def handle_request(
     notice_seconds: int | None = None,
     reload_delay_ms: int | None = None,
     diag_error_display_cap: int | None = None,
+    flash_ms: int | None = None,
+    filter_debounce_ms: int | None = None,
 ) -> Response:
     # Host allowlist first — before any routing or work (DNS-rebinding defense).
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
@@ -228,6 +242,7 @@ def handle_request(
                 page_version, poll_seconds=poll_seconds, version_check_seconds=version_check_seconds,
                 confirm_arm_seconds=confirm_arm_seconds, notice_seconds=notice_seconds,
                 reload_delay_ms=reload_delay_ms, diag_error_display_cap=diag_error_display_cap,
+                flash_ms=flash_ms, filter_debounce_ms=filter_debounce_ms,
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
         if path == "/api/sessions":

@@ -2036,6 +2036,8 @@ def make_web_handler(
     confirm_arm_seconds: int | None = None,
     notice_seconds: int | None = None,
     reload_delay_ms: int | None = None,
+    flash_ms: int | None = None,
+    filter_debounce_ms: int | None = None,
     diag_error_display_cap: int | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
@@ -2071,6 +2073,8 @@ def make_web_handler(
                 notice_seconds=notice_seconds,
                 reload_delay_ms=reload_delay_ms,
                 diag_error_display_cap=diag_error_display_cap,
+                flash_ms=flash_ms,
+                filter_debounce_ms=filter_debounce_ms,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -2521,6 +2525,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         confirm_arm_seconds=config.get("confirm_arm_seconds"),
         notice_seconds=config.get("notice_seconds"),
         reload_delay_ms=config.get("reload_delay_ms"),
+        flash_ms=config.get("flash_ms"),
+        filter_debounce_ms=config.get("filter_debounce_ms"),
         diag_error_display_cap=config.get("diag_error_display_cap"),
     )
 

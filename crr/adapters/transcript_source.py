@@ -115,15 +115,14 @@ def list_all_transcripts(home: Path | None = None) -> list[dict]:
     return out
 
 
-# Authoritative cwd shows up within the first handful of records in every
-# observed transcript (the session-start/snapshot header lines don't carry
-# it; the very first real turn does) — bounded so `read_cwd` never has to
-# read a multi-megabyte transcript end to end for a field that lives near
-# the top.
-_CWD_SCAN_LINES = 200
+# Bound for the cwd search (see crr.core.config's `cwd_scan_lines` for the
+# empirical justification — that DEFAULTS entry is the injectable prior;
+# this constant only supplies the default argument below, mirroring
+# MODEL_TAIL_LINES / REPLY_TAIL_LINES / BRIDGE_SCAN_LINES).
+CWD_SCAN_LINES = DEFAULTS["cwd_scan_lines"]
 
 
-def read_cwd(session_id: str, home: Path | None = None, scan_lines: int = _CWD_SCAN_LINES) -> str | None:
+def read_cwd(session_id: str, home: Path | None = None, scan_lines: int = CWD_SCAN_LINES) -> str | None:
     """The AUTHORITATIVE cwd a transcript's own records carry, or None.
 
     Unlike ``_decode_project_dir_name`` (lossy: a literal ``-`` in a real

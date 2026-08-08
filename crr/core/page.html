@@ -367,6 +367,7 @@ var CONFIRM_ARM_MS = @CONFIRM_ARM_MS@;
 var NOTICE_MS = @NOTICE_MS@;
 var RELOAD_DELAY_MS = @RELOAD_DELAY_MS@;
 var DIAG_ERR_CAP = @DIAG_ERR_CAP@;
+var FILTER_DEBOUNCE_MS = @FILTER_DEBOUNCE_MS@;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
@@ -426,7 +427,7 @@ var searchMatchSids = null;
 // The card most recently jumped to, and how long its highlight lasts.
 // Survives a re-render (see jumpToSession).
 var flashSid = null, flashUntil = 0;
-var FLASH_MS = 1400;
+var FLASH_MS = @FLASH_MS@;
 
 function passesFilter(s) {
   if (searchMatchSids && !searchMatchSids[s.session_id]) return false;
@@ -1227,7 +1228,7 @@ document.getElementById("disc-filter").addEventListener("input", function () {
     discState.query = v;
     discState.offset = 0;    // a new filter always starts at page 1
     loadDiscoverable();
-  }, 250);
+  }, FILTER_DEBOUNCE_MS);
 });
 
 // Settings: the excluded-directory list. Two owners — config.toml (shown

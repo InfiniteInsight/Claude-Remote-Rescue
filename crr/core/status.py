@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from crr.core import contracts
 from crr.core import settings as _settings
+from crr.core.config import DEFAULTS
 from crr.core.bridge import bridge_state as _bridge_state
 from crr.core.classifier import classify
 from crr.core.context_pressure import pressure as _pressure
@@ -70,10 +71,16 @@ def assemble_sessions(
     process_probe: ProcessProbe,
     *,
     tail_facts: Callable[[Mapping[str, Any]], dict[str, Any]] = _empty_facts,
-    context_tight_fraction: float = 0.7,
-    context_compact_fraction: float = 1.0,
-    bridge_stale_records: int = 150,
-    autokick_config_default: bool = True,
+    # (#37) These four were literal copies of config.DEFAULTS — the exact
+    # shape run 2b fixed for web_restart_seconds/model_tail_lines, and the
+    # exact way a default silently drifts from the config that documents it.
+    # Sourced, not repeated. `config` is core, so this import crosses no
+    # layer boundary.
+    context_tight_fraction: float = DEFAULTS["context_tight_fraction"],
+    context_compact_fraction: float = DEFAULTS["context_compact_fraction"],
+    context_bytes_per_token: int = DEFAULTS["context_bytes_per_token"],
+    bridge_stale_records: int = DEFAULTS["bridge_stale_records"],
+    autokick_config_default: bool = DEFAULTS["remote_control_autokick"],
     autokick_global_override: bool | None = None,
     autokick_session_overrides: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
@@ -153,6 +160,7 @@ def assemble_sessions(
                     facts["model"],
                     tight=context_tight_fraction,
                     compact=context_compact_fraction,
+                    bytes_per_token=context_bytes_per_token,
                 ),
                 "remote_control": _bridge_state(
                     facts["bridge_since"],

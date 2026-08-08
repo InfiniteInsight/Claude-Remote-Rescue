@@ -21,9 +21,12 @@ def test_window_for_known_model():
     assert cp.window_for("claude-opus-4-8") == 1_000_000
 
 
-def test_window_for_unknown_model_falls_back_to_default():
-    assert cp.window_for("some-model-nobody-heard-of") == cp.DEFAULT_WINDOW
-    assert cp.window_for("") == cp.DEFAULT_WINDOW
+def test_window_for_unknown_model_is_none():
+    # #37/#39: no fallback constant. An unmapped model has no known window,
+    # and `None` says so — a stand-in number would be the fabricated
+    # denominator both issues removed.
+    assert cp.window_for("some-model-nobody-heard-of") is None
+    assert cp.window_for("") is None
 
 
 def test_confirmed_model_windows():
@@ -40,8 +43,10 @@ def test_confirmed_model_windows():
     assert cp.window_for("claude-haiku-4-5-20251001") == 200_000
 
 
-def test_default_window_is_200k():
-    assert cp.DEFAULT_WINDOW == 200_000
+def test_default_window_constant_is_gone():
+    # It stopped influencing any decision when #39 removed its only
+    # consumer; #37 deleted it rather than promote a dead prior to config.
+    assert not hasattr(cp, "DEFAULT_WINDOW")
 
 
 def test_all_documented_models_present_and_positive():
@@ -138,7 +143,6 @@ def test_known_models_still_classify_normally():
                        tight=0.7, compact=1.0) == "will-compact"
 
 
-def test_window_for_still_falls_back_for_lookup_callers():
-    # `pressure` no longer relies on this, but the lookup keeps its
-    # documented conservative fallback for any other caller.
-    assert cp.window_for("some-model-nobody-heard-of") == cp.DEFAULT_WINDOW
+def test_bytes_per_token_default_matches_config():
+    from crr.core.config import DEFAULTS
+    assert cp.estimate_tokens(1000) == 1000 // DEFAULTS["context_bytes_per_token"]
