@@ -33,22 +33,35 @@ number actually counts, not a change to it.
 from __future__ import annotations
 
 
-def bridge_state(records_since_marker: int, had_marker: bool, *, stale_after: int) -> str:
-    """Classify the Remote Control bridge as ``"off"``, ``"ok"``, or
-    ``"dropped"``.
+def bridge_state(records_since_marker: int, had_marker: bool | None, *, stale_after: int) -> str:
+    """Classify the Remote Control bridge as ``"unknown"``, ``"off"``,
+    ``"ok"``, or ``"dropped"``.
 
-    - ``"off"``: ``had_marker`` is False — no ``bridge-session`` record was
-      ever seen, so Remote Control was never enabled on this session. You
-      cannot drop what was never up: this holds regardless of
-      ``records_since_marker`` (the adapter reports ``0`` when no marker
-      was found within its scan window, but any value would be ignored
-      here just the same).
+    - ``"unknown"``: ``had_marker`` is None — the adapter did not finish
+      looking (its scan window ran out before the transcript did, the
+      caller opted out with ``bridge_scan_lines=0``, or the transcript was
+      unreadable). Absence of evidence, not evidence of absence:
+      ``records_since_marker`` is meaningless without a marker to measure
+      FROM, so a large count cannot promote this to ``"dropped"``.
+    - ``"off"``: ``had_marker`` is False — every record was examined and no
+      ``bridge-session`` marker exists, so Remote Control was never enabled
+      on this session. You cannot drop what was never up, so the count is
+      irrelevant here too.
     - ``"dropped"``: a marker was seen, and more than ``stale_after``
       records have been written since — the bridge came up and then went
       quiet while claude kept working.
     - ``"ok"``: a marker was seen and the transcript is within the
       threshold.
+
+    The ``None``/``False`` split is #33. Both used to be ``False``, so the
+    card asserted ``"off"`` — *Remote Control was never enabled here* —
+    about sessions the walk had merely stopped looking at. The same
+    distinction ``tmux.list_sessions() -> set | None`` draws for liveness
+    (run-2 audit F16): a query that could not answer must not be read as a
+    query that answered "no".
     """
+    if had_marker is None:
+        return "unknown"
     if not had_marker:
         return "off"
     if records_since_marker > stale_after:

@@ -156,8 +156,10 @@ DEFAULTS: dict[str, Any] = {
     # False turns off detection, the card badge, AND the per-poll transcript
     # scan cost, not just the watchdog's kick step — cli._tail_facts_extractor
     # passes bridge_scan_lines=0 downstream when this is False, which reads
-    # as an honest "off" card state, never a stale "dropped"/"ok". The kick
-    # step (cli._kick_dropped_bridges) also gates on this directly.
+    # as an honest "unknown" card state (#33 — never "off", which would
+    # claim Remote Control was never enabled on the strength of never having
+    # looked), and never a stale "dropped"/"ok". The kick step
+    # (cli._kick_dropped_bridges) also gates on this directly.
     "remote_control_watch": True,
     "remote_control_autokick": True,   # GLOBAL hard switch for auto-kicking a dropped session (consumed from Slice 2's watchdog step)
     # Threshold (records, not seconds — see crr.core.bridge's docstring for

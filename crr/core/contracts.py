@@ -24,7 +24,12 @@ JOURNAL_SCHEMA_VERSION = 1
 # v4 adds `last_active` (T-A — true recency) + `context_pressure` (F2 — compaction badge)
 # v7 adds `remote_control` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 1)
 # v8 adds `autokick` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 3)
-SESSIONS_CONTRACT_VERSION = 8
+# v9 adds an `unknown` member to BOTH `remote_control` (#33) and
+# `context_pressure` (#39). No new key — two enums widen, so a v8 consumer
+# reading a v9 payload would reject a value it has no case for. Both encode
+# the same correction: a field that could only ever say "no"/"a level" was
+# asserting one when the underlying read had not established anything.
+SESSIONS_CONTRACT_VERSION = 9
 DIAGNOSTICS_CONTRACT_VERSION = 3  # v3 adds `params` — the generating caps/lookback/timeout
 ARCHIVE_CONTRACT_VERSION = 1
 
@@ -36,10 +41,20 @@ HOSTS = ("tab", "tmux", "ssh")
 SHELLS = ("zsh", "bash", "fish")
 SID_SOURCES = ("injected", "guessed", "verified")
 STATES = ("live", "ghost", "crashed")
-CONTEXT_PRESSURE_LEVELS = ("ok", "tight", "will-compact")
+# Context-pressure level. "unknown" (#39) is emitted when the session's
+# model is not in `context_pressure.MODEL_CONTEXT_WINDOWS` — no confirmed
+# context window means no denominator, and a level computed against the
+# conservative fallback is a claim about a window nobody established.
+# Measured rate: "~1 in 3 transcripts carry NO model at all".
+CONTEXT_PRESSURE_LEVELS = ("unknown", "ok", "tight", "will-compact")
 # Remote-Control bridge state (spec 2026-08-07 — dropped-Remote-Control
-# watchdog): "off" = never enabled; "ok"/"dropped" from crr.core.bridge.
-REMOTE_CONTROL_STATES = ("off", "ok", "dropped")
+# watchdog). "unknown" (#33) = the transcript walk did not finish looking
+# (scan window exhausted, caller opted out, or unreadable), so nothing can
+# be claimed; "off" = the WHOLE transcript was examined and no marker
+# exists, i.e. never enabled; "ok"/"dropped" from crr.core.bridge. The
+# unknown/off split is the point: they were one value, and the card
+# asserted the positive one.
+REMOTE_CONTROL_STATES = ("unknown", "off", "ok", "dropped")
 # The per-session auto-kick toggle's resolved state (spec 2026-08-07,
 # Slice 3), from crr.core.settings.autokick_card_state. THREE values, not
 # a bool, because the dashboard toggle must distinguish two different
