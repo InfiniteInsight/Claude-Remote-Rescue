@@ -2259,6 +2259,7 @@ def _settings_payload(sd: Path, config: cfg.Config) -> dict:
     if resolved is None:
         resolved = config_default
     return {
+        "contract": contracts.SETTINGS_CONTRACT_VERSION,
         "autokick": settings_store.read_global_autokick(),
         "resolved": resolved,
         "config_default": config_default,
@@ -2381,7 +2382,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
              "cwd": r["entry"]["cwd"], "_record": r}
             for r in records
         ]
-        page = discovery.filter_and_page(cheap, query=query, offset=offset, limit=limit)
+        page = discovery.filter_and_page(
+            cheap, query=query, offset=offset, limit=limit,
+            contract=contracts.DISCOVERABLE_CONTRACT_VERSION)
         page["rows"] = [
             _untracked_view(row["_record"], cap, model_tail_lines) for row in page["rows"]
         ]
@@ -2394,7 +2397,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # thousand of them. Scan problems are dropped here (a web handler
         # can't print to stderr); `crr discover` is where they're surfaced.
         candidates, _journaled, _problems = _discoverable_candidates(store)
-        page = discovery.filter_and_page(candidates, query=query, offset=offset, limit=limit)
+        page = discovery.filter_and_page(
+            candidates, query=query, offset=offset, limit=limit,
+            contract=contracts.UNTRACKED_CONTRACT_VERSION)
         page["rows"] = _enrich_discoverable(page["rows"], config)
         # One ps snapshot for the whole page: which of these conversations is
         # ALREADY running? Plain Adopt on a live one starts a second claude on
@@ -2453,6 +2458,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         except (cfg.ConfigError, ValueError, OSError):
             from_file = False
         return {
+            "contract": contracts.EXCLUSIONS_CONTRACT_VERSION,
             "configured": list(config.get("discover_exclude_dirs")),
             "managed": exclusions.ExclusionStore(sd).read(),
             "config_path": str(toml_path),
@@ -2491,9 +2497,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
             matches = transcript_source.search_transcript(sid, query, cap=snippet_cap)
             for m in matches:
                 m["session_id"] = sid
-            return {"matches": transcript.rank_matches(matches, limit=match_cap),
+            return {"contract": contracts.RECALL_CONTRACT_VERSION,
+                    "matches": transcript.rank_matches(matches, limit=match_cap),
                     "scanned": 1, "skipped": 0}
-        return transcript_source.search_all(
+        out = transcript_source.search_all(
             query, snippet_cap=snippet_cap, match_cap=match_cap,
             byte_budget=config.get("recall_scan_byte_budget"),
             per_session_cap=config.get("recall_per_session_cap"),
@@ -2503,6 +2510,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 exclusions.ExclusionStore(sd).read(),
             ),
         )
+        # search_all returns the {matches, scanned, skipped} shape; stamp the
+        # contract here so both arms of this provider emit the same payload.
+        out["contract"] = contracts.RECALL_CONTRACT_VERSION
+        return out
 
     # Host allowlist: loopback + this host's name + tailnet suffix + any
     # config.toml extras.

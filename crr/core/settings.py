@@ -145,6 +145,14 @@ class SettingsStore:
             return {}, True
         if not isinstance(data, dict):
             return {}, True
+        if not contracts.store_version_ok(data, contracts.SETTINGS_STORE_VERSION):
+            # A version this build cannot read is DEGRADED, not empty (#36).
+            # Reading it as "no overrides" would silently drop every
+            # per-session opt-out and re-arm auto-kick against a session the
+            # user excluded — the same fail-closed reasoning as a corrupt
+            # file, and for the same reason: the action downstream SIGTERMs
+            # live processes.
+            return {}, True
         try:
             _normalize_sessions(data.get("sessions", {}))
         except SettingsError:
@@ -204,7 +212,9 @@ class SettingsStore:
         if value is not None and not isinstance(value, bool):
             raise SettingsError("autokick must be a bool or None")
         sessions = _normalize_sessions(self._read_raw().get("sessions", {}))
-        payload: dict[str, Any] = {"sessions": sessions}
+        payload: dict[str, Any] = {
+            "v": contracts.SETTINGS_STORE_VERSION, "sessions": sessions,
+        }
         if value is not None:
             payload["autokick"] = value
         write_json_atomic(self._path, payload)
@@ -221,7 +231,9 @@ class SettingsStore:
         sessions[sid] = value
         if len(sessions) > MAX_SESSION_ENTRIES:
             raise SettingsError(f"too many session overrides (max {MAX_SESSION_ENTRIES})")
-        payload: dict[str, Any] = {"sessions": sessions}
+        payload: dict[str, Any] = {
+            "v": contracts.SETTINGS_STORE_VERSION, "sessions": sessions,
+        }
         global_value = raw.get("autokick")
         if isinstance(global_value, bool):
             payload["autokick"] = global_value

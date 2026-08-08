@@ -169,7 +169,8 @@ def _norm_sep(text: str) -> str:
 
 
 def filter_and_page(
-    rows: Sequence[Mapping[str, Any]], *, query: str, offset: int, limit: int
+    rows: Sequence[Mapping[str, Any]], *, query: str, offset: int, limit: int,
+    contract: int,
 ) -> dict[str, Any]:
     """Filter discoverable rows by ``query`` and slice one page out.
 
@@ -197,6 +198,11 @@ def filter_and_page(
         matched = list(rows)
     start = max(0, offset)
     return {
+        # `contract` is passed in rather than hardcoded (#36): the two
+        # endpoints that share this shape — /api/discoverable and
+        # /api/untracked — version independently, so neither may inherit
+        # the other's number by accident.
+        "contract": contract,
         "rows": matched[start:start + max(0, limit)],
         "total": len(rows),
         "filtered": len(matched),
