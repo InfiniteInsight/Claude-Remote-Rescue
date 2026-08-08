@@ -36,10 +36,16 @@ from typing import Any, Mapping
 # v7: added discover_exclude_dirs (keep tool-internal transcript dirs out of
 # discovery; see crr.core.discovery.is_excluded)
 # v8: added reply_tail_lines (bounds the card's "claude said" lookback)
-# v9: recall_scan_byte_budget defaults to 0 (unlimited) — the raw-bytes
+# v9: SKIPPED — never shipped. Reconstructed 2026-08-08 (#38): commit
+# 553134e bumped the constant 8 -> 10 in a single step while labelling its
+# entry "v9", so from that point every comment sat one number behind the
+# version it described. The number is burned rather than reused: a v9 that
+# means two different things is worse than a v9 that never existed.
+# v10: recall_scan_byte_budget defaults to 0 (unlimited) — the raw-bytes
 # prefilter makes a full sweep cheap, so the budget no longer caps coverage;
 # recall_match_cap 5 -> 10 and new recall_per_session_cap so one chatty
-# session can't fill every result slot
+# session can't fill every result slot. (This is the entry 553134e wrote as
+# "v9"; it has always described v10.)
 # v11: added remote_control (every claude launch/revival enables Claude
 # Code's Remote Control by default, so a session stays reachable from the
 # phone; see crr.core.reviver.revival_argv and the shims)
@@ -134,9 +140,14 @@ DEFAULTS: dict[str, Any] = {
     # everywhere at once (reviver.py + all three shims ask this key).
     "remote_control": True,
     # context-pressure badge (Slice A, F2; audit P5): fraction of a model's
-    # (prior, unverified for most models) context window at which a session
-    # is "tight" vs. expected to compact on revive. See
-    # crr.core.context_pressure.pressure.
+    # context window at which a session is "tight" vs. expected to compact
+    # on revive. Every window in MODEL_CONTEXT_WINDOWS is confirmed against
+    # published model docs (each entry carries its source); a model NOT in
+    # that map yields context_pressure "unknown" rather than borrowing a
+    # number (#39). Corrected 2026-08-08 (#38): this comment used to say
+    # "unverified for most models", which stopped being true when the map
+    # was confirmed and contradicted context_pressure.py's own docstring.
+    # See crr.core.context_pressure.pressure.
     "context_tight_fraction": 0.7,
     "context_compact_fraction": 1.0,
     # Bytes per token — the divisor behind the context estimate (#37). A

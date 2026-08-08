@@ -85,8 +85,13 @@ the declaration codifies what the code already does.
   honest nulls (`degraded` source lists, "no journaled sessions").
 - **Priors (P5):** `crr/core/config.py` DEFAULTS (versioned;
   `crr config --effective` reports origins).
-- **Contracts (P7):** journal v1 · sessions v3 · diagnostics v2 · archive v1
-  · `PAGE_VERSION` · `CONFIG_DEFAULTS_VERSION`.
+- **Contracts (P7):** journal v1 · sessions v9 · diagnostics v3 · archive v1
+  · `PAGE_VERSION` · `CONFIG_DEFAULTS_VERSION`. Each version constant in
+  `crr/core/contracts.py` carries a per-version ledger comment saying what
+  that bump changed; `tests/test_version_ledger.py` fails on a hole.
+  **Dashboard-managed stores** — `exclusions.json`, `settings.json`,
+  `bridge_kicks.json` in the state dir — are read back by later crr builds
+  and so need the same treatment; see #36.
 - **Golden baseline:** `planned` — contract validators currently serve as
   behavioral pins; no frozen derived-output baseline yet.
 - **Guards:** `.claude/guards/` branch guard (+ CLI shim; bundled hook
