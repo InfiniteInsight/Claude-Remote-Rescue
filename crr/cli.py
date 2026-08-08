@@ -1442,10 +1442,19 @@ def _enrich_discoverable(candidates, config) -> list[dict]:
         facts = transcript_source.read_tail_facts(
             t["session_id"], cap, model_tail_lines=model_tail_lines, bridge_scan_lines=0
         )
-        cwd = transcript_source.read_cwd(t["session_id"]) or t["cwd"]
+        # (#34) Keep WHICH of the two cwds this is. `read_cwd` reads the
+        # value Claude Code stamped on the session's own records —
+        # authoritative. `t["cwd"]` is the project-dir decode, which cannot
+        # tell an encoded `/` from a literal `-` (so `Claude-Remote-Rescue`
+        # comes back as `/home/u/Claude/Remote/Rescue`). Collapsing them
+        # with `or` lost exactly the distinction that decides whether the
+        # value is safe to hand to a spawn.
+        verified = transcript_source.read_cwd(t["session_id"])
+        cwd = verified if verified is not None else t["cwd"]
         enriched.append({
             "session_id": t["session_id"],
             "cwd": cwd,
+            "cwd_source": "verified" if verified is not None else "decoded",
             "last_active": facts["last_active"],
             "transcript_bytes": facts["transcript_bytes"],
             "last_prompt": facts["last_prompt"],
@@ -1503,6 +1512,23 @@ def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = Tr
         }
         if sid in journaled:
             return False, f"{sid[:8]} is already tracked"
+        # (#34) A DECODED cwd is a guess, and this is the last point before
+        # it enters the journal — from there it reaches
+        # `tmux.new_detached_session(name, entry["cwd"], ...)`, where a
+        # wrong directory does not display wrong, it fails to revive.
+        # Existing-directory is a weak check but a real one: the classic
+        # lossy decode (`Claude-Remote-Rescue` -> `/home/u/Claude/Remote/
+        # Rescue`) does not resolve, so this catches it. A VERIFIED cwd is
+        # exempt deliberately — it was observed on the session's own
+        # records, and a since-deleted project directory is not this
+        # guard's business.
+        if row.get("cwd_source") == "decoded" and not Path(row["cwd"]).is_dir():
+            return False, (
+                f"cannot adopt {sid[:8]}: its cwd was reconstructed from the "
+                f"project directory name (lossy) and {row['cwd']!r} is not a "
+                "directory — adopting it would journal a path nothing can "
+                "revive into"
+            )
         entry = discovery.build_adopted_entry(row["session_id"], row["cwd"], _now())
         pid = entry["pid"]
         try:
@@ -2384,7 +2410,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         ]
         page = discovery.filter_and_page(
             cheap, query=query, offset=offset, limit=limit,
-            contract=contracts.DISCOVERABLE_CONTRACT_VERSION)
+            contract=contracts.UNTRACKED_CONTRACT_VERSION)
         page["rows"] = [
             _untracked_view(row["_record"], cap, model_tail_lines) for row in page["rows"]
         ]
@@ -2399,7 +2425,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         candidates, _journaled, _problems = _discoverable_candidates(store)
         page = discovery.filter_and_page(
             candidates, query=query, offset=offset, limit=limit,
-            contract=contracts.UNTRACKED_CONTRACT_VERSION)
+            contract=contracts.DISCOVERABLE_CONTRACT_VERSION)
         page["rows"] = _enrich_discoverable(page["rows"], config)
         # One ps snapshot for the whole page: which of these conversations is
         # ALREADY running? Plain Adopt on a live one starts a second claude on
