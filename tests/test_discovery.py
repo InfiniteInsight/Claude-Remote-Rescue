@@ -54,6 +54,9 @@ def test_untracked_row_shape():
         "session_id": _SID_A,
         "sid8": _SID_A[:8],
         "cwd": "/x",
+        # (#34) No cwd_source on the input -> "decoded", the cautious answer:
+        # it is the one that makes _adopt verify before spawning.
+        "cwd_source": "decoded",
         "last_active": "2026-01-01T00:00:00Z",
         "transcript_bytes": 42,
         "last_prompt": "hi",
@@ -128,6 +131,7 @@ def test_untracked_missing_optional_fields_default_honestly():
         "session_id": _SID_A,
         "sid8": _SID_A[:8],
         "cwd": "",
+        "cwd_source": "decoded",
         "last_active": "",
         "transcript_bytes": 0,
         "last_prompt": "",

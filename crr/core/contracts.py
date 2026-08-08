@@ -48,7 +48,9 @@ ARCHIVE_CONTRACT_VERSION = 1
 # downstream rather than an error at the boundary. All start at v1 — the
 # shapes are unchanged, only now they are declared.
 # --------------------------------------------------------------------------
-DISCOVERABLE_CONTRACT_VERSION = 1
+# v2 adds `cwd_source` (#34) — whether the row's cwd was read from the
+# transcript's own records or reconstructed by the lossy project-dir decode
+DISCOVERABLE_CONTRACT_VERSION = 2
 UNTRACKED_CONTRACT_VERSION = 1
 RECALL_CONTRACT_VERSION = 1
 EXCLUSIONS_CONTRACT_VERSION = 1
@@ -124,6 +126,16 @@ REMOTE_CONTROL_STATES = ("unknown", "off", "ok", "dropped")
 #                  per-session toggle must render DISABLED with this
 #                  reason, never a lying "on" it cannot honour.
 AUTOKICK_STATES = ("on", "off", "global-off")
+# How a discovered session's cwd was obtained (#34). The same idea as
+# `sid_source`, for the other field adoption has to get right:
+#   "verified" - read from the transcript's OWN records (authoritative).
+#   "decoded"  - reconstructed from the project directory name, which is
+#                lossy: `_decode_project_dir_name` cannot tell an encoded
+#                `/` from a literal `-`, so `Claude-Remote-Rescue` comes
+#                back as `/home/u/Claude/Remote/Rescue`. Fine to display,
+#                NOT fine to hand to a spawn — which is why `_adopt`
+#                refuses a decoded cwd that is not a real directory.
+CWD_SOURCES = ("verified", "decoded")
 
 # --------------------------------------------------------------------------
 # Canonical key lists.
@@ -430,8 +442,8 @@ def validate_archive_record(record: Any) -> None:
 # --------------------------------------------------------------------------
 
 DISCOVERABLE_ROW_KEYS = (
-    "session_id", "sid8", "cwd", "last_active", "transcript_bytes",
-    "last_prompt", "mtime", "running",
+    "session_id", "sid8", "cwd", "cwd_source", "last_active",
+    "transcript_bytes", "last_prompt", "mtime", "running",
 )
 UNTRACKED_ROW_KEYS = ("session_id", "sid8", "cwd", "archived_at", "last_prompt")
 PAGED_PAYLOAD_KEYS = ("contract", "rows", "total", "filtered", "offset", "limit")
@@ -478,6 +490,8 @@ def _validate_paged(payload: Any, expected: int, row_keys: tuple[str, ...], what
             raise ContractError(f"{what} row 'session_id' is not a session id")
         _require_type(row["sid8"], str, f"{what} row 'sid8'")
         _require_type(row["cwd"], str, f"{what} row 'cwd'")
+        if "cwd_source" in row_keys:
+            _require_enum(row["cwd_source"], CWD_SOURCES, f"{what} row 'cwd_source'")
         _require_type(row["last_prompt"], str, f"{what} row 'last_prompt'")
 
 

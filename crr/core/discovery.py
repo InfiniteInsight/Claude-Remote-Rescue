@@ -221,7 +221,8 @@ def untracked(
     ``last_prompt``, and the recency-fallback ``mtime``) are optional and
     default to an honest "unknown" value when absent rather than a
     fabricated one. Output rows carry exactly
-    ``{session_id, sid8, cwd, last_active, transcript_bytes, last_prompt}``
+    ``{session_id, sid8, cwd, cwd_source, last_active, transcript_bytes,
+    last_prompt}``
     — ``mtime`` is consumed only as a sort-key fallback, never surfaced (a
     file mtime is not itself a fact about the conversation).
     """
@@ -234,6 +235,11 @@ def untracked(
             "session_id": sid,
             "sid8": sid[:8],
             "cwd": t.get("cwd", ""),
+            # (#34) Carried through, not re-derived: this function REBUILDS
+            # the row, and a rebuild is exactly where a field goes missing.
+            # Absent input degrades to "decoded" — the cautious answer, since
+            # it is the one that makes `_adopt` check before spawning.
+            "cwd_source": t.get("cwd_source", "decoded"),
             "last_active": t.get("last_active", ""),
             "transcript_bytes": t.get("transcript_bytes", 0),
             "last_prompt": t.get("last_prompt", ""),
