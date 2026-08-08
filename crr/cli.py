@@ -1063,7 +1063,7 @@ def _kick_dropped_bridges(
                 # The confirmed signal that a prior kick actually worked (or
                 # the bridge never needed one) — the ONLY thing that resets
                 # the attempt counter, per bridge_kicks's docstring.
-                kick_store.reset(sid)
+                kick_store.reset(sid, now=clock())
             continue  # "off" (never enabled) or "ok" — nothing to reconnect
 
         session_override = settings_store.read_session_autokick(sid)
@@ -2302,6 +2302,12 @@ def _cmd_kicks(args: argparse.Namespace) -> int:
             continue
         for a in log:
             when = _iso_or_raw(a.get("at"))
+            if a.get("event"):
+                # A lifecycle record, not a kick attempt — rendering it
+                # through the attempt format printed a row of "?" for every
+                # field it does not have.
+                print(f"    {when}  bridge {a['event']}")
+                continue
             since = a.get("bridge_since", "?")
             stale = a.get("stale_after", "?")
             outcome = a.get("outcome", "outcome not recorded")
