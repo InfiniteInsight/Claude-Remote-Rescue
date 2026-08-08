@@ -179,7 +179,9 @@ class KickHistoryStore:
         if len(sessions) > MAX_ENTRIES:
             oldest_sid = min(
                 (s for s in sessions if s != sid),
-                key=lambda s: sessions[s].get("last_kick_ts", 0),
+                # `or 0`: a reset entry carries last_kick_ts=None (#45); mixing
+                # None with floats raises TypeError once the map fills.
+                key=lambda s: sessions[s].get("last_kick_ts") or 0,
             )
             del sessions[oldest_sid]
         write_json_atomic(
@@ -233,10 +235,23 @@ class KickHistoryStore:
         write_json_atomic(
             self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
 
-    def reset(self, sid: str) -> None:
-        """Clear ``sid``'s attempt history — call this ONLY when its bridge
+    def reset(self, sid: str, now: float | None = None) -> None:
+        """Clear ``sid``'s attempt COUNTERS — call this ONLY when its bridge
         state is observed to be ``"ok"`` again (a confirmed reconnect), per
         the module docstring. A harmless no-op for a sid with no history.
+
+        The LINEAGE survives (#45, found by the first live end-to-end run).
+        This used to delete the whole entry, so a kick that WORKED erased
+        its own record ~30s later when the watchdog observed the reconnect,
+        leaving ``crr kicks --list`` able to show only failures. The
+        successful case is the common one and the one most worth being able
+        to explain afterwards. ``now`` appends the reconnect itself, which
+        is the END of the story: without it the record stops at "kicked"
+        and never says whether it worked.
+
+        Counters are genuinely cleared, not decayed: a confirmed reconnect
+        makes any later drop a NEW incident, so neither the attempt cap nor
+        the cooldown may carry into it.
 
         Deliberately NOT called under ``mutation_lock`` (unlike
         ``record_kick``, which shares the lock the kick itself takes): this
@@ -247,7 +262,24 @@ class KickHistoryStore:
         there is no concurrent writer for this call to race.
         """
         sessions = dict(self._sessions())
-        if sid in sessions:
-            del sessions[sid]
-            write_json_atomic(
+        entry = sessions.get(sid)
+        if not isinstance(entry, dict):
+            return
+        log = list(entry.get("log", [])) if isinstance(entry.get("log"), list) else []
+        # Append the reconnect only on the TRANSITION to ok, never once per
+        # sweep. `reset` runs on EVERY watchdog pass that observes a healthy
+        # bridge — roughly every 30s — so an unconditional append filled the
+        # bounded log with identical "reconnected" records and evicted the
+        # kick that caused them. Measured live: the real kick record was
+        # gone inside three minutes.
+        already = bool(log) and isinstance(log[-1], dict) and log[-1].get("event") == "reconnected"
+        if now is not None and not already:
+            log.append({"at": now, "event": "reconnected"})
+        if log:
+            sessions[sid] = {
+                "attempts": 0, "last_kick_ts": None, "log": log[-MAX_ATTEMPT_LOG:],
+            }
+        else:
+            del sessions[sid]   # nothing to preserve — no empty shell
+        write_json_atomic(
             self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})

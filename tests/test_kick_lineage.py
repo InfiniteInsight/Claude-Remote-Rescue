@@ -93,7 +93,11 @@ def test_counters_still_work_exactly_as_before(tmp_path):
     assert store.last_kick_ts(SID) == 2000.0
     store.reset(SID)
     assert store.attempts(SID) == 0
-    assert store.attempt_log(SID) == []
+    assert store.last_kick_ts(SID) is None
+    # The log is NOT cleared (#45): reset means "the bridge came back", and
+    # erasing the record of the kicks that got it back is exactly what made
+    # `crr kicks --list` useless for every successful case.
+    assert len(store.attempt_log(SID)) == 2
 
 
 def test_a_legacy_counter_only_file_still_reads(tmp_path):
@@ -179,3 +183,116 @@ def test_crr_kicks_list_says_so_when_there_is_nothing(tmp_path, monkeypatch, cap
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     assert cli.main(["kicks", "--list"]) == 0
     assert "no auto-kick attempts" in capsys.readouterr().out
+
+
+# --- what the LIVE run of #45 found --------------------------------------
+# The first end-to-end kick against a real process worked: the claude group
+# died, the shim relaunched on the same conversation, and the lineage was
+# written. Then the real 30s watchdog fired, saw the reconnect, and called
+# reset() — which deleted the whole entry, log and all.
+#
+# So the audit trail survived only when a kick FAILED. The successful case —
+# the common one, and the one you most want to be able to explain later —
+# erased itself. reset() must clear the COUNTERS (what the cooldown and cap
+# read) without destroying the record of what happened.
+
+def test_reset_clears_the_counters(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs())
+    store.record_kick(SID, 2000.0, observation=_obs())
+    store.reset(SID, now=3000.0)
+    assert store.attempts(SID) == 0
+    assert store.last_kick_ts(SID) is None
+
+
+def test_reset_keeps_the_lineage(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs(bridge_since=812))
+    store.record_outcome(SID, ok=True, message="kicked 2049505")
+    store.reset(SID, now=3000.0)
+    log = store.attempt_log(SID)
+    assert any(a.get("bridge_since") == 812 for a in log), \
+        "the kick that succeeded erased its own record"
+    assert any(a.get("outcome") == "kicked 2049505" for a in log)
+
+
+def test_reset_records_the_reconnect_itself(tmp_path):
+    # The reconnect is the END of the story — without it the log stops at
+    # "kicked" and never says whether it worked.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs())
+    store.reset(SID, now=3000.0)
+    assert store.attempt_log(SID)[-1] == {"at": 3000.0, "event": "reconnected"}
+
+
+def test_reset_on_a_session_with_no_history_is_still_a_noop(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.reset(SID, now=1.0)
+    assert store.attempt_log(SID) == []
+    assert store.attempts(SID) == 0
+
+
+def test_a_reset_entry_does_not_break_lru_eviction(tmp_path):
+    # reset() leaves last_kick_ts as None. The eviction key used to be
+    # `.get("last_kick_ts", 0)`, which mixes None with floats and raises
+    # TypeError the moment the map fills up — a latent crash the live run
+    # would not have reached for another 499 sessions.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    for i in range(bridge_kicks.MAX_ENTRIES + 2):
+        sid = f"{i:08x}-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+        store.record_kick(sid, float(i), observation=_obs())
+        if i % 2 == 0:
+            store.reset(sid, now=float(i))
+    assert len(store.session_ids()) <= bridge_kicks.MAX_ENTRIES
+
+
+def test_reset_still_lets_a_later_drop_be_kicked_immediately(tmp_path):
+    # A confirmed reconnect means the next drop is a NEW incident, not a
+    # continuation — so neither the cap nor the cooldown may carry over.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    for i in range(3):
+        store.record_kick(SID, 1000.0 + i, observation=_obs())
+    store.reset(SID, now=2000.0)
+    eligible, reason = bridge_kicks.kick_eligible(
+        attempts=store.attempts(SID), last_kick_ts=store.last_kick_ts(SID),
+        now=2001.0, cooldown_seconds=600, max_attempts=3)
+    assert eligible is True, reason
+
+
+# --- the SECOND thing the live run found ---------------------------------
+# reset() is called on EVERY sweep where the bridge reads "ok", not just on
+# the transition. Appending a "reconnected" record each time meant one entry
+# per 30s watchdog pass, and within ~3 minutes the bounded log held five
+# identical reconnect records and had evicted the kick that caused them.
+# Observed live: the real kick record was gone inside 3 minutes.
+
+def test_repeated_resets_append_only_one_reconnect(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs())
+    for t in range(2000, 2600, 30):          # 20 sweeps, all seeing "ok"
+        store.reset(SID, now=float(t))
+    log = store.attempt_log(SID)
+    assert [a.get("event", "KICK") for a in log] == ["KICK", "reconnected"]
+
+
+def test_the_kick_record_survives_a_long_healthy_period(tmp_path):
+    # The regression, stated as its consequence: after an hour of healthy
+    # sweeps you can still answer "why was this restarted?".
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs(bridge_since=812))
+    store.record_outcome(SID, ok=True, message="kicked 2049505")
+    for t in range(2000, 2000 + 120 * 30, 30):   # 120 sweeps ~= 1 hour
+        store.reset(SID, now=float(t))
+    assert any(a.get("bridge_since") == 812 for a in store.attempt_log(SID))
+
+
+def test_a_later_drop_starts_a_new_incident_in_the_log(tmp_path):
+    # kick -> reconnect -> kick again must read as two incidents, not one.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs(bridge_since=200))
+    store.reset(SID, now=2000.0)
+    store.reset(SID, now=2030.0)                 # healthy sweep, no-op
+    store.record_kick(SID, 3000.0, observation=_obs(bridge_since=300))
+    store.reset(SID, now=4000.0)
+    assert [a.get("event", "KICK") for a in store.attempt_log(SID)] == [
+        "KICK", "reconnected", "KICK", "reconnected"]
