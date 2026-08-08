@@ -53,6 +53,12 @@ FILENAME = "bridge_kicks.json"
 # this file is watchdog-internal bookkeeping, not user input to reject).
 MAX_ENTRIES = 500
 
+# How many past attempts to keep per sid (#35 — lineage). "Why was this
+# restarted three times?" needs all three, so this must exceed the attempt
+# cap; small, because this file is read on every watchdog sweep and lineage
+# must not turn it into an unbounded append log.
+MAX_ATTEMPT_LOG = 5
+
 
 def kick_eligible(
     *, attempts: int, last_kick_ts: float | None, now: float,
@@ -136,22 +142,94 @@ class KickHistoryStore:
         ts = entry.get("last_kick_ts")
         return float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None
 
-    def record_kick(self, sid: str, now: float) -> None:
+    def record_kick(
+        self, sid: str, now: float, observation: dict[str, Any] | None = None,
+    ) -> None:
         """Record one more attempt for ``sid`` — call this on EVERY kick
         attempt, success or failure alike: the cap counts attempts, not
         failures, because a same-sweep verdict on whether the relaunch
         actually reconnected does not exist yet (that only shows up as a
-        fresh bridge marker on a LATER sweep)."""
+        fresh bridge marker on a LATER sweep).
+
+        ``observation`` is the LINEAGE (#35): the state that justified this
+        particular kick — the pid signalled, the bridge reading, and the
+        thresholds in force at the time. Recording the thresholds matters
+        as much as the reading: without them, changing
+        ``bridge_stale_records`` later silently rewrites the history of
+        every decision taken under the old value, and a stored conclusion
+        you cannot regenerate from its inputs is a claim you cannot audit.
+
+        The attempt log is bounded (``MAX_ATTEMPT_LOG``) and the counters
+        are untouched — the cooldown and cap read ``attempts`` /
+        ``last_kick_ts`` exactly as before.
+        """
         sessions = dict(self._sessions())
         prior = sessions.get(sid)
         prior_attempts = prior.get("attempts", 0) if isinstance(prior, dict) else 0
-        sessions[sid] = {"attempts": prior_attempts + 1, "last_kick_ts": now}
+        log = list(prior.get("log", [])) if isinstance(prior, dict) else []
+        record: dict[str, Any] = {"at": now}
+        if observation:
+            record.update(observation)
+        log.append(record)
+        sessions[sid] = {
+            "attempts": prior_attempts + 1,
+            "last_kick_ts": now,
+            "log": log[-MAX_ATTEMPT_LOG:],
+        }
         if len(sessions) > MAX_ENTRIES:
             oldest_sid = min(
                 (s for s in sessions if s != sid),
                 key=lambda s: sessions[s].get("last_kick_ts", 0),
             )
             del sessions[oldest_sid]
+        write_json_atomic(
+            self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
+
+    def session_ids(self) -> list[str]:
+        """Every sid with recorded history, most recently kicked first."""
+        sessions = self._sessions()
+        return sorted(
+            (s for s in sessions if isinstance(sessions[s], dict)),
+            key=lambda s: sessions[s].get("last_kick_ts") or 0,
+            reverse=True,
+        )
+
+    def attempt_log(self, sid: str) -> list[dict[str, Any]]:
+        """This sid's recorded attempts, oldest first (``[]`` if none).
+
+        Empty for a legacy counter-only file written before #35 — an honest
+        "no lineage recorded", never a reconstructed one.
+        """
+        entry = self._sessions().get(sid)
+        if not isinstance(entry, dict):
+            return []
+        log = entry.get("log")
+        return [a for a in log if isinstance(a, dict)] if isinstance(log, list) else []
+
+    def last_attempt(self, sid: str) -> dict[str, Any] | None:
+        """The most recent recorded attempt, or None."""
+        log = self.attempt_log(sid)
+        return log[-1] if log else None
+
+    def record_outcome(self, sid: str, *, ok: bool, message: str) -> None:
+        """Attach the kick's result to the attempt just recorded (#35).
+
+        Separate from ``record_kick`` because the outcome does not exist
+        yet when the attempt is counted — the attempt must be recorded
+        BEFORE ``ops.kick`` runs (see ``cli._kick_dropped_bridges``'s
+        try/finally: a kick that raises must still count, or the restart
+        loop reopens). A no-op when nothing has been recorded, so a failure
+        path that reaches here early cannot raise inside that finally.
+        """
+        sessions = dict(self._sessions())
+        entry = sessions.get(sid)
+        if not isinstance(entry, dict):
+            return
+        log = list(entry.get("log", [])) if isinstance(entry.get("log"), list) else []
+        if not log or not isinstance(log[-1], dict):
+            return
+        log[-1] = {**log[-1], "outcome_ok": bool(ok), "outcome": str(message)}
+        sessions[sid] = {**entry, "log": log}
         write_json_atomic(
             self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
 
