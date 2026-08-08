@@ -116,3 +116,44 @@ def test_degraded_overrides_every_other_state(degraded, expected):
     assert settings.autokick_card_state(
         config_default=True, global_override=None, session_override=None,
         degraded=degraded) == expected
+
+
+# --- the gap that let this ship broken -----------------------------------
+# The tests above call assemble_sessions and inspect the dict. The live
+# server VALIDATES the payload, and `shell: ""` failed the SHELLS enum —
+# so /api/sessions 500'd on a real machine while every unit test passed.
+# Validating the assembled payload is the check that was missing.
+
+def test_an_adopted_payload_passes_its_own_contract():
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    payload = assemble_sessions([entry], FakeBoot(), FakeProbe())
+    contracts.validate_sessions_payload(payload)
+
+
+def test_a_normal_payload_passes_its_own_contract():
+    from crr.core.journal import new_entry
+    entry = new_entry(pid=42, cwd="/home/u/p", host="tmux", shell="fish",
+                      boot_id="boot-1", now="2026-01-01T00:00:00+00:00",
+                      tmux_session="crr-abc",
+                      claude={"session_id": SID, "sid_source": "injected",
+                              "started": "2026-01-01T00:00:00+00:00"})
+    contracts.validate_sessions_payload(
+        assemble_sessions([entry], FakeBoot(), FakeProbe()))
+
+
+def test_a_non_adopted_card_may_not_have_an_empty_shell():
+    # The conditional must not become a blanket "" allowance: an empty
+    # shell on a normally-registered card is still a real error.
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
+    card["adopted"] = False
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)
+
+
+def test_an_adopted_card_may_not_carry_a_fabricated_shell():
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
+    card["shell"] = "bash"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)

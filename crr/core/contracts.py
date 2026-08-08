@@ -328,8 +328,21 @@ def validate_session_card(card: Any) -> None:
     _require_type(card["pid"], int, "session 'pid'")
     _require_enum(card["state"], STATES, "session 'state'")
     _require_type(card["cwd"], str, "session 'cwd'")
-    _require_enum(card["shell"], SHELLS, "session 'shell'")
-    _require_enum(card["host"], HOSTS, "session 'host'")
+    # (#40) An ADOPTED card reports host/shell as "" — adoption never
+    # observed a shell registration, and the journal's schema filler must
+    # not be repeated as fact. Conditional rather than adding "" to the
+    # enums: a NORMAL card with an empty shell is still a contract error,
+    # which is the case worth catching.
+    if card["adopted"]:
+        for field in ("host", "shell"):
+            if card[field] != "":
+                raise ContractError(
+                    f"session '{field}' must be '' on an adopted card "
+                    f"(nothing was observed), got {card[field]!r}"
+                )
+    else:
+        _require_enum(card["host"], HOSTS, "session 'host'")
+        _require_enum(card["shell"], SHELLS, "session 'shell'")
     _require_type(card["session_id"], str, "session 'session_id'")
     if not valid_session_id(card["session_id"]):
         raise ContractError("session 'session_id' must be a UUID")
