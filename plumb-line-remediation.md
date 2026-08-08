@@ -94,3 +94,64 @@ to journald's lineage claim; the two literal fallback defaults
 (`web_restart_seconds`, `model_tail_lines`) now reference `config.DEFAULTS`.
 Post-fix verification: `631 passed, 31 skipped` · lint-imports kept · every
 commit through the pre-commit gate.
+
+---
+
+# Remediation run 3 — 2026-08-08 (the post-baseline delta's findings)
+
+```
+remediation-format: v1
+source-report:       plumb-line-audit.md (run 3, 2026-08-07)
+source-report-format: v3
+principles-revision: 1
+commit:              4da4e11 (pre-remediation) → 2b3d478 (post, merged to main)
+```
+
+Scope: all 19 findings of run 3, filed first as `gap` issues #33–#40 per
+`docs/tracking-dialect.md` (nothing deferred without a record), then worked
+one branch per issue, TDD, merged on local-CI-green.
+
+| Issue | Finding | Class | Action | Change summary |
+|---|---|---|---|---|
+| #33 | `bridge_seen=False` conflates never-enabled with unknown (spine) | judgment | applied-judgment | tri-state `True/False/None`; `False` must be EARNED (walk reached the transcript start inside the scan window); `unknown` added to `REMOTE_CONTROL_STATES`; watchdog pinned never to kick one (`7c9b5db`) |
+| #39 | `context_pressure` against a fabricated window (P3) | judgment | applied-judgment | `pressure()` returns `unknown` for any model without a confirmed window; `DEFAULT_WINDOW` deleted, `window_for -> int \| None` (`7c9b5db`) |
+| #37 | Six hardcoded priors, three a regression (P5) | mechanical | applied-mechanical | all six lifted to `DEFAULTS`; `tests/test_priors.py` guards the page-timing class mechanically (`7893772`) |
+| #38 | Version-log holes + 3 docs contradicting the code (P9/P6) | mechanical | applied-mechanical | ledgers repaired; config v9 recorded as **skipped, never shipped** (553134e bumped 8→10 in one step); `tests/test_version_ledger.py` fails on a hole (`774ef03`) |
+| #36 | Eight uncontracted shapes (P7) | mechanical | applied-mechanical | 5 payload + 3 store contracts; stores stamp `v`, accept unstamped as legacy, refuse a future version (`56578b0`) |
+| #34 | cwd provenance laundered (P3) | judgment | applied-judgment | `cwd_source: verified\|decoded`; `_adopt` refuses a decoded cwd that is not a real directory, so no unverifiable cwd enters the journal (`c8805e2`) |
+| #35 | Kick records the action, not the observation (P8) | judgment | applied-judgment | per-attempt lineage (pid, reading, thresholds, outcome), bounded; `crr kicks --list` is the read path, mirroring F15's `archive --list` (`f649de7`) |
+| #40 | Fabricated adopted fields; degraded store's wrong reason | judgment | applied-judgment | adopted cards report host/shell as `""` + an `adopted` badge; `degraded` added to `AUTOKICK_STATES` (`e3b7cec`) |
+| F19 | Golden baseline still `planned` | advisory | filed, not applied | now issue **#41** — no longer an unfiled deferral |
+| F17 | `sleep(0.1)` poll granularity | advisory | filed, not applied | now issue **#42** |
+
+Deliberately not done, with reasons recorded rather than left implicit:
+
+- **JOURNAL_SCHEMA_VERSION was NOT bumped** for #40. Adopted entries' `host`/`shell`
+  are display-only (nothing in crr decides on them), so widening the schema to
+  allow `None` would migrate 15 live journal files for two fields nothing reads.
+  The claim is fixed where the claim is made. A test pins that the journal entry
+  still validates unchanged, so this stays a choice rather than drift.
+- **`DEFAULT_WINDOW` was deleted, not lifted to config** (#37). Once #39 removed
+  its only consumer it influenced no decision — a dead prior, not an injectable
+  one.
+
+Two defects this run introduced and caught:
+
+- **#40 shipped broken to main.** Adopted cards reported `shell: ""` while
+  `validate_session_card` still enum-checked it, so `/api/sessions` 500'd the
+  moment it deployed. Every unit test passed — they called `assemble_sessions`
+  and inspected the dict; nothing validated the assembled payload, which is
+  what the live server does. Fixed in `2b3d478`; four tests now close the gap.
+  The contract caught it, which is the mechanism working, but a test should
+  have caught it first.
+- **#36 found two live defects while landing**: `discovery.untracked()` silently
+  dropped the new `cwd_source` on its row rebuild, and the discoverable/untracked
+  providers had been given each other's contract constants.
+
+Verification: `1198 passed, 33 skipped` · `lint-imports: 1 kept, 0 broken` ·
+`node --check` clean · every commit through the pre-commit gate. Deployed and
+verified live: page v42, sessions contract v10, all five lazy endpoints 200,
+`crr revive` kicked nothing with 24 claude processes untouched, a legacy
+unstamped `exclusions.json` read correctly and a write stamped `v: 1`.
+
+Still open (all `deferred`, all filed): #41–#46.
