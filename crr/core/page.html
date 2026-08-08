@@ -638,6 +638,15 @@ function renderCard(s, uncertain, groupColor, latest) {
     rcu.textContent = "remote control unknown";
     top.appendChild(rcu);
   }
+  // (#40) An adopted card never observed a shell registration, so its
+  // host/shell come back empty rather than as the journal's schema filler.
+  // Say WHY they are blank, or a blank field reads as a rendering bug.
+  if (s.adopted) {
+    var adb = el("span", "badge unknown-badge");
+    adb.textContent = "adopted";
+    adb.title = "crr found this conversation's transcript on disk and adopted it — it never watched the session start, so its host and shell were never observed.";
+    top.appendChild(adb);
+  }
   // T-B: latest-per-cwd marker.
   var cwdInfo = latest && latest[s.cwd];
   if (cwdInfo && cwdInfo.count > 1 && recencyMs(s) === cwdInfo.max) {
@@ -747,7 +756,15 @@ function renderCard(s, uncertain, groupColor, latest) {
   // fire click either way), whenever the global switch resolves off:
   // never an ON state this button cannot honour.
   var akBtn = el("button", "autokick-btn");
-  if (s.autokick === "global-off") {
+  if (s.autokick === "degraded") {
+    // (#40) Same behaviour as global-off — nothing is kicked — but a
+    // different reason, and the reason is the actionable part. Saying
+    // "the global switch is off" would send the user to a control they
+    // never touched and that flipping will not fix.
+    akBtn.textContent = "Auto-kick unavailable (settings file unreadable)";
+    akBtn.title = "crr cannot read its settings file, so it is auto-kicking nothing at all — including sessions you opted in. This is not a switch you turned off. Open Settings for the file path.";
+    akBtn.disabled = true;
+  } else if (s.autokick === "global-off") {
     akBtn.textContent = "Auto-kick off (global switch is off)";
     akBtn.title = "The global auto-kick switch in Settings is off, so nothing is auto-kicked regardless of this session's own setting. Turn it on in Settings first.";
     akBtn.disabled = true;
