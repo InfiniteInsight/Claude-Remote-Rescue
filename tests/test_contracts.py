@@ -60,6 +60,7 @@ def _session_card():
         "context_pressure": "ok",
         "remote_control": "ok",
         "autokick": "on",
+        "adopted": False,
     }
 
 
@@ -231,14 +232,15 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_9():
+def test_sessions_contract_version_is_10():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
     # v9 widens both enums with `unknown` (#33 remote_control, #39
     # context_pressure) — no new key, but a v8 consumer has no case for the
     # new member, so the version must move.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 9
+    # v10 adds `adopted` and the `degraded` autokick state (#40).
+    assert contracts.SESSIONS_CONTRACT_VERSION == 10
 
 
 def test_sessions_wrong_contract_version_rejected():
@@ -369,7 +371,14 @@ def test_sessions_card_bad_autokick_enum_rejected():
 
 
 def test_autokick_states_enum():
-    assert contracts.AUTOKICK_STATES == ("on", "off", "global-off")
+    assert contracts.AUTOKICK_STATES == ("on", "off", "global-off", "degraded")
+
+
+def test_degraded_is_distinct_from_global_off():
+    # #40: same behaviour (nothing is kicked), different reason — and the
+    # reason is what the user acts on.
+    assert "degraded" in contracts.AUTOKICK_STATES
+    assert "global-off" in contracts.AUTOKICK_STATES
 
 
 def test_sessions_payload_rejects_previous_contract_version():

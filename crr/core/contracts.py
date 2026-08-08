@@ -29,12 +29,15 @@ JOURNAL_SCHEMA_VERSION = 1
 # v6 adds `title` + `slug` — session identity for mobile<->dashboard matching (df434fc)
 # v7 adds `remote_control` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 1)
 # v8 adds `autokick` (spec 2026-08-07 — dropped-Remote-Control watchdog, Slice 3)
+# v10 adds `adopted` (#40 — a card built from an adopted transcript, whose
+# host/shell were never observed) and a `degraded` member to `autokick`
+# (#40 — an unreadable settings file is not the same as a user-off switch)
 # v9 adds an `unknown` member to BOTH `remote_control` (#33) and
 # `context_pressure` (#39). No new key — two enums widen, so a v8 consumer
 # reading a v9 payload would reject a value it has no case for. Both encode
 # the same correction: a field that could only ever say "no"/"a level" was
 # asserting one when the underlying read had not established anything.
-SESSIONS_CONTRACT_VERSION = 9
+SESSIONS_CONTRACT_VERSION = 10
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -125,7 +128,12 @@ REMOTE_CONTROL_STATES = ("unknown", "off", "ok", "dropped")
 #                  auto-kicked regardless of this session's own value. The
 #                  per-session toggle must render DISABLED with this
 #                  reason, never a lying "on" it cannot honour.
-AUTOKICK_STATES = ("on", "off", "global-off")
+#   "degraded"   - the dashboard's settings file cannot be read, so the
+#                  watchdog fails closed and kicks nothing (#40). The
+#                  BEHAVIOUR matches "global-off", but the REASON does not:
+#                  the user never turned the switch off, and telling them
+#                  they did sends them to a control that will not fix it.
+AUTOKICK_STATES = ("on", "off", "global-off", "degraded")
 # How a discovered session's cwd was obtained (#34). The same idea as
 # `sid_source`, for the other field adoption has to get right:
 #   "verified" - read from the transcript's OWN records (authoritative).
@@ -177,6 +185,7 @@ SESSION_CARD_KEYS = (
     "context_pressure",
     "remote_control",
     "autokick",
+    "adopted",
 )
 SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
 
@@ -343,6 +352,7 @@ def validate_session_card(card: Any) -> None:
     _require_enum(card["context_pressure"], CONTEXT_PRESSURE_LEVELS, "session 'context_pressure'")
     _require_enum(card["remote_control"], REMOTE_CONTROL_STATES, "session 'remote_control'")
     _require_enum(card["autokick"], AUTOKICK_STATES, "session 'autokick'")
+    _require_type(card["adopted"], bool, "session 'adopted'")
 
 
 def validate_sessions_payload(payload: Any) -> None:

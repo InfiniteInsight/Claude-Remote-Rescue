@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v9).
+"""Status assembler — journal entries -> /api/sessions payload (contract v10).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -31,6 +31,7 @@ from crr.core.config import DEFAULTS
 from crr.core.bridge import bridge_state as _bridge_state
 from crr.core.classifier import classify
 from crr.core.context_pressure import pressure as _pressure
+from crr.core.discovery import ADOPTED_BOOT_ID
 from crr.core.ports import BootIdentity, ProcessProbe
 
 
@@ -83,6 +84,7 @@ def assemble_sessions(
     autokick_config_default: bool = DEFAULTS["remote_control_autokick"],
     autokick_global_override: bool | None = None,
     autokick_session_overrides: Mapping[str, bool] | None = None,
+    autokick_degraded: bool = False,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -134,14 +136,24 @@ def assemble_sessions(
     cards: list[dict[str, Any]] = []
     for entry in sessions:
         sid = entry["claude"]["session_id"]
+        adopted = entry.get("boot_id") == ADOPTED_BOOT_ID
         facts = tail_facts(entry)
         cards.append(
             {
                 "pid": entry["pid"],
                 "state": classify(entry, boot_identity, probe),
                 "cwd": entry["cwd"],
-                "shell": entry["shell"],
-                "host": entry["host"],
+                # (#40) An ADOPTED entry never observed a shell registration
+                # — `build_adopted_entry` writes host="tab"/shell="bash"
+                # because the v1 schema admits no None, and its docstring is
+                # explicit that "any enum member the schema accepts would be
+                # equally fabricated". Those two fields are display-only
+                # (nothing in crr decides on them), so the dashboard is the
+                # only place the fabrication could escape to — and it stops
+                # here. The journal keeps its schema-valid filler; the card
+                # reports what was actually seen, which is nothing.
+                "shell": "" if adopted else entry["shell"],
+                "host": "" if adopted else entry["host"],
                 "session_id": sid,
                 "sid_source": entry["claude"]["sid_source"],
                 "sid8": sid[:8],
@@ -170,7 +182,9 @@ def assemble_sessions(
                     config_default=autokick_config_default,
                     global_override=autokick_global_override,
                     session_override=autokick_session_overrides.get(sid),
+                    degraded=autokick_degraded,
                 ),
+                "adopted": adopted,
             }
         )
 

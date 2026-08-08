@@ -897,10 +897,16 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_41():
-    """v41: flash + filter-debounce timings injected from config (#37)
-    (v40 added the "unknown" chips for remote control and context)."""
-    assert web.PAGE_VERSION == 41
+def test_page_version_is_42():
+    """v42: adopted badge + degraded auto-kick state (#40)
+    (v41 injected the flash + filter-debounce timings from config)."""
+    assert web.PAGE_VERSION == 42
+
+
+def test_page_distinguishes_a_degraded_store_from_a_user_off_switch():
+    page = web.load_page()
+    assert "settings file unreadable" in page
+    assert "global switch is off" in page
 
 
 def test_page_renders_both_unknown_chips():

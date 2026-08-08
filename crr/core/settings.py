@@ -74,6 +74,7 @@ def autokick_for(
 
 def autokick_card_state(
     *, config_default: bool, global_override: bool | None, session_override: bool | None,
+    degraded: bool = False,
 ) -> str:
     """The session card's ``autokick`` field (spec 2026-08-07, Slice 3):
     ``"on"`` / ``"off"`` / ``"global-off"`` — see ``contracts.AUTOKICK_STATES``
@@ -86,6 +87,13 @@ def autokick_card_state(
     urgent — the panic switch itself is off) from a session that opted out
     while global stays on.
     """
+    if degraded:
+        # #40. The behaviour is identical to "global-off" — nothing is
+        # kicked — but the REASON is not, and the reason is what the user
+        # acts on. "global-off" points them at a switch they never touched
+        # and that flipping will not fix; "degraded" points them at the
+        # file. Checked first because it overrides every other state.
+        return "degraded"
     global_resolved = config_default if global_override is None else global_override
     if not global_resolved:
         return "global-off"
