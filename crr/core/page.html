@@ -281,6 +281,9 @@
 <header>
   <h1>Claude-Remote-Rescue</h1>
   <span class="meta" id="count"></span>
+  <!-- Answers "am I good to leave the desk?" without reading every card —
+       the question the whole reachability feature exists to serve. -->
+  <span class="meta" id="reachableSummary"></span>
 </header>
 <div id="key">
   <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span><span class="k-parked kterm" data-help="Running inside a detached tmux session — crr restored it after a reboot. The conversation is alive; Reopen brings it back into a terminal tab, or attach with: tmux attach -t &lt;name&gt;.">restored</span></span>
@@ -294,6 +297,7 @@
       <option value="all">All</option>
       <option value="crashed">Crashed</option>
       <option value="active">Not crashed</option>
+      <option value="unreachable">Phone: not connected</option>
     </select>
   </label>
   <label>Sort
@@ -449,6 +453,10 @@ function passesFilter(s) {
   if (searchMatchSids && !searchMatchSids[s.session_id]) return false;
   if (filterKey === "crashed") return s.state === "crashed";
   if (filterKey === "active") return s.state !== "crashed";
+  // Deliberately NOT `!== "reachable"`: `unknown` means crr could not
+  // establish the link, and sweeping it in here would present a failure to
+  // read as a failure to connect — the claim this whole design refuses.
+  if (filterKey === "unreachable") return s.remote_control === "unreachable";
   return true;  // "all"
 }
 
@@ -972,6 +980,18 @@ function render(payload) {
   document.getElementById("count").textContent = visible.length === total.length
     ? total.length + (total.length === 1 ? " session" : " sessions")
     : visible.length + " of " + total.length + " sessions";
+  // Counted over `total`, never `visible`: a summary that changed when you
+  // filtered would answer a different question than the one being asked.
+  var reach = { reachable: 0, unreachable: 0, unknown: 0 };
+  total.forEach(function (s) {
+    if (reach[s.remote_control] !== undefined) reach[s.remote_control] += 1;
+  });
+  var parts = [];
+  if (reach.reachable) parts.push(reach.reachable + " reachable");
+  if (reach.unreachable) parts.push(reach.unreachable + " not connected");
+  if (reach.unknown) parts.push(reach.unknown + " unknown");
+  document.getElementById("reachableSummary").textContent =
+    parts.length ? "phone: " + parts.join(" \u00b7 ") : "";
   var empty = document.getElementById("empty");
   if (!visible.length) {
     empty.textContent = total.length ? "No sessions match this filter." : "No journaled sessions.";

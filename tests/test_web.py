@@ -899,11 +899,12 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_47():
-    """v47: the card reports whether the phone can reach this session, from
+def test_page_version_is_48():
+    """v48: header reachability summary + a "not connected" filter
+    (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 47
+    assert web.PAGE_VERSION == 48
 
 
 def test_page_renders_the_parked_state():
@@ -1460,3 +1461,23 @@ def test_a_parked_card_offers_the_running_session_controls(page_source=None):
     for label in ("Kick", "Close", "Untrack", "Un-tmux", "Reopen"):
         assert f'"{label}"' in parked_arm, f"parked card is missing {label}"
     assert '"Dismiss"' not in parked_arm
+
+
+def test_the_header_counts_reachable_and_not_connected():
+    """Spec Phase 3 promised this and it was silently dropped.
+
+    With 17 cards, per-card badges alone do not answer "am I good to leave
+    the desk?" without reading every card. That question is the whole point
+    of the feature, so the count belongs where you can see it at a glance.
+    """
+    page = web.load_page()
+    assert "reachableSummary" in page
+    assert "not connected" in page
+
+
+def test_a_not_reachable_filter_exists():
+    """Also promised by the spec and dropped. After a reboot this is how you
+    see only the sessions that need attention instead of scanning 17 cards."""
+    page = web.load_page()
+    assert 'value="unreachable"' in page
+    assert 'filterKey === "unreachable"' in page

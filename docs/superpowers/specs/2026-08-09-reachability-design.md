@@ -238,6 +238,15 @@ present on disk right now — `waitingFor: "permission prompt"` and
 - `waiting: permission prompt` — the **pending tool call** is lost; it
   will not run. Conversation history survives via `--resume`.
 - `busy` / `shell` — real work dies. Hard blocks.
+- **Any state — the process GROUP.** `ops.kick` sends `SIGTERM` to
+  `killpg(pgid)`, so backgrounded bash jobs, a dev server launched from the
+  session, and in-flight subagents die with claude regardless of which
+  status permitted the kick. Neither guard can see them: `status` describes
+  claude, the transcript boundary describes the conversation, and neither
+  describes the process tree. Accepted deliberately — the alternative is a
+  session that stays unreachable forever — and bounded by the cooldown, the
+  attempt cap, and the per-session and global switches. (Added 2026-08-10:
+  the first draft of this table counted only the un-started tool call.)
 
 Retained unchanged from Part B: the cooldown
 (`bridge_kick_cooldown_seconds`), the attempt cap
