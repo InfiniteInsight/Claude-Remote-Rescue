@@ -151,10 +151,17 @@ def _reachability_by_sid(
         # state file's pid was identical to the journaled one — and after a
         # reboot that is most of the machine, exactly when reachability
         # matters most.
-        matched = state.pid is not None and (
-            state.pid == entry["pid"]
-            or state.pid in groups.get(entry["pid"], ())
-        )
+        # ONLY the live-process snapshot may license a claim. An earlier
+        # version also matched `state.pid == entry["pid"]`, which looks
+        # right for a tmux-revived session (those journal the claude process
+        # itself) but checks NOTHING about the pid — not liveness, not boot.
+        # After a reboot the journaled pid is dead while its state file
+        # survives, so the card asserted `reachable` and "waiting on you"
+        # about a process that no longer exists (adversarial review
+        # 2026-08-10). The branch is also redundant: `_child_groups` returns
+        # `[shell_pgid]` when the journaled pid IS claude (#58), so every
+        # LIVE revived session matches here anyway.
+        matched = state.pid is not None and state.pid in groups.get(entry["pid"], ())
         reach = reachability.reachability(
             state.bridge_session_id,
             pid_matched=matched,

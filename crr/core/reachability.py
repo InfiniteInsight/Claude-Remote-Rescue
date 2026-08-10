@@ -50,7 +50,17 @@ def reachability(
     """
     if not pid_matched or not field_present:
         return UNKNOWN
-    return REACHABLE if bridge_session_id else UNREACHABLE
+    if bridge_session_id is None:
+        return UNREACHABLE          # an explicit null: the setter ran teardown
+    if not bridge_session_id:
+        # Present, a string, and empty. The enumerated writer emits a session
+        # object or an explicit null — never "". An unparseable value must
+        # not read as "down" (adversarial review 2026-08-10): `unreachable`
+        # is on the kick path, and with `status: "waiting"` the boundary
+        # corroboration is deliberately skipped, so this would SIGTERM a
+        # live process on evidence nobody has.
+        return UNKNOWN
+    return REACHABLE
 
 
 def may_kick(status: str | None) -> tuple[bool, str]:
