@@ -19,6 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+from crr.core.ports import TabSpawnTimeout
+
 BINFMT_MISC = Path("/proc/sys/fs/binfmt_misc")
 
 # WSL registers one of these; newer images use the "-late" variant.
@@ -82,7 +84,12 @@ class WindowsTerminalSpawner:
         return shutil.which("wt.exe") is not None and interop_registered()
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
-        subprocess.run(
-            wt_command(argv, cwd, self._profile, self._distro),
-            capture_output=True, text=True, timeout=self._timeout, check=True,
-        )
+        try:
+            subprocess.run(
+                wt_command(argv, cwd, self._profile, self._distro),
+                capture_output=True, text=True, timeout=self._timeout, check=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # A cold Windows Terminal can outrun the budget and still open the
+            # tab. Say we could not confirm; do not claim it failed (#53).
+            raise TabSpawnTimeout(exc.timeout or self._timeout) from exc

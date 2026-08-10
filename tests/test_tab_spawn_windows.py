@@ -94,3 +94,41 @@ def test_available_is_false_when_interop_is_unregistered(monkeypatch):
     monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/.../wt.exe")
     monkeypatch.setattr(tsw, "interop_registered", lambda: False)
     assert tsw.WindowsTerminalSpawner(5).available() is False
+
+
+# --- cold start (#53) ------------------------------------------------------
+#
+# A warm Windows Terminal answers in milliseconds; a cold one can take longer
+# than the 5s interop budget meant for ps/tmux probes. A timeout is NOT
+# evidence the tab failed — it usually means the opposite — so the adapter
+# reports it as its own thing instead of letting it look like a crash.
+
+def test_spawner_raises_tab_spawn_timeout_not_a_generic_error(monkeypatch):
+    import subprocess as sp
+    from crr.core.ports import TabSpawnTimeout
+
+    def boom(cmd, **kw):
+        raise sp.TimeoutExpired(cmd, kw.get("timeout", 30))
+
+    monkeypatch.setattr(tsw.subprocess, "run", boom)
+    try:
+        tsw.WindowsTerminalSpawner(30).open_tab(_ARGV)
+    except TabSpawnTimeout as exc:
+        assert exc.seconds == 30
+    else:
+        raise AssertionError("expected TabSpawnTimeout")
+
+
+def test_spawner_still_raises_normally_for_a_real_failure(monkeypatch):
+    from crr.core.ports import TabSpawnTimeout
+
+    def boom(cmd, **kw):
+        raise OSError(8, "Exec format error", "wt.exe")
+
+    monkeypatch.setattr(tsw.subprocess, "run", boom)
+    try:
+        tsw.WindowsTerminalSpawner(30).open_tab(_ARGV)
+    except TabSpawnTimeout:
+        raise AssertionError("a hard failure must not masquerade as a timeout")
+    except OSError:
+        pass

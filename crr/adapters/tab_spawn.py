@@ -28,6 +28,8 @@ import shlex
 import subprocess
 from typing import Mapping, Sequence
 
+from crr.core.ports import TabSpawnTimeout
+
 
 def _shell_command(argv: Sequence[str], cwd: str | None) -> str:
     """Render argv (word-form) into a shell command string, cd'ing if asked."""
@@ -99,10 +101,15 @@ class _OsascriptSpawner:
             return False
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
-        subprocess.run(
-            ["osascript", "-e", self._script(argv, cwd)],
-            capture_output=True, text=True, timeout=self._timeout, check=True,
-        )
+        try:
+            subprocess.run(
+                ["osascript", "-e", self._script(argv, cwd)],
+                capture_output=True, text=True, timeout=self._timeout, check=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # A cold terminal app can outrun the budget and still open the
+            # tab. Report "could not confirm", never "failed" (#53).
+            raise TabSpawnTimeout(exc.timeout or self._timeout) from exc
 
 
 class TerminalAppSpawner(_OsascriptSpawner):

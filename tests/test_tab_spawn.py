@@ -156,3 +156,23 @@ def test_iterm_applescript_compiles(tmp_path):
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_osascript_spawner_reports_a_timeout_as_unconfirmed_not_failed(monkeypatch):
+    # [#53/#54] tab_spawn_timeout_seconds feeds every spawner, not just WSL.
+    # A slow-but-successful launch must not be asserted as a failure on any
+    # platform — ports.TabSpawnTimeout is the contract, so every adapter owes
+    # it.
+    import subprocess as sp
+    from crr.core.ports import TabSpawnTimeout
+
+    def slow(cmd, **kw):
+        raise sp.TimeoutExpired(cmd, kw.get("timeout", 30))
+
+    monkeypatch.setattr(tab_spawn.subprocess, "run", slow)
+    try:
+        tab_spawn.TerminalAppSpawner(30).open_tab(["tmux", "attach", "-t", "crr-x"])
+    except TabSpawnTimeout as exc:
+        assert exc.seconds == 30
+    else:
+        raise AssertionError("expected TabSpawnTimeout")
