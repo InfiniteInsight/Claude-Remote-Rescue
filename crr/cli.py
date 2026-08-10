@@ -141,7 +141,20 @@ def _reachability_by_sid(
         state = states.get(sid)
         if state is None:
             continue  # no state file for this sid: nothing readable to report
-        matched = state.pid is not None and state.pid in groups.get(entry["pid"], ())
+        # Two ways a state file can belong to this entry, and BOTH are
+        # needed. The journaled pid is usually a parent shell, so claude
+        # shows up in its group list — but a tmux-revived session journals
+        # the CLAUDE PROCESS ITSELF (`crr revive` spawns
+        # `tmux new-session -d ... claude ...`), which has no claude
+        # children and therefore an EMPTY group list. Matching only on the
+        # group list left 13 of 17 real cards reading `unknown` while the
+        # state file's pid was identical to the journaled one — and after a
+        # reboot that is most of the machine, exactly when reachability
+        # matters most.
+        matched = state.pid is not None and (
+            state.pid == entry["pid"]
+            or state.pid in groups.get(entry["pid"], ())
+        )
         reach = reachability.reachability(
             state.bridge_session_id,
             pid_matched=matched,

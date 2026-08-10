@@ -3954,3 +3954,40 @@ def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatc
     out = capsys.readouterr().out
     assert "[restored]" in out
     assert "[parked]" not in out
+
+
+def test_reachability_matches_a_session_journaled_as_the_claude_process_itself(tmp_path, monkeypatch):
+    """A tmux-revived session journals the CLAUDE process, not a parent shell.
+
+    `crr revive` spawns `tmux new-session -d ... claude ...`, so the journaled
+    pid IS claude — it has no claude CHILDREN, and `claude_group_pids` returns
+    an empty list for it. Matching only against that list left 13 of 17 real
+    cards reading `unknown` even though the state file's pid was IDENTICAL to
+    the journaled one. Post-reboot that is most of the machine, which is
+    precisely when reachability matters most.
+    """
+    from crr.adapters import session_state, state_dir
+    from crr.core.journal import JournalStore, new_entry
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(new_entry(
+        pid=1960, cwd="/home/u/p", host="tmux", shell="bash",
+        boot_id="b", now="2026-01-01T00:00:00+00:00", tmux_session="crr-x",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-01-01T00:00:00+00:00"}))
+
+    class NoChildren:
+        def is_alive(self, pid): return True
+        def has_controlling_tty(self, pid): return True
+        def controlling_ttys(self, pids): return set(pids)
+        def claude_group_pids(self, pids): return {p: [] for p in pids}   # no children
+
+    state = session_state.SessionState(
+        pid=1960, bridge_session_id=None, field_present=True,
+        status="idle", waiting_for="")
+    got = cli._reachability_by_sid(
+        JournalStore(tmp_path).scan().entries, NoChildren(), cfg.Config(),
+        read_session_state=lambda: {sid: state})
+    assert got[sid] == ("unreachable", ""), \
+        "the state file's pid equals the journaled pid; that is a match"
