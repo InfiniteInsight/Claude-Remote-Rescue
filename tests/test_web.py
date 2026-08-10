@@ -975,7 +975,12 @@ def test_key_explains_both_unknown_terms():
     # Every badge the card can render needs a key entry, or the user is left
     # guessing what an "unknown" chip is telling them.
     page = web.load_page()
-    key = page[page.index('id="key"'):page.index('id="key"') + 5000]
+    # Bounded by the element that FOLLOWS #key, not a magic character count:
+    # the legend grew in v46 and the old 4000-char window already reached
+    # past #key into the settings modal — which carries its own "Remote
+    # Control" copy, so the assertion could have passed on text that is not
+    # in the legend at all.
+    key = page[page.index('id="key"'):page.index('id="controls"')]
     assert "phone: unknown" in key
     assert "context unknown" in key
 
