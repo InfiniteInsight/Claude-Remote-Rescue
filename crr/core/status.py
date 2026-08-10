@@ -29,10 +29,17 @@ from crr.core import contracts
 from crr.core import settings as _settings
 from crr.core.config import DEFAULTS
 from crr.core.bridge import bridge_state as _bridge_state
-from crr.core.classifier import classify
+from crr.core.classifier import CRASHED, classify
 from crr.core.context_pressure import pressure as _pressure
 from crr.core.discovery import ADOPTED_BOOT_ID
 from crr.core.ports import BootIdentity, ProcessProbe
+
+# Display-only state (spec 2026-08-09, Phase 0). NOT a classifier state:
+# `classify()` answers "may I act on this pid", and CRASHED is the right
+# answer for a parked session — `ops.detmux`/`ops.untmux` guard on exactly
+# that and re-home only crashed entries. This projection changes what the
+# CARD says, and nothing else.
+PARKED = "parked"
 
 
 def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -66,6 +73,21 @@ class _MemoTtyProbe:
         return pid in self._tty_pids
 
 
+def _display_state(entry, boot_identity, probe, live_tmux_sessions) -> str:
+    """The card's state: the operational state, except that a CRASHED entry
+    parked in a confirmed-live tmux session reads PARKED.
+
+    One-directional by construction: only CRASHED is ever rewritten, so
+    tmux liveness can rescue an entry from a wrong `crashed` but can never
+    push a live or ghost session into `parked`.
+    """
+    state = classify(entry, boot_identity, probe)
+    if state != CRASHED or not live_tmux_sessions:
+        return state
+    name = entry.get("tmux_session")
+    return PARKED if name and name in live_tmux_sessions else state
+
+
 def assemble_sessions(
     entries: Sequence[Mapping[str, Any]],
     boot_identity: BootIdentity,
@@ -85,6 +107,7 @@ def assemble_sessions(
     autokick_global_override: bool | None = None,
     autokick_session_overrides: Mapping[str, bool] | None = None,
     autokick_degraded: bool = False,
+    live_tmux_sessions: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -123,6 +146,11 @@ def assemble_sessions(
     lose the REASON — the user never turned the global switch off — and the
     Settings modal remains the place that surfaces ``is_degraded()``
     itself. That residual gap is tracked in #40, not here.
+
+    ``live_tmux_sessions`` is the set of tmux session names confirmed
+    alive, resolved ONCE per poll by the caller (core does no I/O).
+    ``None`` is F16's honest "could not determine" and never promotes an
+    entry — an unconfirmed query may not assert that a session is running.
     """
     autokick_session_overrides = autokick_session_overrides or {}
     sessions = [e for e in entries if e.get("claude") is not None]
@@ -141,7 +169,9 @@ def assemble_sessions(
         cards.append(
             {
                 "pid": entry["pid"],
-                "state": classify(entry, boot_identity, probe),
+                "state": _display_state(
+                    entry, boot_identity, probe, live_tmux_sessions
+                ),
                 "cwd": entry["cwd"],
                 # (#40) An ADOPTED entry never observed a shell registration
                 # — `build_adopted_entry` writes host="tab"/shell="bash"

@@ -389,3 +389,58 @@ def test_claude_less_shells_are_not_cards():
     payload = assemble_sessions(entries, FakeBoot(), FakeProbe())
     contracts.validate_sessions_payload(payload)
     assert [c["pid"] for c in payload["sessions"]] == [1]
+
+
+def test_a_crashed_entry_parked_in_a_live_tmux_session_reads_parked():
+    # After a reboot the reviver restores conversations into detached tmux.
+    # The journal keeps the pre-reboot pid and boot_id, so classify() says
+    # CRASHED — correct for "may I act on this pid", wrong for the card.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
+    assert payload["sessions"][0]["state"] == "parked"
+
+
+def test_a_crashed_entry_whose_tmux_session_is_gone_stays_crashed():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions=set())
+    assert payload["sessions"][0]["state"] == "crashed"
+
+
+def test_unknown_tmux_state_never_promotes_to_parked():
+    # F16 tri-state: None means "could not determine". Promoting on it
+    # would assert a session is running on the strength of a failed query.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions=None)
+    assert payload["sessions"][0]["state"] == "crashed"
+
+
+def test_an_entry_with_no_tmux_session_is_unaffected():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-other"})
+    assert payload["sessions"][0]["state"] == "crashed"
+
+
+def test_a_live_session_is_never_demoted_to_parked():
+    # The projection is one-directional: tmux liveness may only rescue an
+    # entry from a wrong `crashed`, never push one into parked.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
+    assert payload["sessions"][0]["state"] == "live"
