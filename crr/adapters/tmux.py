@@ -27,6 +27,10 @@ def _new_session_cmd(name: str, cwd: str, argv: Sequence[str]) -> list[str]:
     return ["tmux", "new-session", "-d", "-s", name, "-c", cwd, "--", *argv]
 
 
+def _session_pid_cmd(name: str) -> list[str]:
+    return ["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"]
+
+
 def _kill_session_cmd(name: str) -> list[str]:
     return ["tmux", "kill-session", "-t", name]
 
@@ -41,6 +45,31 @@ class RealTmux:
 
     def available(self) -> bool:
         return shutil.which("tmux") is not None
+
+    def session_pid(self, name: str) -> int | None:
+        """The pid running in ``name``'s first pane, or None if unknown.
+
+        A revived session's pane pid IS the claude process (the reviver
+        spawns `tmux new-session -- claude ...` with no shell in between),
+        which is what lets the journal be re-keyed onto the live process
+        (#58). None means "could not determine" and is never guessed at:
+        re-keying an entry onto a pid we did not observe would point every
+        pid-keyed op at the wrong process.
+        """
+        try:
+            result = subprocess.run(
+                _session_pid_cmd(name),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        first = result.stdout.strip().split("\n", 1)[0].strip()
+        try:
+            return int(first)
+        except ValueError:
+            return None
 
     def list_sessions(self) -> set[str] | None:
         """Return the live tmux session names, or None if that could not be

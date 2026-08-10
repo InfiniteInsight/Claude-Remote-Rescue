@@ -96,21 +96,29 @@ def test_register_launch_crash_revive_status_web(isolated, tmp_path, capsys):
             env={**os.environ, "TMUX_TMPDIR": str(tmp_path / "tmux")},
         )
         assert name in listed.stdout, f"revived tmux session missing: {listed.stdout!r}"
-        # Journal now records the tmux session for that entry.
-        assert JournalStore(scratch).read(pid)["tmux_session"] == name
+        # Journal now records the tmux session — re-keyed onto the pid
+        # actually running in the pane, since the revived claude never runs
+        # the shim and would otherwise have no card at all (#58).
+        store = JournalStore(scratch)
+        entry = next(e for e in store.scan().entries
+                     if (e.get("claude") or {}).get("session_id") == sid)
+        assert entry["tmux_session"] == name
+        assert entry["pid"] != pid
 
         # 5. status --json emits a contract-valid payload with the card.
         assert cli.main(["status", "--json"]) == 0
         payload = json.loads(capsys.readouterr().out)
         contracts.validate_sessions_payload(payload)
-        card = next(c for c in payload["sessions"] if c["pid"] == pid)
-        assert card["session_id"] == sid
-        # The journaled shell pid is dead, so `classify()` still returns
-        # CRASHED — which `ops.detmux`/`ops.untmux` require. But step 4 just
-        # revived the conversation into a live tmux session, so the CARD
-        # reads `parked` (spec 2026-08-09, Phase 0). This is the only test in
-        # the suite with a real tmux server, so it is the end-to-end proof
-        # that `cli._live_tmux_sessions` reaches the display projection.
+        # [#58] The card is keyed to the pid running in the pane now, not the
+        # dead shell pid, so look it up by conversation.
+        card = next(c for c in payload["sessions"] if c["session_id"] == sid)
+        assert card["pid"] == entry["pid"] != pid
+        # The entry is re-keyed onto the live claude in the pane (#58), so
+        # `classify()` now returns LIVE — and the CARD still reads `parked`,
+        # because the projection covers a tmux-hosted live entry too (spec
+        # 2026-08-09, Phase 0). This is the only test in the suite with a
+        # real tmux server, so it is the end-to-end proof that both
+        # `cli._live_tmux_sessions` and the re-key reach the display.
         assert card["state"] == "parked"
 
         # 6. Serve the dashboard on an OS-assigned port and hit both APIs.
@@ -135,7 +143,8 @@ def test_register_launch_crash_revive_status_web(isolated, tmp_path, capsys):
                 assert r.status == 200
                 body = json.loads(r.read())
                 contracts.validate_sessions_payload(body)
-                assert any(c["pid"] == pid for c in body["sessions"])
+                # keyed to the pane's claude after the re-key (#58)
+                assert any(c["session_id"] == sid for c in body["sessions"])
 
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/diagnostics",
                                          headers={"Host": "localhost"})
