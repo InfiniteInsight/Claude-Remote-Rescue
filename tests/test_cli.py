@@ -3929,3 +3929,24 @@ def test_revive_passes_the_flag_store_so_close_actually_sticks(tmp_path, monkeyp
                         lambda t: type("T", (), {"available": lambda s: True})())
     assert cli.main(["revive"]) == 0
     assert seen["flags"] is not None, "revive ran without a flag store"
+
+
+def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
+    tmp_path, monkeypatch
+):
+    # [#62] The reviver can only open the tab if the CLI hands it a spawner.
+    # Without this wiring the fix is inert in the only place it runs.
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["tab_spawner"] = kw.get("tab_spawner")
+        from crr.core.reviver import RevivalOutcome
+        return RevivalOutcome([], [], [])
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: ("SPAWNER", True))
+    monkeypatch.setattr(cli.tmux, "RealTmux",
+                        lambda t: type("T", (), {"available": lambda s: True})())
+    assert cli.main(["revive"]) == 0
+    assert seen["tab_spawner"] == "SPAWNER"

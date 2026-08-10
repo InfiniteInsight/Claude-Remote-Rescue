@@ -639,3 +639,66 @@ def test_a_relaunch_flag_does_not_stop_a_revival(tmp_path):
                    max_strikes=3, now=_NOW, remote_control_enabled=True,
                    flags=_Flags({2016: ("relaunch", _SID_A)}))
     assert len(tmux.created) == 1
+
+
+# --- a kicked conversation comes back WITH a tab (#62) --------------------
+#
+# Kick signals and returns; the watchdog creates the replacement ~30s later,
+# so the tab can only come from here. The relaunch flag is the signal that
+# THIS revival was asked for: the shim consumes it for a shim-managed
+# session, but a tmux-parked one has no shim (#58), so it survives to this
+# sweep. Crash-driven revivals carry no flag and must stay tabless — the
+# reporting host revives 13 conversations at boot.
+
+class _Tab:
+    def __init__(self, fail=False):
+        self.opened = []
+        self._fail = fail
+
+    def available(self):
+        return True
+
+    def open_tab(self, argv, cwd=None):
+        if self._fail:
+            raise RuntimeError("wt boom")
+        self.opened.append(list(argv))
+
+
+def test_a_kicked_session_is_revived_with_a_tab(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab = _Tab()
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"])})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=tab)
+    assert tab.opened, "kicked session came back with nothing pointing at it"
+    assert tab.opened[0][-1] == session_name({"claude": _claude()})
+    assert flags.cleared == [899149], "the flag must not re-open a tab next sweep"
+
+
+def test_a_crash_driven_revival_opens_no_tab(tmp_path):
+    # 13 conversations revive at boot on the reporting host. None asked for.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tab = _Tab()
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=_Flags(), tab_spawner=tab)
+    assert tab.opened == []
+
+
+def test_a_failed_tab_never_costs_the_revival(tmp_path):
+    # The revival is durable by the time the tab is attempted; a spawner
+    # failure is convenience lost, never the conversation.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tmux = FakeTmux()
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=_Flags({899149: ("relaunch", _claude()["session_id"])}),
+        tab_spawner=_Tab(fail=True),
+    )
+    assert outcome.revived == [899149]
+    assert len(tmux.created) == 1

@@ -141,6 +141,23 @@ def attach_argv(name: str) -> list[str]:
     return ["tmux", "attach", "-t", name]
 
 
+def _try_open_tab(tab_spawner, name: str) -> bool:
+    """Best-effort visible tab attaching to ``name``. Never raises.
+
+    Deliberately local rather than reusing ``ops._open_tab``: ``ops``
+    imports this module, so importing it back would be a cycle. This one
+    also has no message to build — the reviver runs unattended, so a tab
+    that does not appear is not something a human is waiting to read about.
+    """
+    try:
+        if not tab_spawner.available():
+            return False
+        tab_spawner.open_tab(attach_argv(name))
+        return True
+    except Exception:
+        return False  # the revival is already durable; the tab is not
+
+
 def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
     """Re-key ``entry`` onto the pid actually running in tmux session ``name``.
 
@@ -221,6 +238,7 @@ def revive_crashed(
     now: str,
     remote_control_enabled: bool,
     flags=None,
+    tab_spawner=None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -281,6 +299,19 @@ def revive_crashed(
             # The spawn just created the process crr must be able to Kick;
             # put the journal on it before the pass ends (#58).
             _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
+            # An armed `relaunch` flag means a human pressed Kick and the
+            # shim never consumed it — i.e. a tmux-parked session with no
+            # shim (#58). That is the one revival that was ASKED for, so it
+            # is the one that gets a tab: Kick means "restart it and put it
+            # in front of me" (#62). A crash-driven revival carries no flag
+            # and stays tabless — 13 of those fire at boot on the reporting
+            # host. Best-effort: the revival is already durable, so a
+            # spawner failure costs the tab, never the conversation.
+            if flags is not None and tab_spawner is not None:
+                armed = flags.read(pid)
+                if armed is not None and armed[0] == "relaunch":
+                    _try_open_tab(tab_spawner, name)
+                    flags.clear(pid)  # or it re-opens a tab every sweep
             revived.append(pid)
 
     # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'
