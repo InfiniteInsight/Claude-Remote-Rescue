@@ -1528,7 +1528,7 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     assert cli.main(["revive"]) == 0
     entry = store.read(7)
     assert entry["claude"]["sid_source"] == "verified"  # upgrade survived revive's write
-    assert entry["tmux_session"] == f"crr-{_G1_SID[:8]}"  # and it was actually revived
+    assert entry["tmux_session"] == f"crr-{_G1_SID}"  # and it was actually revived
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
@@ -1822,12 +1822,12 @@ def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
     ))
     try:
         assert cli.main(["reopen", "--pid", "42"]) == 0
-        assert store.read(42)["tmux_session"] == f"crr-{sid[:8]}"
+        assert store.read(42)["tmux_session"] == f"crr-{sid}"
         sessions = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         ).stdout
-        assert f"crr-{sid[:8]}" in sessions
+        assert f"crr-{sid}" in sessions
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
@@ -2840,13 +2840,13 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
         rc = cli.main(["revive"])
         assert rc == 0
         entry = store.read(4242)
-        assert entry["tmux_session"] == f"crr-{sid[:8]}"
+        assert entry["tmux_session"] == f"crr-{sid}"
         assert entry["revive_strikes"] == 1
         sessions = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         ).stdout
-        assert f"crr-{sid[:8]}" in sessions
+        assert f"crr-{sid}" in sessions
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 

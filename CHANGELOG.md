@@ -131,6 +131,20 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- tmux sessions were named `crr-<first 8 chars of the session id>`, and crr
+  uses that name as the identity of a parked conversation — so two
+  conversations sharing those 8 characters collided, and Reopen silently
+  attached the user to the *wrong* conversation while reporting success.
+  `sid8` is a display abbreviation (payload contract, dashboard cards); using
+  it as a key was the defect, not its width. Sessions are now named by the
+  **full** session id, which removes the collision by construction rather
+  than lowering its odds. `resolved_session_name()` prefers the name already
+  recorded in `entry["tmux_session"]`, so conversations already parked under
+  a legacy `crr-<sid8>` keep answering to it — without that, `reviver._decide`
+  and `ops.reopen` would both read the unmatched name as "not running" and
+  spawn a second `claude --resume` on a conversation that already has one.
+  tmux resolves `-t` by prefix, so `tmux attach -t crr-79e5` still works.
+
 - Reopen delivered a session but not always the tab, and reported that as
   plain success. The tab is part of what Reopen means, so a revival with no
   tab on a tab-capable host is now a distinct **degraded** outcome: `OpResult`

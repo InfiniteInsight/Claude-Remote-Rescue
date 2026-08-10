@@ -89,7 +89,7 @@ def test_register_launch_crash_revive_status_web(isolated, tmp_path, capsys):
         assert cli.main(["revive"]) == 0
         capsys.readouterr()
 
-        name = f"crr-{sid[:8]}"
+        name = f"crr-{sid}"
         listed = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,

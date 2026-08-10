@@ -16,7 +16,13 @@ import pytest
 
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
-from crr.core.reviver import attach_argv, revival_argv, revive_crashed, session_name
+from crr.core.reviver import (
+    attach_argv,
+    resolved_session_name,
+    revival_argv,
+    revive_crashed,
+    session_name,
+)
 
 _ENTRY_BOOT = "entry-boot-0000"
 _NOW = "2026-07-24T00:00:00Z"
@@ -438,3 +444,49 @@ def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_
     assert outcome == ([], [], [], True)
     assert outcome.skipped is True
     assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched
+
+
+# --- session naming: the full sid is the identity (#51) -------------------
+#
+# `crr-<sid8>` used an 8-char DISPLAY abbreviation as crr's identity for a
+# parked conversation. Two sids sharing those 8 chars collided, and Reopen
+# then attached the user to the wrong conversation while reporting success.
+
+_SID_A = "8a1b2c3d-1111-4a6b-8c7d-9e0f1a2b3c4d"
+_SID_B = "8a1b2c3d-2222-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def test_session_name_uses_the_whole_session_id():
+    assert session_name({"claude": _claude(_SID_A)}) == f"crr-{_SID_A}"
+
+
+def test_session_names_differ_for_sids_sharing_eight_characters():
+    assert _SID_A[:8] == _SID_B[:8]  # the collision precondition
+    assert session_name({"claude": _claude(_SID_A)}) != session_name({"claude": _claude(_SID_B)})
+
+
+def test_resolved_name_prefers_a_name_already_recorded():
+    # Migration: a conversation already parked under a legacy crr-<sid8>
+    # must keep answering to that name. Recomputing it would make the
+    # reviver think the session is gone and start a SECOND claude --resume
+    # on the same conversation (the #48 hazard).
+    entry = {"claude": _claude(_SID_A), "tmux_session": "crr-8a1b2c3d"}
+    assert resolved_session_name(entry) == "crr-8a1b2c3d"
+
+
+def test_resolved_name_computes_when_nothing_is_recorded():
+    for recorded in (None, ""):
+        entry = {"claude": _claude(_SID_A), "tmux_session": recorded}
+        assert resolved_session_name(entry) == f"crr-{_SID_A}"
+
+
+def test_revive_does_not_duplicate_a_legacy_named_session(tmp_path):
+    # The live session is parked under the OLD short name. The reviver must
+    # recognise it and reset strikes, not spawn a second one.
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude(_SID_A), tmux_session="crr-8a1b2c3d", strikes=2)
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    outcome = _run(store, tmux)
+    assert tmux.created == [], "spawned a duplicate for an already-parked legacy session"
+    assert outcome.revived == []
+    assert outcome.reset == [42]

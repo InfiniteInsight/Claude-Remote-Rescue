@@ -341,7 +341,7 @@ uses it. Only the watchdog stops consulting it.
 | `SESSIONS_CONTRACT_VERSION` | 10 → 11 (`parked` state, `remote_control` enum replaced, `waiting_for` added) |
 | `RESCUED_CONTRACT_VERSION` | new, 1 |
 | `CONFIG_DEFAULTS_VERSION` | 14 → 15 (two keys removed) |
-| `PAGE_VERSION` | 42 → 43 |
+| `PAGE_VERSION` | one bump per phase that changes the page; floor moves as other work ships (43 at time of writing) |
 
 Per `tests/test_version_ledger.py`, every bump needs a ledger entry.
 
