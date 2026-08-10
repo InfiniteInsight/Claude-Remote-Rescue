@@ -101,3 +101,20 @@ def test_spawner_available_reflects_which(monkeypatch):
     assert tsl.LinuxTerminalSpawner("konsole", 5).available() is True
     monkeypatch.setattr(tsl.shutil, "which", lambda b: None)
     assert tsl.LinuxTerminalSpawner("konsole", 5).available() is False
+
+
+def test_linux_spawner_reports_a_timeout_as_unconfirmed_not_failed(monkeypatch):
+    # Same contract as the macOS and WSL spawners (#53/#54).
+    import subprocess as sp
+    from crr.core.ports import TabSpawnTimeout
+
+    def slow(cmd, **kw):
+        raise sp.TimeoutExpired(cmd, kw.get("timeout", 30))
+
+    monkeypatch.setattr(tsl.subprocess, "run", slow)
+    try:
+        tsl.LinuxTerminalSpawner("kitty", 30).open_tab(["tmux", "attach", "-t", "crr-x"])
+    except TabSpawnTimeout as exc:
+        assert exc.seconds == 30
+    else:
+        raise AssertionError("expected TabSpawnTimeout")
