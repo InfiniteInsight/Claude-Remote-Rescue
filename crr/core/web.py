@@ -210,6 +210,21 @@ def _json(status: int, obj: Any) -> Response:
     return _resp(status, "application/json", json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
 
+def _action_result(ok: bool, message: str, degraded: bool) -> dict:
+    """The stamped envelope both action endpoints return (#55).
+
+    Built in ONE place so the two handlers cannot drift, and stamped with
+    its contract version so a future widening has something to bump — the
+    gap that let #49 change this shape silently.
+    """
+    return {
+        "contract": contracts.ACTION_CONTRACT_VERSION,
+        "ok": bool(ok),
+        "message": str(message),
+        "degraded": bool(degraded),
+    }
+
+
 def handle_request(
     method: str,
     path: str,
@@ -358,8 +373,7 @@ def handle_request(
             # degraded is NOT an error status: the op succeeded, so the fetch
             # guards in page.html must stay on the success path. Only the
             # notice styling changes ([user request, 2026-08-09]).
-            return _json(200 if ok else 409,
-                         {"ok": ok, "message": message, "degraded": degraded})
+            return _json(200 if ok else 409, _action_result(ok, message, degraded))
 
         if path == "/api/exclusions":
             # Same CSRF posture as /api/action (host allowlist already ran;
@@ -426,8 +440,7 @@ def handle_request(
             if sid_action_provider is None:
                 return _plain(503, "actions unavailable")
             ok, message, degraded = sid_action_provider(op, sid)
-            return _json(200 if ok else 409,
-                         {"ok": ok, "message": message, "degraded": degraded})
+            return _json(200 if ok else 409, _action_result(ok, message, degraded))
 
         return _plain(404, "not found")
 
