@@ -36,6 +36,7 @@ def _page_sha() -> str:
 # APPEND a new entry for every page change; never edit an existing one.
 PAGE_PINS: dict[int, str] = {
     45: "f18d2516203d2868d60452cf478bc19dd3b36f802f9df066c77b40e17bf2d7e9",
+    46: "65abf9908a2d494db3275a61fc666faae197bc3a6c790342e02325223979f817",
 }
 
 
