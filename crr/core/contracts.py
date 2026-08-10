@@ -43,7 +43,8 @@ JOURNAL_SCHEMA_VERSION = 1
 # v12 replaces `remote_control`'s enum — the record-counting off/ok/dropped
 # gives way to reachable/unreachable sourced from Claude Code's own
 # bridgeSessionId — and adds `waiting_for` (spec 2026-08-09, Phases 1-3)
-SESSIONS_CONTRACT_VERSION = 12
+# v13 adds `conflict` (#48) — two live claudes on one conversation
+SESSIONS_CONTRACT_VERSION = 13
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -207,6 +208,13 @@ SESSION_CARD_KEYS = (
     "waiting_for",
     "autokick",
     "adopted",
+    # Two entries for this conversation each own a LIVE claude, so two
+    # agents are writing to one transcript (#48). NOT `duplicate_group`,
+    # which also fires for the benign shell-beside-its-revived-claude pair.
+    # False rather than nullable on purpose: an unreadable process probe
+    # must not become a positive claim that two agents are fighting, which
+    # would tell the reader to kill something on no evidence.
+    "conflict",
 )
 SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
 
@@ -384,6 +392,7 @@ def validate_session_card(card: Any) -> None:
     # duplicate_group is nullable: None (not in a group) or a group id string.
     if card["duplicate_group"] is not None:
         _require_type(card["duplicate_group"], str, "session 'duplicate_group'")
+    _require_type(card["conflict"], bool, "session 'conflict'")
     if card["tmux_session"] is not None:
         _require_type(card["tmux_session"], str, "session 'tmux_session'")
     # last_active (T-A): a possibly-empty ISO timestamp string — "" is an

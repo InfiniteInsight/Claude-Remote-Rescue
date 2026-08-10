@@ -473,3 +473,54 @@ def test_a_crashed_entry_parked_in_tmux_still_reads_parked():
         def has_controlling_tty(self, pid): return False
 
     assert st._display_state(entry, Boot(), Probe(), {"crr-abc"}) == st.PARKED
+
+
+# --- two agents on one conversation (#48) ---------------------------------
+#
+# `duplicate_group` is not this signal: it fires whenever two entries share
+# a sid, which includes the benign shell-plus-its-revived-claude pair. The
+# hazard is two entries that each own a LIVE claude — both writing to one
+# transcript. Measured on the reporting host, both shapes at once:
+#
+#   93122659  pid 1687  host=tab  claude_groups=[1160061]   <- a real agent
+#             pid 1957  host=tmux claude_groups=[1957]      <- a real agent
+#   (and elsewhere) a shell whose claude had died: claude_groups=[]
+
+def _two_entries(sid):
+    a, b = _entry(1687, sid), _entry(1957, sid)
+    b["host"] = "tmux"
+    b["tmux_session"] = "crr-x"
+    return [a, b]
+
+
+def test_two_entries_each_owning_a_claude_are_flagged_as_conflicting():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(_two_entries(sid), FakeBoot(), FakeProbe(),
+                                claude_owners={1687: [1160061], 1957: [1957]})
+    for card in payload["sessions"]:
+        assert card["conflict"] is True
+    contracts.validate_sessions_payload(payload)
+
+
+def test_a_shell_whose_claude_died_is_not_a_conflict():
+    # The benign duplicate: the original shell entry lingers beside the
+    # revived claude, but only one agent is running.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(_two_entries(sid), FakeBoot(), FakeProbe(),
+                                claude_owners={1687: [], 1957: [1957]})
+    assert [c["conflict"] for c in payload["sessions"]] == [False, False]
+
+
+def test_a_lone_session_is_never_a_conflict():
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe(),
+                                claude_owners={42: [999]})
+    assert payload["sessions"][0]["conflict"] is False
+
+
+def test_conflict_is_False_not_None_when_the_probe_cannot_answer():
+    # An unreadable ps must not become a positive claim that two agents are
+    # fighting — that would tell the user to kill something on no evidence.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    payload = assemble_sessions(_two_entries(sid), FakeBoot(), FakeProbe())
+    assert [c["conflict"] for c in payload["sessions"]] == [False, False]

@@ -93,6 +93,10 @@ def _reachability_by_sid(
     config: cfg.Config,
     *,
     read_session_state: Callable[[], Mapping[str, Any]] | None = None,
+    # (#48) Reuse the caller's single per-poll process snapshot when it has
+    # one. Taking a second `ps -A` here is exactly what batching exists to
+    # avoid, and there is a test enforcing one snapshot per poll.
+    owners: Mapping[int, Sequence[int]] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """``{session_id: (remote_control, waiting_for)}`` for ``assemble_sessions``.
 
@@ -136,7 +140,8 @@ def _reachability_by_sid(
     # but this is a HEURISTIC, not an exact identity. A mismatch fails CLOSED
     # (no match -> `unknown` -> no kick, no claim), so the cost is a missed
     # detection, never a wrong restart or a fabricated badge.
-    groups = probe.claude_group_pids([e["pid"] for e in sessions])
+    groups = (owners if owners is not None
+              else probe.claude_group_pids([e["pid"] for e in sessions]))
     out: dict[str, tuple[str, str]] = {}
     for entry in sessions:
         sid = entry["claude"]["session_id"]
@@ -748,13 +753,17 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     scan = store.scan()
     settings_store = settings.SettingsStore(sd)
+    _owners = probe.claude_group_pids(
+        [e["pid"] for e in scan.entries if e.get("claude") is not None])
     payload = status.assemble_sessions(
         scan.entries,
         boot,
         probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
-        reachability_by_sid=_reachability_by_sid(scan.entries, probe, config),
+        reachability_by_sid=_reachability_by_sid(
+            scan.entries, probe, config, owners=_owners),
+        claude_owners=_owners,
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
         autokick_config_default=config.get("remote_control_autokick"),

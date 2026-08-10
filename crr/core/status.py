@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v12).
+"""Status assembler — journal entries -> /api/sessions payload (contract v13).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -73,6 +73,23 @@ class _MemoTtyProbe:
         return pid in self._tty_pids
 
 
+def _conflicting_sids(sessions, owners) -> set[str]:
+    """Sids whose conversation has MORE THAN ONE live claude behind it (#48).
+
+    `duplicate_group` cannot answer this: it fires whenever two entries
+    share a sid, and the common case is benign — the shell that originally
+    launched the conversation lingers in the journal beside the claude the
+    reviver later parked in tmux, with only one agent running. What matters
+    is which entries still OWN a claude process.
+    """
+    counts: dict[str, int] = {}
+    for entry in sessions:
+        if owners.get(entry["pid"]):
+            sid = entry["claude"]["session_id"]
+            counts[sid] = counts.get(sid, 0) + 1
+    return {sid for sid, n in counts.items() if n > 1}
+
+
 def _display_state(entry, boot_identity, probe, live_tmux_sessions) -> str:
     """The card's state: the operational state, except that an entry sitting
     in a confirmed-live tmux session reads PARKED.
@@ -119,6 +136,10 @@ def assemble_sessions(
     autokick_degraded: bool = False,
     live_tmux_sessions: set[str] | None = None,
     reachability_by_sid: Mapping[str, tuple[str, str]] | None = None,
+    # (#48) pid -> claude process groups it owns, from the composition
+    # root's single per-poll snapshot. None means the probe was not run or
+    # could not answer: no conflict is claimed on absent evidence.
+    claude_owners: Mapping[int, Sequence[int]] | None = None,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -173,6 +194,13 @@ def assemble_sessions(
     # Batch the tty probe: one query for every candidate pid instead of one
     # ps per card (DESIGN 'snap jq' perf). classify then reads it O(1).
     tty_pids = process_probe.controlling_ttys([e["pid"] for e in sessions])
+    # #48: which entries actually OWN a running claude. Injected, not probed
+    # here — the composition root takes ONE process snapshot per poll and
+    # feeds it to both this and the reachability detector, because a second
+    # `ps -A` per poll is exactly what the batching exists to avoid. Absent
+    # (None) means no evidence, and no evidence must not become a claim that
+    # two agents are fighting.
+    _conflicted = _conflicting_sids(sessions, claude_owners or {})
     probe = _MemoTtyProbe(process_probe, tty_pids)
 
     cards: list[dict[str, Any]] = []
@@ -214,6 +242,7 @@ def assemble_sessions(
                 "slug": facts["slug"],
                 "model": facts["model"],
                 "duplicate_group": sid if sid_counts[sid] > 1 else None,
+                "conflict": sid in _conflicted,
                 "tmux_session": entry["tmux_session"],
                 "updated": entry["updated"],
                 "last_active": facts["last_active"],
