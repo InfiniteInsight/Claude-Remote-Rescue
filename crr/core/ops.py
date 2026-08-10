@@ -30,6 +30,13 @@ if TYPE_CHECKING:
 class OpResult(NamedTuple):
     ok: bool
     message: str
+    # The op did what it was asked, but not everything the user clicked for.
+    # Today's only case: a revival that produced no visible tab on a host that
+    # HAS tabs. The session is alive and attachable, so ok stays True — but
+    # "reopen" means "put it in front of me", and a caller that renders this
+    # as a plain success is lying by omission ([user request, 2026-08-09]).
+    # Defaulted so every other op constructs OpResult(ok, message) unchanged.
+    degraded: bool = False
 
 
 def remove(store: JournalStore, pid: int) -> OpResult:
@@ -74,6 +81,11 @@ def reopen(
     grace: float,
     remote_control: bool,
     tab_spawner: TabSpawner | None = None,
+    # Whether THIS host has a concept of visible tabs at all. Selecting the
+    # adapter is crr.cli's job, so the discrimination between "headless, tabs
+    # were never possible" and "tab-capable host, the tab did not appear"
+    # arrives as a plain bool rather than core learning what WSL is.
+    tabs_expected: bool = False,
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
 
@@ -93,10 +105,12 @@ def reopen(
       rationale.
     - LIVE: refused — kick/close are the ops for a running claude.
 
-    Revival always lands in a detached tmux session first (durable). If a
-    ``tab_spawner`` is available, a visible tab then attaches to it — a
-    best-effort convenience: a tab failure is surfaced in the message but
-    never demotes the successful revival to a failure.
+    Revival always lands in a detached tmux session first (durable), then a
+    visible tab attaches to it. The tab is part of what "reopen" means, not a
+    garnish: when ``tabs_expected`` and no tab appears, the result is marked
+    ``degraded`` so callers can say so ([user request, 2026-08-09]). ``ok``
+    still stays True — the session is alive and attachable, and claiming
+    otherwise would send the user hunting for a session that is right there.
     """
     try:
         entry = store.read(pid)
@@ -121,6 +135,7 @@ def reopen(
         return _reopen_ghost(
             store, archive, tmux, controller, flags, entry, pid, now,
             live=live, grace=grace, remote_control=remote_control, tab_spawner=tab_spawner,
+            tabs_expected=tabs_expected,
         )
 
     # CRASHED — original path, unchanged.
@@ -135,7 +150,8 @@ def reopen(
         entry["updated"] = now
         store.write(entry)
         base = f"reopened {pid} as {name}"
-    return OpResult(True, base + _open_tab(tab_spawner, name))
+    suffix, landed = _open_tab(tab_spawner, name)
+    return OpResult(True, base + suffix, degraded=tabs_expected and not landed)
 
 
 def _reopen_ghost(
@@ -152,6 +168,7 @@ def _reopen_ghost(
     grace: float,
     remote_control: bool,
     tab_spawner: TabSpawner | None,
+    tabs_expected: bool,
 ) -> OpResult:
     """The GHOST branch of ``reopen`` (see its docstring for the "why").
 
@@ -198,9 +215,10 @@ def _reopen_ghost(
     store.remove(pid)
 
     if name in live:
+        suffix, landed = _open_tab(tab_spawner, name)
         return OpResult(
             True, f"restored {pid}'s conversation as {name} (already running){kill_suffix}"
-            + _open_tab(tab_spawner, name)
+            + suffix, degraded=tabs_expected and not landed
         )
     try:
         tmux.new_detached_session(
@@ -212,10 +230,17 @@ def _reopen_ghost(
             f"restored {pid}'s conversation to the archive as ghost-restored, but the "
             f"tmux spawn failed ({exc}) — the watchdog will revive it on its next "
             f"pass{kill_suffix}",
+            # Neither a tmux session nor a tab: the conversation is preserved,
+            # but nothing the user clicked for actually happened. Not gated on
+            # tabs_expected — a missing tmux session matters on every host,
+            # headless included, and this must not be the one outcome that
+            # still reads as plain success now that lesser ones don't.
+            degraded=True,
         )
+    suffix, landed = _open_tab(tab_spawner, name)
     return OpResult(
         True, f"restored {pid}'s conversation into detached tmux as {name}{kill_suffix}"
-        + _open_tab(tab_spawner, name)
+        + suffix, degraded=tabs_expected and not landed
     )
 
 
@@ -517,19 +542,25 @@ def _signal_groups(
     return landed, errors
 
 
-def _open_tab(tab_spawner: TabSpawner | None, name: str) -> str:
-    """Best-effort visible tab attaching to ``name``; returns a message suffix.
+def _open_tab(tab_spawner: TabSpawner | None, name: str) -> tuple[str, bool]:
+    """Open a visible tab attaching to ``name``; return (suffix, landed).
 
-    The tmux revival is already durable by the time this runs, so any
-    failure here is convenience-only — reported, never fatal.
+    The tmux revival is already durable by the time this runs, so a failure
+    here is never fatal to the session — but it is not nothing either: the
+    caller asked for a tab. ``landed`` lets the caller mark the op degraded
+    instead of silently reporting success ([user request, 2026-08-09]).
     """
     if tab_spawner is None or not tab_spawner.available():
         # Honesty: revival already landed (durable) — say why no tab
         # appeared instead of looking like the whole op did nothing, and
         # give the manual fallback ([live bug, 2026-07-31]).
-        return f" (no tab spawner on this host — attach with: tmux attach -t {name})"
+        return f" (no tab spawner on this host — attach with: tmux attach -t {name})", False
     try:
         tab_spawner.open_tab(attach_argv(name))
-        return " (opened in a new tab)"
+        return " (opened in a new tab)", True
     except Exception as exc:  # best-effort: an osascript/subprocess failure
-        return f" (tab spawn failed: {exc})"
+        # Same honesty as the no-spawner branch: the revival is durable and
+        # the session is attachable, so name the cause AND the way in. A bare
+        # errno reads as "the whole op failed" ([live bug, 2026-08-09]: WSL
+        # ENOEXEC on wt.exe when the WSLInterop binfmt handler is missing).
+        return f" (tab spawn failed: {exc} — attach with: tmux attach -t {name})", False

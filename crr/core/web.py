@@ -32,7 +32,7 @@ from crr.core import contracts
 
 # Discipline: bump this whenever crr/core/page.html changes after a release,
 # or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
-PAGE_VERSION = 42  # v42: adopted badge + degraded auto-kick state (#40)
+PAGE_VERSION = 43  # v43: amber NO TAB notice for degraded reopen (#49)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -209,11 +209,11 @@ def handle_request(
     body: bytes = b"",
     *,
     sessions_provider: Callable[[], dict[str, Any]],
-    action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
+    action_provider: Callable[[str, int], tuple[bool, str, bool]] | None = None,
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
     untracked_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     discoverable_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
-    sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
+    sid_action_provider: Callable[[str, str], tuple[bool, str, bool]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
     exclusions_provider: Callable[[], dict[str, Any]] | None = None,
     exclusions_writer: Callable[[Any], dict[str, Any]] | None = None,
@@ -346,8 +346,12 @@ def handle_request(
                 return _plain(400, "invalid op or pid")
             if action_provider is None:
                 return _plain(503, "actions unavailable")
-            ok, message = action_provider(op, pid)
-            return _json(200 if ok else 409, {"ok": ok, "message": message})
+            ok, message, degraded = action_provider(op, pid)
+            # degraded is NOT an error status: the op succeeded, so the fetch
+            # guards in page.html must stay on the success path. Only the
+            # notice styling changes ([user request, 2026-08-09]).
+            return _json(200 if ok else 409,
+                         {"ok": ok, "message": message, "degraded": degraded})
 
         if path == "/api/exclusions":
             # Same CSRF posture as /api/action (host allowlist already ran;
@@ -413,8 +417,9 @@ def handle_request(
                 return _plain(400, "invalid op or sid")
             if sid_action_provider is None:
                 return _plain(503, "actions unavailable")
-            ok, message = sid_action_provider(op, sid)
-            return _json(200 if ok else 409, {"ok": ok, "message": message})
+            ok, message, degraded = sid_action_provider(op, sid)
+            return _json(200 if ok else 409,
+                         {"ok": ok, "message": message, "degraded": degraded})
 
         return _plain(404, "not found")
 

@@ -447,26 +447,26 @@ def test_post_action_dispatches_and_returns_result():
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
-        return True, f"reopened {pid}"
+        return True, f"reopened {pid}", False
     resp = _post({"op": "reopen", "pid": 42}, action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("reopen", 42)
-    assert json.loads(resp.body) == {"ok": True, "message": "reopened 42"}
+    assert json.loads(resp.body) == {"ok": True, "message": "reopened 42", "degraded": False}
 
 
 def test_post_action_gate_refusal_is_409():
-    resp = _post({"op": "dismiss", "pid": 42}, action_provider=lambda o, p: (False, "is live"))
+    resp = _post({"op": "dismiss", "pid": 42}, action_provider=lambda o, p: (False, "is live", False))
     assert resp.status == 409
     assert json.loads(resp.body)["ok"] is False
 
 
 def test_post_without_json_content_type_is_415():
-    resp = _post({"op": "remove", "pid": 42}, headers={}, action_provider=lambda o, p: (True, "ok"))
+    resp = _post({"op": "remove", "pid": 42}, headers={}, action_provider=lambda o, p: (True, "ok", False))
     assert resp.status == 415
 
 
 def test_post_bad_json_is_400():
-    resp = _post(raw=b"{not json", action_provider=lambda o, p: (True, "ok"))
+    resp = _post(raw=b"{not json", action_provider=lambda o, p: (True, "ok", False))
     assert resp.status == 400
 
 
@@ -479,14 +479,14 @@ def test_post_bad_json_is_400():
     {"pid": 42},                     # missing op
 ])
 def test_post_invalid_op_or_pid_is_400(payload):
-    resp = _post(payload, action_provider=lambda o, p: (True, "should-not-run"))
+    resp = _post(payload, action_provider=lambda o, p: (True, "should-not-run", False))
     assert resp.status == 400
 
 
 def test_post_disallowed_host_is_403_before_dispatch():
     called = []
     resp = _post({"op": "remove", "pid": 42}, host="evil.com",
-                 action_provider=lambda o, p: called.append(1) or (True, "ok"))
+                 action_provider=lambda o, p: called.append(1) or (True, "ok", False))
     assert resp.status == 403
     assert called == []  # never dispatched
 
@@ -519,7 +519,7 @@ def test_post_kick_is_accepted_and_dispatched():
     seen = {}
     def action_provider(op, pid):
         seen["op"], seen["pid"] = op, pid
-        return True, "kicked 5 (resuming the same conversation)"
+        return True, "kicked 5 (resuming the same conversation)", False
     resp = web.handle_request(
         "POST", "/api/action",
         {"Host": "localhost", "Content-Type": "application/json"},
@@ -536,7 +536,7 @@ def test_post_untrack_is_accepted_and_dispatched():
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
-        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it"
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it", False
     resp = _post({"op": "untrack", "pid": 42}, action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("untrack", 42)
@@ -547,13 +547,14 @@ def test_post_detmux_is_accepted_and_dispatched():
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
-        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it"
+        return True, "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it", False
     resp = _post({"op": "detmux", "pid": 42}, action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("detmux", 42)
     assert json.loads(resp.body) == {
         "ok": True,
         "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it",
+        "degraded": False,
     }
 
 
@@ -561,13 +562,14 @@ def test_post_untmux_is_accepted_and_dispatched():
     seen = {}
     def act(op, pid):
         seen["call"] = (op, pid)
-        return True, "un-tmuxed 42: claude --resume in a new tab; crr no longer manages it"
+        return True, "un-tmuxed 42: claude --resume in a new tab; crr no longer manages it", False
     resp = _post({"op": "untmux", "pid": 42}, action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("untmux", 42)
     assert json.loads(resp.body) == {
         "ok": True,
         "message": "un-tmuxed 42: claude --resume in a new tab; crr no longer manages it",
+        "degraded": False,
     }
 
 
@@ -580,7 +582,7 @@ def test_post_action_still_rejects_a_bad_pid_unchanged():
     # /api/sid-action is a SEPARATE route (C2) — must not weaken the
     # existing pid-keyed /api/action's strict validation.
     resp = _post({"op": "reopen", "pid": "not-an-int"},
-                 action_provider=lambda o, p: (True, "should-not-run"))
+                 action_provider=lambda o, p: (True, "should-not-run", False))
     assert resp.status == 400
 
 
@@ -616,7 +618,7 @@ def test_post_sid_action_autokick_on_dispatches_and_returns_result():
 
     def act(op, sid):
         seen["call"] = (op, sid)
-        return True, "auto-kick enabled for this session"
+        return True, "auto-kick enabled for this session", False
 
     resp = _post_sid({"op": "autokick-on", "sid": _VALID_SID}, sid_action_provider=act)
     assert resp.status == 200
@@ -629,7 +631,7 @@ def test_post_sid_action_autokick_off_dispatches_and_returns_result():
 
     def act(op, sid):
         seen["call"] = (op, sid)
-        return True, "auto-kick disabled for this session"
+        return True, "auto-kick disabled for this session", False
 
     resp = _post_sid({"op": "autokick-off", "sid": _VALID_SID}, sid_action_provider=act)
     assert resp.status == 200
@@ -648,17 +650,17 @@ def test_post_sid_action_adopt_dispatches_and_returns_result():
 
     def act(op, sid):
         seen["call"] = (op, sid)
-        return True, f"adopted {sid[:8]} — now tracked as recoverable"
+        return True, f"adopted {sid[:8]} — now tracked as recoverable", False
 
     resp = _post_sid({"op": "adopt", "sid": _VALID_SID}, sid_action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("adopt", _VALID_SID)
-    assert json.loads(resp.body) == {"ok": True, "message": f"adopted {_VALID_SID[:8]} — now tracked as recoverable"}
+    assert json.loads(resp.body) == {"ok": True, "message": f"adopted {_VALID_SID[:8]} — now tracked as recoverable", "degraded": False}
 
 
 def test_post_sid_action_adopt_gate_refusal_is_409():
     resp = _post_sid({"op": "adopt", "sid": _VALID_SID},
-                     sid_action_provider=lambda o, s: (False, "not discoverable"))
+                     sid_action_provider=lambda o, s: (False, "not discoverable", False))
     assert resp.status == 409
     assert json.loads(resp.body)["ok"] is False
 
@@ -668,17 +670,17 @@ def test_post_sid_action_dispatches_and_returns_result():
 
     def act(op, sid):
         seen["call"] = (op, sid)
-        return True, f"retracked {sid[:8]}"
+        return True, f"retracked {sid[:8]}", False
 
     resp = _post_sid({"op": "retrack", "sid": _VALID_SID}, sid_action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("retrack", _VALID_SID)
-    assert json.loads(resp.body) == {"ok": True, "message": f"retracked {_VALID_SID[:8]}"}
+    assert json.loads(resp.body) == {"ok": True, "message": f"retracked {_VALID_SID[:8]}", "degraded": False}
 
 
 def test_post_sid_action_gate_refusal_is_409():
     resp = _post_sid({"op": "retrack", "sid": _VALID_SID},
-                     sid_action_provider=lambda o, s: (False, "no archived session"))
+                     sid_action_provider=lambda o, s: (False, "no archived session", False))
     assert resp.status == 409
     assert json.loads(resp.body)["ok"] is False
 
@@ -897,10 +899,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_42():
+def test_page_version_is_43():
     """v42: adopted badge + degraded auto-kick state (#40)
     (v41 injected the flash + filter-debounce timings from config)."""
-    assert web.PAGE_VERSION == 42
+    assert web.PAGE_VERSION == 43
 
 
 def test_page_distinguishes_a_degraded_store_from_a_user_off_switch():
@@ -1031,8 +1033,10 @@ def test_page_status_toast_is_color_coded_and_animated():
 def test_page_actions_report_both_success_and_failure():
     page = web.render_page()
     # Both the card (/api/action) and sid (/api/sid-action) handlers map the
-    # outcome to a toast kind — success is no longer silent.
-    assert page.count('j.ok ? "ok" : "error"') >= 2
+    # outcome to a toast kind — success is no longer silent. The mapping is a
+    # shared helper now that there are three outcomes, not two.
+    assert page.count("noticeKind(j)") >= 2
+    assert 'j.degraded ? "warn" : "ok"' in page
 
 
 def test_page_retrack_rows_render_last_prompt():
@@ -1232,6 +1236,57 @@ def test_cmd_web_warms_the_page_snapshot_before_serving(monkeypatch):
 
     monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
     assert cli.main(["web", "--port", "1"]) == 0
+
+
+def test_cmd_web_resolves_the_tab_spawner_per_action_not_once_at_startup(monkeypatch):
+    """[live bug, 2026-08-09] The dashboard bound its tab spawner once, at
+    service startup. On WSL that decision depends on whether the WSLInterop
+    binfmt handler is registered — which can be absent at boot and repaired
+    minutes later. A long-lived crr-web that started while interop was down
+    held `None` for its whole life, so every Reopen click silently produced no
+    tab even after the host became tab-capable. Resolve it per action.
+    """
+    import crr.cli as cli
+
+    captured = {}
+
+    def fake_make_web_handler(provider, allowed, suffixes, **kw):
+        captured.update(kw)
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    calls = {"n": 0}
+
+    def counting_tab_spawner(config):
+        calls["n"] += 1
+        return None, True
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    monkeypatch.setattr(cli, "_tab_spawner", counting_tab_spawner)
+    assert cli.main(["web", "--port", "1"]) == 0
+
+    # Startup must not have decided anything about tabs.
+    assert calls["n"] == 0, "tab spawner resolved at startup — the stale-decision bug"
+
+    # Each tab-capable action re-asks the host. 'remove' never spawns a tab,
+    # so it must not pay for the probe either.
+    action = captured["action_provider"]
+    action("remove", 999999)
+    assert calls["n"] == 0
+    action("reopen", 999999)
+    assert calls["n"] == 1
+    action("reopen", 999999)
+    assert calls["n"] == 2
 
 
 def test_page_stack_toggle_pluralises_correctly():
