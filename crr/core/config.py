@@ -62,7 +62,16 @@ from typing import Any, Mapping
 # run-3 audit caught, three of them a regression of a class run 2 had
 # already remediated; tests/test_priors.py is the guard that keeps them
 # from coming back a third time)
-CONFIG_DEFAULTS_VERSION = 14
+# v15: REMOVED bridge_stale_records / bridge_scan_lines (spec 2026-08-09,
+# Phases 1-3 — the record-counting dropped-Remote-Control detector is gone,
+# replaced by Claude Code's own per-process bridgeSessionId; see
+# crr.adapters.session_state and crr.core.reachability). Both keys were
+# priors of a measurement that is no longer taken, so leaving them would
+# have been a config surface that decides nothing. `remote_control_watch`
+# and the two bridge_kick_* guards survive — only the thresholds of the
+# deleted detector went. The v12 entry above still names them: it is
+# history, and history is not edited.
+CONFIG_DEFAULTS_VERSION = 15
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -136,7 +145,7 @@ DEFAULTS: dict[str, Any] = {
     # within the first handful of records in every transcript seen — the
     # session-start/snapshot header lines don't carry it, the first real
     # turn does. Bounded so a cwd-less transcript is never read end to end.
-    # Same shape as model_tail_lines / reply_tail_lines / bridge_scan_lines.
+    # Same shape as model_tail_lines / reply_tail_lines.
     "cwd_scan_lines": 200,
     # Every claude launch/resume/revival crr is involved in passes
     # `--remote-control <name>` (an explicit name — never a bare flag; see
@@ -196,32 +205,21 @@ DEFAULTS: dict[str, Any] = {
     "takeover_idle_seconds": 20.0,       # transcript quiet + clean tail this long
     "takeover_max_wait_seconds": 180.0,  # give up (refuse, never kill) after this
     "takeover_poll_seconds": 2.0,        # wait-loop poll cadence
-    # Dropped-Remote-Control watchdog (spec 2026-08-07, Part B). Detects a
-    # session whose mobile Remote Control link has gone quiet while claude
-    # keeps working locally, by counting transcript records since the
-    # newest `bridge-session` marker. See crr.core.bridge.bridge_state.
-    # False turns off detection, the card badge, AND the per-poll transcript
-    # scan cost, not just the watchdog's kick step — cli._tail_facts_extractor
-    # passes bridge_scan_lines=0 downstream when this is False, which reads
-    # as an honest "unknown" card state (#33 — never "off", which would
-    # claim Remote Control was never enabled on the strength of never having
-    # looked), and never a stale "dropped"/"ok". The kick step
-    # (cli._kick_dropped_bridges) also gates on this directly.
+    # Dropped-Remote-Control watchdog (spec 2026-08-09, Phases 1-3). Detects
+    # a session whose mobile Remote Control link has gone down, by reading
+    # Claude Code's OWN per-process `bridgeSessionId` state file — see
+    # crr.adapters.session_state and crr.core.reachability. (It used to count
+    # transcript records since the newest `bridge-session` marker; that
+    # needed a median of 8 minutes of ACTIVE work to fire and never fired at
+    # all on an idle session, which is the case the feature exists for.)
+    # False turns off detection, the card badge, AND the per-poll cost, not
+    # just the watchdog's kick step: cli._reachability_by_sid skips both the
+    # `~/.claude/sessions` scan and the process-table snapshot, which reads
+    # as an honest "unknown" card state (#33 — never a positive claim about
+    # a session nothing looked at). The kick step (cli._kick_dropped_bridges)
+    # also gates on this directly.
     "remote_control_watch": True,
     "remote_control_autokick": True,   # GLOBAL hard switch for auto-kicking a dropped session (consumed from Slice 2's watchdog step)
-    # Threshold (records, not seconds — see crr.core.bridge's docstring for
-    # why): measured across 54 real transcripts / 6991 marker-to-marker
-    # gaps, the worst LEGITIMATE gap between consecutive bridge markers was
-    # 107 records (a 1.4x margin under 150); no legitimate gap in that
-    # corpus exceeded 150. A session past it has produced several turns'
-    # worth of records with no marker, not a slow-but-normal gap.
-    "bridge_stale_records": 150,
-    # How far back the bridge-marker search walks before giving up and
-    # reporting "unseen" (never a fabricated drop). Same shape as
-    # `model_tail_lines`/`reply_tail_lines`: measured, the newest marker
-    # sits 0-11 records from the tail on a healthy session and never more
-    # than 107 behind, so 400 covers the worst observed case with headroom.
-    "bridge_scan_lines": 400,
     # Watchdog restart-loop guards (review fix-wave 2026-08-07, FIX 1 —
     # CRITICAL). Without these, a failed reconnect (host briefly offline,
     # auth expired, Remote Control unavailable) re-qualifies for a kick on

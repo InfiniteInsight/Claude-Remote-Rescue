@@ -95,6 +95,40 @@ class PsProcessProbe:
             return set()
         return _parse_tty_pids(result.stdout)
 
+    def claude_group_pids(self, shell_pids: Sequence[int]) -> dict[int, list[int]]:
+        """Claude process-group ids per shell pid, from ONE ``ps`` snapshot.
+
+        The read-only, batched counterpart to
+        ``ProcessController.claude_groups`` (the parallel of
+        ``controlling_ttys`` vs ``has_controlling_tty``). The reachability
+        detector needs "does this state file's pid belong to a claude job
+        under this journaled shell" for every card on every 5s poll;
+        ``claude_groups`` forks a full ``ps -A`` per call, which the 30s
+        watchdog can afford and the dashboard cannot — 17 cards would cost
+        ~204 forks a minute, forever.
+
+        It lives on the read-only probe deliberately: the status path must
+        not be handed ``terminate_group`` just to answer a question about
+        pids (see ``ports.ProcessController``'s docstring on the split).
+        Same degrade-to-empty policy as every other probe here — an
+        inconclusive ``ps`` yields ``{}``, which the caller reads as
+        "unknown", never as a confirmed mismatch.
+        """
+        ids = [int(p) for p in shell_pids]
+        if not ids:
+            return {}
+        try:
+            result = subprocess.run(
+                _ps_snapshot_argv(),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return {}
+        if result.returncode != 0:
+            return {}
+        rows = _parse_ps_rows(result.stdout)
+        return {pid: _child_groups(rows, pid) for pid in ids}
+
 
 def _ps_snapshot_argv() -> list[str]:
     # -A all processes; bare `=` headers -> no header line. args last so the

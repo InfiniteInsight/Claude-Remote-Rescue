@@ -4,11 +4,11 @@
 Without this, `cli._kick_dropped_bridges` is stateless across sweeps: a
 failed reconnect (host briefly offline, auth expired, RC unavailable)
 re-qualifies for a kick on every 30s pass forever, because a kick does not
-reset `bridge_since` and the session stays LIVE at a clean turn boundary.
+itself make the session reachable and it stays LIVE at a clean turn boundary.
 This module is the guard: a cooldown (never re-kick the same sid within
 `bridge_kick_cooldown_seconds`) and a hard attempt cap
 (`bridge_kick_max_attempts`), with the counter reset ONLY by a confirmed
-`"ok"` bridge state — never by a timer, or the cap just delays the loop.
+`reachable` reading — never by a timer, or the cap just delays the loop.
 
 Same JSON-in-the-state-dir / atomic-write discipline as
 `crr/core/exclusions.py` and `crr/core/settings.py`.

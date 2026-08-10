@@ -67,36 +67,99 @@ def _load_config() -> cfg.Config:
 
 def _tail_facts_extractor(config: cfg.Config):
     """A tail_facts(entry)->{last_prompt, model, last_active, transcript_bytes,
-    bridge_seen, bridge_since, ...} closure for assemble_sessions.
+    ...} closure for assemble_sessions.
 
     One backward transcript read per card yields all these facts. Only
     called for claude-bearing entries (assemble_sessions filters the
     rest), so entry["claude"] is always present here.
 
-    ``remote_control_watch`` (review fix-wave 2026-08-07, FIX 2 — IMPORTANT)
-    gates the bridge scan itself, not just the watchdog's kick step: False
-    passes ``bridge_scan_lines=0``, which short-circuits
-    ``read_tail_facts``'s backward walk for the bridge marker, so no scan
-    cost is paid on every poll and the card can never show a stale
-    ``"dropped"``/``"ok"`` computed from a feature the user turned off.
-    This is the single choke point every card-building call site
-    (``_cmd_status``, ``_cmd_web``'s provider, ``_whoami_card``) reads
-    through, so gating here covers detection + the badge + the scan cost at
-    once.
-
-    With watching off the card reads ``"unknown"``, not ``"off"`` (#33).
-    ``off`` is a positive claim — *Remote Control was never enabled on this
-    session* — and crr cannot support it while declining to look. The
-    honest statement is that it does not know, which is exactly what
-    turning the watch off asked for.
+    It no longer carries any bridge facts: the reachability detector (spec
+    2026-08-09, Phases 1-3) reads Claude Code's own per-process state file
+    instead of counting transcript records, so ``_reachability_by_sid``
+    below is where the card's ``remote_control`` now comes from.
     """
     cap = config.get("last_prompt_display_cap")
     model_tail_lines = config.get("model_tail_lines")
-    bridge_scan_lines = config.get("bridge_scan_lines") if config.get("remote_control_watch") else 0
     return lambda entry: transcript_source.read_tail_facts(
-        entry["claude"]["session_id"], cap,
-        model_tail_lines=model_tail_lines, bridge_scan_lines=bridge_scan_lines,
+        entry["claude"]["session_id"], cap, model_tail_lines=model_tail_lines,
     )
+
+
+def _reachability_by_sid(
+    entries: Sequence[Mapping[str, Any]],
+    probe: ports.ProcessProbe,
+    config: cfg.Config,
+    *,
+    read_session_state: Callable[[], Mapping[str, Any]] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """``{session_id: (remote_control, waiting_for)}`` for ``assemble_sessions``.
+
+    The card-path twin of ``_kick_dropped_bridges``'s per-sweep read, and
+    the same source: Claude Code's own ``~/.claude/sessions/<pid>.json``,
+    not a count of transcript records. A sid with no entry here is left out
+    entirely, which ``assemble_sessions`` reads as ``("unknown", "")`` — an
+    unread signal is never evidence the bridge is down (#33).
+
+    TWO probes for the whole poll, not two per card:
+
+    - ONE ``read_session_state()`` directory scan, which also resolves
+      newest-file-wins per sid (23 of 70 sids on the author's machine had
+      more than one state file, one of them nineteen).
+    - ONE batched ``claude_group_pids`` snapshot. ``claude_groups`` forks a
+      full ``ps -A`` per call — affordable in the 30s watchdog, ruinous on
+      a 5s dashboard poll (17 cards ≈ 204 forks/minute, forever). Same
+      shape as ``status``'s ``controlling_ttys`` batch.
+
+    ``remote_control_watch`` (review fix-wave 2026-08-07, FIX 2 —
+    IMPORTANT) gates both reads, not just the badge, so a user who turns
+    the feature off pays none of its cost. The card then reads
+    ``"unknown"``, never a positive claim computed from a feature nobody
+    looked at.
+    """
+    # Resolved at CALL time, not bound as a default: a default argument
+    # freezes the adapter at import, which silently defeats patching
+    # `cli.session_state.read_all` — the shape every other adapter seam here
+    # is exercised through.
+    read_session_state = read_session_state or session_state.read_all
+    if not config.get("remote_control_watch"):
+        return {}
+    states = read_session_state()
+    if not states:
+        return {}
+    sessions = [e for e in entries if e.get("claude") is not None]
+    # HONEST LIMIT, restated from `_kick_dropped_bridges`: `claude_group_pids`
+    # returns process GROUP ids, while the state file records claude's own
+    # pid. They coincide when claude leads its group — the normal job-control
+    # case, and true for all 18 claude processes on the author's machine —
+    # but this is a HEURISTIC, not an exact identity. A mismatch fails CLOSED
+    # (no match -> `unknown` -> no kick, no claim), so the cost is a missed
+    # detection, never a wrong restart or a fabricated badge.
+    groups = probe.claude_group_pids([e["pid"] for e in sessions])
+    out: dict[str, tuple[str, str]] = {}
+    for entry in sessions:
+        sid = entry["claude"]["session_id"]
+        state = states.get(sid)
+        if state is None:
+            continue  # no state file for this sid: nothing readable to report
+        matched = state.pid is not None and state.pid in groups.get(entry["pid"], ())
+        reach = reachability.reachability(
+            state.bridge_session_id,
+            pid_matched=matched,
+            field_present=state.field_present,
+        )
+        # Duplicate entries journal the same sid under different shells. The
+        # one whose process table actually contains the state file's pid is
+        # the one describing the running claude, so a match must not be
+        # overwritten by a later unmatched sibling.
+        if reach == reachability.UNKNOWN and sid in out:
+            continue
+        # `waiting_for` comes from the SAME file as the bridge id. When
+        # `pid_matched` is False that file may belong to a recycled pid, so
+        # its activity fields are exactly as untrustworthy — carrying
+        # `waiting_for` off a file we just declined to believe would leak a
+        # stranger's state onto the card.
+        out[sid] = (reach, state.waiting_for if reach != reachability.UNKNOWN else "")
+    return out
 
 
 def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
@@ -545,9 +608,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
+        reachability_by_sid=_reachability_by_sid(scan.entries, probe, config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
-        bridge_stale_records=config.get("bridge_stale_records"),
         autokick_config_default=config.get("remote_control_autokick"),
         autokick_global_override=settings_store.effective_global_autokick(),
         autokick_degraded=settings_store.is_degraded(),
@@ -1441,12 +1504,8 @@ def _untracked_view(record: dict, cap: int, model_tail_lines: int) -> dict:
     """
     entry = record["entry"]
     sid = entry["claude"]["session_id"]
-    # This view has no use for bridge facts, so bridge_scan_lines=0 keeps
-    # the walk's early exit exactly as cheap as before Slice 1 added the
-    # bridge search (0 means the bridge window is never "in", so the break
-    # clause is satisfied immediately and bridge_seen/bridge_since default).
     facts = transcript_source.read_tail_facts(
-        sid, cap, model_tail_lines=model_tail_lines, bridge_scan_lines=0
+        sid, cap, model_tail_lines=model_tail_lines
     )
     return {
         "session_id": sid,
@@ -1590,11 +1649,8 @@ def _enrich_discoverable(candidates, config) -> list[dict]:
     model_tail_lines = config.get("model_tail_lines")
     enriched = []
     for t in candidates:
-        # No use for bridge facts here either; bridge_scan_lines=0 keeps
-        # this walk's early exit as cheap as before Slice 1 (see
-        # _untracked_view's comment on the same pattern).
         facts = transcript_source.read_tail_facts(
-            t["session_id"], cap, model_tail_lines=model_tail_lines, bridge_scan_lines=0
+            t["session_id"], cap, model_tail_lines=model_tail_lines
         )
         # (#34) Keep WHICH of the two cwds this is. `read_cwd` reads the
         # value Claude Code stamped on the session's own records —
@@ -1977,13 +2033,17 @@ def _whoami_card(config=None) -> dict | None:
         return None
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     settings_store = settings.SettingsStore(sd)
+    mine = [e for e in scan.entries if e["pid"] == shell_pid]
     payload = status.assemble_sessions(
-        [e for e in scan.entries if e["pid"] == shell_pid], boot, probe,
+        mine, boot, probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
+        # Exercised by NO test (`crr whoami` reads the card it builds here),
+        # so a missing injection would show up only on the real machine, as
+        # a card that permanently reads "unknown".
+        reachability_by_sid=_reachability_by_sid(mine, probe, config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
-        bridge_stale_records=config.get("bridge_stale_records"),
         autokick_config_default=config.get("remote_control_autokick"),
         autokick_global_override=settings_store.effective_global_autokick(),
         autokick_degraded=settings_store.is_degraded(),
@@ -2595,20 +2655,23 @@ def _cmd_web(args: argparse.Namespace) -> int:
             with mutation_lock(sd):
                 _verify_guessed_sids(store, now)
         settings_store = settings.SettingsStore(sd)
+        entries = store.scan().entries
         payload = status.assemble_sessions(
-            store.scan().entries,
+            entries,
             boot,
             probe,
             tail_facts=extract,
             # Inside provider(), NOT hoisted beside `extract`: tmux liveness
             # is a live property re-asked each poll, not a startup fact.
             live_tmux_sessions=_live_tmux_sessions(config),
+            # Likewise re-asked each poll, and likewise ONE probe pair for
+            # the whole page rather than one per card (see its docstring).
+            reachability_by_sid=_reachability_by_sid(entries, probe, config),
             context_tight_fraction=config.get("context_tight_fraction"),
             context_compact_fraction=config.get("context_compact_fraction"),
-            bridge_stale_records=config.get("bridge_stale_records"),
             autokick_config_default=config.get("remote_control_autokick"),
             autokick_global_override=settings_store.effective_global_autokick(),
-        autokick_degraded=settings_store.is_degraded(),
+            autokick_degraded=settings_store.is_degraded(),
             autokick_session_overrides=settings_store.read_session_overrides(),
         )
         contracts.validate_sessions_payload(payload)

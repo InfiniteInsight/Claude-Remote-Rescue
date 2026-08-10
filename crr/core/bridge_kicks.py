@@ -2,15 +2,14 @@
 (review fix-wave 2026-08-07, FIX 1 — CRITICAL).
 
 `cli._kick_dropped_bridges` was stateless across sweeps: nothing carried
-forward between one `crr revive` pass and the next. A kick does not reset
-`bridge_since` (the marker is still N records back — it takes a fresh
-bridge marker to clear "dropped", and that only happens if the relaunch
-actually reconnects), so a FAILED reconnect (host briefly offline, auth
+forward between one `crr revive` pass and the next. A kick does not itself
+make a session reachable — only an actual reconnect writes a non-null
+`bridgeSessionId` — so a FAILED reconnect (host briefly offline, auth
 expired, Remote Control unavailable) re-qualifies for another kick on
-every subsequent pass — every guard the watchdog has clears again, because
+every subsequent pass: every guard the watchdog has clears again, because
 none of them look at what happened last time. Left unguarded this is an
-indefinite restart loop: dozens of SIGTERMs over hours, until the marker
-finally drifts past `bridge_scan_lines` and the state degrades to "off".
+indefinite restart loop, dozens of SIGTERMs over hours, with nothing that
+ever ends it.
 
 This module is the missing memory. Two independent guards, both gating the
 SAME `sid`, never `pid` (a recycled pid must not inherit another session's
@@ -149,15 +148,15 @@ class KickHistoryStore:
         attempt, success or failure alike: the cap counts attempts, not
         failures, because a same-sweep verdict on whether the relaunch
         actually reconnected does not exist yet (that only shows up as a
-        fresh bridge marker on a LATER sweep).
+        reachable reading on a LATER sweep).
 
         ``observation`` is the LINEAGE (#35): the state that justified this
         particular kick — the pid signalled, the bridge reading, and the
         thresholds in force at the time. Recording the thresholds matters
-        as much as the reading: without them, changing
-        ``bridge_stale_records`` later silently rewrites the history of
-        every decision taken under the old value, and a stored conclusion
-        you cannot regenerate from its inputs is a claim you cannot audit.
+        as much as the reading: without them, changing a guard (the cooldown,
+        the attempt cap) later silently rewrites the history of every
+        decision taken under the old value, and a stored conclusion you
+        cannot regenerate from its inputs is a claim you cannot audit.
 
         The attempt log is bounded (``MAX_ATTEMPT_LOG``) and the counters
         are untouched — the cooldown and cap read ``attempts`` /

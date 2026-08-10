@@ -43,12 +43,12 @@ PARKED = "parked"
 
 
 def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
-    # bridge_seen is None, not False (#33): no extractor was injected, so
-    # nothing looked at a transcript at all. That is the textbook unknown —
-    # `False` would claim Remote Control was never enabled on the session.
+    # Mirrors `transcript_source.read_tail_facts`'s shape exactly, so the
+    # default and the real adapter cannot drift. No bridge keys: the card's
+    # `remote_control` comes from `reachability_by_sid` (Claude Code's own
+    # state file), never from a transcript read.
     return {"last_prompt": "", "model": "", "last_active": "",
-            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
-            "bridge_seen": None, "bridge_since": 0}
+            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0}
 
 
 class _MemoTtyProbe:

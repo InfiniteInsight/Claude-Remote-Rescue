@@ -118,7 +118,7 @@ def list_all_transcripts(home: Path | None = None) -> list[dict]:
 # Bound for the cwd search (see crr.core.config's `cwd_scan_lines` for the
 # empirical justification — that DEFAULTS entry is the injectable prior;
 # this constant only supplies the default argument below, mirroring
-# MODEL_TAIL_LINES / REPLY_TAIL_LINES / BRIDGE_SCAN_LINES).
+# MODEL_TAIL_LINES / REPLY_TAIL_LINES).
 CWD_SCAN_LINES = DEFAULTS["cwd_scan_lines"]
 
 
@@ -185,11 +185,6 @@ def _reversed_lines(path: Path, block_size: int = 65536) -> Iterator[str]:
 # argument below for callers that don't have a Config to hand).
 MODEL_TAIL_LINES = DEFAULTS["model_tail_lines"]
 REPLY_TAIL_LINES = DEFAULTS["reply_tail_lines"]
-# Bound for the bridge-marker search (see crr.core.config's
-# `bridge_scan_lines` for the empirical justification — that DEFAULTS entry
-# is the injectable prior; this constant only supplies the default argument
-# below for callers that don't have a Config to hand).
-BRIDGE_SCAN_LINES = DEFAULTS["bridge_scan_lines"]
 
 
 def _read_records(path: Path) -> list[dict]:
@@ -433,7 +428,6 @@ def read_tail_facts(
     session_id: str, cap: int, home: Path | None = None,
     model_tail_lines: int = MODEL_TAIL_LINES,
     reply_tail_lines: int = REPLY_TAIL_LINES,
-    bridge_scan_lines: int = BRIDGE_SCAN_LINES,
 ) -> dict[str, str | int]:
     """Most recent real prompt + model + activity + size, in ONE backward read.
 
@@ -456,43 +450,17 @@ def read_tail_facts(
     sat 4-65 records before the prompt), and left an honest "" when it isn't
     found inside that window rather than reading the whole file on a 5s poll.
 
-    ``bridge_seen``/``bridge_since`` (spec 2026-08-07 — dropped-Remote-
-    Control watchdog): whether a ``bridge-session`` marker was found on
-    THIS SAME walk, and how many records sit between it and the tail.
-    Bounded by ``bridge_scan_lines`` (measured: a healthy marker sits 0-11
-    records from the tail, never more than 107 behind — 54 transcripts /
-    6991 gaps, review fix-wave 2026-08-07 correction of an earlier
-    20-transcript figure); it never triggers a second file read to look
-    further.
-
-    ``bridge_seen`` is TRI-STATE (#33), and the distinction is the whole
-    point of the field:
-
-    - ``True``  — a marker was found; ``bridge_since`` is its distance from
-      the tail.
-    - ``False`` — the walk reached the START of the transcript while still
-      inside the scan window, so every record was examined and no marker
-      exists. This is the only outcome that licenses the downstream claim
-      "Remote Control was never enabled on this session".
-    - ``None``  — the walk did not finish looking: the scan window ran out
-      first, the caller opted out with ``bridge_scan_lines=0``, or the
-      transcript was absent/unreadable. An honest unknown.
-
-    ``False`` and ``None`` used to be the same value, which made the
-    dashboard assert ``off`` about sessions it had merely stopped reading —
-    and, worse, made an "unknown" eligible for the same treatment as a
-    verified state in a code path that SIGTERMs live processes.
+    NO bridge facts: the dropped-Remote-Control detector no longer counts
+    transcript records (spec 2026-08-09, Phases 1-3). It reads Claude Code's
+    own per-process ``bridgeSessionId`` instead — see
+    ``crr.adapters.session_state`` and ``cli._reachability_by_sid`` — because
+    the counting detector needed a median of 8 minutes of ACTIVE work to
+    fire and never fired at all on an idle session, which is the case the
+    feature exists for.
     """
-    # bridge_seen starts as None — the honest "we have not looked yet"
-    # (#33). Every early return below (no transcript, failed stat, read
-    # error) therefore reports UNKNOWN rather than the old False, which
-    # downstream read as the positive claim "Remote Control was never
-    # enabled here". Only a walk that reaches the start of the transcript
-    # while still inside the scan window may downgrade it to False.
     facts: dict[str, Any] = {
         "last_prompt": "", "model": "", "last_active": "",
         "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
-        "bridge_seen": None, "bridge_since": 0,
     }
     path = find_transcript(session_id, home)
     if path is None:
@@ -501,23 +469,10 @@ def read_tail_facts(
         facts["transcript_bytes"] = path.stat().st_size
     except OSError:
         return facts
-    # A zero-length window means the caller opted out of the bridge search
-    # entirely (the discovery/untracked views; `_tail_facts_extractor` when
-    # `remote_control_watch` is off). Pre-set rather than inferred from the
-    # loop, so an EMPTY transcript is still reported as "did not look"
-    # rather than as a verified absence.
-    bridge_window_exhausted = bridge_scan_lines <= 0
-    walked_to_start = False
     try:
         for i, line in enumerate(_reversed_lines(path)):
             in_model_window = i < model_tail_lines
             in_reply_window = i < reply_tail_lines
-            in_bridge_window = i < bridge_scan_lines
-            if not in_bridge_window:
-                # We have walked at least as far back as the scan window
-                # allows without finding a marker, so anything further is
-                # territory this read will never examine (#33).
-                bridge_window_exhausted = True
             try:
                 record = json.loads(line)
             except (ValueError, TypeError):
@@ -556,37 +511,16 @@ def read_tail_facts(
                 reply = transcript._assistant_text(record)
                 if reply is not None:
                     facts["last_reply"] = transcript.clean_display_tail(reply, cap)
-            # The NEWEST bridge-session marker: the first one hit walking
-            # backward from the tail IS the newest, so stop looking once found.
-            if (record is not None and not facts["bridge_seen"] and in_bridge_window
-                    and transcript.is_bridge_marker(record)):
-                facts["bridge_seen"] = True
-                facts["bridge_since"] = i
-            # Stop once prompt+timestamp are found, and model/reply/title+slug/
-            # bridge are each either found or past their windows.
+            # Stop once prompt+timestamp are found, and model/reply/
+            # title+slug are each either found or past their windows.
             if (
                 facts["last_prompt"]
                 and facts["last_active"]
                 and (facts["model"] or not in_model_window)
                 and (facts["last_reply"] or not in_reply_window)
                 and ((facts["title"] and facts["slug"]) or not in_model_window)
-                and (facts["bridge_seen"] or not in_bridge_window)
             ):
                 break
-        else:
-            # The walk ran off the start of the transcript rather than
-            # breaking early — every record in the file was examined.
-            walked_to_start = True
     except OSError:
         return facts
-
-    # Resolve the bridge tri-state (#33). True was already set the moment a
-    # marker was found. Otherwise there are exactly two honest answers, and
-    # only one of them is a claim: `False` requires having SEEN the whole
-    # transcript from tail to start without ever leaving the scan window —
-    # then "no marker exists here" is a fact. Any other way of ending the
-    # walk (window ran out, caller opted out, early break past the window)
-    # leaves records unexamined, so the answer stays None: unknown.
-    if facts["bridge_seen"] is None and walked_to_start and not bridge_window_exhausted:
-        facts["bridge_seen"] = False
     return facts

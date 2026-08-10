@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from crr import cli
-from crr.adapters import boot_identity, state_dir
+from crr.adapters import boot_identity, process_probe, session_state, state_dir
 from crr.core import config as cfg
 from crr.core import contracts
 from crr.core import discovery
@@ -996,80 +996,149 @@ def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsy
 
 
 # --------------------------------------------------------------------------
-# Review fix-wave 2026-08-07, FIX 2 (IMPORTANT) — `remote_control_watch`
-# must gate detection/badge/scan cost, not just the watchdog's kick step.
-# `_tail_facts_extractor` is the single choke point every card-building
-# call site (`_cmd_status`, `_cmd_web`'s provider, `_whoami_card`) reads
-# through, so gating there covers all three at once.
+# The reachability detector on the CARD path (spec 2026-08-09, Phase 3).
+# `_kick_dropped_bridges` already reads Claude Code's own state file; these
+# pin the same source behind `crr status --json` / the web provider /
+# `crr whoami`, and pin the cost of doing so.
 # --------------------------------------------------------------------------
 
-def test_tail_facts_extractor_scans_for_the_bridge_marker_when_watch_is_on():
-    config = cfg.Config({"remote_control_watch": True, "bridge_scan_lines": 400})
-    seen = {}
-
-    def fake_read_tail_facts(sid, cap, *, model_tail_lines, bridge_scan_lines):
-        seen["bridge_scan_lines"] = bridge_scan_lines
-        return {"bridge_seen": False, "bridge_since": 0}
-
-    import crr.adapters.transcript_source as ts
-    orig = ts.read_tail_facts
-    ts.read_tail_facts = fake_read_tail_facts
-    try:
-        extract = cli._tail_facts_extractor(config)
-        extract({"claude": {"session_id": "sid"}})
-    finally:
-        ts.read_tail_facts = orig
-
-    assert seen["bridge_scan_lines"] == 400
+_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 
-def test_tail_facts_extractor_skips_the_bridge_scan_when_watch_is_off():
-    config = cfg.Config({"remote_control_watch": False, "bridge_scan_lines": 400})
-    seen = {}
-
-    def fake_read_tail_facts(sid, cap, *, model_tail_lines, bridge_scan_lines):
-        seen["bridge_scan_lines"] = bridge_scan_lines
-        return {"bridge_seen": False, "bridge_since": 0}
-
-    import crr.adapters.transcript_source as ts
-    orig = ts.read_tail_facts
-    ts.read_tail_facts = fake_read_tail_facts
-    try:
-        extract = cli._tail_facts_extractor(config)
-        extract({"claude": {"session_id": "sid"}})
-    finally:
-        ts.read_tail_facts = orig
-
-    # 0 short-circuits the adapter's bridge scan entirely (verified
-    # separately in test_transcript_source.py) — no scan cost is paid on
-    # every 5s dashboard poll while the feature is off.
-    assert seen["bridge_scan_lines"] == 0
-
-
-def test_status_json_remote_control_reads_off_when_watch_is_disabled(tmp_path, monkeypatch, capsys):
-    # End-to-end through `crr status --json`: even a session with a real,
-    # long-dropped bridge marker must read "off" (never a stale "dropped"),
-    # once remote_control_watch is False — the badge and the field agree.
-    boot_id = boot_identity.detect().current()
-    store = JournalStore(tmp_path)
-    store.write(_live_entry(pid=os.getpid(), boot_id=boot_id))
-    (tmp_path / "config.toml").write_text("remote_control_watch = false\n", encoding="utf-8")
-    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    # Even if a bridge scan somehow ran and found a wildly stale marker...
+def _no_tail_facts(monkeypatch):
+    """Silence the transcript read — these tests are about the state file."""
     monkeypatch.setattr(
         cli.transcript_source, "read_tail_facts",
         lambda sid, cap, **kw: {
             "last_prompt": "", "model": "", "last_active": "", "last_reply": "",
             "title": "", "slug": "", "transcript_bytes": 0,
-            "bridge_seen": kw.get("bridge_scan_lines", 0) > 0,  # honest: only "sees" it if allowed to scan
-            "bridge_since": 9999,
         },
     )
 
-    rc = cli.main(["status", "--json"])
-    assert rc == 0
+
+def _state(bridge_session_id, *, pid, field_present=True,
+           status="waiting", waiting_for="permission prompt"):
+    return session_state.SessionState(
+        pid=pid, bridge_session_id=bridge_session_id,
+        field_present=field_present, status=status, waiting_for=waiting_for,
+    )
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
+def test_status_json_reports_reachability_from_the_state_file(tmp_path, monkeypatch, capsys):
+    # End to end through the composition root: the card's remote_control
+    # comes from Claude Code's own `bridgeSessionId`, not from counting
+    # transcript records.
+    boot_id = boot_identity.detect().current()
+    shell_pid = os.getpid()
+    JournalStore(tmp_path).write(_live_entry(pid=shell_pid, boot_id=boot_id))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _no_tail_facts(monkeypatch)
+    monkeypatch.setattr(cli.session_state, "read_all",
+                        lambda: {_SID: _state(None, pid=4242)})
+    monkeypatch.setattr(process_probe.PsProcessProbe, "claude_group_pids",
+                        lambda self, pids: {shell_pid: [4242]})
+
+    assert cli.main(["status", "--json"]) == 0
+    card = json.loads(capsys.readouterr().out)["sessions"][0]
+    assert card["remote_control"] == "unreachable"
+    assert card["waiting_for"] == "permission prompt"
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
+def test_status_json_declines_to_believe_a_state_file_whose_pid_is_not_ours(tmp_path, monkeypatch, capsys):
+    # 117 of 133 state files on the author's machine belonged to dead pids
+    # and 2 to RECYCLED ones. An unmatched pid is `unknown` — and its
+    # `waitingFor` is exactly as untrustworthy as its bridge id, so the
+    # card must not carry it either.
+    boot_id = boot_identity.detect().current()
+    JournalStore(tmp_path).write(_live_entry(pid=os.getpid(), boot_id=boot_id))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _no_tail_facts(monkeypatch)
+    monkeypatch.setattr(cli.session_state, "read_all",
+                        lambda: {_SID: _state(None, pid=4242)})
+    monkeypatch.setattr(process_probe.PsProcessProbe, "claude_group_pids",
+                        lambda self, pids: {})
+
+    assert cli.main(["status", "--json"]) == 0
+    card = json.loads(capsys.readouterr().out)["sessions"][0]
+    assert card["remote_control"] == "unknown"
+    assert card["waiting_for"] == ""
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
+def test_status_json_probes_the_process_table_once_for_all_cards(tmp_path, monkeypatch, capsys):
+    # The dashboard polls every 5s. A per-card `ps` snapshot would cost
+    # ~204 forks/minute at the 17 cards measured on the author's machine,
+    # forever. One batched query per poll, exactly like `controlling_ttys`.
+    boot_id = boot_identity.detect().current()
+    store = JournalStore(tmp_path)
+    store.write(_live_entry(pid=os.getpid(), boot_id=boot_id))
+    for pid, sid in ((424242, "11111111-1111-4111-8111-111111111111"),
+                     (424243, "22222222-2222-4222-8222-222222222222")):
+        entry = _live_entry(pid=pid, boot_id=boot_id)
+        entry["claude"]["session_id"] = sid
+        store.write(entry)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _no_tail_facts(monkeypatch)
+    monkeypatch.setattr(cli.session_state, "read_all",
+                        lambda: {_SID: _state("bridge-abc", pid=4242)})
+    calls = []
+    monkeypatch.setattr(
+        process_probe.PsProcessProbe, "claude_group_pids",
+        lambda self, pids: (calls.append(list(pids)), {})[1],
+    )
+
+    assert cli.main(["status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["sessions"][0]["remote_control"] == "off"
+    assert len(payload["sessions"]) == 3
+    assert len(calls) == 1, f"one snapshot per poll, not one per card: {calls}"
+    assert sorted(calls[0]) == sorted([os.getpid(), 424242, 424243])
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
+def test_status_json_remote_control_is_unknown_when_watch_is_disabled(tmp_path, monkeypatch, capsys):
+    # End-to-end through `crr status --json`: with `remote_control_watch`
+    # off the card reads "unknown", never a positive claim — even though a
+    # readable state file says the bridge is up. Turning the watch off asks
+    # crr to stop looking; the honest report of not looking is "unknown".
+    boot_id = boot_identity.detect().current()
+    JournalStore(tmp_path).write(_live_entry(pid=os.getpid(), boot_id=boot_id))
+    (tmp_path / "config.toml").write_text("remote_control_watch = false\n", encoding="utf-8")
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _no_tail_facts(monkeypatch)
+    monkeypatch.setattr(cli.session_state, "read_all",
+                        lambda: {_SID: _state("bridge-abc", pid=os.getpid())})
+
+    assert cli.main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["sessions"][0]["remote_control"] == "unknown"
+
+
+def test_reachability_lookup_is_skipped_entirely_when_watch_is_off():
+    # Review fix-wave 2026-08-07, FIX 2 (IMPORTANT), restated for the new
+    # detector: `remote_control_watch` gates the READ, not just the badge.
+    # With it off, neither `~/.claude/sessions` nor the process table is
+    # touched — no cost is paid on every 5s poll for a feature that is off.
+    entries = [{"pid": 1, "claude": {"session_id": _SID}}]
+
+    def boom(*a, **kw):
+        raise AssertionError("watch is off — nothing should have been read")
+
+    probe = SimpleNamespace(claude_group_pids=boom)
+    assert cli._reachability_by_sid(
+        entries, probe, cfg.Config({"remote_control_watch": False}),
+        read_session_state=boom,
+    ) == {}
+
+
+def test_reachability_lookup_reads_when_watch_is_on():
+    entries = [{"pid": 1, "claude": {"session_id": _SID}}]
+    probe = SimpleNamespace(claude_group_pids=lambda pids: {1: [77]})
+    got = cli._reachability_by_sid(
+        entries, probe, cfg.Config({"remote_control_watch": True}),
+        read_session_state=lambda: {_SID: _state(None, pid=77)},
+    )
+    assert got == {_SID: ("unreachable", "permission prompt")}
 
 
 def _human_card(model, duplicate_group=None, sid_source="injected"):

@@ -143,8 +143,6 @@ def test_tail_facts_extractor_is_used_for_prompt_and_model():
             "model": "claude-opus-5",
             "last_active": "2026-08-01T00:00:00Z",
             "transcript_bytes": 0,
-            "bridge_seen": False,
-            "bridge_since": 0,
         },
     )
     card = payload["sessions"][0]
@@ -176,8 +174,6 @@ def test_card_carries_last_active_from_tail_facts():
             "model": "",
             "last_active": "2026-08-01T12:34:56Z",
             "transcript_bytes": 0,
-            "bridge_seen": False,
-            "bridge_since": 0,
         },
     )
     card = payload["sessions"][0]
@@ -211,8 +207,6 @@ def test_card_context_pressure_will_compact_when_over_window():
             "model": "claude-haiku-4-5-20251001",
             "last_active": "",
             "transcript_bytes": 200_000 * 4,
-            "bridge_seen": False,
-            "bridge_since": 0,
         },
     )
     assert payload["sessions"][0]["context_pressure"] == "will-compact"
@@ -232,8 +226,6 @@ def test_card_context_pressure_thresholds_are_configurable():
             "model": "claude-haiku-4-5-20251001",
             "last_active": "",
             "transcript_bytes": 100_000 * 4,  # fraction 0.5 of haiku-4.5's 200_000 window
-            "bridge_seen": False,
-            "bridge_since": 0,
         },
         context_tight_fraction=0.4,
         context_compact_fraction=0.9,
