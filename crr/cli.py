@@ -34,12 +34,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
+from crr.adapters import deploy as deploy_io
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
+from crr.core import deploy
 from crr.core import bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -327,6 +329,16 @@ def _build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--json", action="store_true", help="emit the /api/diagnostics payload")
     diag.set_defaults(func=_cmd_diagnose)
 
+    dep = sub.add_parser(
+        "deploy",
+        help="install the current commit as the copy the services run",
+    )
+    dep.add_argument(
+        "--force", action="store_true",
+        help="deploy even with uncommitted changes (or an unknown tree state)",
+    )
+    dep.set_defaults(func=_cmd_deploy)
+
     gc = sub.add_parser("gc", help="drop archive records past the retention window")
     gc.set_defaults(func=_cmd_gc)
 
@@ -497,6 +509,22 @@ def _build_parser() -> argparse.ArgumentParser:
 SHIM_SHELLS = ("bash", "zsh", "fish")
 
 
+def _resolve_service_bin(explicit: str | None) -> str:
+    """The crr a SERVICE unit should run: the deployed copy when one exists.
+
+    Services mutate real session state unattended, so they must not follow
+    the development working tree (#61). Falls back to the ordinary
+    resolution when nothing is deployed, which keeps a fresh checkout
+    working exactly as before.
+    """
+    if explicit:
+        return explicit
+    deployed = deploy.deployed_bin(state_dir.state_dir())
+    if deployed.exists():
+        return str(deployed)
+    return _resolve_crr_bin(None)
+
+
 def _resolve_crr_bin(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -508,6 +536,40 @@ def _resolve_crr_bin(explicit: str | None) -> str:
         return argv0
     found = shutil.which("crr")
     return found or argv0 or "crr"
+
+
+def _repo_root() -> Path:
+    """The checkout this crr was imported from."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _cmd_deploy(args: argparse.Namespace) -> int:
+    """Install the current commit as the copy the SERVICES run (#61).
+
+    The watchdog and dashboard used to run the development working tree via
+    an editable install, so an unsaved edit reached a process that mutates
+    real session state within one timer interval. They now run from here,
+    and this command is the only thing that moves it.
+    """
+    sd = state_dir.state_dir()
+    repo = _repo_root()
+    dirty = deploy_io.is_dirty(repo)
+    stop = deploy.refusal(dirty=dirty, force=args.force)
+    if stop:
+        print(f"crr deploy: {stop}", file=sys.stderr)
+        return 2
+    sha = deploy_io.head_sha(repo)
+    app = deploy.app_dir(sd)
+    print(f"crr deploy: installing {sha[:7] if sha else 'working tree'} into {app}")
+    err = deploy_io.build(app, repo, sha)
+    if err:
+        print(f"crr deploy: {err}", file=sys.stderr)
+        return 1
+    deploy_io.write_marker(deploy.marker_path(sd), sha, _now())
+    print(f"deployed {sha[:7] if sha else '(unknown commit)'} to {app}")
+    print("restart the services to pick it up: "
+          "systemctl --user restart crr-web.service")
+    return 0
 
 
 def _cmd_shim(args: argparse.Namespace) -> int:
@@ -537,6 +599,14 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         f"archive v{contracts.ARCHIVE_CONTRACT_VERSION}, "
         f"config-defaults v{cfg.CONFIG_DEFAULTS_VERSION}, page v{web.PAGE_VERSION}"
     )
+    # Which code the SERVICES are running (#61). Silent when it matches HEAD:
+    # a stale deploy is legitimate, it just must not be invisible — "my fix
+    # is committed" and "my fix is live" are otherwise indistinguishable.
+    _sd = state_dir.state_dir()
+    _drift = deploy.drift(deploy_io.read_marker(deploy.marker_path(_sd)),
+                          deploy_io.head_sha(_repo_root()))
+    if _drift:
+        print(f"deploy: {_drift}")
 
     # Platform integration.
     try:
@@ -2995,7 +3065,7 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
         print("crr systemd: --install and --uninstall are mutually exclusive", file=sys.stderr)
         return 2
     config = _load_config()
-    crr_bin = _resolve_crr_bin(args.crr_bin)
+    crr_bin = _resolve_service_bin(args.crr_bin)
     # WSL tab-spawning (Untrack/Un-tmux/Reopen) shells out to wt.exe/wsl.exe, which
     # live under Windows dirs a service's PATH never inherits ([lesson:
     # interop PATH]) — baked as extras here, not in systemd.py, so native
@@ -3105,7 +3175,7 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
         print("crr launchd: --install and --uninstall are mutually exclusive", file=sys.stderr)
         return 2
     config = _load_config()
-    crr_bin = _resolve_crr_bin(args.crr_bin)
+    crr_bin = _resolve_service_bin(args.crr_bin)
     path, missing = launchd.resolve_service_path(crr_bin)
     # State dir is NOT baked: state_dir.resolve("Darwin", …) is env-independent,
     # so the agent resolves the same dir the shims write to via HOME alone.
@@ -3164,7 +3234,7 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
         print("crr schtasks: --install and --uninstall are mutually exclusive", file=sys.stderr)
         return 2
     config = _load_config()
-    crr_bin = _resolve_crr_bin(args.crr_bin)
+    crr_bin = _resolve_service_bin(args.crr_bin)
     distro = os.environ.get("WSL_DISTRO_NAME")
     interval = config.get("watchdog_interval_seconds")
     port = args.port if args.port is not None else config.get("dashboard_port")
