@@ -36,6 +36,16 @@ same shape as `tail_facts`, so core does no I/O.
   If a task seems to need it, stop — the design is being violated.
 - F16 tri-state: `tmux.list_sessions()` returns `set | None`. `None` means
   "could not determine" and may never be treated as "no sessions exist".
+- **Tasks 1 and 2 are NOT independently shippable and must never be merged
+  apart.** Task 1 teaches `status.py` to emit `parked`; Task 2 teaches
+  `contracts.STATES` to accept it. Between them the assembler can produce a
+  card its own validator rejects. The suite stays green only because no
+  test both passes `live_tmux_sessions` and calls
+  `validate_sessions_payload` — a gap, not a guarantee. (Found by the Task 1
+  implementer, 2026-08-10.)
+- When a step says "if the test passes here, stop", that applies only to the
+  NEW tests named in that step. A `-k` selector may also match pre-existing
+  tests, which pass unconditionally and are not a signal.
 - **Version floors verified against `main` at 7b0f9c6:** `PAGE_VERSION`
   is 43, `SESSIONS_CONTRACT_VERSION` is 10, `CONFIG_DEFAULTS_VERSION` is
   14. Re-check these before starting — another session shipped #49 while
@@ -121,7 +131,9 @@ def test_a_live_session_is_never_demoted_to_parked():
 Run: `.venv/bin/python -m pytest tests/test_status.py -q -k "parked or tmux"`
 
 Expected: FAIL — `assemble_sessions() got an unexpected keyword argument
-'live_tmux_sessions'`. If any test passes here, stop: the behaviour
+'live_tmux_sessions'`, on all five NEW tests. The selector also matches the
+pre-existing `test_card_carries_tmux_session`, which passes and is not a
+signal. If one of the five new tests passes here, stop: the behaviour
 already exists and the test is not testing what it claims.
 
 - [ ] **Step 3: Implement the projection**
@@ -533,6 +545,15 @@ git commit -m "feat(web): render the parked state as 'restored' (page v43)"
 
 **Files:** none (verification only).
 
+- [ ] **Step 0: Confirm Tasks 1 and 2 are both present**
+
+```bash
+git log --oneline main..HEAD
+```
+
+Expected: at least the Task 1 and Task 2 commits. Merging Task 1 without
+Task 2 ships an assembler that can emit a card its own validator rejects.
+
 - [ ] **Step 1: Confirm the untouchable files were not touched**
 
 ```bash
@@ -556,7 +577,7 @@ deliberately preserves.
 ```bash
 git fetch -q origin && git rev-parse origin/main   # confirm unmoved
 git checkout main
-git merge --no-ff -m "Merge feat/parked-state: a restored session stops reading crashed" feat/parked-state
+git merge --no-ff -m "Merge phase 0: a restored session stops reading crashed" worktree-phase0-parked-state
 .venv/bin/python -m pytest -q && .venv/bin/lint-imports
 ```
 
