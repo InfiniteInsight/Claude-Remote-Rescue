@@ -3713,3 +3713,28 @@ def test_tab_spawner_uses_its_own_timeout_not_the_interop_one(monkeypatch):
 
 def test_tab_spawn_timeout_default_covers_a_cold_terminal_launch():
     assert cfg.Config().get("tab_spawn_timeout_seconds") >= 20
+
+
+def test_tab_spawner_resolves_the_distro_at_call_time_over_a_stale_env(monkeypatch):
+    # [#54] crr systemd bakes WSL_DISTRO_NAME into the unit. After a distro
+    # rename that baked value targets a distro that no longer exists; wslpath
+    # reports the current name, so it must win.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_path", lambda: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.host, "_wslpath_root", lambda timeout=None: "\\\\wsl.localhost\\Renamed\\")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Stale-Name")
+    spawner, _ = cli._tab_spawner(cfg.Config())
+    assert spawner._distro == "Renamed"
+
+
+def test_tab_spawner_falls_back_to_the_baked_env_when_wslpath_is_unavailable(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_path", lambda: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.host, "_wslpath_root", lambda timeout=None: None)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Baked-Name")
+    spawner, _ = cli._tab_spawner(cfg.Config())
+    assert spawner._distro == "Baked-Name"

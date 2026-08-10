@@ -1176,7 +1176,11 @@ def _tab_spawner(config: cfg.Config) -> tuple[object | None, bool]:
         # WSL first: reach the Windows side via wt.exe (crr runs in the distro).
         if host.is_wsl():
             spawner = tab_spawn_windows.WindowsTerminalSpawner(
-                timeout, config.get("wt_profile"), os.environ.get("WSL_DISTRO_NAME")
+                timeout, config.get("wt_profile"),
+                # Resolved now, not read from a value baked at install time:
+                # a renamed distro leaves the baked env pointing at one that
+                # no longer exists (#54). The env stays the fallback.
+                host.distro_name(os.environ, timeout=config.get("interop_timeout_seconds")),
             )
             if spawner.available():
                 return spawner, True

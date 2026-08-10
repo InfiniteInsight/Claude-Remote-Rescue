@@ -131,6 +131,17 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- The distro name and `wt.exe` path were frozen into `crr-web.service` at
+  install time (a service inherits neither `WSL_DISTRO_NAME` nor the Windows
+  directories on `PATH`), so renaming the distro or moving the Windows user
+  profile broke tab spawning until someone re-ran `crr systemd --install`.
+  Both are now resolved at call time: `host.distro_name()` parses
+  `wslpath -w /` (a Linux-side binary — no interop needed, and it reports the
+  *current* registered name), and `tab_spawn_windows.wt_path()` falls back to
+  a `/mnt/*/Users/*/…/WindowsApps/wt.exe` search when `PATH` comes up empty.
+  The baked values remain as fallbacks, so a host without `wslpath` behaves
+  exactly as before.
+
 - Tab spawning borrowed `interop_timeout_seconds` (5s) — a budget shared with
   `ps`/tmux probes, where short is correct. A cold Windows Terminal launch can
   exceed it and still open the tab, so crr reported a false `NO TAB` while a
