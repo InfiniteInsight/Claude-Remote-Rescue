@@ -251,87 +251,52 @@ def test_card_carries_tmux_session():
     assert by_pid[2]["tmux_session"] is None
 
 
-def _facts(**over):
-    base = {
-        "last_prompt": "", "last_reply": "", "title": "", "slug": "",
-        "model": "", "last_active": "", "transcript_bytes": 0,
-        "bridge_seen": False, "bridge_since": 0,
-    }
-    base.update(over)
-    return base
+# --------------------------------------------------------------------------
+# `remote_control` + `waiting_for` (spec 2026-08-09, Phases 1-3, contract
+# v12). These replace the five record-counting tests that lived here: the
+# card no longer derives the bridge state from `bridge_seen`/`bridge_since`
+# and an injected `bridge_stale_records` threshold, so `off`/`ok`/`dropped`
+# and the threshold tests went with them. The value is now RESOLVED BY THE
+# CALLER — cli reads Claude Code's own per-process state file (filesystem,
+# so not core's job) and classifies it through
+# `reachability.reachability` — and injected as a sid -> (state,
+# waiting_for) map, exactly like `live_tmux_sessions` and the autokick
+# overrides below.
+# --------------------------------------------------------------------------
 
-
-def test_card_remote_control_off_when_no_marker_ever_seen():
+def test_the_card_carries_the_injected_reachability():
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions(
         [_entry(42, sid)], FakeBoot(), FakeProbe(),
-        tail_facts=lambda entry: _facts(bridge_seen=False, bridge_since=0),
-    )
-    assert payload["sessions"][0]["remote_control"] == "off"
+        reachability_by_sid={sid: ("unreachable", "permission prompt")})
+    card = payload["sessions"][0]
+    assert card["remote_control"] == "unreachable"
+    assert card["waiting_for"] == "permission prompt"
 
 
-def test_card_remote_control_ok_within_threshold():
-    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-    payload = assemble_sessions(
-        [_entry(42, sid)], FakeBoot(), FakeProbe(),
-        tail_facts=lambda entry: _facts(bridge_seen=True, bridge_since=10),
-        bridge_stale_records=150,
-    )
-    assert payload["sessions"][0]["remote_control"] == "ok"
-
-
-def test_card_remote_control_dropped_past_threshold():
-    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-    payload = assemble_sessions(
-        [_entry(42, sid)], FakeBoot(), FakeProbe(),
-        tail_facts=lambda entry: _facts(bridge_seen=True, bridge_since=151),
-        bridge_stale_records=150,
-    )
-    assert payload["sessions"][0]["remote_control"] == "dropped"
-
-
-def test_card_remote_control_threshold_is_configurable():
-    # Same bridge_since, a tighter threshold flips ok -> dropped: the
-    # caller-injected value is actually honoured, not a hardcoded 150.
-    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-    payload = assemble_sessions(
-        [_entry(42, sid)], FakeBoot(), FakeProbe(),
-        tail_facts=lambda entry: _facts(bridge_seen=True, bridge_since=20),
-        bridge_stale_records=10,
-    )
-    assert payload["sessions"][0]["remote_control"] == "dropped"
-
-
-def test_card_remote_control_is_unknown_with_no_tail_facts_wired():
-    # #33: no extractor means no transcript was read, so bridge_seen is None
-    # and the card says "unknown". It used to say "off" — asserting Remote
-    # Control was never enabled, on the strength of never having looked.
+def test_a_session_with_no_reachability_entry_is_unknown():
+    # Nothing injected, or the adapter had no state file for it. Absence is
+    # not evidence the bridge is down.
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions([_entry(42, sid)], FakeBoot(), FakeProbe())
     assert payload["sessions"][0]["remote_control"] == "unknown"
+    assert payload["sessions"][0]["waiting_for"] == ""
 
 
-def test_card_remote_control_is_off_only_when_the_whole_transcript_was_read():
-    # The one case that licenses the positive claim: the adapter reports
-    # bridge_seen=False, meaning it walked to the start of the transcript
-    # inside its scan window and found no marker.
+def test_a_reachability_card_survives_its_own_validator():
+    from crr.core import contracts
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions(
         [_entry(42, sid)], FakeBoot(), FakeProbe(),
-        tail_facts=lambda entry: {
-            "last_prompt": "", "last_reply": "", "title": "", "slug": "",
-            "model": "", "last_active": "", "transcript_bytes": 0,
-            "bridge_seen": False, "bridge_since": 0,
-        },
-    )
-    assert payload["sessions"][0]["remote_control"] == "off"
+        reachability_by_sid={sid: ("reachable", "")})
+    contracts.validate_sessions_payload(payload)
 
 
 # --------------------------------------------------------------------------
 # `autokick` card field (spec 2026-08-07, Slice 3): the resolved values are
 # injected from the caller (cli reads config.toml + the dashboard's
 # SettingsStore, both filesystem — core stays pure), mirroring how
-# bridge_stale_records is injected above.
+# reachability_by_sid is injected above.
 # --------------------------------------------------------------------------
 
 def test_card_autokick_on_by_default_with_nothing_injected():

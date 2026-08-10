@@ -40,7 +40,10 @@ JOURNAL_SCHEMA_VERSION = 1
 # v11 adds the `parked` display state (spec 2026-08-09, Phase 0) — a card
 # whose session the reviver restored into a live tmux session. Like v9, no
 # new key: `STATES` widens, and a v10 consumer has no case for the member.
-SESSIONS_CONTRACT_VERSION = 11
+# v12 replaces `remote_control`'s enum — the record-counting off/ok/dropped
+# gives way to reachable/unreachable sourced from Claude Code's own
+# bridgeSessionId — and adds `waiting_for` (spec 2026-08-09, Phases 1-3)
+SESSIONS_CONTRACT_VERSION = 12
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -114,14 +117,12 @@ STATES = ("live", "ghost", "crashed", "parked")
 # conservative fallback is a claim about a window nobody established.
 # Measured rate: "~1 in 3 transcripts carry NO model at all".
 CONTEXT_PRESSURE_LEVELS = ("unknown", "ok", "tight", "will-compact")
-# Remote-Control bridge state (spec 2026-08-07 — dropped-Remote-Control
-# watchdog). "unknown" (#33) = the transcript walk did not finish looking
-# (scan window exhausted, caller opted out, or unreadable), so nothing can
-# be claimed; "off" = the WHOLE transcript was examined and no marker
-# exists, i.e. never enabled; "ok"/"dropped" from crr.core.bridge. The
-# unknown/off split is the point: they were one value, and the card
-# asserted the positive one.
-REMOTE_CONTROL_STATES = ("unknown", "off", "ok", "dropped")
+# Whether this session's phone link is up (spec 2026-08-09, Phases 1-3).
+# Sourced from Claude Code's own `bridgeSessionId`, not inferred from
+# transcript records. "unknown" is every failure route — a stale or
+# recycled pid, a missing field, no state file at all — because an
+# unreadable signal must not become a positive claim.
+REMOTE_CONTROL_STATES = ("unknown", "reachable", "unreachable")
 # The per-session auto-kick toggle's resolved state (spec 2026-08-07,
 # Slice 3), from crr.core.settings.autokick_card_state. THREE values, not
 # a bool, because the dashboard toggle must distinguish two different
@@ -191,6 +192,12 @@ SESSION_CARD_KEYS = (
     "last_active",
     "context_pressure",
     "remote_control",
+    # What Claude Code reports this session is blocked on ("permission
+    # prompt", "input needed"), "" when it is not waiting or nothing was
+    # read. Free text from an undocumented state file, never an enum: crr
+    # decides nothing on it, it only tells the reader why a session that
+    # cannot be reached is also not moving.
+    "waiting_for",
     "autokick",
     "adopted",
 )
@@ -371,6 +378,7 @@ def validate_session_card(card: Any) -> None:
     _require_type(card["last_active"], str, "session 'last_active'")
     _require_enum(card["context_pressure"], CONTEXT_PRESSURE_LEVELS, "session 'context_pressure'")
     _require_enum(card["remote_control"], REMOTE_CONTROL_STATES, "session 'remote_control'")
+    _require_type(card["waiting_for"], str, "session 'waiting_for'")
     _require_enum(card["autokick"], AUTOKICK_STATES, "session 'autokick'")
     _require_type(card["adopted"], bool, "session 'adopted'")
 

@@ -58,7 +58,8 @@ def _session_card():
         "updated": "2026-07-23T00:00:00Z",
         "last_active": "2026-07-23T00:00:00Z",
         "context_pressure": "ok",
-        "remote_control": "ok",
+        "remote_control": "reachable",
+        "waiting_for": "",
         "autokick": "on",
         "adopted": False,
     }
@@ -232,7 +233,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_11():
+def test_sessions_contract_version_is_12():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -243,7 +244,12 @@ def test_sessions_contract_version_is_11():
     # v11 adds the `parked` display state (spec 2026-08-09, Phase 0) — same
     # shape of change as v9: no new key, one enum widens, and a v10 consumer
     # has no case for the new member.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 11
+    # v12 REPLACES remote_control's enum wholesale (off/ok/dropped ->
+    # reachable/unreachable) and adds waiting_for (spec 2026-08-09,
+    # Phases 1-3). The only bump so far that RETIRES members: a v11
+    # consumer has no case for "unreachable" AND its `dropped` branch is
+    # now dead code, so this one is not a widening.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 12
 
 
 def test_states_enum_includes_parked():
@@ -355,15 +361,46 @@ def test_sessions_card_bad_remote_control_enum_rejected():
         contracts.validate_sessions_payload(p)
 
 
-def test_remote_control_states_enum():
-    assert contracts.REMOTE_CONTROL_STATES == ("unknown", "off", "ok", "dropped")
+def test_remote_control_states_are_the_reachability_triple():
+    assert contracts.REMOTE_CONTROL_STATES == ("unknown", "reachable", "unreachable")
 
 
-def test_remote_control_unknown_and_off_are_both_present_and_distinct():
-    # #33: these were one value. "unknown" = the walk did not finish looking;
-    # "off" = the whole transcript was read and no marker exists.
+def test_remote_control_unknown_and_unreachable_are_both_present_and_distinct():
+    # #33's point, restated for v12's source. It was "unknown" vs "off"
+    # when the signal came from a transcript walk; it is now "unknown" vs
+    # "unreachable" — a state file that could not be read, or belonged to a
+    # dead/recycled pid, says NOTHING about the bridge, and must never
+    # collapse into the value that licenses a kick.
     assert "unknown" in contracts.REMOTE_CONTROL_STATES
-    assert "off" in contracts.REMOTE_CONTROL_STATES
+    assert "unreachable" in contracts.REMOTE_CONTROL_STATES
+
+
+def test_the_contract_enum_matches_the_core_one():
+    # The enum now exists in two places — `reachability`'s constants and
+    # this tuple — with nothing making them agree, so a rename in either
+    # would diverge silently. Both are core, so this import is layering-legal.
+    from crr.core import reachability as r
+    assert set(contracts.REMOTE_CONTROL_STATES) == {r.REACHABLE, r.UNREACHABLE, r.UNKNOWN}
+
+
+def test_waiting_for_is_a_contracted_card_field():
+    assert "waiting_for" in contracts.SESSION_CARD_KEYS
+    p = _sessions_payload()
+    del p["sessions"][0]["waiting_for"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
+
+
+def test_sessions_card_non_string_waiting_for_rejected():
+    # The value originates in an UNDOCUMENTED state file, so the type is a
+    # claim about someone else's format, not ours. `read_all` coerces a
+    # non-string to "" — this asserts the boundary that makes that coercion
+    # load-bearing, so a wiring that skips it fails here rather than
+    # crashing `crr status` on the validator at serve time.
+    p = _sessions_payload()
+    p["sessions"][0]["waiting_for"] = None
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(p)
 
 
 def test_context_pressure_levels_include_unknown():
