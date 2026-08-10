@@ -82,3 +82,19 @@ def read_marker(path: Path) -> str | None:
         return None
     sha = data.get("sha") if isinstance(data, dict) else None
     return sha if isinstance(sha, str) and sha else None
+
+
+def ensure_link(link: Path, target: Path) -> str | None:
+    """Point ``link`` at ``target``. Returns an error message, or None.
+
+    Replaces an existing symlink (a re-deploy must be able to re-point a
+    stale one) but never a regular file — the caller checks that first.
+    """
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target)
+    except OSError as exc:
+        return f"could not link {link} -> {target}: {exc}"
+    return None

@@ -73,3 +73,39 @@ def drift(deployed_sha: str | None, head_sha: str | None) -> str | None:
         return None
     return (f"services are running {deployed_sha[:7]}, working tree is at "
             f"{head_sha[:7]} — run `crr deploy` to update them")
+
+
+# The conventional per-user bin dir. A deploy puts `crr` on PATH here so the
+# command works from anywhere, pointing at the same reviewed copy the
+# services run rather than at whatever venv happens to be active.
+LINK_DIRNAME = Path(".local") / "bin"
+
+
+def link_path(home: Path) -> Path:
+    """Where `crr` should be linked so it is callable from anywhere."""
+    return Path(home) / LINK_DIRNAME / "crr"
+
+
+def link_refusal(link: Path) -> str | None:
+    """Why the link must not be written, or None to go ahead.
+
+    A real file there is somebody else's install (a pip --user script, a
+    hand-written wrapper). Replacing a symlink crr owns is routine;
+    clobbering a regular file is not ours to do.
+    """
+    if link.is_symlink():
+        return None
+    if link.exists():
+        return (f"{link} exists and is not a symlink — leaving it alone; "
+                "remove it first if you want `crr` to point at the deployed copy")
+    return None
+
+
+def path_warning(path_env: str, link: Path) -> str | None:
+    """Warn when the link lands somewhere PATH will not find, else None."""
+    parent = str(link.parent)
+    entries = [e for e in (path_env or "").split(":") if e]
+    if parent in entries:
+        return None
+    return (f"{parent} is not on PATH — `crr` will not be found by name until "
+            "you add it")

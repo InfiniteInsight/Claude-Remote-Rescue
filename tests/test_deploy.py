@@ -204,3 +204,73 @@ def test_doctor_is_silent_when_the_deploy_matches_head(tmp_path, monkeypatch, ca
     monkeypatch.setattr(ad, "read_marker", lambda path: "same111")
     cli.main(["doctor"])
     assert "crr deploy" not in capsys.readouterr().out
+
+
+# --- deploy puts crr on PATH (#61 follow-up) ------------------------------
+
+def test_link_lands_in_the_conventional_user_bin_dir():
+    assert deploy.link_path(Path("/home/u")) == Path("/home/u/.local/bin/crr")
+
+
+def test_replacing_a_symlink_crr_owns_is_fine(tmp_path):
+    link = tmp_path / "crr"
+    link.symlink_to(tmp_path / "old-target")
+    assert deploy.link_refusal(link) is None
+
+
+def test_a_real_file_there_is_left_alone(tmp_path):
+    # Someone else's install — a pip --user script, a hand-written wrapper.
+    link = tmp_path / "crr"
+    link.write_text("#!/bin/sh\necho not ours\n")
+    msg = deploy.link_refusal(link)
+    assert msg and "not a symlink" in msg
+
+
+def test_a_missing_link_is_fine_to_create(tmp_path):
+    assert deploy.link_refusal(tmp_path / "nothing-here") is None
+
+
+def test_a_link_outside_PATH_is_called_out():
+    msg = deploy.path_warning("/usr/bin:/bin", Path("/home/u/.local/bin/crr"))
+    assert msg and "not on PATH" in msg
+
+
+def test_a_link_on_PATH_is_silent():
+    assert deploy.path_warning("/home/u/.local/bin:/usr/bin",
+                               Path("/home/u/.local/bin/crr")) is None
+
+
+def test_ensure_link_repoints_a_stale_symlink(tmp_path):
+    from crr.adapters import deploy as ad
+    link, old, new = tmp_path / "crr", tmp_path / "old", tmp_path / "new"
+    new.write_text("")
+    link.symlink_to(old)
+    assert ad.ensure_link(link, new) is None
+    assert link.resolve() == new.resolve()
+
+
+def test_deploy_links_crr_onto_PATH_after_a_successful_build(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    home = tmp_path / "home"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setenv("PATH", str(home / ".local" / "bin"))
+    assert cli.main(["deploy"]) == 0
+    assert (home / ".local" / "bin" / "crr").is_symlink()
+
+
+def test_deploy_does_not_link_when_the_build_failed(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    home = tmp_path / "home"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: "install failed: boom")
+    assert cli.main(["deploy"]) == 1
+    assert not (home / ".local" / "bin" / "crr").exists(), "linked a failed deploy"

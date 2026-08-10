@@ -574,6 +574,25 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         return 1
     deploy_io.write_marker(deploy.marker_path(sd), sha, _now())
     print(f"deployed {sha[:7] if sha else '(unknown commit)'} to {app}")
+
+    # Put `crr` on PATH pointing at the copy that was just deployed, so the
+    # command works from anywhere and runs the same reviewed code as the
+    # services — not whatever venv happens to be active. Done here rather
+    # than by hand so it is re-created if the app dir is ever wiped.
+    link = deploy.link_path(Path.home())
+    refused = deploy.link_refusal(link)
+    if refused:
+        print(f"crr deploy: {refused}", file=sys.stderr)
+    else:
+        err = deploy_io.ensure_link(link, deploy.deployed_bin(sd))
+        if err:
+            print(f"crr deploy: {err}", file=sys.stderr)
+        else:
+            print(f"linked {link} -> the deployed copy")
+            warn = deploy.path_warning(os.environ.get("PATH", ""), link)
+            if warn:
+                print(f"crr deploy: {warn}", file=sys.stderr)
+
     print("restart the services to pick it up: "
           "systemctl --user restart crr-web.service")
     return 0
