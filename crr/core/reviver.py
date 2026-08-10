@@ -52,8 +52,33 @@ class RevivalOutcome(NamedTuple):
 
 
 def session_name(entry: Mapping[str, Any]) -> str:
-    """Deterministic tmux session name for an entry's claude session."""
-    return f"crr-{entry['claude']['session_id'][:8]}"
+    """Deterministic tmux session name for an entry's claude session.
+
+    The WHOLE session id, not the ``sid8`` short form. ``sid8`` is a display
+    abbreviation (payload contract, dashboard cards); this name is an
+    identity — crr decides a conversation is already parked by matching it
+    against live tmux sessions. Two session ids sharing their first 8
+    characters produced the same name, and Reopen then attached the user to
+    the *other* conversation while reporting success (#51). A wider prefix
+    would only lower the odds; the full id removes them.
+
+    Still metacharacter-free (hex and dashes), and tmux resolves ``-t`` by
+    prefix, so ``tmux attach -t crr-79e5`` keeps working.
+    """
+    return f"crr-{entry['claude']['session_id']}"
+
+
+def resolved_session_name(entry: Mapping[str, Any]) -> str:
+    """The tmux session name to use for ``entry`` — recorded name wins.
+
+    A conversation already parked under the legacy ``crr-<sid8>`` must keep
+    answering to that name. Recomputing it would leave the live session
+    unmatched, and both ``reviver._decide`` and ``ops.reopen`` read "no live
+    session" as "revive it" — spawning a SECOND ``claude --resume`` on a
+    conversation that already has one (the hazard in #48). Preferring the
+    recorded name is what makes the rename safe with no migration step.
+    """
+    return entry.get("tmux_session") or session_name(entry)
 
 
 def remote_control_name(cwd: str) -> str:
@@ -110,7 +135,7 @@ def revival_argv(entry: Mapping[str, Any], *, remote_control: bool) -> list[str]
 def attach_argv(name: str) -> list[str]:
     """Word-form argv for a visible tab to attach to the detached session.
 
-    The session name is ``crr-<8hex>`` (metacharacter-free), so this stays
+    The session name is ``crr-<session id>`` (metacharacter-free), so this stays
     safe even where an adapter must render it into a shell string.
     """
     return ["tmux", "attach", "-t", name]
@@ -121,7 +146,7 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
 
     action is one of: 'reset-nochange', 'reset', 'revive', 'give_up'.
     """
-    name = session_name(entry)
+    name = resolved_session_name(entry)  # legacy crr-<sid8> keeps its name (#51)
     if name in live:
         if entry["revive_strikes"] == 0 and entry["tmux_session"] == name:
             return "reset-nochange", entry, name
