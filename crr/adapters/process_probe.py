@@ -280,7 +280,14 @@ def _group_alive(pgid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but not ours (shouldn't happen for own sessions)
+        # NOT "exists but not ours" — measured on macOS CI, killpg(pgid, 0)
+        # returns EPERM for a group whose only member is a zombie
+        # (rows-for-pgid=[' 3391 Z<  '], ps rc=0). Returning True here
+        # short-circuited the ps check entirely, which is why the zombie fix
+        # worked on Linux and changed nothing on macOS (#65). Fall through
+        # and let ps answer: a genuinely foreign LIVE group still reads
+        # alive, because ps will show a non-zombie member.
+        pass
     runnable = _group_has_a_runnable_member(pgid)
     return True if runnable is None else runnable
 
