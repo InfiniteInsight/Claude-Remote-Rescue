@@ -21,12 +21,6 @@ def test_a_null_bridge_session_id_is_unreachable():
     assert r.reachability(None, pid_matched=True, field_present=True) == "unreachable"
 
 
-def test_an_empty_string_is_unreachable_not_reachable():
-    # Falsy but present: Claude Code writes null, but a "" would otherwise
-    # sneak through a truthiness check as a live session id.
-    assert r.reachability("", pid_matched=True, field_present=True) == "unreachable"
-
-
 def test_a_pid_that_does_not_match_is_unknown():
     # 117 of 133 state files on the author's machine belong to dead pids,
     # and 2 to RECYCLED pids now owned by unrelated processes. One session
@@ -78,3 +72,16 @@ def test_an_unrecognised_status_is_never_kicked(status):
 def test_idle_and_waiting_are_the_only_permitted_statuses():
     permitted = {s for s in ("idle", "busy", "shell", "waiting") if r.may_kick(s)[0]}
     assert permitted == {"idle", "waiting"}
+
+
+def test_an_empty_string_is_unknown_not_unreachable():
+    """A `""` bridge id is not evidence the link is down.
+
+    Adversarial review, 2026-08-10. The enumerated writer in Claude Code's
+    bundle emits a session object or an explicit null — never `""`. Treating
+    an unparseable value as `unreachable` puts it on the kick path: with
+    `status: "waiting"` the boundary corroboration is deliberately skipped,
+    so a `""` would SIGTERM a live process on evidence nobody has. The
+    honest degrade is `unknown`, which costs nothing — no kick, no claim.
+    """
+    assert r.reachability("", pid_matched=True, field_present=True) == "unknown"

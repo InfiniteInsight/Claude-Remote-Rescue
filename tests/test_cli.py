@@ -4025,15 +4025,13 @@ def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
     assert seen["tab_spawner"] == "SPAWNER"
 
 
-def test_reachability_matches_a_session_journaled_as_the_claude_process_itself(tmp_path, monkeypatch):
+def test_reachability_matches_a_tmux_revived_session_via_the_live_snapshot(tmp_path, monkeypatch):
     """A tmux-revived session journals the CLAUDE process, not a parent shell.
 
-    `crr revive` spawns `tmux new-session -d ... claude ...`, so the journaled
-    pid IS claude — it has no claude CHILDREN, and `claude_group_pids` returns
-    an empty list for it. Matching only against that list left 13 of 17 real
-    cards reading `unknown` even though the state file's pid was IDENTICAL to
-    the journaled one. Post-reboot that is most of the machine, which is
-    precisely when reachability matters most.
+    `_child_groups` returns `[shell_pgid]` for that shape (#58), so the LIVE
+    snapshot matches it. The probe must model that — an earlier version of
+    this test faked `{pid: []}`, which cannot tell "claude with no children"
+    from "this pid does not exist", and so licensed a match on dead pids.
     """
     from crr.adapters import session_state, state_dir
     from crr.core.journal import JournalStore, new_entry
@@ -4046,17 +4044,50 @@ def test_reachability_matches_a_session_journaled_as_the_claude_process_itself(t
         claude={"session_id": sid, "sid_source": "injected",
                 "started": "2026-01-01T00:00:00+00:00"}))
 
-    class NoChildren:
-        def is_alive(self, pid): return True
-        def has_controlling_tty(self, pid): return True
-        def controlling_ttys(self, pids): return set(pids)
-        def claude_group_pids(self, pids): return {p: [] for p in pids}   # no children
+    class LiveClaudeLeadsItsGroup:
+        def claude_group_pids(self, pids): return {p: [p] for p in pids}
 
     state = session_state.SessionState(
         pid=1960, bridge_session_id=None, field_present=True,
         status="idle", waiting_for="")
     got = cli._reachability_by_sid(
-        JournalStore(tmp_path).scan().entries, NoChildren(), cfg.Config(),
-        read_session_state=lambda: {sid: state})
-    assert got[sid] == ("unreachable", ""), \
-        "the state file's pid equals the journaled pid; that is a match"
+        JournalStore(tmp_path).scan().entries, LiveClaudeLeadsItsGroup(),
+        cfg.Config(), read_session_state=lambda: {sid: state})
+    assert got[sid] == ("unreachable", "")
+
+
+def test_a_dead_pid_state_file_never_licenses_a_claim(tmp_path, monkeypatch):
+    """The defect this replaced: after a reboot a revived session's journaled
+    pid is dead, but its state file survives with the SAME pid and sid.
+
+    Matching on pid equality alone checked nothing about liveness, so the
+    card asserted `reachable` — and "waiting on you" — about a process that
+    no longer existed. On this machine that was 13 of 17 cards for the 76
+    minutes between boot and the reviver running (adversarial review
+    2026-08-10).
+    """
+    from crr.adapters import session_state, state_dir
+    from crr.core.journal import JournalStore, new_entry
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(new_entry(
+        pid=999999, cwd="/home/u/p", host="tmux", shell="bash",
+        boot_id="an-old-boot", now="2026-01-01T00:00:00+00:00", tmux_session="crr-x",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-01-01T00:00:00+00:00"}))
+
+    class PidIsGone:
+        def claude_group_pids(self, pids): return {p: [] for p in pids}
+
+    stale = session_state.SessionState(
+        pid=999999, bridge_session_id="session_from_before_the_reboot",
+        field_present=True, status="waiting", waiting_for="permission prompt")
+    got = cli._reachability_by_sid(
+        JournalStore(tmp_path).scan().entries, PidIsGone(), cfg.Config(),
+        read_session_state=lambda: {sid: stale})
+    # The invariant is "no positive claim and no leaked state", not a
+    # particular container shape: an explicit `unknown` is as honest as an
+    # absent key, and `assemble_sessions` reads both the same way.
+    assert got[sid] == ("unknown", ""), \
+        "a dead pid's stale file must license neither a verdict nor waiting_for"
