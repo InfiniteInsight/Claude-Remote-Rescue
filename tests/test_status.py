@@ -444,3 +444,15 @@ def test_a_live_session_is_never_demoted_to_parked():
     payload = assemble_sessions(
         [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
     assert payload["sessions"][0]["state"] == "live"
+
+
+def test_a_parked_card_survives_its_own_validator():
+    from crr.core import contracts
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
+    assert payload["sessions"][0]["state"] == "parked"
+    contracts.validate_sessions_payload(payload)   # the half nothing covered

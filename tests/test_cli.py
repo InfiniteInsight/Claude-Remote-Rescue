@@ -3695,3 +3695,119 @@ def test_settings_payload_resolved_reflects_a_healthy_stored_override(tmp_path):
 
     assert payload["degraded"] is False
     assert payload["resolved"] is False
+
+
+def _parked_journal_entry(tmp_path, sid):
+    """A pre-reboot entry (stale boot_id, dead pid) parked in a tmux session."""
+    JournalStore(tmp_path).write(new_entry(
+        pid=999999, cwd="/home/u/p", host="tmux", shell="bash",
+        boot_id="a-previous-boot", now="2026-01-01T00:00:00+00:00",
+        tmux_session="crr-8a1b2c3d",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-01-01T00:00:00+00:00"}))
+
+
+def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkeypatch, capsys):
+    # End to end through the composition root: a pre-reboot entry whose
+    # tmux session is alive must not print as crashed.
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return {"crr-8a1b2c3d"}
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    assert cli.main(["status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["state"] == "parked"
+
+
+def test_status_json_declines_to_park_when_tmux_cannot_say(tmp_path, monkeypatch, capsys):
+    # F16 tri-state at the composition root: list_sessions() -> None is
+    # "could not determine" and must reach core as None, not as set(). A
+    # helper that wrote `or set()` would pass the test above and still be
+    # wrong here only in that it would... also say crashed. The value of
+    # this pin is the inverse: it fails loudly if someone ever "fixes"
+    # unknown into a promotion.
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    class UnknownTmux:
+        def available(self): return True
+        def list_sessions(self): return None
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: UnknownTmux())
+    assert cli.main(["status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["state"] == "crashed"
+
+
+def test_live_tmux_sessions_passes_the_unknown_tri_state_through(monkeypatch):
+    # The helper itself: None must survive, and an absent tmux is a
+    # confirmed-empty set(), not an unknown.
+    from crr.adapters import tmux
+
+    class UnknownTmux:
+        def available(self): return True
+        def list_sessions(self): return None
+
+    class NoTmux:
+        def available(self): return False
+        def list_sessions(self): raise AssertionError("must not be queried")
+
+    config = cfg.Config()
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: UnknownTmux())
+    assert cli._live_tmux_sessions(config) is None
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: NoTmux())
+    assert cli._live_tmux_sessions(config) == set()
+
+
+def test_the_web_provider_reports_parked_for_a_tmux_restored_session(tmp_path, monkeypatch):
+    # The dashboard surface, resolved per poll — not cached at server
+    # start. A set hoisted out of provider() would freeze at boot and the
+    # card would keep answering with a stale liveness forever.
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    live = {"names": set()}
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return set(live["names"])
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    captured = {}
+
+    def fake_make_web_handler(provider, allowed, suffixes, **kw):
+        captured["provider"] = provider
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
+
+    provider = captured["provider"]
+    assert provider()["sessions"][0]["state"] == "crashed"
+    live["names"] = {"crr-8a1b2c3d"}
+    # Re-asked per poll: a set resolved once at startup would still say crashed.
+    assert provider()["sessions"][0]["state"] == "parked"

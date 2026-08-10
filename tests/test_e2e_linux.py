@@ -105,7 +105,13 @@ def test_register_launch_crash_revive_status_web(isolated, tmp_path, capsys):
         contracts.validate_sessions_payload(payload)
         card = next(c for c in payload["sessions"] if c["pid"] == pid)
         assert card["session_id"] == sid
-        assert card["state"] == "crashed"  # the journaled shell pid is dead
+        # The journaled shell pid is dead, so `classify()` still returns
+        # CRASHED — which `ops.detmux`/`ops.untmux` require. But step 4 just
+        # revived the conversation into a live tmux session, so the CARD
+        # reads `parked` (spec 2026-08-09, Phase 0). This is the only test in
+        # the suite with a real tmux server, so it is the end-to-end proof
+        # that `cli._live_tmux_sessions` reaches the display projection.
+        assert card["state"] == "parked"
 
         # 6. Serve the dashboard on an OS-assigned port and hit both APIs.
         config = cli._load_config()
