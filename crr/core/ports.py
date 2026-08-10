@@ -158,6 +158,21 @@ class TmuxSpawner(Protocol):
         ...
 
 
+class TabSpawnTimeout(Exception):
+    """The spawn command did not finish in time — NOT proof no tab opened.
+
+    Distinct from a hard failure on purpose. Launching a cold terminal app
+    (Windows Terminal in particular) can outrun the budget while still
+    succeeding a moment later, so callers must report this as "could not
+    confirm" rather than asserting the tab failed (#53). Adapters raise it
+    instead of letting a subprocess timeout surface as a generic error.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"no tab confirmed within {seconds:g}s")
+        self.seconds = seconds
+
+
 @runtime_checkable
 class TabSpawner(Protocol):
     """Opens a *visible* terminal tab — the counterpart to detached tmux.

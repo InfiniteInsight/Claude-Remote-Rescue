@@ -1087,3 +1087,19 @@ def test_kick_refuses_a_claude_less_shell(tmp_path):
     res = ops.kick(store, ctrl, flags, FakeBoot("B"), FakeProbe(), 11, grace=5)
     assert res.ok is False
     assert flags.armed == {}
+
+
+# --- cold start: a timeout is not a failure (#53) -------------------------
+
+def test_open_tab_does_not_claim_failure_when_it_merely_timed_out():
+    from crr.core.ports import TabSpawnTimeout
+
+    class SlowSpawner:
+        def available(self): return True
+        def open_tab(self, argv, cwd=None): raise TabSpawnTimeout(30)
+
+    msg, landed = ops._open_tab(SlowSpawner(), "crr-8a1b2c3d")
+    assert landed is False                       # still degraded: we don't KNOW
+    assert "failed" not in msg.lower()           # ...but we must not assert it failed
+    assert "30" in msg
+    assert "tmux attach -t crr-8a1b2c3d" in msg

@@ -79,6 +79,11 @@ DEFAULTS: dict[str, Any] = {
     "diagnose_macos_lookback": "1d",  # macOS `log show --last` window (no boot index on macOS)
     "diagnose_macos_timeout_seconds": 30,  # macOS `log show` is slow to start; own timeout
     "interop_timeout_seconds": 5,  # per external-command guard in diagnostics/probes
+    # Tab spawning gets its OWN budget: launching a cold Windows Terminal is
+    # nothing like a ps/tmux probe, and borrowing the 5s above produced false
+    # "no tab" reports while the tab opened anyway (#53). Costs nothing warm —
+    # the call returns in milliseconds and only a genuine cold start nears it.
+    "tab_spawn_timeout_seconds": 30,
     # dashboard
     "dashboard_poll_seconds": 5,   # session-list poll cadence
     "version_check_seconds": 30,   # page self-heal version poll cadence

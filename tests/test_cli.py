@@ -3695,3 +3695,21 @@ def test_settings_payload_resolved_reflects_a_healthy_stored_override(tmp_path):
 
     assert payload["degraded"] is False
     assert payload["resolved"] is False
+
+
+def test_tab_spawner_uses_its_own_timeout_not_the_interop_one(monkeypatch):
+    # [#53] interop_timeout_seconds (5s) is shared with ps/tmux probes, where
+    # short is correct. A cold Windows Terminal start needs far longer, and
+    # borrowing that budget is what produced false "NO TAB" reports.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which", lambda b: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    config = cfg.Config()
+    spawner, _expected = cli._tab_spawner(config)
+    assert spawner._timeout == config.get("tab_spawn_timeout_seconds")
+    assert spawner._timeout != config.get("interop_timeout_seconds")
+
+
+def test_tab_spawn_timeout_default_covers_a_cold_terminal_launch():
+    assert cfg.Config().get("tab_spawn_timeout_seconds") >= 20

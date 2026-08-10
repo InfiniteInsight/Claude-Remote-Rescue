@@ -19,7 +19,7 @@ from crr.core import contracts
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, GHOST, LIVE, classify
 from crr.core.journal import JournalStore
-from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TmuxSpawner
+from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TabSpawnTimeout, TmuxSpawner
 from crr.core.reviver import attach_argv, resolved_session_name, revival_argv
 
 if TYPE_CHECKING:
@@ -558,6 +558,15 @@ def _open_tab(tab_spawner: TabSpawner | None, name: str) -> tuple[str, bool]:
     try:
         tab_spawner.open_tab(attach_argv(name))
         return " (opened in a new tab)", True
+    except TabSpawnTimeout as exc:
+        # Degraded, but honestly: we do not know that no tab opened, and
+        # sending the user to `tmux attach` for a tab that is already on its
+        # way would be its own kind of wrong (#53).
+        return (
+            f" (no tab confirmed within {exc.seconds:g}s — the terminal may still be "
+            f"starting; if none appears, attach with: tmux attach -t {name})",
+            False,
+        )
     except Exception as exc:  # best-effort: an osascript/subprocess failure
         # Same honesty as the no-spawner branch: the revival is durable and
         # the session is attachable, so name the cause AND the way in. A bare

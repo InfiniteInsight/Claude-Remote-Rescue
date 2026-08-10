@@ -131,6 +131,24 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- Tab spawning borrowed `interop_timeout_seconds` (5s) — a budget shared with
+  `ps`/tmux probes, where short is correct. A cold Windows Terminal launch can
+  exceed it and still open the tab, so crr reported a false `NO TAB` while a
+  tab appeared anyway. Tab spawning now has its own
+  `tab_spawn_timeout_seconds` (default 30), which costs nothing when the
+  terminal is warm. A timeout is also no longer reported as a failure: it
+  raises `ports.TabSpawnTimeout` and is worded *no tab confirmed within Ns —
+  the terminal may still be starting*, because "the command did not finish in
+  time" is not "no tab appeared". Automatic retry was considered and rejected
+  — a tab spawn is not idempotent, so retrying a slow-but-successful spawn
+  opens a second tab.
+
+- The dashboard showed nothing at all while an action was in flight, so a
+  slow reopen looked ignored. Actions now raise a sticky *working…* notice for
+  the whole round trip, and a degraded result carries a manual **Retry**
+  control — manual because only the user can see whether a tab actually
+  appeared.
+
 - tmux sessions were named `crr-<first 8 chars of the session id>`, and crr
   uses that name as the identity of a parked conversation — so two
   conversations sharing those 8 characters collided, and Reopen silently

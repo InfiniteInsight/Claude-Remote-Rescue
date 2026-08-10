@@ -1166,7 +1166,7 @@ def _tab_spawner(config: cfg.Config) -> tuple[object | None, bool]:
     "reopen" quietly meaning "revived, no tab" is the bug the user hit
     ([user request, 2026-08-09]).
     """
-    timeout = config.get("interop_timeout_seconds")
+    timeout = config.get("tab_spawn_timeout_seconds")
     system = platform.system()
     if system == "Darwin":
         kind = tab_spawn.choose(config.get("terminal"), os.environ)
