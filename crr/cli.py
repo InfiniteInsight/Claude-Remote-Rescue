@@ -921,6 +921,10 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             # `close` arms a flag the shim consumes, and a tmux-revived
             # claude has no shim (#58).
             flags=FlagStore(sd),
+            # And without this a KICKED conversation comes back with nothing
+            # pointing at it (#62) — the sweep, not kick, creates the
+            # replacement, so the tab can only be opened from here.
+            tab_spawner=_tab_spawner(config)[0],
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
