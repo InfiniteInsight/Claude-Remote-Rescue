@@ -291,6 +291,54 @@ def test_systemd_print_warns_accurately_when_only_tab_spawn_binaries_missing(
     assert "tab" in err.lower()
 
 
+def test_systemd_print_warns_when_interop_is_unregistered_despite_wt_on_path(
+    tmp_path, monkeypatch, capsys
+):
+    # [live bug, 2026-08-09] On DrvFs every file looks executable, so a PATH
+    # check alone reports wt.exe/wsl.exe healthy while the kernel cannot exec
+    # them (missing WSLInterop binfmt handler → ENOEXEC). Warning only on
+    # "not found" would tell the operator tab spawning is fine when it isn't.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/mnt/c/{name}")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: False)
+    rc = cli.main(["systemd"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "not found on PATH" not in err  # they ARE on PATH — say the true thing
+    assert "WSLInterop" in err
+    assert "tab" in err.lower()
+    assert "revived sessions will fail on exec" not in err
+
+
+def test_systemd_print_is_silent_about_interop_when_it_is_registered(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/mnt/c/{name}")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    assert cli.main(["systemd"]) == 0
+    assert "WSLInterop" not in capsys.readouterr().err
+
+
+def test_systemd_print_does_not_check_interop_off_wsl(tmp_path, monkeypatch, capsys):
+    # Native Linux has no interop to be missing; never consult it, never warn.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.systemd.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def boom():
+        raise AssertionError("interop must not be consulted off WSL")
+
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", boom)
+    assert cli.main(["systemd"]) == 0
+    assert "WSLInterop" not in capsys.readouterr().err
+
+
 def test_systemd_print_omits_wsl_distro_name_when_not_wsl(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
@@ -707,7 +755,7 @@ def test_tab_spawner_is_none_on_headless_non_wsl_linux(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
     monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
     monkeypatch.setattr(cli.os, "environ", {})  # no display
-    assert cli._tab_spawner(cfg.Config()) is None
+    assert cli._tab_spawner(cfg.Config())[0] is None
 
 
 def test_tab_spawner_selects_a_linux_terminal_on_a_desktop(monkeypatch):
@@ -717,24 +765,124 @@ def test_tab_spawner_selects_a_linux_terminal_on_a_desktop(monkeypatch):
     monkeypatch.setattr(cli.os, "environ", {"DISPLAY": ":0"})
     monkeypatch.setattr(cli.tab_spawn_linux.shutil, "which",
                         lambda b: "/usr/bin/kitty" if b == "kitty" else None)
-    spawner = cli._tab_spawner(cfg.Config(overrides={"terminal": "kitty"}))
+    spawner, _expected = cli._tab_spawner(cfg.Config(overrides={"terminal": "kitty"}))
     assert isinstance(spawner, cli.tab_spawn_linux.LinuxTerminalSpawner)
     assert spawner.kind == "kitty"
 
 
 def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
-    # WSL is checked before the Linux desktop path: wt.exe wins when present.
+    # WSL is checked before the Linux desktop path: wt.exe wins when present
+    # AND the interop handler can exec it ([live bug, 2026-08-09]).
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
                         lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
-    spawner = cli._tab_spawner(cfg.Config())
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    spawner, _expected = cli._tab_spawner(cfg.Config())
     assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
+
+
+def test_tab_spawner_falls_through_when_wsl_interop_is_unregistered(monkeypatch):
+    # wt.exe resolves on DrvFs but cannot exec — don't hand back a spawner
+    # that will only ENOEXEC; fall through to the Linux desktop detector
+    # (None when headless), so reopen prints the tmux attach fallback.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
+                        lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: False)
+    monkeypatch.setattr(cli.tab_spawn_linux, "detect", lambda *a, **k: None)
+    assert cli._tab_spawner(cfg.Config())[0] is None
 
 
 def test_tab_spawner_is_none_on_other_platforms(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
-    assert cli._tab_spawner(cfg.Config()) is None
+    spawner, tabs_expected = cli._tab_spawner(cfg.Config())
+    assert spawner is None
+    assert tabs_expected is False
+
+
+# --- tabs_expected ([user request, 2026-08-09]) ---------------------------
+#
+# "the tab is not convenience — if I am clicking reopen I want the tab."
+# A revival with no tab is only degraded on a host that HAS tabs; a headless
+# box, an SSH session or a systemd timer can never open one, and flagging
+# those every time would make the signal worthless. _tab_spawner is the only
+# place that knows which is which, so it answers both questions at once.
+
+def test_tabs_are_expected_on_wsl_even_when_the_spawner_is_unusable(monkeypatch):
+    # The case the user hit: wt.exe resolves, interop is dead, no spawner.
+    # Tabs are still EXPECTED here — that is exactly what makes it degraded
+    # rather than "this host doesn't do tabs".
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which", lambda b: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: False)
+    monkeypatch.setattr(cli.tab_spawn_linux, "detect", lambda *a, **k: None)
+    spawner, tabs_expected = cli._tab_spawner(cfg.Config())
+    assert spawner is None
+    assert tabs_expected is True
+
+
+def test_tabs_are_not_expected_on_headless_linux(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.tab_spawn_linux, "detect", lambda *a, **k: None)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    spawner, tabs_expected = cli._tab_spawner(cfg.Config())
+    assert spawner is None
+    assert tabs_expected is False
+
+
+def test_tabs_are_expected_on_a_linux_desktop_with_no_terminal_installed(monkeypatch):
+    # A graphical session where none of the known terminals is installed is a
+    # real gap the user should see, not a headless box.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.tab_spawn_linux, "detect", lambda *a, **k: None)
+    monkeypatch.setenv("DISPLAY", ":0")
+    spawner, tabs_expected = cli._tab_spawner(cfg.Config())
+    assert spawner is None
+    assert tabs_expected is True
+
+
+def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
+    tmp_path, monkeypatch, capsys
+):
+    # [user request, 2026-08-09] The human needs to know the tab never came;
+    # a script must not start reading a live session as a failure. So: loud
+    # on stderr, exit 0.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli.ops, "reopen",
+                        lambda *a, **k: cli.ops.OpResult(True, "reopened 42 as crr-abc12345",
+                                                          degraded=True))
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True})())
+    rc = cli.main(["reopen", "--pid", "42"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert "reopened 42" in out
+    assert "WARNING" in err and "no tab" in err.lower()
+
+
+def test_cmd_reopen_stays_quiet_when_the_tab_opened(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli.ops, "reopen",
+                        lambda *a, **k: cli.ops.OpResult(True, "reopened 42 (opened in a new tab)"))
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True})())
+    assert cli.main(["reopen", "--pid", "42"]) == 0
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_tabs_are_expected_on_macos(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.tab_spawn, "spawner_for",
+                        lambda kind, timeout: type("S", (), {"available": lambda self: False})())
+    spawner, tabs_expected = cli._tab_spawner(cfg.Config())
+    assert spawner is None
+    assert tabs_expected is True
 
 
 def test_tab_spawner_selects_a_macos_spawner_when_app_present(monkeypatch):
@@ -743,11 +891,11 @@ def test_tab_spawner_selects_a_macos_spawner_when_app_present(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(cli.tab_spawn.subprocess, "run",
                         lambda cmd, **kw: type("R", (), {"returncode": 0})())
-    spawner = cli._tab_spawner(cfg.Config(overrides={"terminal": "iterm"}))
+    spawner, _expected = cli._tab_spawner(cfg.Config(overrides={"terminal": "iterm"}))
     assert isinstance(spawner, cli.tab_spawn.ITerm2Spawner)
     monkeypatch.setattr(cli.tab_spawn.subprocess, "run",
                         lambda cmd, **kw: type("R", (), {"returncode": 1})())
-    assert cli._tab_spawner(cfg.Config()) is None
+    assert cli._tab_spawner(cfg.Config())[0] is None
 
 
 def test_doctor_reports_install_health(tmp_path, monkeypatch, capsys):
@@ -1761,7 +1909,7 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
             pass
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
 
     store = JournalStore(tmp_path)
     store.write(new_entry(
@@ -1823,7 +1971,7 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
             pass
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
 
     store = JournalStore(tmp_path)
     store.write(new_entry(
@@ -2370,7 +2518,7 @@ def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys)
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: None)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
@@ -2396,7 +2544,7 @@ def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypat
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: None)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
     monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
 
     rc = cli.main(["rescue-check"])
@@ -2414,7 +2562,7 @@ def test_rescue_check_yes_opens_tabs_and_marks(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
@@ -2447,7 +2595,7 @@ def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
@@ -2480,7 +2628,7 @@ def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "\n")  # Enter, no text
 
@@ -2510,7 +2658,7 @@ def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "")  # EOF
 
@@ -2534,7 +2682,7 @@ def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))
 
     calls = []
@@ -2564,7 +2712,7 @@ def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys)
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
 
     def _raise_keyboard_interrupt(*a, **k):
         raise KeyboardInterrupt
@@ -2617,7 +2765,7 @@ def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monke
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: _FakeTab())
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
 
     def _boom(*a, **k):
         raise RuntimeError("boom")

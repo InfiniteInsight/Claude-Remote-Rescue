@@ -16,7 +16,35 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Sequence
+
+BINFMT_MISC = Path("/proc/sys/fs/binfmt_misc")
+
+# WSL registers one of these; newer images use the "-late" variant.
+_INTEROP_HANDLERS = ("WSLInterop", "WSLInterop-late")
+
+
+def interop_registered(binfmt_misc: Path | None = None) -> bool:
+    """True when the kernel can exec a Windows PE binary in this namespace.
+
+    ``shutil.which`` cannot answer this: DrvFs marks every file under /mnt/c
+    executable, so wt.exe resolves whether or not it can actually run. The
+    handler that makes the exec succeed is binfmt_misc's WSLInterop entry —
+    and it can go missing while wt.exe stays on PATH, because a systemd
+    remount of /proc/sys/fs/binfmt_misc replaces the (empty) filesystem
+    instance WSL registered into at boot. Without it, execve returns ENOEXEC
+    ([live bug, 2026-08-09]).
+    """
+    root = BINFMT_MISC if binfmt_misc is None else binfmt_misc
+    for name in _INTEROP_HANDLERS:
+        try:
+            first = (root / name).read_text().split("\n", 1)[0].strip()
+        except OSError:
+            continue  # absent, or an unreadable /proc — treat as not usable
+        if first == "enabled":
+            return True
+    return False
 
 
 def wt_command(
@@ -47,7 +75,11 @@ class WindowsTerminalSpawner:
         self._distro = distro
 
     def available(self) -> bool:
-        return shutil.which("wt.exe") is not None
+        # Both halves are required: wt.exe on PATH, and an interop handler
+        # that can actually exec it. Reporting unavailable makes reopen
+        # degrade to the honest "attach with: tmux attach -t ..." rather than
+        # surfacing a raw ENOEXEC after the fact.
+        return shutil.which("wt.exe") is not None and interop_registered()
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
         subprocess.run(

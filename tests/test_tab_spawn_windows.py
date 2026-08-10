@@ -38,6 +38,59 @@ def test_spawner_open_tab_runs_the_built_command(monkeypatch):
 
 def test_available_reflects_which(monkeypatch):
     monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/.../wt.exe")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
     assert tsw.WindowsTerminalSpawner(5).available() is True
     monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
+    assert tsw.WindowsTerminalSpawner(5).available() is False
+
+
+# --- interop_registered ([live bug, 2026-08-09]) --------------------------
+#
+# shutil.which can never fail on DrvFs: every file under /mnt/c looks
+# executable, so wt.exe is "found" even when the kernel cannot exec it. The
+# handler that makes a PE binary runnable is binfmt_misc's WSLInterop entry,
+# and a systemd remount of /proc/sys/fs/binfmt_misc replaces the instance WSL
+# registered into at boot — leaving wt.exe on PATH and ENOEXEC on exec.
+
+def test_interop_registered_true_when_a_handler_is_enabled(tmp_path):
+    d = tmp_path / "binfmt_misc"
+    d.mkdir()
+    (d / "WSLInterop").write_text("enabled\ninterpreter /init\n")
+    assert tsw.interop_registered(d) is True
+
+
+def test_interop_registered_accepts_the_late_handler(tmp_path):
+    # Newer WSL images register WSLInterop-late instead; either name counts.
+    d = tmp_path / "binfmt_misc"
+    d.mkdir()
+    (d / "WSLInterop-late").write_text("enabled\ninterpreter /init\n")
+    assert tsw.interop_registered(d) is True
+
+
+def test_interop_registered_false_when_the_handler_is_disabled(tmp_path):
+    d = tmp_path / "binfmt_misc"
+    d.mkdir()
+    (d / "WSLInterop").write_text("disabled\ninterpreter /init\n")
+    assert tsw.interop_registered(d) is False
+
+
+def test_interop_registered_false_when_the_fs_was_remounted_empty(tmp_path):
+    # The live failure: binfmt_misc mounted and enabled, but WSL's own
+    # registration is gone — only `register` and `status` remain.
+    d = tmp_path / "binfmt_misc"
+    d.mkdir()
+    (d / "register").write_text("")
+    (d / "status").write_text("enabled\n")
+    assert tsw.interop_registered(d) is False
+
+
+def test_interop_registered_false_when_binfmt_misc_is_absent(tmp_path):
+    assert tsw.interop_registered(tmp_path / "nope") is False
+
+
+def test_available_is_false_when_interop_is_unregistered(monkeypatch):
+    # wt.exe resolves but cannot exec — report no spawner so reopen degrades
+    # to the honest "attach with: tmux attach -t ..." rather than an errno.
+    monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/.../wt.exe")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: False)
     assert tsw.WindowsTerminalSpawner(5).available() is False

@@ -283,12 +283,98 @@ def test_reopen_refuses_when_tmux_liveness_is_unknown(tmp_path):
 # --- _open_tab (honesty when no spawner is available) ----------------------
 
 def test_open_tab_no_spawner_gives_the_attach_command():
-    msg = ops._open_tab(None, "crr-8a1b2c3d")
+    msg, _landed = ops._open_tab(None, "crr-8a1b2c3d")
     assert msg == " (no tab spawner on this host — attach with: tmux attach -t crr-8a1b2c3d)"
 
 
 def test_open_tab_unavailable_spawner_gives_the_attach_command():
-    msg = ops._open_tab(FakeTabSpawner(available=False), "crr-8a1b2c3d")
+    msg, _landed = ops._open_tab(FakeTabSpawner(available=False), "crr-8a1b2c3d")
+    assert "tmux attach -t crr-8a1b2c3d" in msg
+
+
+def test_open_tab_reports_whether_a_tab_actually_landed():
+    # [user request, 2026-08-09] "the tab is not convenience — if I am clicking
+    # reopen I want the tab." Callers cannot honour that while _open_tab only
+    # returns prose; it must say whether one appeared.
+    spawner = FakeTabSpawner()
+    suffix, landed = ops._open_tab(spawner, "crr-8a1b2c3d")
+    assert landed is True
+    assert "opened in a new tab" in suffix
+
+    suffix, landed = ops._open_tab(FakeTabSpawner(fail=True), "crr-8a1b2c3d")
+    assert landed is False
+
+    suffix, landed = ops._open_tab(None, "crr-8a1b2c3d")
+    assert landed is False
+
+
+def test_reopen_is_degraded_when_a_tab_was_expected_and_missed(tmp_path):
+    # A revival with no tab, on a host that HAS tabs, is not a plain success.
+    store, archive, tmux = JournalStore(tmp_path), ArchiveStore(tmp_path), FakeTmux()
+    _seed(store, 42, boot="OLD", claude=_claude())
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("NEW"), FakeProbe(alive=False),
+                     42, _NOW, grace=0.1, remote_control=True,
+                     tab_spawner=FakeTabSpawner(fail=True), tabs_expected=True)
+    assert res.ok is True          # the session IS alive — never report otherwise
+    assert res.degraded is True
+    assert "tmux attach -t" in res.message
+
+
+def test_reopen_is_not_degraded_where_the_host_has_no_tabs(tmp_path):
+    # Headless Linux / SSH / a systemd timer can never open a tab; saying
+    # "degraded" every time would make the signal meaningless.
+    store, archive, tmux = JournalStore(tmp_path), ArchiveStore(tmp_path), FakeTmux()
+    _seed(store, 42, boot="OLD", claude=_claude())
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("NEW"), FakeProbe(alive=False),
+                     42, _NOW, grace=0.1, remote_control=True,
+                     tab_spawner=None, tabs_expected=False)
+    assert res.ok is True
+    assert res.degraded is False
+
+
+def test_reopen_is_not_degraded_when_the_tab_opens(tmp_path):
+    store, archive, tmux = JournalStore(tmp_path), ArchiveStore(tmp_path), FakeTmux()
+    _seed(store, 42, boot="OLD", claude=_claude())
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("NEW"), FakeProbe(alive=False),
+                     42, _NOW, grace=0.1, remote_control=True,
+                     tab_spawner=FakeTabSpawner(), tabs_expected=True)
+    assert res.ok is True
+    assert res.degraded is False
+
+
+def test_ghost_reopen_with_no_tmux_session_at_all_is_degraded(tmp_path):
+    # Getting NEITHER a tmux session nor a tab is worse than losing only the
+    # tab, so it must not be the one outcome that still reads as plain green.
+    # Not gated on tabs_expected: a missing tmux session matters on every
+    # host, headless included.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe = _ghost(store, 42)
+    tmux = FakeTmux(fail_spawn=True)
+    ctrl, flags = FakeController(groups=[]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW,
+                     grace=0.1, remote_control=True, tab_spawner=None, tabs_expected=False)
+    assert res.ok is True          # the conversation IS preserved in the archive
+    assert res.degraded is True    # ...but nothing the user clicked for happened
+    assert "watchdog will revive it" in res.message
+
+
+def test_opresult_defaults_to_not_degraded():
+    # Every other op constructs OpResult(ok, message) — none of them regress.
+    assert ops.OpResult(True, "x").degraded is False
+
+
+def test_open_tab_failed_spawn_still_gives_the_attach_command():
+    # [live bug, 2026-08-09] On WSL with the WSLInterop binfmt handler
+    # unregistered, wt.exe is on PATH but cannot exec: the spawn raises
+    # OSError(errno 8) and reopen reported only "(tab spawn failed: [Errno 8]
+    # Exec format error: 'wt.exe')". The revival was durable and the session
+    # attachable the whole time, so this branch owes the same manual fallback
+    # the unavailable-spawner branch gives — the errno alone reads as a dead end.
+    msg, _landed = ops._open_tab(FakeTabSpawner(fail=True), "crr-8a1b2c3d")
+    assert "osascript boom" in msg  # the cause is still reported, never swallowed
     assert "tmux attach -t crr-8a1b2c3d" in msg
 
 

@@ -1151,22 +1151,27 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     return 0 if res.ok else 2
 
 
-def _tab_spawner(config: cfg.Config):
-    """The visible-tab spawner for this host, or None where none applies.
+def _tab_spawner(config: cfg.Config) -> tuple[object | None, bool]:
+    """Return ``(spawner, tabs_expected)`` for this host.
 
     macOS → Terminal.app / iTerm2. WSL → Windows Terminal (wt.exe). Other
-    Linux (desktop) → gnome-terminal / konsole / kitty / wezterm (None when
-    headless or none installed). A None spawner makes reopen degrade to
-    detached tmux rather than erroring — and the tab step is best-effort
-    regardless, so an unverified wt.exe command can never cost the (already
-    durable) revival.
+    Linux (desktop) → gnome-terminal / konsole / kitty / wezterm.
+
+    ``tabs_expected`` says whether this host has a concept of visible tabs at
+    all — independently of whether one can be opened right now. The two
+    answers differ exactly where it matters: a headless box or a systemd
+    timer can never open a tab, while a WSL host with a dead interop handler
+    *should* have opened one and didn't. Core turns the second case into a
+    degraded result; without this bool it could not tell them apart, and
+    "reopen" quietly meaning "revived, no tab" is the bug the user hit
+    ([user request, 2026-08-09]).
     """
     timeout = config.get("interop_timeout_seconds")
     system = platform.system()
     if system == "Darwin":
         kind = tab_spawn.choose(config.get("terminal"), os.environ)
         spawner = tab_spawn.spawner_for(kind, timeout)
-        return spawner if spawner.available() else None
+        return (spawner if spawner.available() else None), True
     if system == "Linux":
         # WSL first: reach the Windows side via wt.exe (crr runs in the distro).
         if host.is_wsl():
@@ -1174,10 +1179,14 @@ def _tab_spawner(config: cfg.Config):
                 timeout, config.get("wt_profile"), os.environ.get("WSL_DISTRO_NAME")
             )
             if spawner.available():
-                return spawner
-        # Otherwise a native Linux desktop terminal (None if headless/none).
-        return tab_spawn_linux.detect(config.get("terminal"), os.environ, timeout)
-    return None
+                return spawner, True
+            # No usable spawner, but this host still owes a tab.
+            return None, True
+        # A graphical session is the "should have tabs" signal on native
+        # Linux; without one there is no display to draw a tab on.
+        graphical = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        return tab_spawn_linux.detect(config.get("terminal"), os.environ, timeout), graphical
+    return None, False
 
 
 def _cmd_reopen(args: argparse.Namespace) -> int:
@@ -1195,13 +1204,20 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     flags = FlagStore(sd)
+    spawner, tabs_expected = _tab_spawner(config)
     with mutation_lock(sd):
         res = ops.reopen(JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
                          boot, probe, args.pid, _now(),
                          grace=config.get("close_grace_seconds"),
                          remote_control=config.get("remote_control"),
-                         tab_spawner=_tab_spawner(config))
+                         tab_spawner=spawner, tabs_expected=tabs_expected)
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    if res.degraded:
+        # Exit 0 stands: the session IS revived, and scripted callers should
+        # not start treating a live session as a failure. The warning is what
+        # a human needs — the tab they asked for never appeared.
+        print("crr reopen: WARNING — no tab opened; the session is running but not in front of you",
+              file=sys.stderr)
     return 0 if res.ok else 2
 
 
@@ -1258,7 +1274,7 @@ def _cmd_untrack(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
         res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
-                         tab_spawner=_tab_spawner(config))
+                         tab_spawner=_tab_spawner(config)[0])
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
 
@@ -1279,7 +1295,7 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     with mutation_lock(sd):
         res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
                          remote_control=config.get("remote_control"),
-                         tab_spawner=_tab_spawner(config))
+                         tab_spawner=_tab_spawner(config)[0])
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
 
@@ -2030,7 +2046,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         return 0
 
     n = len(found)
-    tab = _tab_spawner(config)
+    tab, _tabs_expected = _tab_spawner(config)
     if tab is None or not tab.available():
         print(f"crr: {n} conversation(s) rescued from the last reboot — "
               "'crr rescued' lists them; attach with: tmux attach -t <name>")
@@ -2424,7 +2440,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
     archive = ArchiveStore(sd)
     flags = FlagStore(sd)
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
-    tab = _tab_spawner(config)
+    # NOT resolved here: whether this host can open a tab is a live property,
+    # not a startup fact. On WSL it hinges on the WSLInterop binfmt handler,
+    # which can be missing at boot and repaired minutes later — a spawner
+    # cached at startup would keep answering "no tab" for the life of the
+    # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
 
     extract = _tail_facts_extractor(config)
 
@@ -2450,7 +2470,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         contracts.validate_sessions_payload(payload)
         return payload
 
-    def action_provider(op: str, pid: int) -> tuple[bool, str]:
+    def action_provider(op: str, pid: int) -> tuple[bool, str, bool]:
         # Same classifier-gated ops the CLI uses — one implementation — and
         # under the same mutation lock, so a double-tapped button (two
         # handler threads) or a race with the revive timer can't interleave.
@@ -2460,10 +2480,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "dismiss":
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
+                spawner, tabs_expected = _tab_spawner(config)
                 res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                                   pid, _now(), grace=config.get("close_grace_seconds"),
                                   remote_control=config.get("remote_control"),
-                                  tab_spawner=tab)
+                                  tab_spawner=spawner, tabs_expected=tabs_expected)
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))
@@ -2471,13 +2492,15 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 res = ops.kick(store, controller, flags, boot, probe, pid,
                                 grace=config.get("close_grace_seconds"))
             elif op in ("untrack", "detmux"):  # detmux: deprecated alias, same op
-                res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(), tab_spawner=tab)
+                res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
+                                  tab_spawner=_tab_spawner(config)[0])
             elif op == "untmux":
                 res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
-                                  remote_control=config.get("remote_control"), tab_spawner=tab)
+                                  remote_control=config.get("remote_control"),
+                                  tab_spawner=_tab_spawner(config)[0])
             else:
-                return False, f"unknown op {op}"
-        return res.ok, res.message
+                return False, f"unknown op {op}", False
+        return res.ok, res.message, res.degraded
 
     def diagnostics_provider() -> dict:
         return gather_diagnostics(config)  # lazy: only on panel open, never on poll
@@ -2524,17 +2547,21 @@ def _cmd_web(args: argparse.Namespace) -> int:
             row["running"] = row["session_id"] in live
         return page
 
-    def sid_action_provider(op: str, sid: str) -> tuple[bool, str]:
+    def sid_action_provider(op: str, sid: str) -> tuple[bool, str, bool]:
+        # Third element is `degraded`, matching action_provider so
+        # web.handle_request builds ONE response shape for both. No sid-keyed
+        # op opens a tab today, so it is always False here — but a second
+        # shape would be a silent trap for the next op added.
         if op == "adopt":
             # _adopt takes its own mutation_lock scoped to just the
             # re-check + write (see its docstring) — the transcript reads
             # that resolve the cwd must NOT hold the lock the pid-keyed
             # action_provider and the revive timer also contend for.
-            return _adopt(store, sd, sid)
+            return (*_adopt(store, sd, sid), False)
         if op == "takeover":
             # _web_takeover uses max_wait=0.0 (non-blocking) and manages its
             # own mutation_lock for the kill, like _adopt — do NOT wrap it.
-            return _web_takeover(store, sd, config, controller, flags, sid)
+            return (*_web_takeover(store, sd, config, controller, flags, sid), False)
         if op in ("autokick-on", "autokick-off"):
             # Pins ONE session's auto-kick opt-in/opt-out (spec 2026-08-07,
             # Slice 3). `_write_session_autokick_locked` holds `mutation_lock`
@@ -2550,16 +2577,16 @@ def _cmd_web(args: argparse.Namespace) -> int:
             try:
                 _write_session_autokick_locked(sd, sid, value)
             except settings.SettingsError as exc:
-                return False, str(exc)
-            return True, f"auto-kick {'enabled' if value else 'disabled'} for this session"
+                return False, str(exc), False
+            return True, f"auto-kick {'enabled' if value else 'disabled'} for this session", False
         # Same mutation lock as action_provider — a sid-keyed op racing the
         # pid-keyed ops or the revive timer must not interleave.
         with mutation_lock(sd):
             if op == "retrack":
                 res = ops.retrack(store, archive, sid, _now())
             else:
-                return False, f"unknown op {op}"
-        return res.ok, res.message
+                return False, f"unknown op {op}", False
+        return res.ok, res.message, res.degraded
 
     def exclusions_provider() -> dict:
         # Say WHERE the baseline came from, with the full path: on a machine
@@ -2718,6 +2745,18 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
             "crr systemd: WARNING — not found on PATH: "
             f"{', '.join(tab_missing)}; Untrack/Un-tmux/Reopen tab spawning will be unavailable "
             "until these resolve",
+            file=sys.stderr,
+        )
+    # Resolving on PATH is not the same as being executable: DrvFs marks every
+    # file under /mnt/c executable, so the check above passes while the kernel
+    # refuses the exec ([live bug, 2026-08-09]). Warn on the real signal —
+    # otherwise this command reports tab spawning healthy when it is not.
+    elif is_wsl and not tab_spawn_windows.interop_registered():
+        print(
+            "crr systemd: WARNING — wt.exe/wsl.exe resolve but WSL interop is not registered "
+            "(no enabled WSLInterop handler in /proc/sys/fs/binfmt_misc); Untrack/Un-tmux/Reopen "
+            "tab spawning will be unavailable until it is. Re-register with: "
+            "sudo sh -c 'echo \":WSLInterop:M::MZ::/init:FP\" > /proc/sys/fs/binfmt_misc/register'",
             file=sys.stderr,
         )
 

@@ -787,6 +787,16 @@ function renderCard(s, uncertain, groupColor, latest) {
 // Status toast: `kind` is "ok" | "error" | "warn" (default), driving the
 // color-coded class. Re-adding the class after a reflow re-triggers the
 // entrance animation even when a notice is already showing.
+// A degraded action succeeded but did not deliver everything the click asked
+// for — today: reopen revived the session but no tab appeared. It is NOT an
+// error (the session is live and the message says how to attach), so it gets
+// its own amber notice rather than green success or red failure
+// ([user request, 2026-08-09]).
+function noticeKind(j) { return j.ok ? (j.degraded ? "warn" : "ok") : "error"; }
+function noticeText(j, okFallback) {
+  var msg = j.message || (j.ok ? okFallback : "action failed");
+  return j.ok && j.degraded ? "NO TAB — " + msg : msg;
+}
 function showNotice(text, kind) {
   var n = document.getElementById("notice");
   n.textContent = text;
@@ -806,7 +816,7 @@ function action(op, pid, btn) {
   })
     .then(function (r) { return r.json(); })
     .then(function (j) {
-      showNotice(j.message || (j.ok ? op + " ok" : "action failed"), j.ok ? "ok" : "error");
+      showNotice(noticeText(j, op + " ok"), noticeKind(j));
       pollSessions();
     })
     .catch(function () { showNotice("request failed", "error"); })
@@ -1019,7 +1029,7 @@ function sidAction(op, sid, btn, onDone) {
   })
     .then(function (r) { return r.json(); })
     .then(function (j) {
-      showNotice(j.message || (j.ok ? "done" : "action failed"), j.ok ? "ok" : "error");
+      showNotice(noticeText(j, "done"), noticeKind(j));
       if (j.ok) {
         pollSessions();
         if (onDone) onDone();

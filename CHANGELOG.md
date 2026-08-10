@@ -131,6 +131,35 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- Reopen delivered a session but not always the tab, and reported that as
+  plain success. The tab is part of what Reopen means, so a revival with no
+  tab on a tab-capable host is now a distinct **degraded** outcome: `OpResult`
+  carries `degraded`, `/api/action` returns it (still HTTP 200 — the session
+  is alive), the dashboard shows an amber `NO TAB — …` notice instead of a
+  green one, and `crr reopen` prints a warning to stderr while keeping exit 0
+  so scripted callers do not start treating a live session as a failure.
+  Hosts that have no tabs at all (headless, SSH, a systemd timer) are not
+  flagged — `_tab_spawner` now reports `(spawner, tabs_expected)` so core can
+  tell "never possible here" from "should have happened and didn't".
+
+- The dashboard resolved its tab spawner once, at service startup. On WSL
+  that decision depends on the `WSLInterop` binfmt handler, which can be
+  absent at boot and repaired minutes later — so a long-lived `crr web` that
+  started while interop was down opened no tab for the rest of its life, with
+  no way to tell from the UI. The spawner is now resolved per action.
+
+- Reopen on WSL reported only `(tab spawn failed: [Errno 8] Exec format
+  error: 'wt.exe')` when the `WSLInterop` binfmt handler was missing — a
+  systemd remount of `/proc/sys/fs/binfmt_misc` replaces the filesystem
+  instance WSL registered into at boot, leaving `wt.exe` on `PATH` but
+  unexecutable (live incident, 2026-08-09). Two fixes: the Windows Terminal
+  spawner now reports itself unavailable unless an interop handler is
+  actually registered (`shutil.which` cannot detect this — DrvFs marks every
+  file executable), so reopen degrades to the honest `attach with: tmux
+  attach -t …`; and the tab-spawn failure path now carries that same manual
+  fallback instead of a bare errno. The revival itself was durable and the
+  session attachable throughout; only the convenience tab was lost.
+
 - The dashboard service re-read `page.html` from disk on every request, so a
   branch checkout under a running service could serve a template whose
   placeholders the loaded code cannot substitute — one raw `@PLACEHOLDER@` is
