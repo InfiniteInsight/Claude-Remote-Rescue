@@ -131,6 +131,49 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- The distro name and `wt.exe` path were frozen into `crr-web.service` at
+  install time (a service inherits neither `WSL_DISTRO_NAME` nor the Windows
+  directories on `PATH`), so renaming the distro or moving the Windows user
+  profile broke tab spawning until someone re-ran `crr systemd --install`.
+  Both are now resolved at call time: `host.distro_name()` parses
+  `wslpath -w /` (a Linux-side binary — no interop needed, and it reports the
+  *current* registered name), and `tab_spawn_windows.wt_path()` falls back to
+  a `/mnt/*/Users/*/…/WindowsApps/wt.exe` search when `PATH` comes up empty.
+  The baked values remain as fallbacks, so a host without `wslpath` behaves
+  exactly as before.
+
+- Tab spawning borrowed `interop_timeout_seconds` (5s) — a budget shared with
+  `ps`/tmux probes, where short is correct. A cold Windows Terminal launch can
+  exceed it and still open the tab, so crr reported a false `NO TAB` while a
+  tab appeared anyway. Tab spawning now has its own
+  `tab_spawn_timeout_seconds` (default 30), which costs nothing when the
+  terminal is warm. A timeout is also no longer reported as a failure: it
+  raises `ports.TabSpawnTimeout` and is worded *no tab confirmed within Ns —
+  the terminal may still be starting*, because "the command did not finish in
+  time" is not "no tab appeared". Automatic retry was considered and rejected
+  — a tab spawn is not idempotent, so retrying a slow-but-successful spawn
+  opens a second tab.
+
+- The dashboard showed nothing at all while an action was in flight, so a
+  slow reopen looked ignored. Actions now raise a sticky *working…* notice for
+  the whole round trip, and a degraded result carries a manual **Retry**
+  control — manual because only the user can see whether a tab actually
+  appeared.
+
+- tmux sessions were named `crr-<first 8 chars of the session id>`, and crr
+  uses that name as the identity of a parked conversation — so two
+  conversations sharing those 8 characters collided, and Reopen silently
+  attached the user to the *wrong* conversation while reporting success.
+  `sid8` is a display abbreviation (payload contract, dashboard cards); using
+  it as a key was the defect, not its width. Sessions are now named by the
+  **full** session id, which removes the collision by construction rather
+  than lowering its odds. `resolved_session_name()` prefers the name already
+  recorded in `entry["tmux_session"]`, so conversations already parked under
+  a legacy `crr-<sid8>` keep answering to it — without that, `reviver._decide`
+  and `ops.reopen` would both read the unmatched name as "not running" and
+  spawn a second `claude --resume` on a conversation that already has one.
+  tmux resolves `-t` by prefix, so `tmux attach -t crr-79e5` still works.
+
 - Reopen delivered a session but not always the tab, and reported that as
   plain success. The tab is part of what Reopen means, so a revival with no
   tab on a tab-capable host is now a distinct **degraded** outcome: `OpResult`

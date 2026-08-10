@@ -19,7 +19,36 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+from crr.core.ports import TabSpawnTimeout
+
 BINFMT_MISC = Path("/proc/sys/fs/binfmt_misc")
+
+# Where WSL mounts the Windows drives. Overridable so the fallback search is
+# testable without a real /mnt/c.
+MNT_ROOT = Path("/mnt")
+# Windows Terminal's per-user install location (the App Execution Alias).
+_WINDOWSAPPS_GLOB = "*/Users/*/AppData/Local/Microsoft/WindowsApps/wt.exe"
+
+
+def wt_path() -> str | None:
+    """Absolute path to wt.exe, resolved at CALL time — or None.
+
+    PATH first, which is the normal answer. The fallback exists because
+    ``crr systemd`` bakes the WindowsApps directory into the service's PATH
+    at install time (a service inherits no Windows dirs), and that snapshot
+    goes stale silently when the Windows user profile is renamed or moved —
+    leaving tab spawning broken with no signal beyond a degraded reopen
+    (#54). Looking under /mnt/*/Users finds it again without a reinstall.
+    """
+    found = shutil.which("wt.exe")
+    if found:
+        return found
+    try:
+        for candidate in sorted(MNT_ROOT.glob(_WINDOWSAPPS_GLOB)):
+            return str(candidate)
+    except OSError:
+        pass
+    return None
 
 # WSL registers one of these; newer images use the "-late" variant.
 _INTEROP_HANDLERS = ("WSLInterop", "WSLInterop-late")
@@ -54,7 +83,7 @@ def wt_command(
     distro: str | None = None,
 ) -> list[str]:
     """Build the ``wt.exe new-tab`` command that runs ``argv`` inside WSL."""
-    cmd = ["wt.exe", "new-tab"]
+    cmd = [wt_path() or "wt.exe", "new-tab"]
     if profile:
         cmd += ["-p", profile]
     if cwd:
@@ -79,10 +108,15 @@ class WindowsTerminalSpawner:
         # that can actually exec it. Reporting unavailable makes reopen
         # degrade to the honest "attach with: tmux attach -t ..." rather than
         # surfacing a raw ENOEXEC after the fact.
-        return shutil.which("wt.exe") is not None and interop_registered()
+        return wt_path() is not None and interop_registered()
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
-        subprocess.run(
-            wt_command(argv, cwd, self._profile, self._distro),
-            capture_output=True, text=True, timeout=self._timeout, check=True,
-        )
+        try:
+            subprocess.run(
+                wt_command(argv, cwd, self._profile, self._distro),
+                capture_output=True, text=True, timeout=self._timeout, check=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # A cold Windows Terminal can outrun the budget and still open the
+            # tab. Say we could not confirm; do not claim it failed (#53).
+            raise TabSpawnTimeout(exc.timeout or self._timeout) from exc

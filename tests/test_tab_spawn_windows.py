@@ -14,14 +14,16 @@ from crr.adapters import tab_spawn_windows as tsw
 _ARGV = ["tmux", "attach", "-t", "crr-abc12345"]
 
 
-def test_wt_command_runs_argv_in_wsl_via_new_tab():
+def test_wt_command_runs_argv_in_wsl_via_new_tab(monkeypatch):
+    monkeypatch.setattr(tsw, "wt_path", lambda: "wt.exe")
     # From WSL, a visible tab is a Windows Terminal tab that re-enters this
     # distro (wsl.exe -e) and runs the word-form argv.
     cmd = tsw.wt_command(_ARGV)
     assert cmd == ["wt.exe", "new-tab", "wsl.exe", "-e", *_ARGV]
 
 
-def test_wt_command_threads_profile_startdir_and_distro():
+def test_wt_command_threads_profile_startdir_and_distro(monkeypatch):
+    monkeypatch.setattr(tsw, "wt_path", lambda: "wt.exe")
     cmd = tsw.wt_command(_ARGV, cwd="/home/u/p", profile="Ubuntu", distro="Ubuntu-22.04")
     assert cmd == [
         "wt.exe", "new-tab", "-p", "Ubuntu", "-d", "/home/u/p",
@@ -30,17 +32,20 @@ def test_wt_command_threads_profile_startdir_and_distro():
 
 
 def test_spawner_open_tab_runs_the_built_command(monkeypatch):
+    monkeypatch.setattr(tsw, "wt_path", lambda: "wt.exe")
     calls = []
     monkeypatch.setattr(tsw.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
     tsw.WindowsTerminalSpawner(5, profile="Ubuntu").open_tab(_ARGV)
     assert calls == [["wt.exe", "new-tab", "-p", "Ubuntu", "wsl.exe", "-e", *_ARGV]]
 
 
-def test_available_reflects_which(monkeypatch):
+def test_available_reflects_which(monkeypatch, tmp_path):
     monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/.../wt.exe")
     monkeypatch.setattr(tsw, "interop_registered", lambda: True)
     assert tsw.WindowsTerminalSpawner(5).available() is True
+    # Neither on PATH nor findable under /mnt -> genuinely absent.
     monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
+    monkeypatch.setattr(tsw, "MNT_ROOT", tmp_path / "no-windows-here")
     assert tsw.WindowsTerminalSpawner(5).available() is False
 
 
@@ -94,3 +99,84 @@ def test_available_is_false_when_interop_is_unregistered(monkeypatch):
     monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/.../wt.exe")
     monkeypatch.setattr(tsw, "interop_registered", lambda: False)
     assert tsw.WindowsTerminalSpawner(5).available() is False
+
+
+# --- cold start (#53) ------------------------------------------------------
+#
+# A warm Windows Terminal answers in milliseconds; a cold one can take longer
+# than the 5s interop budget meant for ps/tmux probes. A timeout is NOT
+# evidence the tab failed — it usually means the opposite — so the adapter
+# reports it as its own thing instead of letting it look like a crash.
+
+def test_spawner_raises_tab_spawn_timeout_not_a_generic_error(monkeypatch):
+    import subprocess as sp
+    from crr.core.ports import TabSpawnTimeout
+
+    def boom(cmd, **kw):
+        raise sp.TimeoutExpired(cmd, kw.get("timeout", 30))
+
+    monkeypatch.setattr(tsw.subprocess, "run", boom)
+    try:
+        tsw.WindowsTerminalSpawner(30).open_tab(_ARGV)
+    except TabSpawnTimeout as exc:
+        assert exc.seconds == 30
+    else:
+        raise AssertionError("expected TabSpawnTimeout")
+
+
+def test_spawner_still_raises_normally_for_a_real_failure(monkeypatch):
+    from crr.core.ports import TabSpawnTimeout
+
+    def boom(cmd, **kw):
+        raise OSError(8, "Exec format error", "wt.exe")
+
+    monkeypatch.setattr(tsw.subprocess, "run", boom)
+    try:
+        tsw.WindowsTerminalSpawner(30).open_tab(_ARGV)
+    except TabSpawnTimeout:
+        raise AssertionError("a hard failure must not masquerade as a timeout")
+    except OSError:
+        pass
+
+
+# --- locate wt.exe at call time (#54) -------------------------------------
+#
+# crr systemd bakes the WindowsApps dir into the service PATH. Move or rename
+# the Windows user profile and that snapshot points nowhere, with no signal
+# beyond a degraded reopen. Fall back to a direct look under /mnt/*/Users.
+
+def test_wt_path_prefers_what_is_on_path(monkeypatch):
+    monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/from/PATH/wt.exe")
+    assert tsw.wt_path() == "/mnt/c/from/PATH/wt.exe"
+
+
+def test_wt_path_falls_back_to_a_windowsapps_search(tmp_path, monkeypatch):
+    found = tmp_path / "mnt/c/Users/Someone/AppData/Local/Microsoft/WindowsApps/wt.exe"
+    found.parent.mkdir(parents=True)
+    found.write_text("")
+    monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
+    monkeypatch.setattr(tsw, "MNT_ROOT", tmp_path / "mnt")
+    assert tsw.wt_path() == str(found)
+
+
+def test_wt_path_is_none_when_it_genuinely_is_not_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
+    monkeypatch.setattr(tsw, "MNT_ROOT", tmp_path / "nothing-here")
+    assert tsw.wt_path() is None
+
+
+def test_available_uses_the_resolved_path_not_only_path(tmp_path, monkeypatch):
+    # A stale service PATH must not read as "Windows Terminal is missing".
+    found = tmp_path / "mnt/c/Users/Someone/AppData/Local/Microsoft/WindowsApps/wt.exe"
+    found.parent.mkdir(parents=True)
+    found.write_text("")
+    monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
+    monkeypatch.setattr(tsw, "MNT_ROOT", tmp_path / "mnt")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    assert tsw.WindowsTerminalSpawner(30).available() is True
+
+
+def test_command_uses_the_resolved_wt_path(monkeypatch):
+    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/Users/Other/wt.exe")
+    cmd = tsw.wt_command(_ARGV)
+    assert cmd[0] == "/mnt/c/Users/Other/wt.exe"

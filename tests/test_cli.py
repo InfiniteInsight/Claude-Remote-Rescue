@@ -1528,7 +1528,7 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     assert cli.main(["revive"]) == 0
     entry = store.read(7)
     assert entry["claude"]["sid_source"] == "verified"  # upgrade survived revive's write
-    assert entry["tmux_session"] == f"crr-{_G1_SID[:8]}"  # and it was actually revived
+    assert entry["tmux_session"] == f"crr-{_G1_SID}"  # and it was actually revived
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
@@ -1822,12 +1822,12 @@ def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
     ))
     try:
         assert cli.main(["reopen", "--pid", "42"]) == 0
-        assert store.read(42)["tmux_session"] == f"crr-{sid[:8]}"
+        assert store.read(42)["tmux_session"] == f"crr-{sid}"
         sessions = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         ).stdout
-        assert f"crr-{sid[:8]}" in sessions
+        assert f"crr-{sid}" in sessions
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
@@ -2840,13 +2840,13 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
         rc = cli.main(["revive"])
         assert rc == 0
         entry = store.read(4242)
-        assert entry["tmux_session"] == f"crr-{sid[:8]}"
+        assert entry["tmux_session"] == f"crr-{sid}"
         assert entry["revive_strikes"] == 1
         sessions = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         ).stdout
-        assert f"crr-{sid[:8]}" in sessions
+        assert f"crr-{sid}" in sessions
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
@@ -3695,6 +3695,49 @@ def test_settings_payload_resolved_reflects_a_healthy_stored_override(tmp_path):
 
     assert payload["degraded"] is False
     assert payload["resolved"] is False
+
+
+def test_tab_spawner_uses_its_own_timeout_not_the_interop_one(monkeypatch):
+    # [#53] interop_timeout_seconds (5s) is shared with ps/tmux probes, where
+    # short is correct. A cold Windows Terminal start needs far longer, and
+    # borrowing that budget is what produced false "NO TAB" reports.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which", lambda b: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    config = cfg.Config()
+    spawner, _expected = cli._tab_spawner(config)
+    assert spawner._timeout == config.get("tab_spawn_timeout_seconds")
+    assert spawner._timeout != config.get("interop_timeout_seconds")
+
+
+def test_tab_spawn_timeout_default_covers_a_cold_terminal_launch():
+    assert cfg.Config().get("tab_spawn_timeout_seconds") >= 20
+
+
+def test_tab_spawner_resolves_the_distro_at_call_time_over_a_stale_env(monkeypatch):
+    # [#54] crr systemd bakes WSL_DISTRO_NAME into the unit. After a distro
+    # rename that baked value targets a distro that no longer exists; wslpath
+    # reports the current name, so it must win.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_path", lambda: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.host, "_wslpath_root", lambda timeout=None: "\\\\wsl.localhost\\Renamed\\")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Stale-Name")
+    spawner, _ = cli._tab_spawner(cfg.Config())
+    assert spawner._distro == "Renamed"
+
+
+def test_tab_spawner_falls_back_to_the_baked_env_when_wslpath_is_unavailable(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_path", lambda: "/mnt/c/wt.exe")
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.host, "_wslpath_root", lambda timeout=None: None)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Baked-Name")
+    spawner, _ = cli._tab_spawner(cfg.Config())
+    assert spawner._distro == "Baked-Name"
 
 
 def _parked_journal_entry(tmp_path, sid):

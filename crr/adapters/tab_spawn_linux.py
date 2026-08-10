@@ -22,6 +22,8 @@ import shutil
 import subprocess
 from typing import Callable, Mapping, Sequence
 
+from crr.core.ports import TabSpawnTimeout
+
 # Priority order for auto-detection (also the set of valid explicit choices).
 _PRIORITY = ("gnome-terminal", "konsole", "kitty", "wezterm")
 
@@ -97,10 +99,15 @@ class LinuxTerminalSpawner:
         return shutil.which(self.kind) is not None
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
-        subprocess.run(
-            _BUILDERS[self.kind](argv, cwd),
-            capture_output=True, text=True, timeout=self._timeout, check=True,
-        )
+        try:
+            subprocess.run(
+                _BUILDERS[self.kind](argv, cwd),
+                capture_output=True, text=True, timeout=self._timeout, check=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # A cold terminal app can outrun the budget and still open the
+            # tab. Report "could not confirm", never "failed" (#53).
+            raise TabSpawnTimeout(exc.timeout or self._timeout) from exc
 
 
 def detect(

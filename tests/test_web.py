@@ -899,10 +899,10 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_44():
-    """v44: the parked state renders as 'restored' (spec 2026-08-09, Phase 0)
-    (v43 added the amber NO TAB notice for a degraded reopen, #49)."""
-    assert web.PAGE_VERSION == 44
+def test_page_version_is_45():
+    """v45: the parked state renders as 'restored' (spec 2026-08-09, Phase 0)
+    (v44 added the in-flight notice + manual retry on a degraded action, #53)."""
+    assert web.PAGE_VERSION == 45
 
 
 def test_page_renders_the_parked_state():
@@ -1072,7 +1072,7 @@ def test_page_discoverable_has_confirm_gated_takeover_button():
 def test_page_status_toast_is_color_coded_and_animated():
     page = web.render_page()
     # showNotice takes an outcome kind and drives color-coded classes.
-    assert "function showNotice(text, kind)" in page
+    assert "function showNotice(text, kind, opts)" in page  # + sticky/retry (#53)
     assert "#notice.ok" in page
     assert "#notice.error" in page
     # a real entrance animation, not just display:block.
@@ -1402,3 +1402,23 @@ def test_page_key_help_works_on_touch_not_just_hover():
     page = web.render_page()
     assert '#key .kterm' in page
     assert 'showNotice(t.textContent + ": " + help' in page
+
+
+# --- cold start: in-flight feedback + manual retry (#53) ------------------
+
+def test_page_shows_an_in_flight_state_while_an_action_runs():
+    # A cold Windows Terminal start can take ~30s. The old page showed
+    # nothing at all for that whole time, so the click looked ignored.
+    page = web.render_page()
+    assert "noticeWorking(" in page          # a distinct in-flight notice helper
+    assert "opts.sticky" in page             # ...which must not self-dismiss
+    assert "noticeWorking(op)" in page       # and the card action must call it
+
+
+def test_page_offers_retry_only_when_an_action_came_back_degraded():
+    # Manual, never automatic: a tab spawn is not idempotent, so an
+    # auto-retry after a slow-but-successful spawn opens a SECOND tab. The
+    # user can look at their screen and decide; the code cannot.
+    page = web.render_page()
+    assert "notice-retry" in page
+    assert "j.degraded" in page

@@ -157,6 +157,12 @@
   #notice.ok    { background: #123a22; color: #7fe0a0; border-color: #1c5233; }
   #notice.error { background: #3a1616; color: #f08b8b; border-color: #5a2222; }
   #notice.warn  { background: #3a2f12; color: #e0a53b; border-color: #5a4a1c; }
+  #notice .notice-retry {
+    margin-left: 10px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+    background: transparent; color: inherit; border: 1px solid currentColor;
+    font: inherit; opacity: 0.85;
+  }
+  #notice .notice-retry:hover { opacity: 1; }
   @keyframes notice-in {
     from { opacity: 0; transform: translate(-50%, -10px); }
     to   { opacity: 1; transform: translate(-50%, 0); }
@@ -811,18 +817,40 @@ function noticeText(j, okFallback) {
   var msg = j.message || (j.ok ? okFallback : "action failed");
   return j.ok && j.degraded ? "NO TAB — " + msg : msg;
 }
-function showNotice(text, kind) {
+function showNotice(text, kind, opts) {
+  opts = opts || {};
   var n = document.getElementById("notice");
   n.textContent = text;
   n.className = "";
   void n.offsetWidth;  // force reflow so the animation restarts on repeat calls
   n.className = (kind || "warn") + " show";
   clearTimeout(n._t);
-  n._t = setTimeout(function () { n.className = ""; }, NOTICE_MS);
+  if (opts.retry) {
+    // Manual, never automatic. A tab spawn is not idempotent: retrying after
+    // a slow-but-successful spawn opens a SECOND tab. The user can look at
+    // their screen and decide whether one appeared; the code cannot (#53).
+    var b = document.createElement("button");
+    b.className = "notice-retry";
+    b.textContent = "Retry";
+    b.onclick = function () { n.className = ""; opts.retry(); };
+    n.appendChild(b);
+  }
+  // A sticky notice stays until the next one replaces it — used while an
+  // action is in flight, and for degraded results that carry a Retry.
+  if (!opts.sticky) n._t = setTimeout(function () { n.className = ""; }, NOTICE_MS);
+}
+
+// Shown for the whole round trip. A cold Windows Terminal launch can run to
+// tab_spawn_timeout_seconds (~30s); without this the page sat unchanged and
+// the click looked ignored (#53).
+function noticeWorking(op) {
+  showNotice(op + " — working\u2026 (a cold terminal can take a few seconds)",
+             "warn", { sticky: true });
 }
 
 function action(op, pid, btn) {
   btn.disabled = true;
+  noticeWorking(op);
   fetch("/api/action", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -830,7 +858,11 @@ function action(op, pid, btn) {
   })
     .then(function (r) { return r.json(); })
     .then(function (j) {
-      showNotice(noticeText(j, op + " ok"), noticeKind(j));
+      var degraded = j.ok && j.degraded;
+      showNotice(noticeText(j, op + " ok"), noticeKind(j), degraded ? {
+        sticky: true,
+        retry: function () { action(op, pid, btn); }
+      } : {});
       pollSessions();
     })
     .catch(function () { showNotice("request failed", "error"); })
