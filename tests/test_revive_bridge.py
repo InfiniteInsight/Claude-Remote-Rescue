@@ -181,7 +181,7 @@ def test_an_unreachable_idle_session_still_needs_a_clean_boundary(tmp_path, caps
 
 
 @pytest.mark.parametrize("status", ["busy", "shell"])
-def test_an_unreachable_but_working_session_is_never_kicked(tmp_path, status):
+def test_an_unreachable_but_working_session_is_never_kicked(tmp_path, capsys, status):
     # `busy` is claude generating; `shell` is a command running under it.
     # Kicking either destroys work in flight, and an unreachable phone is
     # not worth that.
@@ -193,6 +193,12 @@ def test_an_unreachable_but_working_session_is_never_kicked(tmp_path, status):
          state=_state(None, status=status))
 
     assert recorder.calls == []
+    # The step's stated invariant: every skip prints its reason, because a
+    # watchdog that silently declines to act is as unauditable as one that
+    # silently acts.
+    out = capsys.readouterr().out
+    assert "8a1b2c3d" in out
+    assert status in out
 
 
 @pytest.mark.parametrize("status", [None, "", "some-future-status"])

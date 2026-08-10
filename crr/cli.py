@@ -2435,14 +2435,44 @@ def _cmd_kicks(args: argparse.Namespace) -> int:
                 # field it does not have.
                 print(f"    {when}  bridge {a['event']}")
                 continue
-            since = a.get("bridge_since", "?")
-            stale = a.get("stale_after", "?")
             outcome = a.get("outcome", "outcome not recorded")
             mark = "ok" if a.get("outcome_ok") else "FAILED" if "outcome_ok" in a else "?"
             print(f"    {when}  pid {a.get('pid', '?')}  "
-                  f"{since} records since the bridge marker (threshold {stale})  "
-                  f"-> {mark}: {outcome}")
+                  f"{_kick_justification(a)}  -> {mark}: {outcome}")
     return 0
+
+
+def _kick_justification(a: Mapping[str, Any]) -> str:
+    """The one-line "why" of a recorded kick attempt (#35).
+
+    TWO vocabularies, deliberately, because two detectors have written this
+    log. The reachability detector (spec 2026-08-09, Phase 3) replaced the
+    record-counting one, but the attempt log is BOUNDED, not migrated — so
+    every installed copy still holds old records, and rendering them
+    through the new format (or the new ones through the old) prints a row
+    of "?" for a field the record never had. That is worse than useless
+    here: this is the command a human runs to find out why their live
+    session was restarted, so a blank answer reads as "crr does not know".
+
+    Dispatch is on the key that identifies the writer, not on a version
+    number the old records do not carry.
+    """
+    if "reachability" in a:
+        bits = [str(a["reachability"])]
+        if a.get("status"):
+            bits.append(f"status {a['status']}")
+        if a.get("waiting_for"):
+            bits.append(f"blocked on {a['waiting_for']}")
+        if a.get("bridge_session_id"):
+            # A kick on a non-null id should not happen; show it if it did.
+            bits.append(f"bridge {a['bridge_session_id']}")
+        elif a.get("field_present"):
+            bits.append("bridgeSessionId null")
+        return f"{', '.join(bits)} (Claude Code's own state file)"
+    if "bridge_since" in a:
+        return (f"{a['bridge_since']} records since the bridge marker "
+                f"(threshold {a.get('stale_after', '?')})")
+    return "no observation recorded"
 
 
 def _iso_or_raw(ts) -> str:

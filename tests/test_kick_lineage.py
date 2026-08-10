@@ -191,6 +191,55 @@ def test_crr_kicks_list_reads_the_lineage_back(tmp_path, monkeypatch, capsys):
     assert "no such process" in out
 
 
+def test_crr_kicks_list_renders_a_reachability_observation(tmp_path, monkeypatch, capsys):
+    # The read path is where lineage earns its keep, and the detector's
+    # vocabulary changed under it (spec 2026-08-09, Phase 3). Rendering a
+    # reachability record through the old record-counting format printed
+    # "? records since the bridge marker (threshold ?)" — a sentence that
+    # is both blank and false, for the one command a human runs to find out
+    # why their session was restarted.
+    from crr import cli
+    from crr.adapters import state_dir
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1_700_000_000.0, observation={
+        "pid": 4242, "state_pid": 5150, "pid_matched": True,
+        "bridge_session_id": None, "field_present": True,
+        "reachability": "unreachable", "status": "waiting",
+        "waiting_for": "permission prompt",
+        "cooldown_seconds": 600, "max_attempts": 3,
+        "config_defaults_version": 14,
+    })
+    store.record_outcome(SID, ok=True, message="kicked 4242")
+
+    assert cli.main(["kicks", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "unreachable" in out                  # what justified it
+    assert "waiting" in out                      # the activity that permitted it
+    assert "permission prompt" in out            # what it was blocked on
+    assert "kicked 4242" in out
+    assert "?" not in out, "the new lineage rendered as unknown fields"
+
+
+def test_crr_kicks_list_still_reads_a_legacy_record_counting_record(tmp_path, monkeypatch, capsys):
+    # Records written by the old detector are still on disk in every
+    # installed copy — the log is bounded, not migrated. They must keep
+    # rendering in their own vocabulary rather than degrading to "?".
+    from crr import cli
+    from crr.adapters import state_dir
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1_700_000_000.0, observation=_obs())
+    store.record_outcome(SID, ok=True, message="kicked 4242")
+
+    assert cli.main(["kicks", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "812" in out and "150" in out
+    assert "bridge marker" in out
+
+
 def test_crr_kicks_list_says_so_when_there_is_nothing(tmp_path, monkeypatch, capsys):
     from crr import cli
     from crr.adapters import state_dir
