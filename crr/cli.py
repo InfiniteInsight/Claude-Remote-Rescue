@@ -36,11 +36,11 @@ from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
-from crr.adapters import launchd, process_probe, state_dir, systemd, tab_spawn, tmux, transcript_source
+from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
-from crr.core import bridge, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
+from crr.core import bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -967,15 +967,16 @@ def _kick_dropped_bridges(
     controller,
     flags: FlagStore,
     *,
-    read_tail_facts=transcript_source.read_tail_facts,
+    read_session_state=session_state.read_all,
     read_takeover_signal=transcript_source.read_takeover_signal,
     kick=ops.kick,
     clock=time.time,
     kick_store: "bridge_kicks.KickHistoryStore | None" = None,
 ) -> None:
-    """Watchdog step (spec 2026-08-07, Slice 2): restart a LIVE session
-    whose Remote Control bridge has dropped, so the relaunch (which always
-    carries ``--remote-control``) reconnects it on the phone.
+    """Watchdog step (spec 2026-08-07 Slice 2; detector replaced by spec
+    2026-08-09 Phase 3): restart a LIVE session the phone can no longer
+    reach, so the relaunch (which always carries ``--remote-control``)
+    reconnects it.
 
     THIS KILLS LIVE PROCESSES. Every guard below is load-bearing and
     checked in this exact order; every skip is printed with its reason —
@@ -985,23 +986,37 @@ def _kick_dropped_bridges(
       2. the session must classify LIVE — never CRASHED (that is the
          reviver's job, above), never GHOST (no controlling terminal to
          reconnect on).
-      3. its bridge state (``bridge.bridge_state`` over the same tail-facts
-         walk Slice 1 added) must be ``"dropped"`` — not ``"off"`` (never
-         enabled) and not ``"ok"``. A transition TO ``"ok"`` resets this
-         sid's kick history (see ``kick_store`` below) — that is the only
-         thing that resets it; nothing here does it on a timer.
+      3. ``reachability.reachability`` over Claude Code's OWN per-process
+         state file (spec 2026-08-09, Phase 3 — one
+         ``session_state.read_all`` before the loop, not one read per card)
+         must say ``"unreachable"``: the file is readable, its pid is one
+         of this session's live claude jobs, and its ``bridgeSessionId`` is
+         null. ``"unknown"`` — no state file, a stale or recycled pid, an
+         unparseable field — is never actionable, because acting would
+         restart a live process on the strength of something crr could not
+         read. A transition TO ``"reachable"`` resets this sid's kick
+         history (see ``kick_store`` below) — that is the only thing that
+         resets it; nothing here does it on a timer, and an ``"unknown"``
+         explicitly does NOT, being the absence of a confirmation rather
+         than one.
       4. ``settings.autokick_for`` must resolve True for this sid, given
          the config default, the dashboard's global override, and this
          session's own override.
-      5. ``takeover.ready_to_take_over`` must say the transcript is quiet
-         at a completed assistant turn — a kick mid-turn destroys the
-         in-flight turn, so a not-yet-ready session is simply left for the
-         next pass rather than kicked now.
+      5. ``reachability.may_kick`` must permit this session's reported
+         activity: ``busy`` (generating) and ``shell`` (a command running
+         under it) have work in flight that a kick would destroy, and an
+         unrecognised status is refused outright. For ``idle`` — and ONLY
+         idle — ``takeover.ready_to_take_over`` must additionally agree
+         that the transcript is quiet at a completed assistant turn, so
+         two independent signals back the restart. ``waiting`` is exempt
+         by design: a session blocked on a permission prompt never reaches
+         a clean boundary, so requiring one would refuse forever exactly
+         the session this watchdog exists to unstick.
       6. ``bridge_kicks.kick_eligible`` (review fix-wave 2026-08-07, FIX 1
          — CRITICAL): this sid must be past its cooldown AND under its
          attempt cap. Without this the pass is stateless across sweeps —
          a FAILED reconnect (host briefly offline, auth expired, Remote
-         Control unavailable) does not advance the bridge marker, so every
+         Control unavailable) leaves ``bridgeSessionId`` null, so every
          guard above clears again next pass, re-kicking the same sid every
          ``watchdog_interval_seconds`` forever. ``kick_store`` persists the
          per-sid attempt count + last-kick time in the state dir
@@ -1010,8 +1025,9 @@ def _kick_dropped_bridges(
 
     Only once every guard clears does ``kick`` run, and only then under
     ``mutation_lock`` — mirroring ``crr kick``'s own locking. Everything
-    before that is lock-free, so a slow transcript scan on one session
-    never stalls the others or the dashboard. ``kick_store.record_kick``
+    before that is lock-free, so a slow state-file scan or ``ps`` probe on
+    one session never stalls the others or the dashboard.
+    ``kick_store.record_kick``
     happens inside the same lock, right after ``kick`` returns — it is
     part of the same mutating step, not a separate one.
 
@@ -1022,8 +1038,9 @@ def _kick_dropped_bridges(
     Two journal entries CAN carry the same session id (duplicate_group on
     the card; the crashed-session revival above has its own analogous
     guard — see ``test_duplicate_sids_spawn_one_session_not_two``). Such
-    entries share a transcript, so they'd share every verdict above: if
-    one qualifies, both would, deterministically double-kicking one live
+    entries share a session id, hence the same state-file entry and the
+    same transcript, so they'd share every verdict above: if one
+    qualifies, both would, deterministically double-kicking one live
     conversation. ``kicked_sids`` makes this pass kick each sid at most
     once per sweep.
     """
@@ -1050,15 +1067,17 @@ def _kick_dropped_bridges(
 
     global_override = settings_store.read_global_autokick()
     config_default = config.get("remote_control_autokick")
-    bridge_stale_records = config.get("bridge_stale_records")
-    bridge_scan_lines = config.get("bridge_scan_lines")
-    model_tail_lines = config.get("model_tail_lines")
-    cap = config.get("last_prompt_display_cap")
     idle_window = config.get("takeover_idle_seconds")
     grace = config.get("close_grace_seconds")
     cooldown_seconds = config.get("bridge_kick_cooldown_seconds")
     max_attempts = config.get("bridge_kick_max_attempts")
     kicked_sids: set[str] = set()
+
+    # ONE directory scan for the whole sweep, not one read per card —
+    # `read_all` already resolves newest-file-wins per session id, which
+    # matters more than it looks: 23 of 70 session ids on the author's
+    # machine had more than one state file, one of them nineteen.
+    states = read_session_state()
 
     for entry in entries:
         if entry.get("claude") is None:
@@ -1072,25 +1091,48 @@ def _kick_dropped_bridges(
         if classifier.classify(entry, boot, probe) != classifier.LIVE:
             continue  # CRASHED is the reviver's job above; GHOST has no terminal to reconnect
 
-        facts = read_tail_facts(
-            sid, cap, model_tail_lines=model_tail_lines, bridge_scan_lines=bridge_scan_lines,
+        state = states.get(sid)
+        if state is None:
+            # No state file for this sid at all: `unknown` by construction
+            # (no pid to match, no field to read), so nothing to act on and
+            # nothing to reset. Short-circuited here rather than routed
+            # through `reachability()` only to skip the `ps` probe below.
+            continue
+
+        # `pid_matched` is what stops a leftover file from speaking for a
+        # live session: 117 of 133 state files on the author's machine
+        # belonged to dead pids and 2 to RECYCLED pids owned by unrelated
+        # processes, so a liveness check alone returns a confident wrong
+        # answer. The question asked is "is this pid one of the claude jobs
+        # under THIS journaled shell", which `claude_groups` answers.
+        #
+        # HONEST LIMIT: `claude_groups` returns process GROUP ids, while the
+        # state file records claude's own pid. They coincide when claude is
+        # its group's leader — the normal job-control case, and the one the
+        # journal records — but not necessarily otherwise. The mismatch
+        # fails CLOSED (no match -> `unknown` -> no kick), so the cost is a
+        # missed detection, never a wrong restart.
+        pid_matched = (
+            state.pid is not None and state.pid in controller.claude_groups(pid)
         )
-        remote_control = bridge.bridge_state(
-            facts["bridge_since"], facts["bridge_seen"], stale_after=bridge_stale_records,
+        reach = reachability.reachability(
+            state.bridge_session_id,
+            pid_matched=pid_matched,
+            field_present=state.field_present,
         )
-        # Only "dropped" is actionable. "unknown" (#33) in particular must
-        # never be: it means the scan did not finish looking, so there is no
-        # evidence of a drop to act on — and acting would SIGTERM a live
-        # process on the strength of an absence. It also must not reset the
-        # attempt counter: only a confirmed "ok" is evidence a reconnect
-        # worked, and an unknown is by definition not a confirmation.
-        if remote_control != "dropped":
-            if remote_control == "ok":
+        # Only "unreachable" is actionable. "unknown" must never be: it
+        # means crr could not read a trustworthy answer, and acting would
+        # SIGTERM a live process on the strength of an absence. It also
+        # must not reset the attempt counter — only a confirmed "reachable"
+        # is evidence a reconnect worked, and an unknown is by definition
+        # not a confirmation.
+        if reach != reachability.UNREACHABLE:
+            if reach == reachability.REACHABLE:
                 # The confirmed signal that a prior kick actually worked (or
                 # the bridge never needed one) — the ONLY thing that resets
                 # the attempt counter, per bridge_kicks's docstring.
                 kick_store.reset(sid, now=clock())
-            continue  # "off" (never enabled) or "ok" — nothing to reconnect
+            continue  # reachable (nothing to reconnect) or unknown (no evidence)
 
         session_override = settings_store.read_session_autokick(sid)
         if not settings.autokick_for(
@@ -1100,14 +1142,41 @@ def _kick_dropped_bridges(
         ):
             global_resolved = config_default if global_override is None else global_override
             reason = "autokick globally off" if not global_resolved else "autokick opted out for this session"
-            print(f"crr revive: skipping {sid8} (dropped bridge, {reason})")
+            print(f"crr revive: skipping {sid8} (unreachable, {reason})")
             continue
 
-        sig = read_takeover_signal(sid)
-        seconds_idle = clock() - sig["mtime"]
-        if not takeover.ready_to_take_over(seconds_idle, sig["tail_kind"], idle_window=idle_window):
-            print(f"crr revive: skipping {sid8} (dropped bridge, mid-turn — waiting for a clean boundary)")
+        allowed, refusal = reachability.may_kick(state.status)
+        if not allowed:
+            print(f"crr revive: skipping {sid8} (unreachable, {refusal})")
             continue
+
+        # KNOWN DUPLICATION, accepted deliberately (plan 2026-08-10, Task 4).
+        # `may_kick` answers True for BOTH members of `reachability._KICKABLE`
+        # — "idle" and "waiting" — with an identical `(True, "")`, carrying no
+        # signal about which of them needs corroborating. So the corroboration
+        # rule lives here instead, and cli re-tests one member of a vocabulary
+        # core owns: "idle" is the ONLY status that must ALSO clear a clean
+        # assistant-end boundary.
+        #
+        # Why the asymmetry is not an oversight: for "idle" a second
+        # independent signal exists and two agreeing signals should back
+        # anything that signals a live process. For "waiting" none exists —
+        # a session blocked on a permission prompt never reaches a boundary,
+        # so a blanket check would refuse forever exactly the session this
+        # watchdog exists to unstick.
+        #
+        # The price of keeping the rule here: ADDING A MEMBER TO `_KICKABLE`
+        # REQUIRES DECIDING ITS CORROBORATION RULE ON THE NEXT LINE. A new
+        # kickable status silently inherits "no boundary needed" otherwise.
+        # The alternative — a third element on `may_kick`'s return — was
+        # weighed and declined: it breaks the two-tuple unpacking in
+        # `tests/test_reachability.py` for a rule with exactly one exception.
+        if state.status == "idle":
+            sig = read_takeover_signal(sid)
+            seconds_idle = clock() - sig["mtime"]
+            if not takeover.ready_to_take_over(seconds_idle, sig["tail_kind"], idle_window=idle_window):
+                print(f"crr revive: skipping {sid8} (unreachable, mid-turn — waiting for a clean boundary)")
+                continue
 
         now = clock()
         eligible, ineligible_reason = bridge_kicks.kick_eligible(
@@ -1115,7 +1184,7 @@ def _kick_dropped_bridges(
             now=now, cooldown_seconds=cooldown_seconds, max_attempts=max_attempts,
         )
         if not eligible:
-            print(f"crr revive: skipping {sid8} (dropped bridge, {ineligible_reason})")
+            print(f"crr revive: skipping {sid8} (unreachable, {ineligible_reason})")
             continue
 
         with mutation_lock(sd):
@@ -1132,17 +1201,28 @@ def _kick_dropped_bridges(
                 # retry immediately.
                 #
                 # `observation` is the lineage (#35): the state that justified
-                # THIS kick, plus the thresholds in force. Without the
-                # thresholds, changing bridge_stale_records later silently
-                # rewrites the history of every decision taken under the old
-                # one. Recorded here rather than after `kick` returns for the
-                # same reason the counter is: it must survive an exception.
+                # THIS kick, plus the thresholds in force. Recorded here
+                # rather than after `kick` returns for the same reason the
+                # counter is: it must survive an exception.
+                #
+                # The RAW inputs are recorded alongside the verdict, not
+                # instead of it — a stored conclusion you cannot regenerate
+                # from its inputs is a claim you cannot audit. Note that the
+                # detector's own threshold is gone: the old record carried
+                # `stale_after`/`scan_lines` because a later change to
+                # `bridge_stale_records` would silently rewrite the history
+                # of every decision taken under the old value. Reachability
+                # has no such tunable — it reads Claude Code's own answer —
+                # so only the cooldown/cap thresholds still need pinning.
                 kick_store.record_kick(sid, now, observation={
-                    "pid": pid,
-                    "bridge_since": facts["bridge_since"],
-                    "bridge_seen": facts["bridge_seen"],
-                    "stale_after": bridge_stale_records,
-                    "scan_lines": bridge_scan_lines,
+                    "pid": pid,                          # signalled (the journaled shell)
+                    "state_pid": state.pid,              # the claude the state file described
+                    "pid_matched": pid_matched,
+                    "bridge_session_id": state.bridge_session_id,
+                    "field_present": state.field_present,
+                    "reachability": reach,
+                    "status": state.status,
+                    "waiting_for": state.waiting_for,
                     "cooldown_seconds": cooldown_seconds,
                     "max_attempts": max_attempts,
                     "config_defaults_version": cfg.CONFIG_DEFAULTS_VERSION,
@@ -1151,7 +1231,7 @@ def _kick_dropped_bridges(
                     kick_store.record_outcome(sid, ok=res.ok, message=res.message)
         kicked_sids.add(sid)  # at most one kick attempt per sid per sweep, success or not
         outcome_word = "kicked" if res.ok else "kick failed for"
-        print(f"crr revive: {outcome_word} {sid8} (dropped bridge): {res.message}")
+        print(f"crr revive: {outcome_word} {sid8} (unreachable): {res.message}")
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:

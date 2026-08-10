@@ -116,6 +116,7 @@ def test_a_legacy_counter_only_file_still_reads(tmp_path):
 
 def test_a_watchdog_kick_records_its_justification(tmp_path, capsys):
     from crr import cli
+    from crr.adapters import session_state
     from crr.core import config as cfg, settings
     from crr.core.journal import JournalStore, new_entry
     from crr.core.ops import OpResult
@@ -136,14 +137,18 @@ def test_a_watchdog_kick_records_its_justification(tmp_path, capsys):
         def has_controlling_tty(self, pid): return True
         def controlling_ttys(self, pids): return set(pids)
 
+    class FakeController:
+        """`claude_groups` supplies `pid_matched`: the state file's pid must
+        be one of this shell's live claude jobs."""
+        def claude_groups(self, shell_pid): return [5150]
+
     cli._kick_dropped_bridges(
         store.scan().entries, FakeBoot(), FakeProbe(), cfg.Config(),
         settings.SettingsStore(tmp_path), store, tmp_path,
-        controller=None, flags=None,
-        read_tail_facts=lambda s, cap, **kw: {
-            "last_prompt": "", "model": "", "last_active": "", "last_reply": "",
-            "title": "", "slug": "", "transcript_bytes": 0,
-            "bridge_seen": True, "bridge_since": 812},
+        controller=FakeController(), flags=None,
+        read_session_state=lambda: {SID: session_state.SessionState(
+            pid=5150, bridge_session_id=None, field_present=True,
+            status="idle", waiting_for="")},
         read_takeover_signal=lambda s: {"mtime": 0.0, "tail_kind": "assistant-end"},
         kick=lambda *a, **k: OpResult(True, "kicked 4242"),
         clock=lambda: 10_000.0,
@@ -152,8 +157,18 @@ def test_a_watchdog_kick_records_its_justification(tmp_path, capsys):
     attempt = bridge_kicks.KickHistoryStore(tmp_path).last_attempt(SID)
     assert attempt is not None, "the kick recorded no lineage at all"
     assert attempt["pid"] == 4242
-    assert attempt["bridge_since"] == 812          # what justified it
-    assert attempt["stale_after"] == 150           # the threshold in force
+    # What justified it, under the reachability detector (spec 2026-08-09):
+    # Claude Code's own null bridgeSessionId, read off a state file whose
+    # pid matched a live claude here. There is no `stale_after` any more —
+    # the old record pinned that threshold because changing it later would
+    # rewrite the history of every decision taken under the old value, and
+    # reachability has no such tunable.
+    assert attempt["reachability"] == "unreachable"
+    assert attempt["bridge_session_id"] is None
+    assert attempt["field_present"] is True
+    assert attempt["pid_matched"] is True
+    assert attempt["status"] == "idle"
+    assert attempt["max_attempts"] == 3            # the thresholds in force
     assert attempt["outcome_ok"] is True
     assert "kicked 4242" in attempt["outcome"]
 
