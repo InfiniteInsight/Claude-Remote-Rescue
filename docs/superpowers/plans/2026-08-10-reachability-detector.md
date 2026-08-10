@@ -48,6 +48,21 @@ tests:
 2. **`~/.claude/sessions/*.json` is undocumented internal state.** Every
    read degrades to `unknown`, never to a positive claim.
 
+**Interface note for Tasks 3-6, established in Task 2.** `field_present`
+means "there is a READABLE answer", not merely "the key exists". A
+`bridgeSessionId` that is neither a string nor null — a future Claude Code
+reshaping it to `{"id": ...}` — reports `field_present=False`. The plan's
+first draft returned `field_present=True, bridge_session_id=None` for that
+case, which `reachability()` classifies **`unreachable`** and Task 4
+**kicks**: a live process restarted on the strength of a value crr could
+not parse. Caught and fixed during Task 2; verified by construction.
+
+**Real-machine scale, measured in Task 2:** 143 files, **70** unique
+session ids — 21 reachable, 24 unreachable, 25 field-absent. `read_all`
+applies no liveness filter by design; `pid_matched` is the caller's job.
+One session id had **nineteen** state files, and 23 of 70 had more than
+one, so newest-wins carries more weight than the plan first implied.
+
 ---
 
 ### Task 1: The pure classifier
@@ -330,9 +345,15 @@ def test_absent_waiting_for_is_an_empty_string_not_none(tmp_path):
     assert session_state.read_all(tmp_path)[SID_A].waiting_for == ""
 
 
-def test_the_newest_file_wins_when_a_session_has_several(tmp_path):
-    # Observed live: one session id had THREE state files from successive
-    # claude processes. Only the newest describes the running one.
+@pytest.mark.parametrize("stale_pid,live_pid", [(100, 200), (200, 100)])
+def test_the_newest_file_wins_when_a_session_has_several(tmp_path, stale_pid, live_pid):
+    # Observed live: 23 of 70 session ids had more than one state file, one
+    # of them NINETEEN. Only the newest describes the running process.
+    #
+    # Parametrised both directions deliberately: `Path.glob` yields
+    # filesystem order, so a single-direction test passes against a
+    # first-globbed-wins implementation as readily as a correct one. Running
+    # it both ways leaves mtime as the only rule that satisfies both.
     import os, time
     _write(tmp_path, 100, SID_A, bridgeSessionId=None, status="idle")
     _write(tmp_path, 200, SID_A, bridgeSessionId="session_new", status="busy")
@@ -416,6 +437,28 @@ class SessionState(NamedTuple):
     waiting_for: str
 
 
+def _bridge(data: dict) -> tuple[str | None, bool]:
+    """Split ``bridgeSessionId`` into ``(value, readable)``.
+
+    A null bridgeSessionId is an ANSWER ("the link is down"), so it must
+    stay distinguishable from the field being absent — hence the flag
+    rather than folding both into ``None``.
+
+    Anything neither a string nor null is NOT an answer. Reporting it as a
+    bare ``None`` with the flag set would have core classify the session
+    ``unreachable``, and the watchdog would restart a live process on the
+    strength of a value it could not parse.
+    """
+    if "bridgeSessionId" not in data:
+        return None, False
+    value = data["bridgeSessionId"]
+    if value is None:
+        return None, True
+    if isinstance(value, str):
+        return value, True
+    return None, False
+
+
 def read_all(home: Path | None = None) -> dict[str, SessionState]:
     """Newest state file per session id, as ``{session_id: SessionState}``.
 
@@ -441,15 +484,15 @@ def read_all(home: Path | None = None) -> dict[str, SessionState]:
         if not isinstance(sid, str) or not sid:
             continue
         pid = data.get("pid")
-        bridge = data.get("bridgeSessionId")
+        bridge, bridge_readable = _bridge(data)
         state = SessionState(
             pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
             # A null bridgeSessionId is an ANSWER ("the link is down"), so it
             # must stay distinguishable from the field being absent entirely
             # (an older Claude Code, or a renamed field) — hence the separate
             # `field_present` rather than folding both into None.
-            bridge_session_id=bridge if isinstance(bridge, str) else None,
-            field_present="bridgeSessionId" in data,
+            bridge_session_id=bridge,
+            field_present=bridge_readable,
             status=data.get("status") if isinstance(data.get("status"), str) else None,
             waiting_for=data.get("waitingFor") if isinstance(data.get("waitingFor"), str) else "",
         )
