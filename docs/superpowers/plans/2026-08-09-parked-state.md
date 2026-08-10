@@ -299,7 +299,13 @@ git commit -m "feat(contracts): sessions v11 adds the parked display state"
 
 **Files:**
 - Modify: `crr/cli.py` (the three `assemble_sessions(` call sites)
-- Test: `tests/test_cli.py`, `tests/test_status.py`
+- Test: `tests/test_cli.py`, `tests/test_status.py`,
+  `tests/test_e2e_linux.py` — the last one is NOT optional. It is the only
+  test in the suite that stands up a real tmux server and actually revives
+  a session, and its `assert card["state"] == "crashed"` predates `parked`.
+  It will fail with `assert 'parked' == 'crashed'` once the wiring lands.
+  That failure is the feature working end to end; update the assertion (do
+  not weaken it) and say so in a comment.
 
 **Interfaces:**
 - Consumes: `assemble_sessions(live_tmux_sessions=…)` from Task 1.
@@ -384,7 +390,10 @@ def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
 ```
 
 Then at each of the three `assemble_sessions(` call sites in `cli.py`
-(the `status` command, the web provider, and `_whoami_card`), add:
+(the `status` command, the web provider, and `_whoami_card` — which also
+backs the `session-start` hook, so every Claude session start pays one
+extra tmux fork; once per session, inside an existing catch-all, judged
+acceptable), add:
 
 ```python
         live_tmux_sessions=_live_tmux_sessions(config),
@@ -396,7 +405,10 @@ Locate them with:
 grep -n "assemble_sessions(" crr/cli.py
 ```
 
-There are exactly three. All three must be updated — a missed one shows
+There are exactly three. Resolve the set INSIDE the web `provider()`
+closure, not hoisted beside `_tail_facts_extractor` — hoisting freezes tmux
+liveness at service startup and the dashboard answers with boot-time state
+forever. All three must be updated — a missed one shows
 `crashed` on that surface while the others show `parked`, which is the
 same inconsistency this plan exists to remove.
 
@@ -404,12 +416,12 @@ same inconsistency this plan exists to remove.
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/lint-imports`
 
-Expected: PASS (1236+ tests) and `Contracts: 1 kept, 0 broken`.
+Expected: PASS (1272 at time of writing) and `Contracts: 1 kept, 0 broken`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crr/cli.py tests/test_cli.py
+git add crr/cli.py tests/test_cli.py tests/test_status.py tests/test_e2e_linux.py
 git commit -m "feat(cli): inject live tmux sessions so parked cards render everywhere"
 ```
 
