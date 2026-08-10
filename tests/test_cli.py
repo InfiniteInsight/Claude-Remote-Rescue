@@ -488,8 +488,12 @@ def test_doctor_uses_configured_interop_timeout_for_systemctl_check(tmp_path, mo
     captured = {}
 
     def fake_run(cmd, **kwargs):
-        captured["timeout"] = kwargs.get("timeout")
-        return SimpleNamespace(stdout="enabled\n", stderr="")
+        # Only the systemctl probe is under test; record its timeout. Other
+        # callers (doctor's #61 deploy-drift probe) just need a well-formed
+        # CompletedProcess stand-in — returncode included.
+        if cmd and cmd[0].endswith("systemctl"):
+            captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="enabled\n", stderr="")
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     rc = cli.main(["doctor"])
