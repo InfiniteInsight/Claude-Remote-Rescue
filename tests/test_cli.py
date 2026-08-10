@@ -3811,3 +3811,34 @@ def test_the_web_provider_reports_parked_for_a_tmux_restored_session(tmp_path, m
     live["names"] = {"crr-8a1b2c3d"}
     # Re-asked per poll: a set resolved once at startup would still say crashed.
     assert provider()["sessions"][0]["state"] == "parked"
+
+
+def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatch, capsys):
+    """One state, one word, on every surface.
+
+    `parked` is the contract value; `restored` is what a human is told. The
+    dashboard already renames it, so without this the text CLI and the
+    dashboard describe the same session with two different words — the exact
+    kind of surface-dependent inconsistency Phase 0 exists to remove.
+    """
+    from crr.adapters import state_dir, tmux
+    from crr.core.journal import JournalStore, new_entry
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(new_entry(
+        pid=999999, cwd="/home/u/p", host="tmux", shell="bash",
+        boot_id="a-previous-boot", now="2026-01-01T00:00:00+00:00",
+        tmux_session="crr-8a1b2c3d",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-01-01T00:00:00+00:00"}))
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return {"crr-8a1b2c3d"}
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "[restored]" in out
+    assert "[parked]" not in out

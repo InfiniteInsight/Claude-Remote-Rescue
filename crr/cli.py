@@ -586,7 +586,12 @@ def _print_status_human(payload: dict) -> None:
         # worth the extra characters on an otherwise compact line.
         sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
         model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
-        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}{sid_tag}")
+        # `parked` is the contract value; "restored" is what it means to a
+        # reader, and it is the word the dashboard already shows. Printing the
+        # raw enum here would describe one session with two different words
+        # depending on which surface you looked at.
+        shown = "restored" if card["state"] == "parked" else card["state"]
+        print(f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}")
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
