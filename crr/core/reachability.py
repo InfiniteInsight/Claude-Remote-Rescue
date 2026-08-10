@@ -77,8 +77,23 @@ def may_kick(status: str | None) -> tuple[bool, str]:
       Safe, and the important one: such a session never reaches a clean
       assistant-end turn boundary, so a boundary-only guard would refuse it
       forever — leaving it stuck on a question its owner cannot answer,
-      because the phone is disconnected. Restarting loses at most one
-      pending tool call; the conversation resumes intact.
+      because the phone is disconnected.
+
+    What a kick actually costs, stated honestly (adversarial review
+    2026-08-10 — an earlier version of this docstring claimed "at most one
+    pending tool call", which understated it). ``ops.kick`` calls
+    ``os.killpg(pgid, SIGTERM)`` on claude's whole PROCESS GROUP, so
+    anything still running in that group dies with it: backgrounded bash
+    jobs, a dev server started from the session, in-flight subagents whose
+    parent surfaced the prompt. Neither guard can see any of that —
+    ``status`` describes what claude itself is doing, and the transcript
+    boundary describes the conversation, not the process tree. The
+    conversation always resumes intact via ``--resume``; the group's
+    background work does not.
+
+    That is a real cost, accepted deliberately: the alternative is a
+    session that stays unreachable forever. It is bounded by the cooldown
+    and attempt cap, and switchable off per session or globally.
 
     Anything unrecognised — including ``None`` and a status a future Claude
     Code invents — is refused. An unreadable signal is not a licence to
