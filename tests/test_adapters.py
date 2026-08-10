@@ -417,3 +417,44 @@ def test_resume_session_ids_degrades_to_empty_on_probe_failure(monkeypatch):
 
     monkeypatch.setattr(pp.subprocess, "run", boom)
     assert pp.PsProcessController(2.0).resume_session_ids() == set()
+
+
+# --- session_pid: who is actually running in a parked session (#58) -------
+
+def test_session_pid_cmd_asks_tmux_for_the_pane_pid():
+    from crr.adapters import tmux as tmux_mod
+    assert tmux_mod._session_pid_cmd("crr-abc") == [
+        "tmux", "list-panes", "-t", "crr-abc", "-F", "#{pane_pid}",
+    ]
+
+
+def test_session_pid_parses_the_first_pane(monkeypatch):
+    from crr.adapters import tmux as tmux_mod
+
+    class R:
+        returncode, stdout, stderr = 0, "2016\n", ""
+
+    monkeypatch.setattr(tmux_mod.subprocess, "run", lambda *a, **k: R())
+    assert tmux_mod.RealTmux(5).session_pid("crr-abc") == 2016
+
+
+def test_session_pid_is_none_when_it_cannot_be_determined(monkeypatch):
+    # Unknown is not zero (spine: null-result expressibility) — the reviver
+    # must not re-key an entry onto a pid it did not actually observe.
+    from crr.adapters import tmux as tmux_mod
+
+    class Missing:
+        returncode, stdout, stderr = 1, "", "can't find session"
+
+    class Junk:
+        returncode, stdout, stderr = 0, "not-a-number\n", ""
+
+    for fake in (Missing, Junk):
+        monkeypatch.setattr(tmux_mod.subprocess, "run", lambda *a, **k: fake())
+        assert tmux_mod.RealTmux(5).session_pid("crr-abc") is None
+
+    def boom(*a, **k):
+        raise OSError("tmux gone")
+
+    monkeypatch.setattr(tmux_mod.subprocess, "run", boom)
+    assert tmux_mod.RealTmux(5).session_pid("crr-abc") is None

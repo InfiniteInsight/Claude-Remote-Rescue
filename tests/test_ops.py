@@ -48,7 +48,7 @@ class FakeProbe:
 
 
 class FakeTmux:
-    def __init__(self, live=(), fail_spawn=False, fail_kill=False):
+    def __init__(self, live=(), fail_spawn=False, fail_kill=False, session_pids=None):
         # live=None means "liveness is unknown" (F16 tri-state) — distinct
         # from live=() (genuinely no live sessions).
         self._live = None if live is None else set(live)
@@ -56,6 +56,7 @@ class FakeTmux:
         self.killed = []
         self._fail_spawn = fail_spawn
         self._fail_kill = fail_kill
+        self._session_pids = dict(session_pids or {})
 
     def list_sessions(self):
         return None if self._live is None else set(self._live)
@@ -67,6 +68,11 @@ class FakeTmux:
             raise RuntimeError("tmux new-session boom")
         self.created.append((name, cwd, list(argv)))
         self._live.add(name)
+
+    def session_pid(self, name):
+        # None = "could not determine". For a LIVE entry that means refuse:
+        # we cannot show the journaled pid owns this session (#58).
+        return self._session_pids.get(name)
 
     def kill_session(self, name):
         if self._live is None:
@@ -556,7 +562,7 @@ def test_detmux_refuses_missing_entry(tmp_path):
     assert not res.ok and "no session" in res.message
 
 
-def test_detmux_refuses_live_session(tmp_path):
+def test_detmux_refuses_a_live_shell_wearing_an_inherited_tmux_name(tmp_path):
     """[bug 2026-07-29] DESIGN: ALL session ops are classifier-gated. A live
     shell that inherited tmux_session via same-boot pid preservation must not
     be archived+delisted out of crr management."""
@@ -567,7 +573,7 @@ def test_detmux_refuses_live_session(tmp_path):
                      FakeBoot("same-boot"), FakeProbe(alive=True, tty=True),
                      42, _NOW, tab_spawner=tab)
     assert not res.ok
-    assert "not crashed" in res.message
+    assert "not parked" in res.message
     assert store.read(42)                  # entry untouched
     assert tab.opened == []                # no tab opened
 
@@ -674,14 +680,14 @@ def test_untmux_refuses_missing_entry(tmp_path):
     assert not res.ok and "no session" in res.message
 
 
-def test_untmux_refuses_live_session(tmp_path):
+def test_untmux_refuses_a_live_shell_wearing_an_inherited_tmux_name(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d", boot="same-boot")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     res = ops.untmux(store, archive, tmux, FakeBoot("same-boot"),
                       FakeProbe(alive=True, tty=True), 42, _NOW, tab_spawner=FakeTabSpawner(), remote_control=True)
     assert not res.ok
-    assert "not crashed" in res.message
+    assert "not parked" in res.message
     assert tmux.killed == []
     assert store.read(42)
 
@@ -1103,3 +1109,79 @@ def test_open_tab_does_not_claim_failure_when_it_merely_timed_out():
     assert "failed" not in msg.lower()           # ...but we must not assert it failed
     assert "30" in msg
     assert "tmux attach -t crr-8a1b2c3d" in msg
+
+
+# --- detmux/untmux guard on PARKED, not on CRASHED (#58) ------------------
+#
+# Those two re-home a conversation out of tmux. They guarded on CRASHED, but
+# CRASHED was only ever a proxy for "parked in tmux" — and after #58 a
+# revived entry is re-keyed onto its live claude, so it classifies LIVE and
+# the proxy stops holding. They must ask the thing they actually mean.
+
+def _parked(store, pid, name):
+    _seed(store, pid, boot="same-boot", claude=_claude())
+    e = store.read(pid)
+    e["tmux_session"] = name
+    e["host"] = "tmux"
+    store.write(e)
+    return FakeBoot("same-boot"), FakeProbe(alive=True, tty=True)   # a pane HAS a tty
+
+
+def test_detmux_accepts_a_live_entry_parked_in_tmux(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = f"crr-{_SID}"
+    boot, probe = _parked(store, 2016, name)
+    tmux = FakeTmux(live={name}, session_pids={name: 2016})
+    res = ops.detmux(store, archive, tmux, boot, probe, 2016, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+
+
+def test_untmux_accepts_a_live_entry_parked_in_tmux(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = f"crr-{_SID}"
+    boot, probe = _parked(store, 2016, name)
+    tmux = FakeTmux(live={name}, session_pids={name: 2016})
+    res = ops.untmux(store, archive, tmux, boot, probe, 2016, _NOW,
+                     remote_control=True, tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+
+
+def test_detmux_still_refuses_a_session_running_in_your_own_terminal(tmp_path):
+    # The protective half: never re-home a session the user is using.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 500, boot="same-boot", claude=_claude())
+    res = ops.detmux(store, archive, FakeTmux(live=set()), FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 500, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert not res.ok
+    assert "not tmux-parked" in res.message
+
+
+def test_reopen_attaches_a_tab_to_a_parked_session(tmp_path):
+    # [#58] reopen refuses LIVE because it would race a spawn against a
+    # running shell. A parked entry IS the tmux session, so there is nothing
+    # to race — reopen takes its already-running branch and just attaches a
+    # tab. Without this the parked card loses "show me the tab" entirely.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = f"crr-{_SID}"
+    boot, probe = _parked(store, 2016, name)
+    tmux = FakeTmux(live={name}, session_pids={name: 2016})
+    ctrl, flags = _idle_ctrl_flags()
+    tab = FakeTabSpawner()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 2016, _NOW,
+                     grace=0.1, remote_control=True, tab_spawner=tab, tabs_expected=True)
+    assert res.ok, res.message
+    assert tmux.created == []                 # never respawn a live conversation
+    assert tab.opened and tab.opened[0][0][-1] == name
+
+
+def test_reopen_still_refuses_a_live_session_in_your_own_terminal(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 500, boot="same-boot", claude=_claude())
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 500, _NOW, grace=0.1,
+                     remote_control=True)
+    assert not res.ok
+    assert "is live" in res.message

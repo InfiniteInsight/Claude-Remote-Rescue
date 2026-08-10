@@ -392,11 +392,16 @@ def test_an_entry_with_no_tmux_session_is_unaffected():
     assert payload["sessions"][0]["state"] == "crashed"
 
 
-def test_a_live_session_is_never_demoted_to_parked():
-    # The projection is one-directional: tmux liveness may only rescue an
-    # entry from a wrong `crashed`, never push one into parked.
+def test_a_live_session_in_your_own_terminal_is_never_demoted_to_parked():
+    # The protective half of the projection, unchanged by #58: a session the
+    # user is running in their OWN terminal must never be pushed into parked
+    # just because a tmux session shares its name. (#58 did widen the other
+    # half — a LIVE entry whose host IS tmux now reads parked, since a
+    # re-keyed revived session classifies live; see
+    # test_parked_is_projected_over_a_live_tmux_parked_entry.)
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     entry = _entry(42, sid)
+    entry["host"] = "tab"          # a terminal the user owns, not tmux
     entry["tmux_session"] = "crr-8a1b2c3d"
     payload = assemble_sessions(
         [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
@@ -413,3 +418,58 @@ def test_a_parked_card_survives_its_own_validator():
         [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
     assert payload["sessions"][0]["state"] == "parked"
     contracts.validate_sessions_payload(payload)   # the half nothing covered
+
+
+# --- parked covers a re-keyed revived session too (#58) -------------------
+#
+# Before #58 a revived conversation was journaled under its dead shell pid,
+# so PARKED was projected over CRASHED. Now the entry is re-keyed onto the
+# live claude, so the same conversation classifies LIVE — and would read as
+# a plain "live" card, losing the "this is in tmux, not your terminal"
+# signal the Phase 0 spec added.
+
+def test_parked_is_projected_over_a_live_tmux_parked_entry():
+    from crr.core import status as st
+    entry = {"pid": 2016, "boot_id": "B", "host": "tmux", "tmux_session": "crr-abc",
+             "claude": {"session_id": "s"}}
+
+    class Boot:
+        def current(self): return "B"
+
+    class Probe:
+        def is_alive(self, pid): return True
+        def has_controlling_tty(self, pid): return True   # a tmux pane HAS a tty
+
+    assert st._display_state(entry, Boot(), Probe(), {"crr-abc"}) == st.PARKED
+
+
+def test_a_real_terminal_session_never_reads_parked():
+    # Same liveness, but not tmux-hosted: must stay "live".
+    from crr.core import status as st
+    entry = {"pid": 500, "boot_id": "B", "host": "tab", "tmux_session": None,
+             "claude": {"session_id": "s"}}
+
+    class Boot:
+        def current(self): return "B"
+
+    class Probe:
+        def is_alive(self, pid): return True
+        def has_controlling_tty(self, pid): return True
+
+    assert st._display_state(entry, Boot(), Probe(), {"crr-abc"}) == "live"
+
+
+def test_a_crashed_entry_parked_in_tmux_still_reads_parked():
+    # The pre-#58 shape must keep working (entries not yet re-keyed).
+    from crr.core import status as st
+    entry = {"pid": 1311532, "boot_id": "OLD", "host": "tmux",
+             "tmux_session": "crr-abc", "claude": {"session_id": "s"}}
+
+    class Boot:
+        def current(self): return "B"
+
+    class Probe:
+        def is_alive(self, pid): return False
+        def has_controlling_tty(self, pid): return False
+
+    assert st._display_state(entry, Boot(), Probe(), {"crr-abc"}) == st.PARKED

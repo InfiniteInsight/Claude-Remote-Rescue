@@ -70,6 +70,11 @@ class FakeTmux:
         self.created.append((name, cwd, list(argv)))
         self._live.add(name)
 
+    def session_pid(self, name):
+        # Unknown unless a test says otherwise (see _PidTmux) — matching the
+        # adapter's "never guess a pid to re-key onto" contract.
+        return None
+
 
 def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enabled=True):
     scan = entries_store.scan()
@@ -490,3 +495,210 @@ def test_revive_does_not_duplicate_a_legacy_named_session(tmp_path):
     assert tmux.created == [], "spawned a duplicate for an already-parked legacy session"
     assert outcome.revived == []
     assert outcome.reset == [42]
+
+
+# --- revived sessions land in the journal under their live pid (#58) ------
+#
+# The reviver spawns `tmux new-session -- claude ...`, so the claude runs
+# with no shim between it and tmux and never calls `crr register`. Every
+# revived conversation was therefore invisible to crr: the only entry stayed
+# keyed to the long-dead shell pid, so the card read "crashed" and offered
+# no Kick while the conversation was alive and well.
+
+class _PidTmux(FakeTmux):
+    """FakeTmux that also reports a pane pid, like the real adapter."""
+
+    def __init__(self, live=(), pane_pid=2016):
+        super().__init__(live)
+        self._pane_pid = pane_pid
+
+    def session_pid(self, name):
+        return self._pane_pid
+
+
+def test_revival_rekeys_the_entry_onto_the_live_claude_pid(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude())
+    tmux = _PidTmux(pane_pid=2016)
+    _run(store, tmux)
+
+    assert store.read(2016), "the live conversation has no card"
+    with pytest.raises(KeyError):
+        store.read(1311532)  # the dead shell pid is not a second card
+
+
+def test_rekeyed_entry_carries_the_CURRENT_boot_so_it_classifies_live(tmp_path):
+    # classify() short-circuits to CRASHED on a boot mismatch WITHOUT
+    # consulting the pid, so keeping the old boot id would leave the card
+    # crashed no matter how alive the process is.
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude())
+    _run(store, _PidTmux(pane_pid=2016))
+    assert store.read(2016)["boot_id"] == FakeBoot().current()
+
+
+def test_an_already_parked_session_is_adopted_on_the_next_pass(tmp_path):
+    # The five conversations already parked on the reporting host must not
+    # stay invisible until something re-revives them.
+    store = JournalStore(tmp_path)
+    name = session_name({"claude": _claude()})
+    _seed(store, 1311532, claude=_claude(), tmux_session=name)
+    tmux = _PidTmux(live={name}, pane_pid=2016)
+    _run(store, tmux)
+
+    assert tmux.created == []          # already live: nothing respawned
+    assert store.read(2016)
+    with pytest.raises(KeyError):
+        store.read(1311532)
+
+
+def test_rekey_refuses_to_clobber_a_slot_owned_by_a_different_session(tmp_path):
+    # Same discipline as adopt/retrack: a silent overwrite would destroy
+    # another conversation's revival data.
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude(_SID_A))
+    _seed(store, 2016, claude=_claude(_SID_B))   # the pane pid is taken
+    _run(store, _PidTmux(pane_pid=2016))
+
+    assert store.read(2016)["claude"]["session_id"] == _SID_B  # untouched
+    assert store.read(1311532)                                  # original kept
+
+
+def test_rekey_is_skipped_when_the_pane_pid_is_unknown(tmp_path):
+    # None means "could not determine" — never guess a pid to re-key onto.
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude())
+    _run(store, _PidTmux(pane_pid=None))
+    assert store.read(1311532)  # left exactly as it was
+
+
+# --- Close must stick for a parked session (#58) --------------------------
+#
+# Close arms a close flag that the SHIM's repair loop consumes; the shim then
+# deregisters, which is what actually stops the watchdog. A tmux-revived
+# claude has no shim, so nothing consumed the flag, the entry stayed, and the
+# watchdog revived the very conversation the user just closed — within 30s.
+
+class _Flags:
+    def __init__(self, armed=None):
+        self.armed = dict(armed or {})
+        self.cleared = []
+
+    def read(self, pid):
+        return self.armed.get(pid)
+
+    def clear(self, pid):
+        self.cleared.append(pid)
+        self.armed.pop(pid, None)
+
+
+def test_a_close_flagged_entry_is_not_revived(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 2016, claude=_claude())
+    tmux = FakeTmux()
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=_Flags({2016: ("close", None)}),
+    )
+    assert tmux.created == [], "resurrected a conversation the user closed"
+    assert outcome.revived == []
+
+
+def test_a_close_flagged_entry_is_archived_terminally_and_delisted(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 2016, claude=_claude())
+    flags = _Flags({2016: ("close", None)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags)
+    with pytest.raises(KeyError):
+        store.read(2016)                       # gone from the active journal
+    assert archive.read(_claude()["session_id"])["reason"] == "closed"
+    assert flags.cleared == [2016]             # and the flag does not linger
+
+
+def test_a_closed_archive_record_is_never_revived(tmp_path):
+    # Terminal, like gave-up/dismissed: the archive must not resurrect it.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 2016, claude=_claude())
+    archive.archive(store.read(2016), "closed", _NOW)
+    store.remove(2016)
+    tmux = FakeTmux()
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+                   max_strikes=3, now=_NOW, remote_control_enabled=True)
+    assert tmux.created == []
+
+
+def test_a_relaunch_flag_does_not_stop_a_revival(tmp_path):
+    # Kick means "bring it back" — only close is terminal.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 2016, claude=_claude())
+    tmux = FakeTmux()
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+                   max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=_Flags({2016: ("relaunch", _SID_A)}))
+    assert len(tmux.created) == 1
+
+
+# --- a kicked conversation comes back WITH a tab (#62) --------------------
+#
+# Kick signals and returns; the watchdog creates the replacement ~30s later,
+# so the tab can only come from here. The relaunch flag is the signal that
+# THIS revival was asked for: the shim consumes it for a shim-managed
+# session, but a tmux-parked one has no shim (#58), so it survives to this
+# sweep. Crash-driven revivals carry no flag and must stay tabless — the
+# reporting host revives 13 conversations at boot.
+
+class _Tab:
+    def __init__(self, fail=False):
+        self.opened = []
+        self._fail = fail
+
+    def available(self):
+        return True
+
+    def open_tab(self, argv, cwd=None):
+        if self._fail:
+            raise RuntimeError("wt boom")
+        self.opened.append(list(argv))
+
+
+def test_a_kicked_session_is_revived_with_a_tab(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab = _Tab()
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"])})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=tab)
+    assert tab.opened, "kicked session came back with nothing pointing at it"
+    assert tab.opened[0][-1] == session_name({"claude": _claude()})
+    assert flags.cleared == [899149], "the flag must not re-open a tab next sweep"
+
+
+def test_a_crash_driven_revival_opens_no_tab(tmp_path):
+    # 13 conversations revive at boot on the reporting host. None asked for.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tab = _Tab()
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=_Flags(), tab_spawner=tab)
+    assert tab.opened == []
+
+
+def test_a_failed_tab_never_costs_the_revival(tmp_path):
+    # The revival is durable by the time the tab is attempted; a spawner
+    # failure is convenience lost, never the conversation.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tmux = FakeTmux()
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=_Flags({899149: ("relaunch", _claude()["session_id"])}),
+        tab_spawner=_Tab(fail=True),
+    )
+    assert outcome.revived == [899149]
+    assert len(tmux.created) == 1

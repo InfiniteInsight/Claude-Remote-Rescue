@@ -899,11 +899,11 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_46():
-    """v46: the card reports whether the phone can reach this session, from
+def test_page_version_is_47():
+    """v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
-    (v45 rendered the parked state as 'restored')."""
-    assert web.PAGE_VERSION == 46
+    (v46 gave parked cards Kick/Close, #58)."""
+    assert web.PAGE_VERSION == 47
 
 
 def test_page_renders_the_parked_state():
@@ -922,13 +922,14 @@ def test_key_explains_the_parked_state():
     assert "restored" in key
 
 
-def test_parked_cards_get_the_crashed_action_set():
-    # ops.py classifies a parked session as CRASHED, so it accepts
-    # Reopen/Dismiss/Untrack/Un-tmux and refuses Kick/Close. If the card
-    # branches on "crashed" alone, a parked card offers two buttons that
-    # always fail and loses the four that work.
+def test_parked_cards_get_their_own_action_set():
+    # [#58] Was `..._the_crashed_action_set`. A parked session is no longer
+    # CRASHED operationally — the journal is re-keyed onto the claude in the
+    # pane — so it gets its own arm with the running-session controls rather
+    # than borrowing the crashed one, where Kick/Close were unavailable and
+    # Dismiss would only ever refuse.
     page = web.load_page()
-    assert 's.state === "crashed" || s.state === "parked"' in page
+    assert 'else if (s.state === "parked")' in page
 
 
 def test_parked_renders_as_restored_not_as_the_raw_enum():
@@ -1446,3 +1447,16 @@ def test_page_offers_retry_only_when_an_action_came_back_degraded():
     page = web.render_page()
     assert "notice-retry" in page
     assert "j.degraded" in page
+
+
+def test_a_parked_card_offers_the_running_session_controls(page_source=None):
+    # [#58] A parked conversation is operationally LIVE now (the journal is
+    # re-keyed onto the claude in the pane), so it must offer Kick and Close
+    # — the controls for "reconnect this" and "end this" — alongside the
+    # re-homing pair. Reopen stays (it attaches a tab); Dismiss goes, since
+    # it requires CRASHED and would only ever refuse.
+    page = web.render_page()
+    parked_arm = page.split('else if (s.state === "parked") {')[1].split("} else")[0]
+    for label in ("Kick", "Close", "Untrack", "Un-tmux", "Reopen"):
+        assert f'"{label}"' in parked_arm, f"parked card is missing {label}"
+    assert '"Dismiss"' not in parked_arm

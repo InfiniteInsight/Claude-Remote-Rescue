@@ -1581,6 +1581,9 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
         def new_detached_session(self, name, cwd, argv):
             pass
 
+        def session_pid(self, name):
+            return None  # unknown: no re-key (#58)
+
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
 
     store = JournalStore(tmp_path / "state")
@@ -1598,6 +1601,9 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     entry = store.read(7)
     assert entry["claude"]["sid_source"] == "verified"  # upgrade survived revive's write
     assert entry["tmux_session"] == f"crr-{_G1_SID}"  # and it was actually revived
+
+    def session_pid(self, name):
+        return None  # unknown: no re-key (#58)
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
@@ -1619,6 +1625,9 @@ def test_revive_names_gave_up_pids(tmp_path, monkeypatch, capsys):
 
         def new_detached_session(self, name, cwd, argv):
             pass
+
+        def session_pid(self, name):
+            return None  # unknown: no re-key (#58)
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
     monkeypatch.setattr(
@@ -1646,6 +1655,9 @@ def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
 
         def new_detached_session(self, name, cwd, argv):
             pass
+
+        def session_pid(self, name):
+            return None  # unknown: no re-key (#58)
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
     monkeypatch.setattr(
@@ -1682,6 +1694,9 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
         def new_detached_session(self, name, cwd, argv):
             pass
 
+        def session_pid(self, name):
+            return None  # unknown: no re-key (#58)
+
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
     monkeypatch.setattr(
         cli.reviver, "revive_crashed",
@@ -1716,6 +1731,9 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
 
         def new_detached_session(self, name, cwd, argv):
             pass
+
+        def session_pid(self, name):
+            return None  # unknown: no re-key (#58)
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
 
@@ -2908,7 +2926,15 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
     try:
         rc = cli.main(["revive"])
         assert rc == 0
-        entry = store.read(4242)
+        # [#58] The entry is re-keyed onto the pid actually running in the
+        # pane — the revived claude never runs the shim, so this is the only
+        # way the live conversation gets a card at all. The seeded shell pid
+        # is gone precisely because the conversation moved off it.
+        with pytest.raises(KeyError):
+            store.read(4242)
+        entry = next(e for e in store.scan().entries
+                     if (e.get("claude") or {}).get("session_id") == sid)
+        assert entry["pid"] != 4242
         assert entry["tmux_session"] == f"crr-{sid}"
         assert entry["revive_strikes"] == 1
         sessions = subprocess.run(
@@ -3954,6 +3980,45 @@ def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatc
     out = capsys.readouterr().out
     assert "[restored]" in out
     assert "[parked]" not in out
+
+
+def test_revive_passes_the_flag_store_so_close_actually_sticks(tmp_path, monkeypatch):
+    # [#58] The reviver can only honour a close flag if the CLI hands it one.
+    # Without this wiring the fix is inert in the only place it runs.
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["flags"] = kw.get("flags")
+        from crr.core.reviver import RevivalOutcome
+        return RevivalOutcome([], [], [])
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    monkeypatch.setattr(cli.tmux, "RealTmux",
+                        lambda t: type("T", (), {"available": lambda s: True})())
+    assert cli.main(["revive"]) == 0
+    assert seen["flags"] is not None, "revive ran without a flag store"
+
+
+def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
+    tmp_path, monkeypatch
+):
+    # [#62] The reviver can only open the tab if the CLI hands it a spawner.
+    # Without this wiring the fix is inert in the only place it runs.
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["tab_spawner"] = kw.get("tab_spawner")
+        from crr.core.reviver import RevivalOutcome
+        return RevivalOutcome([], [], [])
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: ("SPAWNER", True))
+    monkeypatch.setattr(cli.tmux, "RealTmux",
+                        lambda t: type("T", (), {"available": lambda s: True})())
+    assert cli.main(["revive"]) == 0
+    assert seen["tab_spawner"] == "SPAWNER"
 
 
 def test_reachability_matches_a_session_journaled_as_the_claude_process_itself(tmp_path, monkeypatch):

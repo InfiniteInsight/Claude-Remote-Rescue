@@ -29,7 +29,7 @@ from crr.core import contracts
 from crr.core import reachability as _reachability
 from crr.core import settings as _settings
 from crr.core.config import DEFAULTS
-from crr.core.classifier import CRASHED, classify
+from crr.core.classifier import CRASHED, classify, LIVE
 from crr.core.context_pressure import pressure as _pressure
 from crr.core.discovery import ADOPTED_BOOT_ID
 from crr.core.ports import BootIdentity, ProcessProbe
@@ -74,15 +74,26 @@ class _MemoTtyProbe:
 
 
 def _display_state(entry, boot_identity, probe, live_tmux_sessions) -> str:
-    """The card's state: the operational state, except that a CRASHED entry
-    parked in a confirmed-live tmux session reads PARKED.
+    """The card's state: the operational state, except that an entry sitting
+    in a confirmed-live tmux session reads PARKED.
 
-    One-directional by construction: only CRASHED is ever rewritten, so
-    tmux liveness can rescue an entry from a wrong `crashed` but can never
-    push a live or ghost session into `parked`.
+    CRASHED covers entries not yet re-keyed. LIVE covers the post-#58 shape:
+    a revived conversation is journaled onto the claude running in the pane,
+    and a tmux pane HAS a controlling tty, so it classifies LIVE — without
+    this it would read as a plain `live` card and lose the "this is in tmux,
+    not a terminal you own" signal entirely.
+
+    Still one-directional and still narrow: GHOST is never rewritten, and
+    the LIVE case additionally requires ``host == "tmux"``, so a session the
+    user is running in their own terminal can never be projected into
+    `parked` just because some tmux session shares its name.
     """
     state = classify(entry, boot_identity, probe)
-    if state != CRASHED or not live_tmux_sessions:
+    if not live_tmux_sessions:
+        return state
+    if state not in (CRASHED, LIVE):
+        return state
+    if state == LIVE and entry.get("host") != "tmux":
         return state
     name = entry.get("tmux_session")
     return PARKED if name and name in live_tmux_sessions else state

@@ -189,6 +189,13 @@ def _child_groups(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list
     shell_pgid = next((pgid for pid, _ppid, pgid, _a in rows if pid == shell_pid), None)
     if shell_pgid is None:
         return []
+    # A revived session is journaled under the claude process itself, which
+    # has no claude children — claude_groups() would find nothing and Kick
+    # would signal nothing (#58). Measured live: claude_groups(2016) == [].
+    # A journaled shell is never claude, so the usual path is untouched.
+    self_argv0 = next((a for pid, _ppid, _pgid, a in rows if pid == shell_pid), "")
+    if _is_claude_argv0(self_argv0):
+        return [shell_pgid] if shell_pgid > 0 else []
     groups: list[int] = []
     for _pid, ppid, pgid, argv0 in rows:
         if (ppid == shell_pid and pgid != shell_pgid and pgid > 0
