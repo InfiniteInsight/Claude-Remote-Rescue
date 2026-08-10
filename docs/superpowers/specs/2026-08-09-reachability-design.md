@@ -112,8 +112,31 @@ theoretical by the transition counter below.
 Independent of everything else, and the most urgent because it is wrong
 right now on 16 cards.
 
-A journal entry whose `tmux_session` is **confirmed alive** is not
-crashed. `classify()` gains a fourth state:
+**Corrected 2026-08-09 during planning.** The first draft of this phase
+put the new state inside `classify()`. That is wrong and would have broken
+two ops on their only valid input: `ops.detmux` and `ops.untmux` both
+guard with `if state != CRASHED: refuse (… re-homes revived sessions
+only)`, and a tmux-parked session is precisely what they re-home.
+`ops.dismiss` guards the same way, and `reviver`'s crashed-entry loop
+would skip parked entries earlier than today, changing the "already
+running N" accounting. Ten call sites, six of them gating destructive
+operations.
+
+`classify()` is the **operational** classifier — it answers *may I act on
+this pid*, and `crashed` is the right answer for a parked session, which
+is exactly why `detmux` keys on it. It is left untouched.
+
+The lie lives in the card's `state`, which is a **display projection**.
+That projection is computed in `status.py` and nowhere else:
+
+```python
+state = classify(entry, boot_identity, probe)
+if state == CRASHED and tmux_alive(entry.get("tmux_session")):
+    state = PARKED          # display only; ops still see CRASHED
+```
+
+A journal entry whose `tmux_session` is **confirmed alive** is not, to a
+reader, crashed. The card gains a fourth state:
 
 ```
 live     shell + claude running with a controlling terminal
@@ -136,8 +159,15 @@ honour F16's tri-state explicitly:
 This keeps the rule one-directional: tmux liveness can only ever *rescue*
 an entry from a wrong `crashed`, never push one into it.
 
-Card shows `restored — attach or reopen`. `STATES` gains `parked`;
-`SESSIONS_CONTRACT_VERSION` bumps.
+Card shows `restored — attach or reopen`. `contracts.STATES` gains
+`parked` (it validates the card, not `classify`'s return);
+`SESSIONS_CONTRACT_VERSION` bumps. `classifier.py` is unchanged, so
+`ops.py`, `reviver.py` and `cli._kick_dropped_bridges` need no edits and
+no re-testing of their guards.
+
+The tmux-liveness lookup is the set `assemble_sessions` can be given once
+per poll — the same injection shape as `tail_facts` — so core still does
+no I/O.
 
 ### Phase 1 — the reachability detector
 
