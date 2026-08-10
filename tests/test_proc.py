@@ -124,7 +124,17 @@ def test_a_zombie_only_group_is_not_alive():
             pytest.skip("could not produce a zombie on this platform")
         # Deliberately NOT reaped yet: this is the state the real ops hit,
         # where the shim shell has not returned from wait() yet.
-        assert _group_alive(pgid) is False, "a zombie counted as a live process"
+        # Diagnostic in the message: if ps cannot report zombies on this
+        # platform (macOS CI has been the hard case), the log must say so
+        # rather than leaving a bare True != False.
+        from crr.adapters.process_probe import _group_states_cmd
+        probe = subprocess.run(_group_states_cmd(), capture_output=True, text=True)
+        rows = [ln for ln in probe.stdout.splitlines()
+                if ln.split(None, 1) and ln.split(None, 1)[0] == str(pgid)]
+        assert _group_alive(pgid) is False, (
+            f"a zombie counted as a live process; ps rc={probe.returncode} "
+            f"stderr={probe.stderr.strip()!r} rows-for-pgid={rows!r}"
+        )
     finally:
         if proc.poll() is None:
             try:

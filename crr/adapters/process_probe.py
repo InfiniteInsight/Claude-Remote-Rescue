@@ -394,3 +394,11 @@ class PsProcessController:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass  # it died in the race between the check and the kill
+            except PermissionError:
+                # Not a permission problem: the SIGTERM above proved this
+                # group is ours. macOS returns EPERM for a group whose only
+                # remaining members are zombies — exited, unreaped, and
+                # unkillable — where Linux quietly succeeds (#65). Treating
+                # it as a failed kill made `crr kick`/`close` report "failed
+                # to signal" on macOS for a kill that had already landed.
+                pass
