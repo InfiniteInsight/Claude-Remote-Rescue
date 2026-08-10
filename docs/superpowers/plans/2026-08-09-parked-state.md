@@ -36,6 +36,16 @@ same shape as `tail_facts`, so core does no I/O.
   If a task seems to need it, stop — the design is being violated.
 - F16 tri-state: `tmux.list_sessions()` returns `set | None`. `None` means
   "could not determine" and may never be treated as "no sessions exist".
+- **Tasks 1 and 2 are NOT independently shippable and must never be merged
+  apart.** Task 1 teaches `status.py` to emit `parked`; Task 2 teaches
+  `contracts.STATES` to accept it. Between them the assembler can produce a
+  card its own validator rejects. The suite stays green only because no
+  test both passes `live_tmux_sessions` and calls
+  `validate_sessions_payload` — a gap, not a guarantee. (Found by the Task 1
+  implementer, 2026-08-10.)
+- When a step says "if the test passes here, stop", that applies only to the
+  NEW tests named in that step. A `-k` selector may also match pre-existing
+  tests, which pass unconditionally and are not a signal.
 - **Version floors verified against `main` at 7b0f9c6:** `PAGE_VERSION`
   is 43, `SESSIONS_CONTRACT_VERSION` is 10, `CONFIG_DEFAULTS_VERSION` is
   14. Re-check these before starting — another session shipped #49 while
@@ -121,7 +131,9 @@ def test_a_live_session_is_never_demoted_to_parked():
 Run: `.venv/bin/python -m pytest tests/test_status.py -q -k "parked or tmux"`
 
 Expected: FAIL — `assemble_sessions() got an unexpected keyword argument
-'live_tmux_sessions'`. If any test passes here, stop: the behaviour
+'live_tmux_sessions'`, on all five NEW tests. The selector also matches the
+pre-existing `test_card_carries_tmux_session`, which passes and is not a
+signal. If one of the five new tests passes here, stop: the behaviour
 already exists and the test is not testing what it claims.
 
 - [ ] **Step 3: Implement the projection**
@@ -201,6 +213,14 @@ git commit -m "feat(status): a tmux-parked session reads 'parked', not 'crashed'
 
 **Files:**
 - Modify: `crr/core/contracts.py`
+- Modify: `crr/core/status.py` — **one word**, the module docstring's
+  `(contract v10)` → `(contract v11)`. This is FORCED, not optional:
+  `tests/test_version_ledger.py::test_status_docstring_version_matches_the_shipped_contract`
+  regexes that docstring out of `status.py`'s text and compares it to
+  `SESSIONS_CONTRACT_VERSION`, so bumping the constant without it leaves
+  the tree red and the pre-commit hook refuses the commit. No logic in
+  `status.py` may change. (The first draft of this plan listed `status.py`
+  as untouchable and was wrong — found by the Task 2 implementer.)
 - Test: `tests/test_contracts.py`, `tests/test_version_ledger.py` (no edit,
   must keep passing)
 
@@ -279,7 +299,13 @@ git commit -m "feat(contracts): sessions v11 adds the parked display state"
 
 **Files:**
 - Modify: `crr/cli.py` (the three `assemble_sessions(` call sites)
-- Test: `tests/test_cli.py`
+- Test: `tests/test_cli.py`, `tests/test_status.py`,
+  `tests/test_e2e_linux.py` — the last one is NOT optional. It is the only
+  test in the suite that stands up a real tmux server and actually revives
+  a session, and its `assert card["state"] == "crashed"` predates `parked`.
+  It will fail with `assert 'parked' == 'crashed'` once the wiring lands.
+  That failure is the feature working end to end; update the assertion (do
+  not weaken it) and say so in a comment.
 
 **Interfaces:**
 - Consumes: `assemble_sessions(live_tmux_sessions=…)` from Task 1.
@@ -316,11 +342,33 @@ def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkey
     assert payload["sessions"][0]["state"] == "parked"
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+Also add to `tests/test_status.py` — the assembler and the validator in ONE
+path. Task 1 tested the assembler, Task 2 tested the validator, and between
+them the assembler could emit a state the validator rejected with nothing to
+catch it. That hole stayed open through both tasks (found by the Task 2
+implementer); close it here:
 
-Run: `.venv/bin/python -m pytest tests/test_cli.py -q -k parked`
+```python
+def test_a_parked_card_survives_its_own_validator():
+    from crr.core import contracts
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
+    assert payload["sessions"][0]["state"] == "parked"
+    contracts.validate_sessions_payload(payload)   # the half nothing covered
+```
 
-Expected: FAIL — `assert 'crashed' == 'parked'`.
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_cli.py tests/test_status.py -q -k parked`
+
+Expected: the cli test FAILs with `assert 'crashed' == 'parked'`. The
+status test PASSES already — Tasks 1 and 2 made it true; it is a
+regression pin, not a driver, and that is why it belongs here rather than
+being skipped.
 
 - [ ] **Step 3: Implement**
 
@@ -342,7 +390,10 @@ def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
 ```
 
 Then at each of the three `assemble_sessions(` call sites in `cli.py`
-(the `status` command, the web provider, and `_whoami_card`), add:
+(the `status` command, the web provider, and `_whoami_card` — which also
+backs the `session-start` hook, so every Claude session start pays one
+extra tmux fork; once per session, inside an existing catch-all, judged
+acceptable), add:
 
 ```python
         live_tmux_sessions=_live_tmux_sessions(config),
@@ -354,7 +405,10 @@ Locate them with:
 grep -n "assemble_sessions(" crr/cli.py
 ```
 
-There are exactly three. All three must be updated — a missed one shows
+There are exactly three. Resolve the set INSIDE the web `provider()`
+closure, not hoisted beside `_tail_facts_extractor` — hoisting freezes tmux
+liveness at service startup and the dashboard answers with boot-time state
+forever. All three must be updated — a missed one shows
 `crashed` on that surface while the others show `parked`, which is the
 same inconsistency this plan exists to remove.
 
@@ -362,12 +416,12 @@ same inconsistency this plan exists to remove.
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/lint-imports`
 
-Expected: PASS (1236+ tests) and `Contracts: 1 kept, 0 broken`.
+Expected: PASS (1272 at time of writing) and `Contracts: 1 kept, 0 broken`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crr/cli.py tests/test_cli.py
+git add crr/cli.py tests/test_cli.py tests/test_status.py tests/test_e2e_linux.py
 git commit -m "feat(cli): inject live tmux sessions so parked cards render everywhere"
 ```
 
@@ -524,7 +578,7 @@ Expected: all tests PASS and every block prints `OK`.
 
 ```bash
 git add crr/core/page.html crr/core/web.py tests/test_web.py
-git commit -m "feat(web): render the parked state as 'restored' (page v43)"
+git commit -m "feat(web): render the parked state as 'restored' (page v44)"
 ```
 
 ---
@@ -532,6 +586,15 @@ git commit -m "feat(web): render the parked state as 'restored' (page v43)"
 ### Task 5: Merge, deploy, verify on the real machine
 
 **Files:** none (verification only).
+
+- [ ] **Step 0: Confirm Tasks 1 and 2 are both present**
+
+```bash
+git log --oneline main..HEAD
+```
+
+Expected: at least the Task 1 and Task 2 commits. Merging Task 1 without
+Task 2 ships an assembler that can emit a card its own validator rejects.
 
 - [ ] **Step 1: Confirm the untouchable files were not touched**
 
@@ -556,7 +619,7 @@ deliberately preserves.
 ```bash
 git fetch -q origin && git rev-parse origin/main   # confirm unmoved
 git checkout main
-git merge --no-ff -m "Merge feat/parked-state: a restored session stops reading crashed" feat/parked-state
+git merge --no-ff -m "Merge phase 0: a restored session stops reading crashed" worktree-phase0-parked-state
 .venv/bin/python -m pytest -q && .venv/bin/lint-imports
 ```
 

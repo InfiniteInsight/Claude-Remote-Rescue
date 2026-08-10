@@ -99,6 +99,26 @@ def _tail_facts_extractor(config: cfg.Config):
     )
 
 
+def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
+    """Tmux session names confirmed alive, or None when tmux cannot say.
+
+    Resolved ONCE per status build and injected into `assemble_sessions`
+    (core does no I/O). Returns None on F16's tri-state unknown so the
+    display projection declines to promote anything — an unconfirmed query
+    must not assert that a session is running. A host with no tmux at all
+    is a different, confident answer: `set()`.
+
+    Called per build, never cached: tmux liveness is a live property, like
+    the tab spawner resolved per action in `_cmd_web` — a set resolved at
+    service startup would freeze the dashboard's answer for the life of the
+    process.
+    """
+    t = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not t.available():
+        return set()
+    return t.list_sessions()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crr",
@@ -524,6 +544,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         boot,
         probe,
         tail_facts=_tail_facts_extractor(config),
+        live_tmux_sessions=_live_tmux_sessions(config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
         bridge_stale_records=config.get("bridge_stale_records"),
@@ -565,7 +586,12 @@ def _print_status_human(payload: dict) -> None:
         # worth the extra characters on an otherwise compact line.
         sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
         model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
-        print(f"#{card['pid']} · {card['sid8']} [{card['state']}]{model} {card['cwd']}{dup}{sid_tag}")
+        # `parked` is the contract value; "restored" is what it means to a
+        # reader, and it is the word the dashboard already shows. Printing the
+        # raw enum here would describe one session with two different words
+        # depending on which surface you looked at.
+        shown = "restored" if card["state"] == "parked" else card["state"]
+        print(f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}")
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
@@ -1874,6 +1900,7 @@ def _whoami_card(config=None) -> dict | None:
     payload = status.assemble_sessions(
         [e for e in scan.entries if e["pid"] == shell_pid], boot, probe,
         tail_facts=_tail_facts_extractor(config),
+        live_tmux_sessions=_live_tmux_sessions(config),
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
         bridge_stale_records=config.get("bridge_stale_records"),
@@ -2463,6 +2490,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
             boot,
             probe,
             tail_facts=extract,
+            # Inside provider(), NOT hoisted beside `extract`: tmux liveness
+            # is a live property re-asked each poll, not a startup fact.
+            live_tmux_sessions=_live_tmux_sessions(config),
             context_tight_fraction=config.get("context_tight_fraction"),
             context_compact_fraction=config.get("context_compact_fraction"),
             bridge_stale_records=config.get("bridge_stale_records"),

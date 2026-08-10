@@ -26,6 +26,7 @@
   .kterm { cursor: help; }
   .kterm:hover { color: #cdd3dd; }
   #key .k-live::before, #key .k-ghost::before, #key .k-crashed::before,
+  #key .k-parked::before,
   #key .k-tight::before, #key .k-will-compact::before {
     content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     margin-right: 5px; vertical-align: middle;
@@ -33,6 +34,9 @@
   .k-live::before { background: #46c26a; }
   .k-ghost::before { background: #e0a53b; }
   .k-crashed::before { background: #e05252; }
+  /* Teal, not red: a parked session is healthy — the conversation is alive
+     inside tmux. Same family as the "latest" badge, not the alarm tier. */
+  .k-parked::before { background: #46c2b0; }
   .k-tight::before { background: #e0a53b; }
   .k-will-compact::before { background: #e05252; }
 
@@ -81,6 +85,7 @@
   .badge.live { background: #123a22; color: #46c26a; }
   .badge.ghost { background: #3a2f12; color: #e0a53b; }
   .badge.crashed { background: #3a1616; color: #e05252; }
+  .badge.parked { background: #123a3a; color: #46c2b0; }
   .badge.dup-badge { margin-left: 8px; background: #1e2740; color: #9fb0f5; text-transform: none; letter-spacing: 0; }
   .badge.dup-badge.uncertain { background: #3a2f12; color: #e0a53b; }
   .badge.pressure-tight { margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none; letter-spacing: 0; }
@@ -273,7 +278,7 @@
   <span class="meta" id="count"></span>
 </header>
 <div id="key">
-  <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span></span>
+  <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span><span class="k-parked kterm" data-help="Running inside a detached tmux session — crr restored it after a reboot. The conversation is alive; Reopen brings it back into a terminal tab, or attach with: tmux attach -t &lt;name&gt;.">restored</span></span>
   <span class="kgroup"><span class="klabel">context</span><span class="k-tight kterm" data-help="Estimated past 70% of this model's context window. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">tight</span><span class="k-will-compact kterm" data-help="Estimated at or over the window, so resuming will compact and lose detail. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.">will compact on revive</span><span class="kterm" data-help="crr has no confirmed context window for this session's model — usually because no model could be read from the transcript at all (about 1 in 3 carry none). No badge would read as 'fine'; this says crr genuinely does not know.">context unknown</span></span>
   <span class="kgroup"><span class="klabel">remote control</span><span class="kterm" data-help="This session's Remote Control link to the phone has gone quiet while claude keeps working locally — the mobile app shows it as Disconnected. Kick restarts claude so it reconnects, or turn on auto-kick in Settings to have crr do that for you.">remote control dropped</span><span class="kterm" data-help="crr did not finish checking this session's Remote Control link — either the marker sits further back than the scan window reaches, or watching is turned off in config. It is not a claim that Remote Control is off; crr never auto-kicks a session in this state.">remote control unknown</span></span>
   <span class="kgroup"><span class="klabel">sid</span><span class="kterm" data-help="How sure crr is that it identified the right conversation. injected = certain: crr generated the session id and passed it to claude.">injected</span><span class="kterm" data-help="Uncertain: the id was inferred from the newest transcript in that directory, so it may be the wrong conversation.">guessed</span><span class="kterm" data-help="Confirmed: a guessed id whose transcript has been written to since the session started.">verified</span></span>
@@ -464,7 +469,12 @@ function jumpToSession(sid) {
   void el0.offsetWidth;      // restart the animation on a repeat click
   el0.classList.add("flash");
 }
-var STATE_ORDER = { crashed: 0, ghost: 1, live: 2 };  // crashed floats to the top
+// crashed floats to the top. parked sits directly under it because parked IS
+// crashed operationally (spec 2026-08-09, Phase 0) — the same fact that gives
+// it the crashed action set. Every state must appear here: the comparator has
+// no fallback, so an unranked state yields `undefined - n` = NaN, which `||`
+// drops through to the pid tiebreak, making the comparator intransitive.
+var STATE_ORDER = { crashed: 0, parked: 1, ghost: 2, live: 3 };
 
 // Stable color per group key (cwd/host): hash -> hue. Deterministic, no state.
 function colorFor(key) {
@@ -604,7 +614,8 @@ function renderCard(s, uncertain, groupColor, latest) {
   id.appendChild(src);
   top.appendChild(id);
   var badge = el("span", "badge " + s.state);
-  badge.textContent = s.state;
+  // "parked" is the contract value; "restored" is what a reader needs.
+  badge.textContent = s.state === "parked" ? "restored" : s.state;
   top.appendChild(badge);
   if (isDup) {
     var dup = el("span", "badge dup-badge" + (isUncertain ? " uncertain" : ""));
@@ -729,7 +740,10 @@ function renderCard(s, uncertain, groupColor, latest) {
     });
     actions.appendChild(b);
   }
-  if (s.state === "crashed") {
+  // parked is CRASHED operationally (see spec Phase 0) — ops.py accepts
+  // exactly these four and refuses Kick/Close, so the card must offer the
+  // same set it does for crashed.
+  if (s.state === "crashed" || s.state === "parked") {
     addBtn("Reopen", "reopen", false, false);
     addBtn("Dismiss", "dismiss", false, false);
     if (s.tmux_session) {        // revived into tmux: offer re-homing
@@ -865,9 +879,11 @@ var expandedDups = {};
 // identical-looking cards is noise, and the pile itself is the signal
 // ("this conversation has 3 entries"). Click to fan out, click to restack.
 // The card shown on top is the one you would act on: a live/ghost entry
-// before a crashed one, then most-recent.
+// before a parked one, a parked one before a crashed one, then most-recent.
 function stackTop(members) {
-  var rank = { live: 0, ghost: 1, crashed: 2 };
+  // parked outranks crashed: its conversation is alive in a tmux session,
+  // so it is the more actionable of the two if a stack holds both.
+  var rank = { live: 0, ghost: 1, parked: 2, crashed: 3 };
   return members.slice().sort(function (a, b) {
     var d = (rank[a.state] === undefined ? 9 : rank[a.state]) -
             (rank[b.state] === undefined ? 9 : rank[b.state]);

@@ -899,10 +899,59 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_44():
-    """v42: adopted badge + degraded auto-kick state (#40)
-    (v41 injected the flash + filter-debounce timings from config)."""
-    assert web.PAGE_VERSION == 44
+def test_page_version_is_45():
+    """v45: the parked state renders as 'restored' (spec 2026-08-09, Phase 0)
+    (v44 added the in-flight notice + manual retry on a degraded action, #53)."""
+    assert web.PAGE_VERSION == 45
+
+
+def test_page_renders_the_parked_state():
+    page = web.load_page()
+    assert "k-parked" in page
+    assert "restored" in page
+    # The colour rule alone is not a dot: `content`/`display`/width/height
+    # come from the scoped `#key ...::before` selector list, so a term left
+    # out of it renders with no dot at all.
+    assert "#key .k-parked::before" in page
+
+
+def test_key_explains_the_parked_state():
+    page = web.load_page()
+    key = page[page.index('id="key"'):page.index('id="key"') + 4000]
+    assert "restored" in key
+
+
+def test_parked_cards_get_the_crashed_action_set():
+    # ops.py classifies a parked session as CRASHED, so it accepts
+    # Reopen/Dismiss/Untrack/Un-tmux and refuses Kick/Close. If the card
+    # branches on "crashed" alone, a parked card offers two buttons that
+    # always fail and loses the four that work.
+    page = web.load_page()
+    assert 's.state === "crashed" || s.state === "parked"' in page
+
+
+def test_parked_renders_as_restored_not_as_the_raw_enum():
+    page = web.load_page()
+    assert 's.state === "parked" ? "restored" : s.state' in page
+
+
+def test_the_state_sort_ranks_parked():
+    # STATE_ORDER has no fallback: an unranked state yields `undefined`, and
+    # `undefined - 0` is NaN, which `||` treats as falsy and drops through to
+    # the pid tiebreak. That makes the comparator intransitive — parked vs.
+    # anything compares by pid while crashed vs. live compares by rank — and
+    # Array.prototype.sort's output is then implementation-defined.
+    page = web.load_page()
+    assert "var STATE_ORDER = { crashed: 0, parked: 1, ghost: 2, live: 3 };" in page
+
+
+def test_a_duplicate_stack_shows_the_parked_card_over_the_crashed_one():
+    # stackTop shows "the one you would act on". Its `undefined ? 9` guard
+    # sorts an unranked state LAST, so a stack holding a parked entry and a
+    # crashed one would surface the crashed card — but the parked entry's
+    # conversation is alive in tmux and is the more actionable of the two.
+    page = web.load_page()
+    assert "var rank = { live: 0, ghost: 1, parked: 2, crashed: 3 };" in page
 
 
 def test_page_distinguishes_a_degraded_store_from_a_user_off_switch():

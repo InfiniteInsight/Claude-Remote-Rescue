@@ -232,7 +232,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_10():
+def test_sessions_contract_version_is_11():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -240,7 +240,23 @@ def test_sessions_contract_version_is_10():
     # context_pressure) — no new key, but a v8 consumer has no case for the
     # new member, so the version must move.
     # v10 adds `adopted` and the `degraded` autokick state (#40).
-    assert contracts.SESSIONS_CONTRACT_VERSION == 10
+    # v11 adds the `parked` display state (spec 2026-08-09, Phase 0) — same
+    # shape of change as v9: no new key, one enum widens, and a v10 consumer
+    # has no case for the new member.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 11
+
+
+def test_states_enum_includes_parked():
+    assert contracts.STATES == ("live", "ghost", "crashed", "parked")
+
+
+def test_a_parked_card_validates():
+    # The gap Task 1 opened: `status.assemble_sessions` can emit
+    # state="parked" for an entry the reviver put in a live tmux session,
+    # and until STATES widened its own validator rejected that card.
+    p = _sessions_payload()
+    p["sessions"][0]["state"] = "parked"
+    contracts.validate_sessions_payload(p)
 
 
 def test_sessions_wrong_contract_version_rejected():
