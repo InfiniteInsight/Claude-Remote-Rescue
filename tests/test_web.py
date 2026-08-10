@@ -451,7 +451,8 @@ def test_post_action_dispatches_and_returns_result():
     resp = _post({"op": "reopen", "pid": 42}, action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("reopen", 42)
-    assert json.loads(resp.body) == {"ok": True, "message": "reopened 42", "degraded": False}
+    assert json.loads(resp.body) == {"contract": web.contracts.ACTION_CONTRACT_VERSION, "ok": True,
+        "message": "reopened 42", "degraded": False}
 
 
 def test_post_action_gate_refusal_is_409():
@@ -552,6 +553,7 @@ def test_post_detmux_is_accepted_and_dispatched():
     assert resp.status == 200
     assert seen["call"] == ("detmux", 42)
     assert json.loads(resp.body) == {
+        "contract": web.contracts.ACTION_CONTRACT_VERSION,
         "ok": True,
         "message": "de-tmuxed 42: attached crr-8a1b2c3d in a tab; crr no longer manages it",
         "degraded": False,
@@ -567,6 +569,7 @@ def test_post_untmux_is_accepted_and_dispatched():
     assert resp.status == 200
     assert seen["call"] == ("untmux", 42)
     assert json.loads(resp.body) == {
+        "contract": web.contracts.ACTION_CONTRACT_VERSION,
         "ok": True,
         "message": "un-tmuxed 42: claude --resume in a new tab; crr no longer manages it",
         "degraded": False,
@@ -655,7 +658,8 @@ def test_post_sid_action_adopt_dispatches_and_returns_result():
     resp = _post_sid({"op": "adopt", "sid": _VALID_SID}, sid_action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("adopt", _VALID_SID)
-    assert json.loads(resp.body) == {"ok": True, "message": f"adopted {_VALID_SID[:8]} — now tracked as recoverable", "degraded": False}
+    assert json.loads(resp.body) == {"contract": web.contracts.ACTION_CONTRACT_VERSION, "ok": True,
+        "message": f"adopted {_VALID_SID[:8]} — now tracked as recoverable", "degraded": False}
 
 
 def test_post_sid_action_adopt_gate_refusal_is_409():
@@ -675,7 +679,8 @@ def test_post_sid_action_dispatches_and_returns_result():
     resp = _post_sid({"op": "retrack", "sid": _VALID_SID}, sid_action_provider=act)
     assert resp.status == 200
     assert seen["call"] == ("retrack", _VALID_SID)
-    assert json.loads(resp.body) == {"ok": True, "message": f"retracked {_VALID_SID[:8]}", "degraded": False}
+    assert json.loads(resp.body) == {"contract": web.contracts.ACTION_CONTRACT_VERSION, "ok": True,
+        "message": f"retracked {_VALID_SID[:8]}", "degraded": False}
 
 
 def test_post_sid_action_gate_refusal_is_409():
@@ -1481,3 +1486,42 @@ def test_a_not_reachable_filter_exists():
     page = web.load_page()
     assert 'value="unreachable"' in page
     assert 'filterKey === "unreachable"' in page
+
+
+# --- the served action envelope satisfies its own validator (#55) ---------
+#
+# A contract nothing checks at the boundary is documentation. These are the
+# tests that would have caught #49 widening the shape silently.
+
+def test_the_served_action_result_validates_against_its_contract():
+    from crr.core import contracts
+    for ok, degraded in ((True, False), (True, True), (False, False)):
+        resp = _post({"op": "reopen", "pid": 42},
+                     action_provider=lambda o, p: (ok, "a message", degraded))
+        contracts.validate_action_result(json.loads(resp.body))
+
+
+def test_the_served_sid_action_result_validates_against_its_contract():
+    from crr.core import contracts
+    resp = _post_sid({"op": "adopt", "sid": _VALID_SID},
+                     sid_action_provider=lambda o, s: (True, "adopted", False))
+    contracts.validate_action_result(json.loads(resp.body))
+
+
+def test_both_endpoints_serve_the_SAME_envelope():
+    # One shape, not two copies free to drift — the reason #55 gives them a
+    # shared constant rather than one each.
+    a = json.loads(_post({"op": "reopen", "pid": 42},
+                         action_provider=lambda o, p: (True, "m", False)).body)
+    b = json.loads(_post_sid({"op": "adopt", "sid": _VALID_SID},
+                             sid_action_provider=lambda o, s: (True, "m", False)).body)
+    assert a == b
+
+
+def test_a_refusal_is_stamped_too():
+    # The 409 path is a served shape as much as the 200 path.
+    from crr.core import contracts
+    resp = _post({"op": "dismiss", "pid": 42},
+                 action_provider=lambda o, p: (False, "is live", False))
+    assert resp.status == 409
+    contracts.validate_action_result(json.loads(resp.body))

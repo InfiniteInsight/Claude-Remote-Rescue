@@ -632,3 +632,54 @@ def test_validators_do_not_mutate_input():
     before = copy.deepcopy(e)
     contracts.validate_journal_entry(e)
     assert e == before
+
+
+# --- the action envelope is a contracted served shape (#55) ---------------
+#
+# #36 enumerated the five GET panels and missed the two POST result shapes.
+# #49 then widened them from {ok, message} to {ok, message, degraded} — the
+# exact change AGENTS.md governs — with no version to bump and no validator
+# to update, so a served shape moved silently.
+
+def _action_result(**over):
+    base = {"contract": contracts.ACTION_CONTRACT_VERSION, "ok": True,
+            "message": "reopened 42", "degraded": False}
+    base.update(over)
+    return base
+
+
+def test_a_well_formed_action_result_validates():
+    contracts.validate_action_result(_action_result())
+
+
+def test_a_missing_degraded_is_rejected():
+    # The pre-#49 shape. It must not quietly pass: a client that drops
+    # `degraded` renders a partial failure as a plain success.
+    payload = _action_result()
+    del payload["degraded"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_action_result(payload)
+
+
+def test_an_unstamped_result_is_rejected():
+    payload = _action_result()
+    del payload["contract"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_action_result(payload)
+
+
+def test_a_future_contract_version_is_refused():
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_action_result(
+            _action_result(contract=contracts.ACTION_CONTRACT_VERSION + 1))
+
+
+def test_wrong_types_are_rejected():
+    for bad in ({"ok": "yes"}, {"degraded": 1}, {"message": None}):
+        with pytest.raises(contracts.ContractError):
+            contracts.validate_action_result(_action_result(**bad))
+
+
+def test_extra_keys_are_rejected():
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_action_result(_action_result(surprise=1))

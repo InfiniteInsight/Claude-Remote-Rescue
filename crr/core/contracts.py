@@ -64,6 +64,13 @@ UNTRACKED_CONTRACT_VERSION = 1
 RECALL_CONTRACT_VERSION = 1
 EXCLUSIONS_CONTRACT_VERSION = 1
 SETTINGS_CONTRACT_VERSION = 1
+# The envelope BOTH action endpoints return (#55). One constant, not two:
+# `/api/action` and `/api/sid-action` return the same shape and are handled
+# adjacently in web.py, so a second copy would only give them room to drift.
+# #36 enumerated the five GET panels and missed these two POST results —
+# which is how #49 widened them from {ok, message} to {ok, message, degraded}
+# with no version to bump and no validator to update.
+ACTION_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -497,6 +504,7 @@ EXCLUSIONS_PAYLOAD_KEYS = (
     "contract", "configured", "managed", "config_path", "config_from_file",
 )
 SETTINGS_PAYLOAD_KEYS = ("contract", "autokick", "resolved", "config_default", "degraded")
+ACTION_RESULT_KEYS = ("contract", "ok", "message", "degraded")
 
 
 def _require_contract(payload: Mapping[str, Any], expected: int, what: str) -> None:
@@ -585,6 +593,22 @@ def validate_exclusions_payload(payload: Any) -> None:
             _require_type(entry, str, f"/api/exclusions '{field}' entry")
     _require_type(payload["config_path"], str, "/api/exclusions 'config_path'")
     _require_type(payload["config_from_file"], bool, "/api/exclusions 'config_from_file'")
+
+
+def validate_action_result(payload: Any) -> None:
+    """The result envelope served by /api/action and /api/sid-action (#55).
+
+    `degraded` is contracted rather than optional because it is the whole
+    difference between "reopened, and here is your tab" and "reopened, and
+    the tab never came" — a client that silently drops it renders a partial
+    failure as a plain success, which is the bug #49 existed to fix.
+    """
+    payload = _require_mapping(payload, "action result")
+    _require_exact_keys(payload, ACTION_RESULT_KEYS, "action result")
+    _require_contract(payload, ACTION_CONTRACT_VERSION, "action result")
+    for field in ("ok", "degraded"):
+        _require_type(payload[field], bool, f"action result '{field}'")
+    _require_type(payload["message"], str, "action result 'message'")
 
 
 def validate_settings_payload(payload: Any) -> None:
