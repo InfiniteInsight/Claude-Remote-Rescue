@@ -213,6 +213,14 @@ git commit -m "feat(status): a tmux-parked session reads 'parked', not 'crashed'
 
 **Files:**
 - Modify: `crr/core/contracts.py`
+- Modify: `crr/core/status.py` — **one word**, the module docstring's
+  `(contract v10)` → `(contract v11)`. This is FORCED, not optional:
+  `tests/test_version_ledger.py::test_status_docstring_version_matches_the_shipped_contract`
+  regexes that docstring out of `status.py`'s text and compares it to
+  `SESSIONS_CONTRACT_VERSION`, so bumping the constant without it leaves
+  the tree red and the pre-commit hook refuses the commit. No logic in
+  `status.py` may change. (The first draft of this plan listed `status.py`
+  as untouchable and was wrong — found by the Task 2 implementer.)
 - Test: `tests/test_contracts.py`, `tests/test_version_ledger.py` (no edit,
   must keep passing)
 
@@ -291,7 +299,7 @@ git commit -m "feat(contracts): sessions v11 adds the parked display state"
 
 **Files:**
 - Modify: `crr/cli.py` (the three `assemble_sessions(` call sites)
-- Test: `tests/test_cli.py`
+- Test: `tests/test_cli.py`, `tests/test_status.py`
 
 **Interfaces:**
 - Consumes: `assemble_sessions(live_tmux_sessions=…)` from Task 1.
@@ -328,11 +336,33 @@ def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkey
     assert payload["sessions"][0]["state"] == "parked"
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+Also add to `tests/test_status.py` — the assembler and the validator in ONE
+path. Task 1 tested the assembler, Task 2 tested the validator, and between
+them the assembler could emit a state the validator rejected with nothing to
+catch it. That hole stayed open through both tasks (found by the Task 2
+implementer); close it here:
 
-Run: `.venv/bin/python -m pytest tests/test_cli.py -q -k parked`
+```python
+def test_a_parked_card_survives_its_own_validator():
+    from crr.core import contracts
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = "crr-8a1b2c3d"
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(), live_tmux_sessions={"crr-8a1b2c3d"})
+    assert payload["sessions"][0]["state"] == "parked"
+    contracts.validate_sessions_payload(payload)   # the half nothing covered
+```
 
-Expected: FAIL — `assert 'crashed' == 'parked'`.
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_cli.py tests/test_status.py -q -k parked`
+
+Expected: the cli test FAILs with `assert 'crashed' == 'parked'`. The
+status test PASSES already — Tasks 1 and 2 made it true; it is a
+regression pin, not a driver, and that is why it belongs here rather than
+being skipped.
 
 - [ ] **Step 3: Implement**
 
@@ -536,7 +566,7 @@ Expected: all tests PASS and every block prints `OK`.
 
 ```bash
 git add crr/core/page.html crr/core/web.py tests/test_web.py
-git commit -m "feat(web): render the parked state as 'restored' (page v43)"
+git commit -m "feat(web): render the parked state as 'restored' (page v44)"
 ```
 
 ---
