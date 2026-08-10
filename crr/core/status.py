@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v11).
+"""Status assembler — journal entries -> /api/sessions payload (contract v12).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -26,9 +26,9 @@ from collections import Counter
 from typing import Any, Callable, Mapping, Sequence
 
 from crr.core import contracts
+from crr.core import reachability as _reachability
 from crr.core import settings as _settings
 from crr.core.config import DEFAULTS
-from crr.core.bridge import bridge_state as _bridge_state
 from crr.core.classifier import CRASHED, classify, LIVE
 from crr.core.context_pressure import pressure as _pressure
 from crr.core.discovery import ADOPTED_BOOT_ID
@@ -43,12 +43,12 @@ PARKED = "parked"
 
 
 def _empty_facts(_entry: Mapping[str, Any]) -> dict[str, Any]:
-    # bridge_seen is None, not False (#33): no extractor was injected, so
-    # nothing looked at a transcript at all. That is the textbook unknown —
-    # `False` would claim Remote Control was never enabled on the session.
+    # Mirrors `transcript_source.read_tail_facts`'s shape exactly, so the
+    # default and the real adapter cannot drift. No bridge keys: the card's
+    # `remote_control` comes from `reachability_by_sid` (Claude Code's own
+    # state file), never from a transcript read.
     return {"last_prompt": "", "model": "", "last_active": "",
-            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0,
-            "bridge_seen": None, "bridge_since": 0}
+            "last_reply": "", "title": "", "slug": "", "transcript_bytes": 0}
 
 
 class _MemoTtyProbe:
@@ -113,12 +113,12 @@ def assemble_sessions(
     context_tight_fraction: float = DEFAULTS["context_tight_fraction"],
     context_compact_fraction: float = DEFAULTS["context_compact_fraction"],
     context_bytes_per_token: int = DEFAULTS["context_bytes_per_token"],
-    bridge_stale_records: int = DEFAULTS["bridge_stale_records"],
     autokick_config_default: bool = DEFAULTS["remote_control_autokick"],
     autokick_global_override: bool | None = None,
     autokick_session_overrides: Mapping[str, bool] | None = None,
     autokick_degraded: bool = False,
     live_tmux_sessions: set[str] | None = None,
+    reachability_by_sid: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -132,14 +132,16 @@ def assemble_sessions(
     caller (cli) reads these from config so this stays pure core with no
     config import (audit: core never imports adapters/cli).
 
-    ``bridge_stale_records`` is the same kind of injected threshold, for
-    the dropped-Remote-Control badge (spec 2026-08-07): the caller reads
-    ``bridge_stale_records`` from config and passes it in here, and
-    ``bridge.bridge_state`` turns it plus ``tail_facts``'s
-    ``bridge_seen``/``bridge_since`` into the card's ``remote_control``
-    value. ``bridge_seen`` is tri-state: ``None`` (the adapter did not
-    finish looking) resolves to ``"unknown"``, distinct from the ``"off"``
-    that ``False`` produces — see #33 and ``bridge.bridge_state``.
+    ``reachability_by_sid`` is the same injection pattern for the card's
+    ``remote_control``/``waiting_for`` pair (spec 2026-08-09, Phases 1-3):
+    session id -> ``(state, waiting_for)``, where ``state`` is a
+    ``contracts.REMOTE_CONTROL_STATES`` member the caller obtained by
+    feeding ``session_state.read_all`` through ``reachability.reachability``
+    (a filesystem read, so core must not do it). A session with **no
+    entry** — nothing injected at all, or no state file for it — defaults
+    to ``("unknown", "")``: the absence of a readable signal is not
+    evidence the bridge is down, which is the #33 correction restated for
+    the new source.
 
     ``autokick_config_default``/``autokick_global_override``/
     ``autokick_session_overrides`` are the same injection pattern (Slice 3):
@@ -164,6 +166,7 @@ def assemble_sessions(
     entry — an unconfirmed query may not assert that a session is running.
     """
     autokick_session_overrides = autokick_session_overrides or {}
+    reachability_by_sid = reachability_by_sid or {}
     sessions = [e for e in entries if e.get("claude") is not None]
     sid_counts = Counter(e["claude"]["session_id"] for e in sessions)
 
@@ -177,6 +180,13 @@ def assemble_sessions(
         sid = entry["claude"]["session_id"]
         adopted = entry.get("boot_id") == ADOPTED_BOOT_ID
         facts = tail_facts(entry)
+        # Defaulting to the module's own constant rather than a third copy
+        # of the literal "unknown" — `contracts.REMOTE_CONTROL_STATES` and
+        # `reachability`'s constants are bound by a test, so this cannot
+        # drift from either.
+        reach, waiting_for = reachability_by_sid.get(
+            sid, (_reachability.UNKNOWN, "")
+        )
         cards.append(
             {
                 "pid": entry["pid"],
@@ -214,11 +224,8 @@ def assemble_sessions(
                     compact=context_compact_fraction,
                     bytes_per_token=context_bytes_per_token,
                 ),
-                "remote_control": _bridge_state(
-                    facts["bridge_since"],
-                    facts["bridge_seen"],
-                    stale_after=bridge_stale_records,
-                ),
+                "remote_control": reach,
+                "waiting_for": waiting_for,
                 "autokick": _settings.autokick_card_state(
                     config_default=autokick_config_default,
                     global_override=autokick_global_override,

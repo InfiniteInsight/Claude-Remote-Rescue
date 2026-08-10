@@ -28,7 +28,6 @@ def test_assemble_sessions_defaults_come_from_config():
     for name, key in (
         ("context_tight_fraction", "context_tight_fraction"),
         ("context_compact_fraction", "context_compact_fraction"),
-        ("bridge_stale_records", "bridge_stale_records"),
         ("autokick_config_default", "remote_control_autokick"),
         ("context_bytes_per_token", "context_bytes_per_token"),
     ):
@@ -38,9 +37,9 @@ def test_assemble_sessions_defaults_come_from_config():
 # --- scan/display bounds that had config-keyed siblings --------------------
 
 def test_cwd_scan_lines_is_the_named_config_default():
-    # Every sibling scan bound (model_tail_lines, reply_tail_lines,
-    # bridge_scan_lines) is a versioned config key with its measurement in
-    # the comment; this one was a bare module constant.
+    # Every sibling scan bound (model_tail_lines, reply_tail_lines) is a
+    # versioned config key with its measurement in the comment; this one was
+    # a bare module constant.
     assert transcript_source.CWD_SCAN_LINES == DEFAULTS["cwd_scan_lines"]
 
 

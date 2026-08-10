@@ -72,6 +72,22 @@ class ProcessProbe(Protocol):
         """
         ...
 
+    def claude_group_pids(self, shell_pids: Sequence[int]) -> dict[int, list[int]]:
+        """Claude process-group ids per shell pid, from ONE process snapshot.
+
+        The read-only, BATCHED counterpart to
+        ``ProcessController.claude_groups`` (same relation as
+        ``controlling_ttys`` to ``has_controlling_tty``). It is on the probe
+        rather than the controller on purpose: the reachability detector on
+        the poll path needs this answer for every card and must not be
+        handed signalling power to get it.
+
+        A shell pid with no claude jobs maps to an empty list. An
+        inconclusive probe returns ``{}`` — the caller must read a missing
+        or empty entry as "cannot confirm", never as a confirmed mismatch.
+        """
+        ...
+
 
 @runtime_checkable
 class ProcessController(Protocol):

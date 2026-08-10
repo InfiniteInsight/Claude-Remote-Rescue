@@ -899,10 +899,11 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_46():
-    """v45: the parked state renders as 'restored' (spec 2026-08-09, Phase 0)
-    (v44 added the in-flight notice + manual retry on a degraded action, #53)."""
-    assert web.PAGE_VERSION == 46
+def test_page_version_is_47():
+    """v47: the card reports whether the phone can reach this session, from
+    Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
+    (v46 gave parked cards Kick/Close, #58)."""
+    assert web.PAGE_VERSION == 47
 
 
 def test_page_renders_the_parked_state():
@@ -966,7 +967,7 @@ def test_page_renders_both_unknown_chips():
     # indistinguishable from "ok" — which is exactly the fabricated
     # reassurance both issues exist to remove.
     page = web.load_page()
-    assert "remote control unknown" in page
+    assert "phone: unknown" in page
     assert "context unknown" in page
     assert "unknown-badge" in page
 
@@ -975,8 +976,13 @@ def test_key_explains_both_unknown_terms():
     # Every badge the card can render needs a key entry, or the user is left
     # guessing what an "unknown" chip is telling them.
     page = web.load_page()
-    key = page[page.index('id="key"'):page.index('id="key"') + 4000]
-    assert "remote control unknown" in key
+    # Bounded by the element that FOLLOWS #key, not a magic character count:
+    # the legend grew in v46 and the old 4000-char window already reached
+    # past #key into the settings modal — which carries its own "Remote
+    # Control" copy, so the assertion could have passed on text that is not
+    # in the legend at all.
+    key = page[page.index('id="key"'):page.index('id="controls"')]
+    assert "phone: unknown" in key
     assert "context unknown" in key
 
 
@@ -1119,27 +1125,45 @@ def test_page_has_compaction_badge_and_legend_note():
     assert "estimate" in page
 
 
-def test_page_has_remote_control_dropped_badge_and_legend():
-    # Slice 3: the badge only renders for "dropped" (off/ok render nothing —
-    # the common case), and the key legend explains the term with per-term
-    # help text (both hover title AND tap->toast, like every other term —
-    # the same `.kterm` mechanism the other groups already use).
-    page = web.render_page()
-    assert 'remote_control === "dropped"' in page
+def test_page_renders_the_not_connected_badge():
+    # spec 2026-08-09: the badge renders for "unreachable" — Claude Code's
+    # own report that the phone has no live link to this session — and the
+    # key legend explains the term with per-term help text (both hover title
+    # AND tap->toast, the same `.kterm` mechanism every other group uses).
+    page = web.load_page()
+    assert "phone: not connected" in page
+    assert 's.remote_control === "unreachable"' in page
     assert "remote-control-badge" in page
     assert 'kterm" data-help="' in page
     # The legend term's own text doubles as the badge label, matching the
     # existing groups (e.g. "will compact on revive") so the tap->toast
     # ("<term>: <help>") reads as a complete sentence.
-    assert page.count("remote control dropped") >= 2
+    assert page.count("phone: not connected") >= 2
 
 
-def test_page_remote_control_badge_off_and_ok_render_nothing():
-    # "off"/"ok" must not produce a badge element — no clutter on the
-    # common case (nearly every session).
-    page = web.render_page()
-    assert 'if (s.remote_control === "off")' not in page
-    assert 'else if (s.remote_control === "ok")' not in page
+def test_page_shows_what_a_waiting_session_is_blocked_on():
+    # `waiting_for` is Claude Code's own "blocked on the user" report (a
+    # permission prompt, a question). It gets its OWN branch rather than
+    # living inside the unreachable/unknown arms: a REACHABLE session
+    # renders no badge at all, and a reachable session stuck on a prompt is
+    # exactly the one whose owner needs telling.
+    page = web.load_page()
+    assert "waiting on you" in page
+    assert "if (s.waiting_for) {" in page
+    assert page.count("waiting on you") >= 2   # badge label + legend term
+
+
+def test_page_has_no_dropped_or_off_remote_control_branches():
+    # The record-counting detector's enum is gone from the contract; a card
+    # branch still testing for it would silently render nothing forever.
+    page = web.load_page()
+    assert 's.remote_control === "dropped"' not in page
+    assert 's.remote_control === "off"' not in page
+
+
+def test_reachable_renders_no_badge():
+    # The common case must stay silent, or every card carries a chip.
+    assert 's.remote_control === "reachable"' not in web.load_page()
 
 
 def test_page_settings_modal_states_autokick_keeps_the_badge():

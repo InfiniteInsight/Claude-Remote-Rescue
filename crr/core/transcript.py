@@ -124,20 +124,6 @@ def extract_slug(record: Mapping[str, Any]) -> str | None:
     return slug if isinstance(slug, str) and slug.strip() else None
 
 
-def is_bridge_marker(record: Mapping[str, Any]) -> bool:
-    """True iff ``record`` is a Remote Control bridge marker.
-
-    Claude Code writes ``{"type": "bridge-session", "sessionId": ...,
-    "bridgeSessionId": ..., "lastSequenceNum": ...}`` records while the
-    mobile Remote Control bridge is up. Slice 1 only needs the marker's
-    PRESENCE (how many records separate the newest one from the tail) —
-    not its payload — so this is a presence check, not an extractor, and
-    mirrors ``extract_ai_title``'s degrade-to-False-on-anything-else shape
-    for the same reason: undocumented internal format, never raise.
-    """
-    return isinstance(record, Mapping) and record.get("type") == "bridge-session"
-
-
 def clean_display(text: str, cap: int) -> str:
     """Collapse whitespace to one line and cap the length for a card."""
     return " ".join(text.split())[:cap]

@@ -2,15 +2,14 @@
 (review fix-wave 2026-08-07, FIX 1 — CRITICAL).
 
 `cli._kick_dropped_bridges` was stateless across sweeps: nothing carried
-forward between one `crr revive` pass and the next. A kick does not reset
-`bridge_since` (the marker is still N records back — it takes a fresh
-bridge marker to clear "dropped", and that only happens if the relaunch
-actually reconnects), so a FAILED reconnect (host briefly offline, auth
+forward between one `crr revive` pass and the next. A kick does not itself
+make a session reachable — only an actual reconnect writes a non-null
+`bridgeSessionId` — so a FAILED reconnect (host briefly offline, auth
 expired, Remote Control unavailable) re-qualifies for another kick on
-every subsequent pass — every guard the watchdog has clears again, because
+every subsequent pass: every guard the watchdog has clears again, because
 none of them look at what happened last time. Left unguarded this is an
-indefinite restart loop: dozens of SIGTERMs over hours, until the marker
-finally drifts past `bridge_scan_lines` and the state degrades to "off".
+indefinite restart loop, dozens of SIGTERMs over hours, with nothing that
+ever ends it.
 
 This module is the missing memory. Two independent guards, both gating the
 SAME `sid`, never `pid` (a recycled pid must not inherit another session's
@@ -114,15 +113,51 @@ class KickHistoryStore:
 
     def is_degraded(self) -> bool:
         """True when a stored file exists but cannot be understood — see the
-        module docstring for why the watchdog must fail CLOSED on this."""
+        module docstring for why the watchdog must fail CLOSED on this.
+
+        Deliberately unchanged by the top-level observability keys below: a
+        corrupt transition COUNTER must not stop the watchdog kicking. What
+        `degraded` gates is the restart-loop protection, and paying for a
+        broken counter with a disabled watchdog inverts the risk.
+        """
         return self._read_checked()[1]
 
-    def _sessions(self) -> dict[str, Any]:
+    def _document(self) -> dict[str, Any]:
+        """The whole stored mapping, or ``{}`` when degraded."""
         data, degraded = self._read_checked()
-        if degraded:
-            return {}
-        sessions = data.get("sessions", {})
+        return {} if degraded else data
+
+    def _sessions(self) -> dict[str, Any]:
+        sessions = self._document().get("sessions", {})
         return sessions if isinstance(sessions, dict) else {}
+
+    def _write(self, **updates: Any) -> None:
+        """Persist ``updates`` MERGED into the stored document.
+
+        Every writer in this class goes through here. Each used to end with
+        its own ``write_json_atomic(path, {"v": …, "sessions": sessions})``,
+        which REBUILDS the file rather than updating it: any key the writer
+        did not itself compute was silently dropped. Harmless while
+        ``sessions`` was the only key; a data-loss bug in both directions
+        the moment a second one exists —
+
+        - ``reset()`` runs on EVERY sweep that sees a healthy bridge, so it
+          would erase the transition counter within ~30 seconds of it being
+          written, leaving a permanent zero: the exact false disproof that
+          counter exists to prevent.
+        - a counter write that rebuilt the document without ``sessions``
+          would erase ``attempts``/``last_kick_ts`` and reopen the
+          indefinite restart loop this module was created to close.
+
+        A DEGRADED document is not merged into — carrying fragments of a
+        file this build could not understand into a freshly stamped one
+        would launder unreadable bytes into an apparently-valid store.
+        """
+        data, degraded = self._read_checked()
+        merged: dict[str, Any] = {} if degraded else dict(data)
+        merged.update(updates)
+        merged["v"] = contracts.KICKS_STORE_VERSION
+        write_json_atomic(self._path, merged)
 
     def attempts(self, sid: str) -> int:
         """Consecutive kick attempts recorded for ``sid`` since its last
@@ -149,15 +184,15 @@ class KickHistoryStore:
         attempt, success or failure alike: the cap counts attempts, not
         failures, because a same-sweep verdict on whether the relaunch
         actually reconnected does not exist yet (that only shows up as a
-        fresh bridge marker on a LATER sweep).
+        reachable reading on a LATER sweep).
 
         ``observation`` is the LINEAGE (#35): the state that justified this
         particular kick — the pid signalled, the bridge reading, and the
         thresholds in force at the time. Recording the thresholds matters
-        as much as the reading: without them, changing
-        ``bridge_stale_records`` later silently rewrites the history of
-        every decision taken under the old value, and a stored conclusion
-        you cannot regenerate from its inputs is a claim you cannot audit.
+        as much as the reading: without them, changing a guard (the cooldown,
+        the attempt cap) later silently rewrites the history of every
+        decision taken under the old value, and a stored conclusion you
+        cannot regenerate from its inputs is a claim you cannot audit.
 
         The attempt log is bounded (``MAX_ATTEMPT_LOG``) and the counters
         are untouched — the cooldown and cap read ``attempts`` /
@@ -184,8 +219,7 @@ class KickHistoryStore:
                 key=lambda s: sessions[s].get("last_kick_ts") or 0,
             )
             del sessions[oldest_sid]
-        write_json_atomic(
-            self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
+        self._write(sessions=sessions)
 
     def session_ids(self) -> list[str]:
         """Every sid with recorded history, most recently kicked first."""
@@ -232,8 +266,7 @@ class KickHistoryStore:
             return
         log[-1] = {**log[-1], "outcome_ok": bool(ok), "outcome": str(message)}
         sessions[sid] = {**entry, "log": log}
-        write_json_atomic(
-            self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
+        self._write(sessions=sessions)
 
     def reset(self, sid: str, now: float | None = None) -> None:
         """Clear ``sid``'s attempt COUNTERS — call this ONLY when its bridge
@@ -281,5 +314,123 @@ class KickHistoryStore:
             }
         else:
             del sessions[sid]   # nothing to preserve — no empty shell
-        write_json_atomic(
-            self._path, {"v": contracts.KICKS_STORE_VERSION, "sessions": sessions})
+        self._write(sessions=sessions)
+
+    # --- the detector's own falsifiability (plan 2026-08-10, Task 7) -----
+    #
+    # The reachability detector ships with one KNOWN gap: Claude Code never
+    # persists `replBridgeError` (all 8 writers to its state file were
+    # enumerated), so a bridge that comes up and then errors WITHOUT
+    # running teardown leaves a stale session id on disk and the detector
+    # reads `reachable`. The miss is silent but safe — no kick, never a
+    # wrong kick, and manual `crr kick` still works.
+    #
+    # The three methods below turn that gap from a story into a number. If
+    # this counter is still 0 after a week in which the user has watched
+    # `/rc` vanish on their own terminal, the assumption the detector rests
+    # on is disproven, and `crr doctor` is where they find that out.
+    #
+    # TOP-LEVEL keys, alongside `sessions`, never per-sid: the question is
+    # "does this detector ever fire at all", not "which session dropped".
+    # A legacy file carrying neither key reports 0 / None and never raises.
+    #
+    # NOT a reason to bump KICKS_STORE_VERSION. `store_version_ok` refuses
+    # a version from the future, which `_read_checked` turns into
+    # `degraded`, which makes `_kick_dropped_bridges` return before kicking
+    # anything: bumping to 2 would disable the watchdog entirely for anyone
+    # still on the previous build. Additive keys at v1 are simply ignored
+    # by an older reader, which is the safe direction.
+
+    def observed_transitions(self) -> int:
+        """How many `reachable -> unreachable` edges crr has ever observed.
+
+        ``0`` for a legacy file, a file that has seen none, or a stored
+        value of the wrong type — the callers of an observability counter
+        must never be able to raise, and a corrupt count is not evidence
+        about the bridge. `crr doctor` distinguishes this 0 from an
+        UNREADABLE file, because here 0 is a claim with consequences.
+        """
+        n = self._document().get("observed_transitions")
+        if isinstance(n, int) and not isinstance(n, bool) and n >= 0:
+            return n
+        return 0
+
+    def last_transition_at(self) -> float | None:
+        """When the most recent observed transition was, or ``None``.
+
+        ``None`` means "never observed", which is a different claim from
+        "observed at time 0".
+        """
+        ts = self._document().get("last_transition_at")
+        return float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None
+
+    def last_transition_sid(self) -> str | None:
+        """The session id of the most recent observed transition, or None.
+
+        The counter's read path (`crr doctor`) names it, so a count of 3 is
+        something the reader can go and check rather than take on faith.
+        """
+        sid = self._document().get("last_transition_sid")
+        return sid if isinstance(sid, str) else None
+
+    def record_transition(self, sid: str, now: float) -> None:
+        """Count one observed `reachable -> unreachable` edge.
+
+        Called from the watchdog's detector, BEFORE the autokick/activity/
+        cooldown guards — a drop that crr declined to act on is still a
+        drop the detector saw, and counting only the kicks would report
+        zero on a machine where every drop happened mid-turn.
+
+        ``sid`` is not indexed by (see above) but IS kept as the single
+        `last_transition_sid`, so the human reading a count of 3 can go and
+        look at that session rather than take the number on faith.
+        """
+        self._write(
+            observed_transitions=self.observed_transitions() + 1,
+            last_transition_at=now,
+            last_transition_sid=sid,
+        )
+
+    def _reachability_seen(self) -> dict[str, Any]:
+        seen = self._document().get("reachability_seen")
+        return dict(seen) if isinstance(seen, dict) else {}
+
+    def last_reachability(self, sid: str) -> str | None:
+        """This sid's last non-`unknown` reading, or ``None`` if crr has
+        never had one (or the file is degraded/legacy).
+
+        A transition is a comparison between two sweeps, and `crr revive`
+        is a systemd ONESHOT — a fresh process every 30 seconds. In-process
+        memory would count zero transitions forever, which is exactly the
+        observation that would (wrongly) disprove the detector.
+        """
+        value = self._reachability_seen().get(sid)
+        return value if isinstance(value, str) else None
+
+    def remember_reachability(self, sid: str, reach: str) -> None:
+        """Remember ``reach`` as this sid's last reading — a no-op when it
+        already is one.
+
+        The no-op matters: this is called for every live session on every
+        sweep, and an unconditional write would turn a file the watchdog
+        merely READS on a steady-state pass into a full atomic rewrite per
+        session per 30 seconds. Writes now happen only when something
+        actually changed.
+
+        Callers pass only `reachable`/`unreachable`. `unknown` must NOT be
+        remembered: it is the absence of a reading (no state file, a stale
+        or recycled pid, an unparseable field), and letting it overwrite
+        the memory would hide the drop that follows behind it.
+
+        Bounded like `sessions`, by least-recently-CHANGED. Eviction can
+        only cost a missed count, never a wrong one: a forgotten sid's next
+        reading is treated as a first sighting, and a first sighting is
+        never a transition.
+        """
+        if self.last_reachability(sid) == reach:
+            return
+        seen = {k: v for k, v in self._reachability_seen().items() if k != sid}
+        seen[sid] = str(reach)
+        while len(seen) > MAX_ENTRIES:
+            del seen[next(iter(seen))]
+        self._write(reachability_seen=seen)
