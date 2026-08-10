@@ -360,3 +360,348 @@ def test_a_later_drop_starts_a_new_incident_in_the_log(tmp_path):
     store.reset(SID, now=4000.0)
     assert [a.get("event", "KICK") for a in store.attempt_log(SID)] == [
         "KICK", "reconnected", "KICK", "reconnected"]
+
+
+# --- the transition counter (plan 2026-08-10, Task 7) --------------------
+#
+# The spec ships with one honest gap: Claude Code never persists
+# `replBridgeError` (all 8 writers to its state file were enumerated), so a
+# bridge that comes up and then errors WITHOUT running teardown leaves a
+# stale session id on disk and the detector reads `reachable`. The miss is
+# silent but safe — no kick, never a wrong kick, and manual `crr kick` still
+# works.
+#
+# These counters are what make that gap countable rather than a story. If
+# crr observes not one reachable -> unreachable transition over a week while
+# the user watches `/rc` vanish on their own terminal, the assumption behind
+# the detector is disproven and there is a number to say so with.
+#
+# Top-level keys, not per-sid: the question is "does this detector ever fire
+# at all", not "which session".
+
+SID2 = "11112222-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def test_an_observed_reachable_to_unreachable_transition_is_counted(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_transition(SID, now=1000.0)
+    assert store.observed_transitions() == 1
+
+
+def test_transitions_accumulate_across_sweeps(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    for t in (1000.0, 2000.0):
+        store.record_transition(SID, now=t)
+    assert store.observed_transitions() == 2
+    assert store.last_transition_at() == 2000.0
+
+
+def test_a_legacy_file_reports_zero_transitions(tmp_path):
+    (tmp_path / bridge_kicks.FILENAME).write_text('{"sessions": {}}', encoding="utf-8")
+    assert bridge_kicks.KickHistoryStore(tmp_path).observed_transitions() == 0
+
+
+def test_a_store_that_has_never_seen_a_transition_says_so(tmp_path):
+    # `None`, not 0.0 — "never" and "at the epoch" are different claims.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    assert store.observed_transitions() == 0
+    assert store.last_transition_at() is None
+
+
+def test_a_transition_counts_are_shared_not_per_sid(tmp_path):
+    # Two different sessions dropping is two observations of the SAME
+    # question ("does the detector fire?"), so one counter, not two.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_transition(SID, now=1000.0)
+    store.record_transition(SID2, now=1100.0)
+    assert store.observed_transitions() == 2
+
+
+def test_a_corrupt_counter_reads_as_zero_rather_than_raising(tmp_path):
+    # An observability counter must never be able to take the watchdog down.
+    (tmp_path / bridge_kicks.FILENAME).write_text(
+        '{"sessions": {}, "observed_transitions": "lots", "last_transition_at": true}',
+        encoding="utf-8")
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    assert store.is_degraded() is False    # not a reason to stop kicking
+    assert store.observed_transitions() == 0
+    assert store.last_transition_at() is None
+
+
+# --- the writer/reader trap, which this store has already sprung once ----
+# Every existing writer ends `write_json_atomic(path, {"v": .., "sessions":
+# ..})` — it REBUILDS the document rather than updating it. A new top-level
+# key is therefore erased by the next kick, and `reset()` runs on every
+# sweep that sees a healthy bridge, so the erasure lands within ~30s. The
+# mirror image is worse: a counter write that drops `sessions` erases
+# `attempts`/`last_kick_ts` and reopens the restart loop FIX 1 closed.
+
+def test_the_transition_count_survives_a_later_kick(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_transition(SID, now=1000.0)
+    store.record_kick(SID, 1001.0, observation=_obs())
+    assert store.observed_transitions() == 1
+    assert store.last_transition_at() == 1000.0
+
+
+def test_the_transition_count_survives_the_every_sweep_reset(tmp_path):
+    # `reset()` is the dangerous one: it fires on EVERY healthy sweep, so a
+    # counter it clobbers reads a permanent zero — the exact false disproof
+    # this counter exists to prevent.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs())
+    store.record_transition(SID, now=1001.0)
+    for t in range(2000, 2600, 30):
+        store.reset(SID, now=float(t))
+    assert store.observed_transitions() == 1
+
+
+def test_recording_a_transition_does_not_erase_the_kick_counters(tmp_path):
+    # The cooldown and the attempt cap ARE the restart-loop protection.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs(bridge_since=812))
+    store.record_transition(SID, now=1001.0)
+    assert store.attempts(SID) == 1
+    assert store.last_kick_ts(SID) == 1000.0
+    assert store.attempt_log(SID)[-1]["bridge_since"] == 812
+
+
+def test_record_outcome_does_not_erase_the_transition_count(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs())
+    store.record_transition(SID, now=1001.0)
+    store.record_outcome(SID, ok=True, message="kicked 4242")
+    assert store.observed_transitions() == 1
+
+
+# --- the previous-reachability memory ------------------------------------
+# `crr revive` is a systemd ONESHOT — a fresh process every 30s. A
+# transition is a comparison between two sweeps, so the previous reading
+# has to outlive the process that took it, or the count is a permanent zero
+# indistinguishable from the failure mode being measured.
+
+def test_the_last_reading_is_remembered_across_instances(tmp_path):
+    bridge_kicks.KickHistoryStore(tmp_path).remember_reachability(SID, "reachable")
+    assert bridge_kicks.KickHistoryStore(tmp_path).last_reachability(SID) == "reachable"
+
+
+def test_an_unseen_sid_has_no_remembered_reading(tmp_path):
+    assert bridge_kicks.KickHistoryStore(tmp_path).last_reachability(SID) is None
+
+
+def test_the_memory_is_per_sid(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.remember_reachability(SID, "reachable")
+    store.remember_reachability(SID2, "unreachable")
+    assert store.last_reachability(SID) == "reachable"
+    assert store.last_reachability(SID2) == "unreachable"
+
+
+def test_the_memory_does_not_disturb_the_kick_history(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.record_kick(SID, 1000.0, observation=_obs())
+    store.remember_reachability(SID, "unreachable")
+    assert store.attempts(SID) == 1
+    assert store.last_kick_ts(SID) == 1000.0
+
+
+def test_remembering_a_reading_does_not_invent_kick_history(tmp_path):
+    # `crr kicks --list` walks `session_ids()`. If the memory lived inside
+    # `sessions`, every live session crr merely LOOKED at would render as
+    # "0 attempt(s) since the last confirmed reconnect / no lineage
+    # recorded" — kick history for a session that was never kicked.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    store.remember_reachability(SID, "reachable")
+    assert store.session_ids() == []
+
+
+def test_the_memory_is_bounded_like_the_rest_of_the_file(tmp_path):
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    for i in range(bridge_kicks.MAX_ENTRIES + 5):
+        store.remember_reachability(f"{i:08x}-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "reachable")
+    raw = json.loads((tmp_path / bridge_kicks.FILENAME).read_text(encoding="utf-8"))
+    assert len(raw["reachability_seen"]) <= bridge_kicks.MAX_ENTRIES
+    # The newest reading survives; the oldest is what gets dropped.
+    newest = f"{bridge_kicks.MAX_ENTRIES + 4:08x}-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    assert store.last_reachability(newest) == "reachable"
+
+
+def test_a_legacy_file_has_no_memory_and_does_not_raise(tmp_path):
+    (tmp_path / bridge_kicks.FILENAME).write_text('{"sessions": {}}', encoding="utf-8")
+    assert bridge_kicks.KickHistoryStore(tmp_path).last_reachability(SID) is None
+
+
+# --- end to end: the watchdog sweep is what has to do the counting -------
+
+def _transition_sweep(tmp_path, states, entries=1, clock_at=10_000.0):
+    """Run one real `_kick_dropped_bridges` pass over `entries` journaled
+    shells sharing SID, with `read_session_state` returning `states`."""
+    from crr import cli
+    from crr.core import config as cfg, settings
+    from crr.core.journal import JournalStore, new_entry
+    from crr.core.ops import OpResult
+
+    store = JournalStore(tmp_path)
+    for i in range(entries):
+        store.write(new_entry(
+            pid=4242 + i, cwd="/home/u/p", host="tab", shell="bash",
+            boot_id="boot-1", now="2026-01-01T00:00:00+00:00", tmux_session=None,
+            claude={"session_id": SID, "sid_source": "injected",
+                    "started": "2026-01-01T00:00:00+00:00"}))
+
+    class FakeBoot:
+        def current(self): return "boot-1"
+
+    class FakeProbe:
+        def is_alive(self, pid): return True
+        def has_controlling_tty(self, pid): return True
+        def controlling_ttys(self, pids): return set(pids)
+
+    class FakeController:
+        def claude_groups(self, shell_pid): return [5150]
+
+    cli._kick_dropped_bridges(
+        store.scan().entries, FakeBoot(), FakeProbe(), cfg.Config(),
+        settings.SettingsStore(tmp_path), store, tmp_path,
+        controller=FakeController(), flags=None,
+        read_session_state=lambda: states,
+        read_takeover_signal=lambda s: {"mtime": 0.0, "tail_kind": "assistant-end"},
+        kick=lambda *a, **k: OpResult(True, "kicked 4242"),
+        clock=lambda: clock_at,
+    )
+
+
+def _state(bridge_session_id, *, field_present=True, status="idle"):
+    from crr.adapters import session_state
+    return {SID: session_state.SessionState(
+        pid=5150, bridge_session_id=bridge_session_id,
+        field_present=field_present, status=status, waiting_for="")}
+
+
+def test_a_sweep_that_sees_a_bridge_drop_counts_one_transition(tmp_path, capsys):
+    _transition_sweep(tmp_path, _state("session_013C"), clock_at=10_000.0)
+    _transition_sweep(tmp_path, _state(None), clock_at=10_030.0)
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    assert store.observed_transitions() == 1
+    assert store.last_transition_at() == 10_030.0
+
+
+def test_a_bridge_that_was_never_reachable_counts_nothing(tmp_path, capsys):
+    # The FIRST reading of a session is not a transition: crr has no
+    # evidence the bridge was ever up, and claiming one would inflate the
+    # very number that is supposed to test the detector.
+    _transition_sweep(tmp_path, _state(None), clock_at=10_000.0)
+    assert bridge_kicks.KickHistoryStore(tmp_path).observed_transitions() == 0
+
+
+def test_a_bridge_that_stays_down_counts_one_transition_not_one_per_sweep(tmp_path, capsys):
+    _transition_sweep(tmp_path, _state("session_013C"), clock_at=10_000.0)
+    for i in range(1, 6):
+        _transition_sweep(tmp_path, _state(None), clock_at=10_000.0 + 30 * i)
+    assert bridge_kicks.KickHistoryStore(tmp_path).observed_transitions() == 1
+
+
+def test_an_unknown_reading_between_them_does_not_lose_the_transition(tmp_path, capsys):
+    # `unknown` is the ABSENCE of a reading (no state file, a stale pid, an
+    # unparseable field). Overwriting the memory with it would mean the
+    # drop that follows is invisible — the last thing crr actually KNEW was
+    # "reachable", so the drop is still a drop.
+    _transition_sweep(tmp_path, _state("session_013C"), clock_at=10_000.0)
+    _transition_sweep(tmp_path, _state(None, field_present=False), clock_at=10_030.0)
+    _transition_sweep(tmp_path, _state(None), clock_at=10_060.0)
+    assert bridge_kicks.KickHistoryStore(tmp_path).observed_transitions() == 1
+
+
+def test_a_reconnect_makes_the_next_drop_a_new_transition(tmp_path, capsys):
+    _transition_sweep(tmp_path, _state("session_013C"), clock_at=10_000.0)
+    _transition_sweep(tmp_path, _state(None), clock_at=10_030.0)
+    _transition_sweep(tmp_path, _state("session_013C"), clock_at=10_060.0)
+    _transition_sweep(tmp_path, _state(None), clock_at=10_090.0)
+    assert bridge_kicks.KickHistoryStore(tmp_path).observed_transitions() == 2
+
+
+def test_two_journal_entries_sharing_a_sid_count_one_transition(tmp_path, capsys):
+    # The duplicate_group case. `kicked_sids` only dedupes AFTER a kick
+    # attempt, so both entries reach the detector on every sweep.
+    _transition_sweep(tmp_path, _state("session_013C"), entries=2, clock_at=10_000.0)
+    _transition_sweep(tmp_path, _state(None), entries=2, clock_at=10_030.0)
+    assert bridge_kicks.KickHistoryStore(tmp_path).observed_transitions() == 1
+
+
+def test_a_drop_is_counted_even_when_the_kick_is_refused(tmp_path, capsys):
+    # The question is "does the DETECTOR fire", not "did crr kick". A
+    # session generating (`busy`) is refused by `may_kick`, and counting
+    # only the kicks would report zero on a machine where every drop
+    # happened mid-turn.
+    _transition_sweep(tmp_path, _state("session_013C", status="busy"), clock_at=10_000.0)
+    _transition_sweep(tmp_path, _state(None, status="busy"), clock_at=10_030.0)
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    assert store.observed_transitions() == 1
+    assert store.session_ids() == []           # nothing was kicked
+    assert "busy" in capsys.readouterr().out   # and it said why
+
+
+def test_the_sweep_does_not_break_the_kick_history_it_shares_a_file_with(tmp_path, capsys):
+    # The writer/reader trap, exercised against what `cli` ACTUALLY writes
+    # rather than a hand-built fixture: one real sweep that both counts a
+    # transition and records a kick, read back through `crr kicks --list`.
+    from crr import cli
+    from crr.adapters import state_dir
+
+    _transition_sweep(tmp_path, _state("session_013C"), clock_at=10_000.0)
+    _transition_sweep(tmp_path, _state(None), clock_at=10_030.0)
+
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    assert store.observed_transitions() == 1
+    assert store.attempts(SID) == 1                    # the kick still counted
+    assert store.last_kick_ts(SID) == 10_030.0         # the cooldown still has its clock
+
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(state_dir, "state_dir", lambda: tmp_path)
+        assert cli.main(["kicks", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert SID[:8] in out
+    assert "unreachable" in out
+    assert "kicked 4242" in out
+    assert "?" not in out
+
+
+# --- crr doctor is where a human reads the number ------------------------
+
+def test_doctor_reports_the_observed_transition_count(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import state_dir
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    bridge_kicks.KickHistoryStore(tmp_path).record_transition(SID, now=1_700_000_000.0)
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "reachable->unreachable" in out
+    assert "1 " in out
+    assert "2023-11-14" in out          # the stamp, not just the count
+
+
+def test_doctor_says_none_observed_rather_than_printing_a_bare_zero(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import state_dir
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "reachable->unreachable" in out
+    assert "none observed yet" in out
+
+
+def test_doctor_does_not_print_an_unreadable_count_as_zero(tmp_path, monkeypatch, capsys):
+    # Zero is a CLAIM here — it is the evidence that would disprove the
+    # detector. An unreadable file must say "unknown", never "0".
+    from crr import cli
+    from crr.adapters import state_dir
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / bridge_kicks.FILENAME).write_text("{not json", encoding="utf-8")
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "unreadable" in out
+    assert "0 reachable->unreachable" not in out

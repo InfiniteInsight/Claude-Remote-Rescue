@@ -561,6 +561,26 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for name, reason in scan.problems:
         _check(f"journal file {name}", False, reason)
 
+    # The reachability detector's own falsifiability (plan 2026-08-10, Task
+    # 7). Claude Code never persists `replBridgeError`, so a bridge that
+    # errors without teardown leaves a stale session id and the detector
+    # reads it as reachable. This count is how that gap gets tested rather
+    # than argued about: if it is still 0 after a week of watching `/rc`
+    # vanish on your own terminal, the detector is not seeing your drops.
+    kick_history = bridge_kicks.KickHistoryStore(sd)
+    if kick_history.is_degraded():
+        # Never print an unreadable file's 0 as a fact — here 0 is the
+        # evidence that would disprove the detector, not an absence.
+        _check("bridge drops observed", False,
+               f"{sd / bridge_kicks.FILENAME} unreadable — the count is unknown, "
+               "not zero (and the watchdog is auto-kicking nothing until it is "
+               "fixed or removed)")
+    else:
+        at = kick_history.last_transition_at()
+        _check("bridge drops observed", True,
+               f"{kick_history.observed_transitions()} reachable->unreachable "
+               f"(last: {_iso_or_raw(at) if at is not None else 'none observed yet'})")
+
     # Config. Doctor's own parse attempt doubles as the source of `config`
     # for the systemctl check below — a second, independent _load_config()
     # call here would print its own "ignoring bad config" line on top of
@@ -1196,6 +1216,32 @@ def _kick_dropped_bridges(
             pid_matched=pid_matched,
             field_present=state.field_present,
         )
+        # COUNT THE EDGE, before any guard below (plan 2026-08-10, Task 7).
+        # The spec has one known gap: Claude Code never persists
+        # `replBridgeError`, so a bridge that comes up and then errors
+        # WITHOUT teardown leaves a stale session id and this reads
+        # `reachable`. Safe (no kick, never a wrong kick) but silent — and a
+        # silent gap is a story, not a measurement. If this counter is still
+        # zero after a week of the user watching `/rc` vanish, the detector's
+        # premise is disproven and `crr doctor` says so.
+        #
+        # Deliberately ahead of autokick, `may_kick` and the cooldown: the
+        # question is "does the DETECTOR fire", not "did crr kick". Counting
+        # only kicks would report zero on a machine where every drop happened
+        # mid-turn or with autokick off.
+        #
+        # `unknown` is skipped rather than remembered — it is the ABSENCE of
+        # a reading, and overwriting the memory with it would hide the very
+        # next drop. A first sighting is never a transition: crr has no
+        # evidence the bridge was ever up, and inventing one would inflate
+        # the number that exists to test this.
+        previously = kick_store.last_reachability(sid)
+        if reach != reachability.UNKNOWN:
+            if reach == reachability.UNREACHABLE and previously == reachability.REACHABLE:
+                kick_store.record_transition(sid, now=clock())
+            # A no-op when unchanged, so a steady state writes nothing.
+            kick_store.remember_reachability(sid, reach)
+
         # Only "unreachable" is actionable. "unknown" must never be: it
         # means crr could not read a trustworthy answer, and acting would
         # SIGTERM a live process on the strength of an absence. It also
