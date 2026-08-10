@@ -561,26 +561,6 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for name, reason in scan.problems:
         _check(f"journal file {name}", False, reason)
 
-    # The reachability detector's own falsifiability (plan 2026-08-10, Task
-    # 7). Claude Code never persists `replBridgeError`, so a bridge that
-    # errors without teardown leaves a stale session id and the detector
-    # reads it as reachable. This count is how that gap gets tested rather
-    # than argued about: if it is still 0 after a week of watching `/rc`
-    # vanish on your own terminal, the detector is not seeing your drops.
-    kick_history = bridge_kicks.KickHistoryStore(sd)
-    if kick_history.is_degraded():
-        # Never print an unreadable file's 0 as a fact — here 0 is the
-        # evidence that would disprove the detector, not an absence.
-        _check("bridge drops observed", False,
-               f"{sd / bridge_kicks.FILENAME} unreadable — the count is unknown, "
-               "not zero (and the watchdog is auto-kicking nothing until it is "
-               "fixed or removed)")
-    else:
-        at = kick_history.last_transition_at()
-        _check("bridge drops observed", True,
-               f"{kick_history.observed_transitions()} reachable->unreachable "
-               f"(last: {_iso_or_raw(at) if at is not None else 'none observed yet'})")
-
     # Config. Doctor's own parse attempt doubles as the source of `config`
     # for the systemctl check below — a second, independent _load_config()
     # call here would print its own "ignoring bad config" line on top of
@@ -596,6 +576,43 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     else:
         config = cfg.Config()
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
+
+    # The reachability detector's own falsifiability (plan 2026-08-10, Task
+    # 7). Claude Code never persists `replBridgeError`, so a bridge that
+    # errors without running teardown leaves a stale session id and the
+    # detector reads it as reachable. This count is how that gap gets tested
+    # rather than argued about: if it is still 0 after a week of watching
+    # `/rc` vanish on your own terminal, the detector is not seeing drops.
+    #
+    # Placed AFTER the config section on purpose — the inference only holds
+    # if the sweep ran, and `remote_control_watch` is what decides that.
+    kick_history = bridge_kicks.KickHistoryStore(sd)
+    if kick_history.is_degraded():
+        # Never print an unreadable file's 0 as a fact — here 0 is the
+        # evidence that would disprove the detector, not an absence.
+        _check("bridge drops observed", False,
+               f"{sd / bridge_kicks.FILENAME} unreadable — the count is unknown, "
+               "not zero (and the watchdog is auto-kicking nothing until it is "
+               "fixed or removed)")
+    else:
+        seen = kick_history.observed_transitions()
+        at = kick_history.last_transition_at()
+        sid = kick_history.last_transition_sid()
+        last = "none observed yet" if at is None else _iso_or_raw(at)
+        if sid:
+            last += f", {sid[:8]}"
+        detail = f"{seen} reachable->unreachable (last: {last})"
+        if not config.get("remote_control_watch"):
+            # An UNQUALIFIED zero here would be read as "the detector swept
+            # all week and saw nothing" when it means "no sweep ever ran" —
+            # `_kick_dropped_bridges` returns on this flag before looking at
+            # anything. Same principle as the degraded branch above: a
+            # number is only evidence if the thing that produces it ran.
+            detail += (
+                " — remote_control_watch is off, so nothing is watching: "
+                "this 0 is not evidence" if not seen else
+                " — remote_control_watch is off; nothing is adding to this count")
+        _check("bridge drops observed", True, detail)
 
     # systemd units (installed? enabled?).
     ud = systemd.unit_dir(Path.home())

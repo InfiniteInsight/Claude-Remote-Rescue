@@ -417,6 +417,17 @@ def test_a_transition_counts_are_shared_not_per_sid(tmp_path):
     assert store.observed_transitions() == 2
 
 
+def test_the_session_that_last_dropped_is_named(tmp_path):
+    # A count of 3 with nothing to look at is a number taken on faith. One
+    # sid — the most recent — is enough to go and check it against the
+    # user's own memory of watching `/rc` vanish.
+    store = bridge_kicks.KickHistoryStore(tmp_path)
+    assert store.last_transition_sid() is None
+    store.record_transition(SID, now=1000.0)
+    store.record_transition(SID2, now=2000.0)
+    assert store.last_transition_sid() == SID2
+
+
 def test_a_corrupt_counter_reads_as_zero_rather_than_raising(tmp_path):
     # An observability counter must never be able to take the watchdog down.
     (tmp_path / bridge_kicks.FILENAME).write_text(
@@ -677,9 +688,9 @@ def test_doctor_reports_the_observed_transition_count(tmp_path, monkeypatch, cap
     bridge_kicks.KickHistoryStore(tmp_path).record_transition(SID, now=1_700_000_000.0)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "reachable->unreachable" in out
-    assert "1 " in out
+    assert "1 reachable->unreachable" in out
     assert "2023-11-14" in out          # the stamp, not just the count
+    assert SID[:8] in out               # and something to go and look at
 
 
 def test_doctor_says_none_observed_rather_than_printing_a_bare_zero(tmp_path, monkeypatch, capsys):
@@ -691,6 +702,24 @@ def test_doctor_says_none_observed_rather_than_printing_a_bare_zero(tmp_path, mo
     out = capsys.readouterr().out
     assert "reachable->unreachable" in out
     assert "none observed yet" in out
+
+
+def test_doctor_does_not_offer_a_zero_as_evidence_while_nothing_is_watching(
+        tmp_path, monkeypatch, capsys):
+    # The counter's whole purpose is that a 0 after a week of watching `/rc`
+    # vanish DISPROVES the detector. That inference only holds if the
+    # detector ran: `_kick_dropped_bridges` returns immediately when
+    # `remote_control_watch` is off, and an unqualified 0 is then
+    # indistinguishable from "swept all week, saw nothing".
+    from crr import cli
+    from crr.adapters import state_dir
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text("remote_control_watch = false\n", encoding="utf-8")
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "remote_control_watch is off" in out
+    assert "not evidence" in out
 
 
 def test_doctor_does_not_print_an_unreadable_count_as_zero(tmp_path, monkeypatch, capsys):

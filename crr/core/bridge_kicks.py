@@ -364,6 +364,15 @@ class KickHistoryStore:
         ts = self._document().get("last_transition_at")
         return float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None
 
+    def last_transition_sid(self) -> str | None:
+        """The session id of the most recent observed transition, or None.
+
+        The counter's read path (`crr doctor`) names it, so a count of 3 is
+        something the reader can go and check rather than take on faith.
+        """
+        sid = self._document().get("last_transition_sid")
+        return sid if isinstance(sid, str) else None
+
     def record_transition(self, sid: str, now: float) -> None:
         """Count one observed `reachable -> unreachable` edge.
 
