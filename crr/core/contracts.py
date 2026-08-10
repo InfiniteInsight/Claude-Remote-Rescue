@@ -37,7 +37,10 @@ JOURNAL_SCHEMA_VERSION = 1
 # reading a v9 payload would reject a value it has no case for. Both encode
 # the same correction: a field that could only ever say "no"/"a level" was
 # asserting one when the underlying read had not established anything.
-SESSIONS_CONTRACT_VERSION = 10
+# v11 adds the `parked` display state (spec 2026-08-09, Phase 0) — a card
+# whose session the reviver restored into a live tmux session. Like v9, no
+# new key: `STATES` widens, and a v10 consumer has no case for the member.
+SESSIONS_CONTRACT_VERSION = 11
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -100,7 +103,11 @@ def store_version_ok(raw: Any, current: int) -> bool:
 HOSTS = ("tab", "tmux", "ssh")
 SHELLS = ("zsh", "bash", "fish")
 SID_SOURCES = ("injected", "guessed", "verified")
-STATES = ("live", "ghost", "crashed")
+# "parked" (spec 2026-08-09, Phase 0) is a DISPLAY state only — a session
+# the reviver restored into a live tmux session. `classify()` still calls
+# it CRASHED, which is what `ops.detmux`/`ops.untmux` require; the card
+# says what a reader needs instead of what the op guard needs.
+STATES = ("live", "ghost", "crashed", "parked")
 # Context-pressure level. "unknown" (#39) is emitted when the session's
 # model is not in `context_pressure.MODEL_CONTEXT_WINDOWS` — no confirmed
 # context window means no denominator, and a level computed against the
