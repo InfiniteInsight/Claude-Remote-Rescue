@@ -30,8 +30,16 @@ from urllib.parse import parse_qs
 from crr.core import config as cfg
 from crr.core import contracts
 
-# Discipline: bump this whenever crr/core/page.html changes after a release,
-# or clients holding a cached page never learn to reload (see CONTRIBUTING.md).
+# Bump this whenever crr/core/page.html changes: the served page compares it
+# to /api/version every `version_check_seconds` and reloads itself when they
+# differ, so reusing a number strands every open dashboard on stale
+# JavaScript (see CONTRIBUTING.md).
+#
+# This is ENFORCED, not just documented (#59): tests/test_page_version_guard.py
+# pins a content hash of page.html against this number and fails if the page
+# moves without it. Two branches also collided on this number twice in two
+# days; git caught both because it is one line, but a page change that simply
+# forgets to bump merges clean, which is what the guard is for.
 PAGE_VERSION = 45  # v45: the parked state renders as "restored" (Phase 0)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
