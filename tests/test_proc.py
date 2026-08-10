@@ -4,6 +4,8 @@ import os
 import shutil
 import signal
 import subprocess
+import time
+from unittest import mock
 
 import pytest
 
@@ -93,3 +95,76 @@ def test_claude_groups_does_not_return_a_non_claude_pids_own_group():
     from crr.adapters.process_probe import _child_groups
     rows = [(500, 1, 500, "fish")]
     assert _child_groups(rows, 500) == []
+
+
+# --- a zombie is not alive (#65) ------------------------------------------
+#
+# `_group_alive` asked `killpg(pgid, 0)`, which succeeds for a ZOMBIE — a
+# process that has exited but not been reaped. So after a successful
+# SIGTERM the group still read as alive for the whole grace window, and
+# terminate_group escalated to SIGKILL every time. Linux tolerates SIGKILL
+# to a zombie-only group; macOS returns EPERM, which `_signal_groups`
+# records as a failure — so on macOS `kick`/`close` reported "failed to
+# signal" for a kill that had in fact landed.
+
+def test_a_zombie_only_group_is_not_alive():
+    proc = subprocess.Popen(["sleep", "60"], preexec_fn=os.setsid)
+    pgid = os.getpgid(proc.pid)
+    try:
+        assert _group_alive(pgid) is True
+        os.killpg(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(proc.pid)],
+                                   capture_output=True, text=True).stdout.strip()
+            if state.startswith("Z"):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.skip("could not produce a zombie on this platform")
+        # Deliberately NOT reaped yet: this is the state the real ops hit,
+        # where the shim shell has not returned from wait() yet.
+        # Diagnostic in the message: if ps cannot report zombies on this
+        # platform (macOS CI has been the hard case), the log must say so
+        # rather than leaving a bare True != False.
+        from crr.adapters.process_probe import _group_states_cmd
+        probe = subprocess.run(_group_states_cmd(), capture_output=True, text=True)
+        rows = [ln for ln in probe.stdout.splitlines()
+                if ln.split(None, 1) and ln.split(None, 1)[0] == str(pgid)]
+        assert _group_alive(pgid) is False, (
+            f"a zombie counted as a live process; ps rc={probe.returncode} "
+            f"stderr={probe.stderr.strip()!r} rows-for-pgid={rows!r}"
+        )
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        proc.wait(timeout=3)
+
+
+def test_terminate_group_does_not_escalate_when_the_group_only_zombies():
+    # The escalation is what raises EPERM on macOS. With zombies excluded
+    # there is nothing left to escalate against.
+    proc = subprocess.Popen(["sleep", "60"], preexec_fn=os.setsid)
+    pgid = os.getpgid(proc.pid)
+    kills = []
+    real_killpg = os.killpg
+
+    def spy(pg, sig):
+        if sig == signal.SIGKILL:
+            kills.append(pg)
+        return real_killpg(pg, sig)
+
+    try:
+        with mock.patch.object(os, "killpg", spy):
+            PsProcessController(2.0).terminate_group(pgid, grace_seconds=1.0)
+        assert kills == [], "escalated to SIGKILL against a group that was already gone"
+    finally:
+        if proc.poll() is None:
+            try:
+                real_killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        proc.wait(timeout=3)

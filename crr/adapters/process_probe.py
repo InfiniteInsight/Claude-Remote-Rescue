@@ -227,14 +227,69 @@ def parent_of(pid: int, timeout: float = 5.0) -> int | None:
         return None
 
 
+def _group_states_cmd() -> list[str]:
+    return ["ps", "-A", "-o", "pgid=,stat="]
+
+
+def _group_has_a_runnable_member(pgid: int, timeout: float = 5.0) -> bool | None:
+    """True if any process in ``pgid`` is not a zombie. None if ps can't say.
+
+    ``ps`` rather than /proc so this holds on macOS too, matching the other
+    probes in this module.
+    """
+    try:
+        result = subprocess.run(
+            _group_states_cmd(), capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            row_pgid = int(parts[0])
+        except ValueError:
+            continue
+        if row_pgid == pgid and not parts[1].strip().startswith("Z"):
+            return True
+    return False
+
+
 def _group_alive(pgid: int) -> bool:
+    """Does this group still contain a process that can RUN?
+
+    A zombie has exited and is only waiting to be reaped: it cannot run, and
+    it cannot be killed. ``killpg(pgid, 0)`` succeeds for one anyway, so this
+    used to report a fully-dead group as alive for the whole grace window —
+    and ``terminate_group`` then escalated to SIGKILL every time. Linux
+    tolerates that against a zombie-only group; macOS returns EPERM, which
+    surfaced as `kick`/`close` reporting "failed to signal" for a kill that
+    had landed (#65).
+
+    The killpg probe stays as the cheap first answer: ProcessLookupError is
+    a definitive "nothing there" with no subprocess. Only when something
+    exists is ps consulted to ask whether any of it can still run — and an
+    unreadable ps is treated as alive, since "could not tell" must not be
+    read as "safe to stop waiting".
+    """
     try:
         os.killpg(pgid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but not ours (shouldn't happen for own sessions)
+        # NOT "exists but not ours" — measured on macOS CI, killpg(pgid, 0)
+        # returns EPERM for a group whose only member is a zombie
+        # (rows-for-pgid=[' 3391 Z<  '], ps rc=0). Returning True here
+        # short-circuited the ps check entirely, which is why the zombie fix
+        # worked on Linux and changed nothing on macOS (#65). Fall through
+        # and let ps answer: a genuinely foreign LIVE group still reads
+        # alive, because ps will show a non-zombie member.
+        pass
+    runnable = _group_has_a_runnable_member(pgid)
+    return True if runnable is None else runnable
 
 
 class PsProcessController:
@@ -346,3 +401,11 @@ class PsProcessController:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass  # it died in the race between the check and the kill
+            except PermissionError:
+                # Not a permission problem: the SIGTERM above proved this
+                # group is ours. macOS returns EPERM for a group whose only
+                # remaining members are zombies — exited, unreaped, and
+                # unkillable — where Linux quietly succeeds (#65). Treating
+                # it as a failed kill made `crr kick`/`close` report "failed
+                # to signal" on macOS for a kill that had already landed.
+                pass
