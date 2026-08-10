@@ -150,7 +150,7 @@ def test_idle_and_waiting_are_the_only_permitted_statuses():
 
 Run: `.venv/bin/pytest tests/test_reachability.py -q`
 
-Expected: collection error, `ModuleNotFoundError: No module named 'crr.core.reachability'`.
+Expected: collection error, `ImportError: cannot import name 'reachability' from 'crr.core'`. (NOT `ModuleNotFoundError` — `crr.core` is an existing package, so CPython's `_handle_fromlist` swallows that and `IMPORT_FROM` raises plain `ImportError`.)
 
 - [ ] **Step 3: Implement**
 
@@ -376,7 +376,7 @@ def test_a_missing_directory_is_empty_not_an_error(tmp_path):
 
 Run: `.venv/bin/pytest tests/test_session_state.py -q`
 
-Expected: collection error, `ModuleNotFoundError: No module named 'crr.adapters.session_state'`.
+Expected: collection error, `ImportError: cannot import name 'session_state' from 'crr.adapters'` — same cause as Task 1, `crr.adapters` is an existing package.
 
 - [ ] **Step 3: Implement**
 
@@ -501,6 +501,14 @@ def test_sessions_contract_version_is_12():
     assert contracts.SESSIONS_CONTRACT_VERSION == 12
 
 
+def test_the_contract_enum_matches_the_core_one():
+    # The enum now exists in two places — `reachability`'s constants and
+    # this tuple — with nothing making them agree, so a rename in either
+    # would diverge silently. Both are core, so this import is layering-legal.
+    from crr.core import reachability as r
+    assert set(contracts.REMOTE_CONTROL_STATES) == {r.REACHABLE, r.UNREACHABLE, r.UNKNOWN}
+
+
 def test_waiting_for_is_a_contracted_card_field():
     assert "waiting_for" in contracts.SESSION_CARD_KEYS
     p = _sessions_payload()
@@ -583,9 +591,13 @@ ledger guard asserts it.
 
 Run: `.venv/bin/pytest -q`
 
-Expected: several `test_cli.py` / `test_web.py` / `test_revive_bridge.py`
-failures remain — they assert `off`/`ok`/`dropped`. **Do not fix them
-here.** Confirm `tests/test_contracts.py`, `tests/test_status.py` and
+Expected: failures remain in `test_cli.py`, `test_web.py`,
+`test_revive_bridge.py` (they assert `off`/`ok`/`dropped`) **and in
+`tests/test_priors.py::test_assemble_sessions_defaults_come_from_config`**,
+which indexes `inspect.signature(assemble_sessions).parameters["bridge_stale_records"]`
+— the exact parameter you are removing — and will raise `KeyError`. That
+one is expected too; Task 5 removes the config key and the pin together.
+**Do not fix any of them here.** Confirm `tests/test_contracts.py`, `tests/test_status.py` and
 `tests/test_version_ledger.py` pass, and list the remaining failures in
 your report; Tasks 4–6 own them.
 
@@ -673,6 +685,15 @@ reaches a boundary.
 
 `pid_matched` comes from `controller.claude_groups(entry["pid"])` — the
 state file's pid must be one of this session's live claude processes.
+
+**Known wart, decide deliberately:** `may_kick` returns `(True, "")` for
+both `idle` and `waiting`, carrying no signal about which one needs the
+`ready_to_take_over` corroboration. So `cli.py` must re-test `status ==
+"idle"` itself, duplicating the vocabulary `reachability._KICKABLE` owns.
+Either accept that knowingly and say so in a comment, or extend
+`may_kick`'s return with a third element naming the reason — and if you do
+the latter, update `tests/test_reachability.py` rather than working around
+it. Do not leave the duplication silent.
 
 Keep unchanged: the `remote_control_watch` gate, LIVE-only, the duplicate-sid
 guard, `autokick_for`, the cooldown/attempt cap, fail-closed on a degraded
