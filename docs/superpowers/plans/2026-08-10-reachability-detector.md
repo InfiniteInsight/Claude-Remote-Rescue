@@ -634,13 +634,24 @@ ledger guard asserts it.
 
 Run: `.venv/bin/pytest -q`
 
-Expected: failures remain in `test_cli.py`, `test_web.py`,
-`test_revive_bridge.py` (they assert `off`/`ok`/`dropped`) **and in
-`tests/test_priors.py::test_assemble_sessions_defaults_come_from_config`**,
-which indexes `inspect.signature(assemble_sessions).parameters["bridge_stale_records"]`
-— the exact parameter you are removing — and will raise `KeyError`. That
-one is expected too; Task 5 removes the config key and the pin together.
-**Do not fix any of them here.** Confirm `tests/test_contracts.py`, `tests/test_status.py` and
+Expected (MEASURED after Task 3 landed — the first draft guessed this
+wrong in both directions): **11 failures, one root cause** — every
+`assemble_sessions(` call site still passes the removed
+`bridge_stale_records`. Nine in `tests/test_cli.py`, one in
+`tests/test_e2e_linux.py`, one in
+`tests/test_priors.py::test_assemble_sessions_defaults_come_from_config`,
+which indexes the removed parameter and raises `KeyError`.
+
+`tests/test_web.py` and `tests/test_revive_bridge.py` **pass** — the first
+asserts on `page.html` source strings (untouched until Task 6), the second
+exercises `_kick_dropped_bridges`, which calls `bridge_state` independently
+of `status.py` (untouched until Task 4). **Do not fix any of them here.**
+
+Also update `_session_card()` (`tests/test_contracts.py:41`): adding
+`waiting_for` to `SESSION_CARD_KEYS` goes through `_require_exact_keys`, so
+every `_sessions_payload()` validation in that file breaks until the
+fixture carries the new key — and the plan's own `del`-based test has
+nothing to delete otherwise. Confirm `tests/test_contracts.py`, `tests/test_status.py` and
 `tests/test_version_ledger.py` pass, and list the remaining failures in
 your report; Tasks 4–6 own them.
 
@@ -760,9 +771,15 @@ git commit --no-verify -m "feat(revive): kick on bridgeSessionId, not record cou
 ### Task 5: Wire the adapter in, delete the old detector
 
 **Files:**
-- Modify: `crr/cli.py`, `crr/core/config.py`, `crr/adapters/transcript_source.py`
+- Modify: `crr/cli.py`, `crr/core/config.py`, `crr/adapters/transcript_source.py`,
+  **`crr/core/status.py`** — `_empty_facts` still returns `bridge_seen` /
+  `bridge_since`, deliberately left in Task 3 so the default kept mirroring
+  the real adapter's shape. Removing them is yours, and without this file
+  Task 5 cannot finish its stated scope.
 - Delete: `crr/core/bridge.py`, `tests/test_bridge.py`
-- Test: `tests/test_cli.py`, `tests/test_transcript_source.py`, `tests/test_config.py`
+- Test: `tests/test_cli.py`, `tests/test_transcript_source.py`,
+  `tests/test_config.py`, `tests/test_priors.py`, **`tests/test_e2e_linux.py`**
+  (it is in the red set and nothing else will turn it green)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -784,6 +801,9 @@ Expected: FAIL — the card still reports `unknown` because nothing injects.
 
 - [ ] **Step 3: Implement**
 
+- **`grep -n "assemble_sessions(" crr/cli.py` and change every hit.** Three
+  today, but `cli.py:1900` (`_cmd_whoami`'s helper) is exercised by NO test
+  — no failure will point at it. The grep is load-bearing, not belt-and-braces.
 - Add `_reachability_by_sid(entries, controller)` to `cli.py`: one
   `session_state.read_all()`, then per entry resolve `pid_matched` via
   `controller.claude_groups(entry["pid"])` and classify. Inject at all
