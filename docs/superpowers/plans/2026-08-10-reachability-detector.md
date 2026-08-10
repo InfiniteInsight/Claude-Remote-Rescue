@@ -805,8 +805,26 @@ Expected: FAIL — the card still reports `unknown` because nothing injects.
   today, but `cli.py:1900` (`_cmd_whoami`'s helper) is exercised by NO test
   — no failure will point at it. The grep is load-bearing, not belt-and-braces.
 - Add `_reachability_by_sid(entries, controller)` to `cli.py`: one
-  `session_state.read_all()`, then per entry resolve `pid_matched` via
-  `controller.claude_groups(entry["pid"])` and classify. Inject at all
+  `session_state.read_all()`, then per entry resolve `pid_matched` and
+  classify.
+
+  **`pid_matched` must be resolved from ONE process snapshot, not per
+  entry.** `controller.claude_groups()` forks a `ps` per call. The watchdog
+  can afford that — it runs once per 30s and short-circuits on sessions
+  with no state file. The dashboard cannot: measured here, **17 cards
+  polling every 5s would be ~204 `ps` forks per minute, forever.** Batch it
+  the way `status.py` already batches the tty probe
+  (`process_probe.controlling_ttys(pids)` — one query, O(1) membership
+  after). If `ProcessProbe` needs a new batched method, add one; do not
+  ship the per-entry version.
+
+  **`pid_matched` is a heuristic, and the code must say so.** `claude_groups`
+  returns process GROUP ids; the state file records claude's own pid. They
+  coincide when claude leads its group — the normal job-control case, and
+  true for all 18 claude processes on this machine — and otherwise the
+  comparison fails CLOSED (`unknown`, no kick). The cost is a missed
+  detection, never a wrong restart. Comment it at the call site rather than
+  implying an exact match. Inject at all
   **three** `assemble_sessions(` call sites (`grep -n "assemble_sessions("`).
 - Delete `crr/core/bridge.py` and `tests/test_bridge.py`.
 - Remove `bridge_stale_records` and `bridge_scan_lines` from
@@ -1029,6 +1047,17 @@ git push origin main
 ```
 
 ---
+
+## A lesson from Task 4, for every task that touches stored records
+
+Task 4 changed what `_kick_dropped_bridges` WRITES into the kick lineage,
+and silently broke what `crr kicks --list` READS — every new kick would
+have rendered `? records since the bridge marker (threshold ?)`. Nothing
+caught it, because the renderer's tests build their input from that test
+file's own helper rather than from what `cli` actually writes. A test that
+constructs both sides of an interface proves only that it is
+self-consistent. When you change a writer, exercise the reader against the
+writer's real output.
 
 ## Verified while writing this plan
 
