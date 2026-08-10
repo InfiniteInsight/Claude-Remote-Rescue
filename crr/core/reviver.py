@@ -141,6 +141,51 @@ def attach_argv(name: str) -> list[str]:
     return ["tmux", "attach", "-t", name]
 
 
+def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
+    """Re-key ``entry`` onto the pid actually running in tmux session ``name``.
+
+    The reviver spawns ``tmux new-session -- claude ...`` with no shell in
+    between, so the revived claude never runs the shim's ``claude()`` wrapper
+    and never calls ``crr register``. Every revived conversation was therefore
+    absent from the journal: the only entry stayed keyed to the long-dead
+    shell pid, so its card read "crashed" and offered Reopen instead of Kick
+    while the conversation was alive (#58).
+
+    The current boot id is stamped along with the pid — ``classify`` returns
+    CRASHED on a boot mismatch *without consulting the pid at all*, so a
+    re-keyed entry carrying the old boot would stay crashed no matter how
+    alive its process is. The revived process genuinely belongs to this boot.
+
+    Returns True if the entry moved. Declines (leaving everything untouched)
+    when the pane pid is unknown — never guess a pid to point every pid-keyed
+    op at — or when that slot already belongs to a different conversation,
+    the same refuse-rather-than-clobber discipline adopt/retrack use.
+    """
+    live_pid = tmux.session_pid(name)
+    if live_pid is None or live_pid == entry["pid"]:
+        return False
+    try:
+        existing = store.read(live_pid)
+    except KeyError:
+        existing = None
+    except Exception:
+        return False  # unreadable slot: refuse rather than guess
+    if existing is not None:
+        same = (existing.get("claude") or {}).get("session_id") == \
+            (entry.get("claude") or {}).get("session_id")
+        if not same:
+            return False
+    moved = dict(entry)
+    moved["pid"] = live_pid
+    moved["boot_id"] = boot_identity.current()
+    moved["tmux_session"] = name
+    moved["host"] = "tmux"
+    moved["updated"] = now
+    store.write(moved)
+    store.remove(entry["pid"])
+    return True
+
+
 def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str):
     """Return (action, updated_entry, name) for one candidate.
 
@@ -175,6 +220,7 @@ def revive_crashed(
     max_strikes: int,
     now: str,
     remote_control_enabled: bool,
+    flags=None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -196,12 +242,30 @@ def revive_crashed(
             continue
         if classify(entry, boot_identity, process_probe) != CRASHED:
             continue
+        # `close` arms a flag the SHIM's repair loop consumes; the shim then
+        # deregisters, and THAT is what stops this sweep. A tmux-revived
+        # claude has no shim (#58), so nothing consumed the flag and the
+        # next pass revived the very conversation the user just closed.
+        # Honour it here: archive terminally, delist, and clear the flag so
+        # it cannot linger onto a recycled pid.
+        if flags is not None:
+            armed = flags.read(entry["pid"])
+            if armed is not None and armed[0] == "close":
+                archive.archive(entry, "closed", now)
+                store.remove(entry["pid"])
+                flags.clear(entry["pid"])
+                continue
         action, updated, name = _decide(entry, live, max_strikes, now)
         pid = entry["pid"]
         if action == "reset-nochange":
+            # Already parked and healthy — but possibly never journaled under
+            # its live pid (every session revived before #58 is in this
+            # state). Adopt it now rather than waiting for a re-revival.
+            _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now)
             reset.append(pid)
         elif action == "reset":
             store.write(updated)
+            _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
             reset.append(pid)
         elif action == "give_up":
             # Terminal home: preserve in the archive, drop from active.
@@ -214,6 +278,9 @@ def revive_crashed(
             )
             live.add(name)  # dedupe within the pass: a shared sid is now "live"
             store.write(updated)
+            # The spawn just created the process crr must be able to Kick;
+            # put the journal on it before the pass ends (#58).
+            _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
             revived.append(pid)
 
     # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'
@@ -231,7 +298,8 @@ def revive_crashed(
     #    their decision. The two 'superseded-*' reasons stay revivable on
     #    purpose: their archives exist to preserve revival data.)
     for record in archive.scan().records:
-        if record["reason"] in ("gave-up", "detmuxed", "untracked", "untmuxed", "dismissed"):
+        if record["reason"] in ("gave-up", "detmuxed", "untracked", "untmuxed",
+                                "dismissed", "closed"):
             continue
         entry = record["entry"]
         action, updated, name = _decide(entry, live, max_strikes, now)

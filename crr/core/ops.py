@@ -120,9 +120,6 @@ def reopen(
         return OpResult(False, f"session {pid} has no claude session to resume")
     state = classify(entry, boot, probe)
 
-    if state == LIVE:
-        return OpResult(False, f"session {pid} is live — use kick or close")
-
     # F16 tri-state: resolve liveness ONCE, before any destructive step —
     # the GHOST branch kills + archives before it would otherwise learn
     # whether the target tmux session already exists, and a kill can't be
@@ -130,6 +127,16 @@ def reopen(
     live = tmux.list_sessions()
     if live is None:
         return OpResult(False, f"reopen {pid}: cannot determine tmux state — is tmux responding?")
+
+    if state == LIVE:
+        # A LIVE entry is normally a shell the user is working in, and
+        # reopen would race a spawn against it. A PARKED one is different:
+        # the journaled pid IS the process in the tmux session (#58), so
+        # there is nothing to race and reopen means what the user expects —
+        # attach a tab to it. Anything else live is still refused.
+        name = entry.get("tmux_session")
+        if not (name and name in live and tmux.session_pid(name) == pid):
+            return OpResult(False, f"session {pid} is live — use kick or close")
 
     if state == GHOST:
         return _reopen_ghost(
@@ -356,9 +363,6 @@ def detmux(
     except (KeyError, contracts.ContractError):
         return OpResult(False, f"no session {pid}")
     state = classify(entry, boot, probe)
-    if state != CRASHED:
-        return OpResult(False, f"session {pid} is {state}, not crashed — refusing "
-                               "(detmux re-homes revived sessions only)")
     name = entry.get("tmux_session")
     if not name:
         return OpResult(False, f"session {pid} is not tmux-parked")
@@ -367,6 +371,21 @@ def detmux(
         return OpResult(False, f"detmux {pid}: cannot determine tmux state — is tmux responding?")
     if name not in live:
         return OpResult(False, f"tmux session {name} is gone")
+    # PARKED, not CRASHED (#58). CRASHED was only ever standing in for
+    # "parked in tmux" — before the journal was re-keyed onto the revived
+    # claude, a parked entry's pid was always the dead shell. Now it is the
+    # live pane process, so refusing on liveness would make this op unusable
+    # on exactly the sessions it exists for.
+    #
+    # But liveness alone must not be dropped: [bug 2026-07-29] a live SHELL
+    # that inherited this tmux_session via same-boot pid preservation must
+    # still be refused, or it gets archived+delisted out of crr management.
+    # The exact discriminator is whether the journaled pid IS the process
+    # running in that session — true for a re-keyed parked entry, false for
+    # a shell wearing an inherited name.
+    if state != CRASHED and tmux.session_pid(name) != pid:
+        return OpResult(False, f"session {pid} is {state}, not parked — refusing "
+                               "(detmux re-homes revived sessions only)")
     if tab_spawner is None or not tab_spawner.available():
         return OpResult(False, "no terminal tab spawner available on this host")
     try:
@@ -427,9 +446,6 @@ def untmux(
     except (KeyError, contracts.ContractError):
         return OpResult(False, f"no session {pid}")
     state = classify(entry, boot, probe)
-    if state != CRASHED:
-        return OpResult(False, f"session {pid} is {state}, not crashed — refusing "
-                               "(untmux re-homes revived sessions only)")
     name = entry.get("tmux_session")
     if not name:
         return OpResult(False, f"session {pid} is not tmux-parked")
@@ -438,6 +454,21 @@ def untmux(
         return OpResult(False, f"untmux {pid}: cannot determine tmux state — is tmux responding?")
     if name not in live:
         return OpResult(False, f"tmux session {name} is gone")
+    # PARKED, not CRASHED (#58). CRASHED was only ever standing in for
+    # "parked in tmux" — before the journal was re-keyed onto the revived
+    # claude, a parked entry's pid was always the dead shell. Now it is the
+    # live pane process, so refusing on liveness would make this op unusable
+    # on exactly the sessions it exists for.
+    #
+    # But liveness alone must not be dropped: [bug 2026-07-29] a live SHELL
+    # that inherited this tmux_session via same-boot pid preservation must
+    # still be refused, or it gets archived+delisted out of crr management.
+    # The exact discriminator is whether the journaled pid IS the process
+    # running in that session — true for a re-keyed parked entry, false for
+    # a shell wearing an inherited name.
+    if state != CRASHED and tmux.session_pid(name) != pid:
+        return OpResult(False, f"session {pid} is {state}, not parked — refusing "
+                               "(untmux re-homes revived sessions only)")
     if tab_spawner is None or not tab_spawner.available():
         return OpResult(False, "no terminal tab spawner available on this host")
     try:

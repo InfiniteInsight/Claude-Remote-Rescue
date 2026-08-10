@@ -62,3 +62,34 @@ def test_claude_groups_selects_the_fake_claude_not_the_bg_job():
             if proc.poll() is None:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 proc.wait(timeout=3)
+
+
+# --- kick must reach a tmux-parked claude (#58) ---------------------------
+#
+# claude_groups() finds claude CHILDREN of a journaled shell pid. A revived
+# session is journaled under the claude process itself, which has no claude
+# children — measured live: claude_groups(2016) == []. Without this case a
+# re-keyed entry shows a Kick button that signals nothing.
+
+def test_claude_groups_returns_the_pids_own_group_when_it_is_itself_claude():
+    from crr.adapters.process_probe import _child_groups
+    rows = [
+        (1956, 1, 1956, "tmux"),      # the tmux server
+        (2016, 1956, 2016, "claude"),  # parked claude: its own group leader
+    ]
+    assert _child_groups(rows, 2016) == [2016]
+
+
+def test_claude_groups_still_finds_children_for_a_journaled_shell():
+    from crr.adapters.process_probe import _child_groups
+    rows = [
+        (500, 1, 500, "fish"),
+        (501, 500, 501, "claude"),
+    ]
+    assert _child_groups(rows, 500) == [501]
+
+
+def test_claude_groups_does_not_return_a_non_claude_pids_own_group():
+    from crr.adapters.process_probe import _child_groups
+    rows = [(500, 1, 500, "fish")]
+    assert _child_groups(rows, 500) == []

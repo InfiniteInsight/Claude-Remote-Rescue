@@ -917,6 +917,10 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             max_strikes=config.get("zombie_strikes"),
             now=_now(),
             remote_control_enabled=config.get("remote_control"),
+            # Without this the sweep revives a conversation the user closed:
+            # `close` arms a flag the shim consumes, and a tmux-revived
+            # claude has no shim (#58).
+            flags=FlagStore(sd),
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)

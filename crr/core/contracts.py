@@ -219,6 +219,12 @@ ARCHIVE_REASONS = (
     "untracked",  # ops.detmux/untrack's current archive reason (terminology: detmux -> untrack)
     "ghost-restored",
     "untmuxed",
+    # Terminal (#58). `close` arms a flag the shim's repair loop consumes,
+    # and the shim's deregister is what actually stops the reviver. A
+    # tmux-revived claude has no shim, so the reviver honours the flag
+    # itself and archives under this reason — without it, the watchdog
+    # revived the conversation the user had just closed.
+    "closed",
 )
 
 

@@ -740,10 +740,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     });
     actions.appendChild(b);
   }
-  // parked is CRASHED operationally (see spec Phase 0) — ops.py accepts
-  // exactly these four and refuses Kick/Close, so the card must offer the
-  // same set it does for crashed.
-  if (s.state === "crashed" || s.state === "parked") {
+  if (s.state === "crashed") {
     addBtn("Reopen", "reopen", false, false);
     addBtn("Dismiss", "dismiss", false, false);
     if (s.tmux_session) {        // revived into tmux: offer re-homing
@@ -752,6 +749,19 @@ function renderCard(s, uncertain, groupColor, latest) {
       // in a visible tab -- confirm-gated (second click) since it kills.
       addBtn("Un-tmux", "untmux", true, true);
     }
+  } else if (s.state === "parked") {
+    // [#58] A parked conversation is operationally LIVE — the journal is
+    // re-keyed onto the claude running in the pane — so it gets the
+    // running-session controls it was previously denied. Kick is the answer
+    // to "Remote Control dropped, reconnect it"; without it the card was a
+    // dead end. Reopen stays and means "attach a tab" (it takes reopen's
+    // already-running branch). Dismiss goes: it requires CRASHED and could
+    // only ever refuse here — Close is the op that ends a running session.
+    addBtn("Reopen", "reopen", false, false);
+    addBtn("Kick", "kick", false);
+    addBtn("Close", "close", true);
+    addBtn("Untrack", "untrack", false, false);
+    addBtn("Un-tmux", "untmux", true, true);
   } else {                       // live or ghost: a running claude to act on
     if (s.state === "ghost") {   // orphaned shell: offer mobile rescue
       addBtn("Restore", "reopen", false);

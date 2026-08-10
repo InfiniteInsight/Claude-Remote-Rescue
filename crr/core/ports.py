@@ -133,6 +133,15 @@ class TmuxSpawner(Protocol):
     shim and double-registers the session ([lesson: word-form exec]).
     """
 
+    def session_pid(self, name: str) -> int | None:
+        """The pid running in session ``name``'s first pane, or None.
+
+        None means "could not be determined" and callers must not guess:
+        this pid is what the journal is re-keyed onto (#58), so a wrong one
+        would point every pid-keyed op at the wrong process.
+        """
+        ...
+
     def list_sessions(self) -> set[str] | None:
         """Return the set of currently-live tmux session names, or None.
 
