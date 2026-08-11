@@ -16,12 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest is deliberately absent: crr cannot be imported
-        # there at all (locking.py imports fcntl at module scope), so the
-        # job could only ever be red. A permanently red board trains people
-        # to ignore CI — the habit that let #65 sit broken for weeks. It
-        # joins the matrix in the same change as the Windows lock.
-        os: [ubuntu-latest, macos-latest]
+        # windows-latest joins with the Windows mutation_lock (#70) — the
+        # import-time fcntl dependency that made it impossible before.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
