@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from crr import cli
+from crr.adapters import state_dir as state_dir_mod
 from crr.core import contracts
 
 _CRR_BIN = str(Path(sys.executable).parent / "crr")
@@ -49,10 +50,18 @@ _INTERACTIVE_ARGV = {
     "fish": ["fish", "--no-config", "-i", "-c"],
 }
 
+# [#43] Was Linux-only. macOS defaults to zsh and ships bash, so gating the
+# WHOLE file on Linux meant the shims — the layer every session goes
+# through — were never executed on the platform half the users are on. The
+# gate is now what it always meant: a POSIX host with crr installed. Each
+# test additionally skips the individual shells this host does not have
+# (fish is commonly absent on a stock macOS runner), so a missing shell
+# costs that shell's coverage rather than the file's.
 pytestmark = pytest.mark.skipif(
-    platform.system() != "Linux" or not Path(_CRR_BIN).exists(),
-    reason="needs Linux + an installed crr console script",
+    os.name != "posix" or not Path(_CRR_BIN).exists(),
+    reason="needs a POSIX host + an installed crr console script",
 )
+
 
 
 def _installed(shell):
@@ -68,12 +77,30 @@ def _make_shim(shell, tmp_path, capsys) -> Path:
     return shim
 
 
-def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
+def _shell_env(state_dir, **extra) -> dict:
+    """Env for a shim subprocess, including where crr ACTUALLY stores state.
+
+    CRR_STATE exists because the scripts used to hardcode
+    $XDG_STATE_HOME/crr, which is simply wrong on macOS —
+    ``state_dir.resolve`` sends Darwin to ~/Library/Application Support/crr
+    and ignores XDG. The shims were writing to the right place; the
+    assertions were reading a directory that only exists on Linux (#43).
+    Built in one place so the five call sites cannot drift.
+    """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(state_dir),
         "XDG_STATE_HOME": str(state_dir),
     }
+    env["CRR_STATE"] = str(
+        state_dir_mod.resolve(platform.system(), env, Path(env["HOME"]))
+    )
+    env.update(extra)
+    return env
+
+
+def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
+    env = _shell_env(state_dir)
     return subprocess.run(
         _SHELLS[shell]["argv"] + [script],
         env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
@@ -87,7 +114,7 @@ def test_shim_registers_a_valid_entry(shell, tmp_path, capsys):
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     pid = _SHELLS[shell]["pid"]
-    script = f'source "{shim}"\ncat "$XDG_STATE_HOME/crr/tabs/{pid}.json"\n'
+    script = f'source "{shim}"\ncat "$CRR_STATE/tabs/{pid}.json"\n'
     result = _run(shell, script, state)
     assert result.returncode == 0, result.stderr
 
@@ -131,12 +158,8 @@ def _fake_claude_bindir(tmp_path) -> Path:
 
 
 def _run_with_fake_claude(shell, script, state_dir, bindir, record, journal=None) -> subprocess.CompletedProcess:
-    env = {
-        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-        "HOME": str(state_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "CRR_TEST_RECORD": str(record),
-    }
+    env = _shell_env(state_dir, PATH=f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                     CRR_TEST_RECORD=str(record))
     if journal is not None:
         env["CRR_TEST_JOURNAL"] = str(journal)
     return subprocess.run(
@@ -157,7 +180,7 @@ def _fake_claude_dumping_journal(tmp_path) -> Path:
         "#!/usr/bin/env bash\n"
         'printf "%s\\n" "$@" > "$CRR_TEST_RECORD"\n'
         '[ -n "$CRR_TEST_JOURNAL" ] && '
-        'cat "$XDG_STATE_HOME/crr/tabs/$PPID.json" > "$CRR_TEST_JOURNAL" 2>/dev/null\n'
+        'cat "$CRR_STATE/tabs/$PPID.json" > "$CRR_TEST_JOURNAL" 2>/dev/null\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -372,7 +395,7 @@ def test_bash_shim_records_last_cmd(tmp_path, capsys):
     script = (
         f'source "{shim}"\n'
         "true marker-command\n"
-        'cat "$XDG_STATE_HOME/crr/tabs/$$.json"\n'
+        'cat "$CRR_STATE/tabs/$$.json"\n'
     )
     result = _run("bash", script, state)
     assert result.returncode == 0, result.stderr
@@ -411,8 +434,8 @@ def _fake_claude_repair_bindir(tmp_path) -> Path:
         '[ -f "$CRR_TEST_COUNT" ] && n=$(cat "$CRR_TEST_COUNT")\n'
         'n=$((n+1)); echo "$n" > "$CRR_TEST_COUNT"\n'
         'if [ "$n" -eq 1 ] && [ -n "$CRR_TEST_FLAG" ]; then\n'
-        '  mkdir -p "$XDG_STATE_HOME/crr/relaunch"\n'
-        '  printf %s "$CRR_TEST_FLAG" > "$XDG_STATE_HOME/crr/relaunch/$PPID"\n'
+        '  mkdir -p "$CRR_STATE/relaunch"\n'
+        '  printf %s "$CRR_TEST_FLAG" > "$CRR_STATE/relaunch/$PPID"\n'
         "fi\n"
         "codes=($CRR_TEST_EXITS)\n"
         "idx=$((n-1))\n"
@@ -425,14 +448,13 @@ def _fake_claude_repair_bindir(tmp_path) -> Path:
 
 
 def _repair_env(state_dir, bindir, tmp_path, exits, flag=None, extra=None):
-    env = {
-        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-        "HOME": str(state_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "CRR_TEST_RECORD": str(tmp_path / "record"),
-        "CRR_TEST_COUNT": str(tmp_path / "count"),
-        "CRR_TEST_EXITS": exits,
-    }
+    env = _shell_env(
+        state_dir,
+        PATH=f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        CRR_TEST_RECORD=str(tmp_path / "record"),
+        CRR_TEST_COUNT=str(tmp_path / "count"),
+        CRR_TEST_EXITS=exits,
+    )
     if flag is not None:
         env["CRR_TEST_FLAG"] = flag
     if extra:
@@ -451,6 +473,23 @@ def _repair_script(shell, shim, cmdline="go", pre="", marker=True):
     if marker:
         lines.append("echo AFTER-MARKER")
     return "\n".join(lines) + "\n"
+
+
+def _skip_fish_pty_on_macos(shell: str) -> None:
+    """[#43, unresolved] fish's `read` never returns under a pty on macOS CI.
+
+    Both crash-offer tests time out after 30s there, and only for fish —
+    bash and zsh pass, and all three pass on Linux with fish 3.7.1. The
+    cause is not established: brew ships a newer fish than the Linux runner,
+    and the pty write may also race differently on Darwin. Skipped rather
+    than guessed at, because the two candidate explanations lead to
+    opposite fixes and neither can be tested without the platform.
+
+    This is NOT a claim that the fish shim works on macOS. It is a claim
+    that this harness cannot currently tell.
+    """
+    if shell == "fish" and platform.system() == "Darwin":
+        pytest.skip("fish read under a pty hangs on macOS CI — unresolved, see #43")
 
 
 def _run_pty(argv, env, input_bytes, timeout=30):
@@ -497,8 +536,8 @@ def test_repair_stale_flag_cleared_at_wrapper_start(shell, tmp_path, capsys):
     bindir = _fake_claude_repair_bindir(tmp_path)
     pid = _SHELLS[shell]["pid"]
     pre = (
-        'mkdir -p "$XDG_STATE_HOME/crr/relaunch"\n'
-        f'printf "relaunch stale-sid" > "$XDG_STATE_HOME/crr/relaunch/{pid}"'
+        'mkdir -p "$CRR_STATE/relaunch"\n'
+        f'printf "relaunch stale-sid" > "$CRR_STATE/relaunch/{pid}"'
     )
     script = _repair_script(shell, shim, pre=pre)
     env = _repair_env(state, bindir, tmp_path, exits="0")
@@ -644,6 +683,7 @@ def test_repair_crash_offer_explicit_no_declines(shell, tmp_path, capsys):
     # With a tty, an explicit `n` at the offer stops the loop.
     if not _installed(shell):
         pytest.skip(f"{shell} not installed")
+    _skip_fish_pty_on_macos(shell)
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     bindir = _fake_claude_repair_bindir(tmp_path)
@@ -659,6 +699,7 @@ def test_repair_crash_offer_explicit_no_declines(shell, tmp_path, capsys):
 def test_repair_crash_offer_yes_resumes(shell, tmp_path, capsys):
     if not _installed(shell):
         pytest.skip(f"{shell} not installed")
+    _skip_fish_pty_on_macos(shell)
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     bindir = _fake_claude_repair_bindir(tmp_path)
@@ -846,12 +887,7 @@ def _fake_crr_bin(tmp_path) -> Path:
 
 
 def _rescue_check_env(state_dir, record) -> dict:
-    return {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": str(state_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "CRR_TEST_RECORD": str(record),
-    }
+    return _shell_env(state_dir, CRR_TEST_RECORD=str(record))
 
 
 @pytest.mark.parametrize("shell", list(_SHELLS))
@@ -909,8 +945,7 @@ def test_rescue_check_is_silent_no_op_when_crr_binary_is_absent(shell, tmp_path,
     script = f'source "{shim}"\n'
     result = subprocess.run(
         _INTERACTIVE_ARGV[shell] + [script],
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(state),
-             "XDG_STATE_HOME": str(state)},
+        env=_shell_env(state),
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr

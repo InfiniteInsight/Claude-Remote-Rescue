@@ -16,6 +16,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # windows-latest is deliberately absent: crr cannot be imported
+        # there at all (locking.py imports fcntl at module scope), so the
+        # job could only ever be red. A permanently red board trains people
+        # to ignore CI — the habit that let #65 sit broken for weeks. It
+        # joins the matrix in the same change as the Windows lock.
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     runs-on: ${{ matrix.os }}
@@ -27,13 +32,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Shim contract tests are Linux-gated (register needs the Linux
-      # boot adapter until the macOS adapter lands in Phase 2). Install
-      # zsh + fish on the Linux runner so all three shims are actually
-      # exercised there, not silently skipped.
+      # [#43] Shim tests run on any POSIX host now, not Linux only — macOS
+      # defaults to zsh, so gating them on Linux left the layer every
+      # session passes through unverified there. Install the shells the
+      # runner lacks so they are actually exercised rather than skipped.
       - name: Install shells for shim tests (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh fish
+
+      - name: Install shells for shim tests (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
 
       - name: Install (dev extras)
         run: |
