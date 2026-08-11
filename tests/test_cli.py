@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import set_home  # tests/ is on sys.path (no __init__.py)
 from crr import cli
 from crr.adapters import boot_identity, process_probe, session_state, state_dir
 from crr.core import config as cfg
@@ -1444,7 +1445,7 @@ def _write_transcript_file(home, cwd, sid, mtime=None):
 
 def test_claude_resume_verifies_an_explicit_sid_with_a_transcript(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
     sid = "eeeeeeee-5555-4555-8555-555555555555"
@@ -1459,7 +1460,7 @@ def test_claude_resume_verifies_an_explicit_sid_with_a_transcript(tmp_path, monk
 
 def test_claude_resume_guesses_newest_transcript_without_explicit_sid(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
     older = "11111111-aaaa-4aaa-8aaa-111111111111"
@@ -1475,7 +1476,7 @@ def test_claude_resume_guesses_newest_transcript_without_explicit_sid(tmp_path, 
 
 def test_claude_resume_leaves_untracked_when_no_sid_and_no_transcript(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
     rc = cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj"])
@@ -1489,7 +1490,7 @@ _G1_SID = "11112222-3333-4444-5555-666677778888"
 def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkeypatch):
     # The revive-sweep helper upgrades a guessed sid to verified once its
     # transcript shows activity after the session started.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     entry = new_entry(
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
@@ -1506,7 +1507,7 @@ def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkey
 
 
 def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     entry = new_entry(
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
@@ -1577,7 +1578,7 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     # survive revive's own store.write of the same entry — pins the re-scan
     # ordering (without it, revive would write back the stale guessed dict).
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -2095,7 +2096,7 @@ def test_untracked_view_reads_last_prompt_from_the_transcript(tmp_path, monkeypa
     # panel reads the real last prompt from it (parity with the discoverable
     # panel), rather than omitting the field. Lazy panel only, never the poll.
     sid = "eeeeeeee-5555-4555-8555-555555555555"
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/p42", sid, [
         _discover_user_rec("the last thing I typed", cwd="/p42"),
     ])
@@ -2112,7 +2113,7 @@ def test_untracked_view_reads_last_prompt_from_the_transcript(tmp_path, monkeypa
 def test_untracked_view_last_prompt_empty_when_transcript_absent(tmp_path, monkeypatch):
     # A gone/unreadable transcript degrades to "" — honest empty, never an error.
     sid = "eeeeeeee-5555-4555-8555-555555555555"
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     entry = new_entry(
         pid=42, cwd="/p42", host="tmux", shell="zsh", boot_id="old-boot",
@@ -2272,7 +2273,7 @@ _DISCOVER_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 def test_discover_lists_untracked_transcripts(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj", timestamp="2026-08-01T00:00:00Z"),
     ])
@@ -2286,7 +2287,7 @@ def test_discover_lists_untracked_transcripts(tmp_path, monkeypatch, capsys):
 
 def test_discover_excludes_journaled_sessions(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
     entry = store.read(4242)
@@ -2304,7 +2305,7 @@ def test_discover_excludes_journaled_sessions(tmp_path, monkeypatch, capsys):
 
 def test_discover_empty_prints_a_clean_message(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     rc = cli.main(["discover"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -2313,7 +2314,7 @@ def test_discover_empty_prints_a_clean_message(tmp_path, monkeypatch, capsys):
 
 def test_discover_adopt_writes_a_valid_journal_entry(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])
@@ -2346,7 +2347,7 @@ def test_discover_adopt_uses_the_transcripts_authoritative_cwd(tmp_path, monkeyp
     # decode would mangle into "/home/u/Real/Dashed/Proj". The transcript's
     # own stamped cwd is what must land in the adopted entry.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/Real-Dashed-Proj", _DISCOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/Real-Dashed-Proj"),
     ])
@@ -2365,7 +2366,7 @@ def test_discover_adopt_rejects_a_malformed_sid(tmp_path, monkeypatch, capsys):
 
 def test_discover_adopt_reports_a_non_discoverable_sid(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     rc = cli.main(["discover", "--adopt", _DISCOVER_SID])
     assert rc == 1
     assert "not a discoverable" in capsys.readouterr().err
@@ -2375,7 +2376,7 @@ def test_discover_adopt_is_idempotent_on_repeat(tmp_path, monkeypatch, capsys):
     # Re-adopting the same sid lands in the same pid slot rather than
     # leaking a second journal file.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])
@@ -2397,7 +2398,7 @@ def test_discover_adopt_refuses_a_pid_slot_collision(tmp_path, monkeypatch, caps
     # synthetic pid slot discovery.adopted_pid(_DISCOVER_SID) would land in.
     # Adopt must refuse rather than silently overwrite it.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     other_sid = "99999999-9999-4999-8999-999999999999"
     colliding_pid = discovery.adopted_pid(_DISCOVER_SID)
@@ -2426,7 +2427,7 @@ def test_discover_survives_a_naive_last_active_timestamp(tmp_path, monkeypatch, 
     # subtracting it from the (always-aware) `_now()` raises TypeError, not
     # ValueError — that must not crash the whole listing.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj", timestamp="2026-08-01T00:00:00"),
     ])
@@ -2442,7 +2443,7 @@ def test_discover_surfaces_corrupt_journal_files_on_stderr(tmp_path, monkeypatch
     # it would leave that pid's sid out of the "journaled" exclusion set
     # and surface an already-tracked session as falsely "discoverable".
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     tabs_dir = tmp_path / "state" / "tabs"
     tabs_dir.mkdir(parents=True)
     (tabs_dir / "99.json").write_text("not json", encoding="utf-8")
@@ -2994,7 +2995,7 @@ _RECALL_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 def test_recall_pid_resolves_sid_and_prints_matches(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
     entry = store.read(4242)
@@ -3013,7 +3014,7 @@ def test_recall_pid_resolves_sid_and_prints_matches(tmp_path, monkeypatch, capsy
 
 def test_recall_sid_used_directly(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_recall_transcript(tmp_path / "home", "/home/u/proj", _RECALL_SID, [
         _user_rec("a fox prompt"),
     ])
@@ -3025,7 +3026,7 @@ def test_recall_sid_used_directly(tmp_path, monkeypatch, capsys):
 
 def test_recall_no_matches_prints_clean_message(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_recall_transcript(tmp_path / "home", "/home/u/proj", _RECALL_SID, [
         _user_rec("hello there"),
     ])
@@ -3037,7 +3038,7 @@ def test_recall_no_matches_prints_clean_message(tmp_path, monkeypatch, capsys):
 
 def test_recall_dash_n_caps_the_printed_matches(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     records = [
         _user_rec(f"fox message {i}", timestamp=f"2026-01-0{i}T00:00:00Z")
         for i in range(1, 6)  # 5 matches
@@ -3055,7 +3056,7 @@ def test_recall_dash_n_caps_the_printed_matches(tmp_path, monkeypatch, capsys):
 
 def test_recall_all_searches_every_transcript_in_the_cwd(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     sid_a = "aaaaaaaa-1111-4111-8111-111111111111"
     sid_b = "bbbbbbbb-2222-4222-8222-222222222222"
     _write_recall_transcript(tmp_path / "home", "/home/u/proj", sid_a, [
@@ -3073,7 +3074,7 @@ def test_recall_all_searches_every_transcript_in_the_cwd(tmp_path, monkeypatch, 
 
 def test_recall_all_derives_cwd_from_pid_entry(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")  # no claude session on this pid
     _write_recall_transcript(tmp_path / "home", "/home/u/proj", _RECALL_SID, [
@@ -3157,7 +3158,7 @@ def test_recall_never_re_injects_only_prints(tmp_path, monkeypatch, capsys):
     # Retrieval-only: crr recall must never touch the journal or spawn
     # anything — it's a read of the transcript on disk, nothing else.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     store = JournalStore(tmp_path / "state")
     _seed(store, 4242, cwd="/home/u/proj")
     entry = store.read(4242)
@@ -3258,7 +3259,7 @@ def test_takeover_happy_path_orders_arm_before_kill_before_adopt(tmp_path, monke
     # the kill ever reused the stale first tuple, this test would see
     # arm_close(50) and terminate_group(100, ...) instead of the fresh
     # ppid/pgid — and "stopped live pid 100" instead of 101.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])
@@ -3306,7 +3307,7 @@ def test_takeover_success_message_omits_the_competing_session_warning(tmp_path, 
     # Plain adopt warns "if the session is still alive elsewhere, the watchdog
     # will start a SECOND claude --resume" — takeover just STOPPED the live
     # process, so that warning is false here and must be dropped.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])
@@ -3331,7 +3332,7 @@ def test_takeover_success_message_omits_the_competing_session_warning(tmp_path, 
 def test_plain_adopt_keeps_the_competing_session_warning(tmp_path, monkeypatch):
     # The default path (crr discover --adopt / crr adopt, no takeover) has NOT
     # stopped any live process, so it must keep disclosing the hazard.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])
@@ -3344,7 +3345,7 @@ def test_plain_adopt_keeps_the_competing_session_warning(tmp_path, monkeypatch):
 def test_web_takeover_refuses_when_no_live_process(tmp_path, monkeypatch):
     # The dashboard takeover path (max_wait=0.0) still refuses honestly when
     # nothing is running for the sid — no kill, no flag.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     calls: list = []
     store = JournalStore(tmp_path / "state")
     controller = _FakeResumeController([None], calls)
@@ -3362,7 +3363,7 @@ def test_web_takeover_refuses_when_no_live_process(tmp_path, monkeypatch):
 def test_web_takeover_translates_the_mid_turn_refusal_for_the_phone(tmp_path, monkeypatch):
     # max_wait=0.0 makes a busy session refuse with the internal "still
     # actively writing after 0s" — a phone user must see something sane.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     calls: list = []
     store = JournalStore(tmp_path / "state")
     proc = ResumeProcess(pid=101, ppid=51, pgid=777)
@@ -3386,7 +3387,7 @@ def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypat
     # live process exiting (and its pid/ppid/pgid being recycled) during
     # the lock-free wait loop. Must refuse honestly using the FRESH (None)
     # result: no kill, no flag armed on the stale first-call tuple.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     calls: list = []
     store = JournalStore(tmp_path / "state")
     proc1 = ResumeProcess(pid=100, ppid=50, pgid=100)
@@ -3420,7 +3421,7 @@ def test_takeover_polls_through_activity_then_takes_over(tmp_path, monkeypatch):
     # advances with the clock while busy (seconds_idle stays a small
     # constant, not a huge negative one — a real streaming transcript), then
     # freezes while the clock jumps forward past the idle window.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _TAKEOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])
@@ -3586,7 +3587,7 @@ def test_adopt_plain_delegates_to_the_existing_adopt_path(tmp_path, monkeypatch,
     # No --takeover: `crr adopt SID` must behave exactly like
     # `crr discover --adopt SID` (same message, same journal write).
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
         _discover_user_rec("a prompt", cwd="/home/u/proj"),
     ])

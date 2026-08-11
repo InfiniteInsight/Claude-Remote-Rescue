@@ -12,6 +12,7 @@ import pathlib
 
 import pytest
 
+from conftest import set_home  # tests/ is on sys.path (no __init__.py)
 from crr.core import contracts
 
 
@@ -134,7 +135,7 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
     home.mkdir()
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     _seed_transcript(home, sid)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     handler_holder = {}
