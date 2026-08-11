@@ -26,3 +26,6 @@ venv/
 
 # SDD scratch (subagent-driven-development workspaces)
 .superpowers/
+
+# git worktrees for parallel agent sessions — checkouts, not project content
+.claude/worktrees/
