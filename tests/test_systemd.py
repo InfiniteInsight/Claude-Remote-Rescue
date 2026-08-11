@@ -44,6 +44,13 @@ def test_timer_unit_uses_the_interval_and_installs_to_timers_target():
     assert "WantedBy=timers.target" in unit
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="asserts on POSIX path literals; os.path.abspath composes "
+           "them under ntpath here, so they acquire a drive letter "
+           "and the assertion measures path semantics rather than "
+           "crr. The unit this PATH goes into targets Linux/macOS",
+)
 def test_resolve_service_path_includes_crr_dir_and_system_dirs():
     path, missing = systemd.resolve_service_path("/opt/crr/bin/crr")
     dirs = path.split(":")
@@ -60,6 +67,13 @@ def test_resolve_service_path_reports_missing_binaries(monkeypatch):
     assert set(missing) == set(systemd.SERVICE_BINARIES)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="asserts on POSIX path literals; os.path.abspath composes "
+           "them under ntpath here, so they acquire a drive letter "
+           "and the assertion measures path semantics rather than "
+           "crr. The unit this PATH goes into targets Linux/macOS",
+)
 def test_resolve_service_path_includes_extra_binaries_dir(monkeypatch):
     # [live bug, 2026-07-31] WSL tab spawning shells out to wt.exe/wsl.exe,
     # which live under Windows dirs the baked SERVICE_BINARIES loop never

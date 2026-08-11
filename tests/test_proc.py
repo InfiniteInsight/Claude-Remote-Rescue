@@ -107,6 +107,7 @@ def test_claude_groups_does_not_return_a_non_claude_pids_own_group():
 # records as a failure — so on macOS `kick`/`close` reported "failed to
 # signal" for a kill that had in fact landed.
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 def test_a_zombie_only_group_is_not_alive():
     proc = subprocess.Popen(["sleep", "60"], preexec_fn=os.setsid)
     pgid = os.getpgid(proc.pid)
@@ -144,6 +145,7 @@ def test_a_zombie_only_group_is_not_alive():
         proc.wait(timeout=3)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 def test_terminate_group_does_not_escalate_when_the_group_only_zombies():
     # The escalation is what raises EPERM on macOS. With zombies excluded
     # there is nothing left to escalate against.

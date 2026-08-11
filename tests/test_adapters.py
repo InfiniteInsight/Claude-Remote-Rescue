@@ -112,6 +112,29 @@ def test_is_alive_false_for_reaped_child():
     assert probe.is_alive(child.pid) is False
 
 
+def test_is_alive_does_not_kill_what_it_probes():
+    # Not hypothetical: this failed on its first Windows run, with the
+    # probed child returning exit 0xC0000142 after nothing but an is_alive()
+    # call. os.kill(pid, 0) is a pure existence check on POSIX, but Windows
+    # routes non-CTRL_* signals through TerminateProcess, so the probe was
+    # lethal — a status read that ends the session it is reporting on, in a
+    # tool whose entire job is not losing sessions. Fixed by [#74]'s
+    # OpenProcess/GetExitCodeProcess path; this is the test that caught it
+    # and the one that keeps it caught.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        probe = process_probe.PsProcessProbe(timeout_seconds=5)
+        probe.is_alive(child.pid)
+        time.sleep(0.05)
+        assert child.poll() is None, (
+            f"is_alive() killed the process it probed (exit {child.poll()}) — "
+            "a status probe must never be a mutation"
+        )
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
 # --- tmux command builders (pure) ----------------------------------------
 
 def test_new_session_cmd_is_word_form_after_dashdash():

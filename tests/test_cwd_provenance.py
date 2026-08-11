@@ -27,7 +27,10 @@ as truth. This is the same idea for cwd.
 """
 
 import json
+import os
 import pathlib
+
+import pytest
 
 from crr import cli
 from crr.core import contracts
@@ -95,6 +98,13 @@ def test_adopt_refuses_a_decoded_cwd_that_is_not_a_real_directory(tmp_path, monk
     assert store.scan().entries == []
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="needs a real directory whose path round-trips through the "
+           "'/'<->'-' project-dir codec; no Windows path does (drive "
+           "letters and backslashes survive neither direction), so there "
+           "is no decoded-cwd-that-exists for the accept case to use",
+)
 def test_adopt_accepts_a_decoded_cwd_that_does_exist(tmp_path, monkeypatch):
     # The project dir must decode to a path that really exists, which means
     # a path with NO hyphens in it. `/tmp` qualifies; pytest's own tmp_path
