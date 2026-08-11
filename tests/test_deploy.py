@@ -274,3 +274,16 @@ def test_deploy_does_not_link_when_the_build_failed(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(ad, "build", lambda *a, **k: "install failed: boom")
     assert cli.main(["deploy"]) == 1
     assert not (home / ".local" / "bin" / "crr").exists(), "linked a failed deploy"
+
+
+def test_path_warning_uses_the_platform_separator():
+    # [#70] Hardcoded ":" made a Windows PATH parse as ONE entry, so the
+    # warning fired for a directory that was on it. Only the separator is
+    # testable off-platform — Windows path SHAPE (backslashes, drive-letter
+    # case) is normalised by os.path.normcase, which is identity here, so
+    # that half is proved by the Windows CI job rather than pretended at.
+    link = Path("/home/u/.local/bin/crr")
+    multi = "/home/u/.local/bin;/usr/bin"
+    assert deploy.path_warning(multi, link, sep=";") is None
+    assert deploy.path_warning(multi, link, sep=":") is not None  # the old bug
+    assert deploy.path_warning("/home/u/.local/bin:/usr/bin", link, sep=":") is None

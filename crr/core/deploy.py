@@ -17,6 +17,7 @@ lives in ``crr.adapters.deploy``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # Under XDG_STATE_HOME/crr, beside the journal the services already read.
@@ -101,10 +102,24 @@ def link_refusal(link: Path) -> str | None:
     return None
 
 
-def path_warning(path_env: str, link: Path) -> str | None:
-    """Warn when the link lands somewhere PATH will not find, else None."""
-    parent = str(link.parent)
-    entries = [e for e in (path_env or "").split(":") if e]
+def path_warning(path_env: str, link: Path, sep: str | None = None) -> str | None:
+    """Warn when the link lands somewhere PATH will not find, else None.
+
+    ``sep`` defaults to this platform's PATH separator — ``:`` on POSIX,
+    ``;`` on Windows. Splitting on a hardcoded ``:`` made every Windows PATH
+    parse as one entry, so the warning fired for a directory that was on it
+    (#70's survey; written today, caught by the Windows CI job the same day).
+    """
+    separator = os.pathsep if sep is None else sep
+    def _norm(value: str) -> str:
+        # normcase folds Windows case and slashes; normpath drops trailing
+        # separators. Both are identity on POSIX. Without this, a PATH entry
+        # and the link's parent could name the same directory and compare
+        # unequal purely on spelling.
+        return os.path.normcase(os.path.normpath(value))
+
+    parent = _norm(str(link.parent))
+    entries = [_norm(e) for e in (path_env or "").split(separator) if e]
     if parent in entries:
         return None
     return (f"{parent} is not on PATH — `crr` will not be found by name until "
