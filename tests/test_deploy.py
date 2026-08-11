@@ -230,14 +230,21 @@ def test_a_missing_link_is_fine_to_create(tmp_path):
     assert deploy.link_refusal(tmp_path / "nothing-here") is None
 
 
+# These two pass a POSIX-shaped PATH, so they say so with `sep=":"` rather
+# than leaning on the host's separator. Without it they were reading a
+# colon-joined string on Windows, where PATH is joined with ";" — one
+# entry, never matching, warning fired. That looked like the #70
+# `path_warning` defect resurfacing; it is the mirror image, a test feeding
+# an input its own platform would never produce.
 def test_a_link_outside_PATH_is_called_out():
-    msg = deploy.path_warning("/usr/bin:/bin", Path("/home/u/.local/bin/crr"))
+    msg = deploy.path_warning("/usr/bin:/bin", Path("/home/u/.local/bin/crr"),
+                              sep=":")
     assert msg and "not on PATH" in msg
 
 
 def test_a_link_on_PATH_is_silent():
     assert deploy.path_warning("/home/u/.local/bin:/usr/bin",
-                               Path("/home/u/.local/bin/crr")) is None
+                               Path("/home/u/.local/bin/crr"), sep=":") is None
 
 
 def test_ensure_link_repoints_a_stale_symlink(tmp_path):

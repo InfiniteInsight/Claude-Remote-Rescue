@@ -102,16 +102,6 @@ def test_is_alive_true_for_current_process():
     assert probe.is_alive(os.getpid()) is True
 
 
-@pytest.mark.xfail(
-    os.name == "nt",
-    strict=True,
-    reason="[#74] is_alive() reports a reaped pid as LIVE on Windows: it "
-           "probes with os.kill(pid, 0), and a Popen object still holding "
-           "the process handle keeps OpenProcess succeeding after the exit. "
-           "xfail rather than skip because the claim is true on Windows too "
-           "— crr would classify a dead session as running — so this must "
-           "turn red the moment someone fixes it, not stay quietly absent.",
-)
 def test_is_alive_false_for_reaped_child():
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     child.terminate()
@@ -123,12 +113,14 @@ def test_is_alive_false_for_reaped_child():
 
 
 def test_is_alive_does_not_kill_what_it_probes():
-    # os.kill(pid, 0) is a pure existence check on POSIX, but the Windows
-    # os.kill routes non-CTRL_* signals through TerminateProcess with the
-    # signal as the exit code — which would make this probe lethal. Whether
-    # signal 0 is special-cased there is not something to reason about from
-    # a Linux box, so the platform answers it: probe a live child, then
-    # require the child to still be live.
+    # Not hypothetical: this failed on its first Windows run, with the
+    # probed child returning exit 0xC0000142 after nothing but an is_alive()
+    # call. os.kill(pid, 0) is a pure existence check on POSIX, but Windows
+    # routes non-CTRL_* signals through TerminateProcess, so the probe was
+    # lethal — a status read that ends the session it is reporting on, in a
+    # tool whose entire job is not losing sessions. Fixed by [#74]'s
+    # OpenProcess/GetExitCodeProcess path; this is the test that caught it
+    # and the one that keeps it caught.
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         probe = process_probe.PsProcessProbe(timeout_seconds=5)

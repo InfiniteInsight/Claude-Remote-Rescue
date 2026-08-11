@@ -50,12 +50,62 @@ def _parse_tty_pids(stdout: str) -> set[int]:
     return out
 
 
+# Windows liveness. `os.kill(pid, 0)` is NOT an existence check there:
+# CPython routes anything that is not CTRL_C_EVENT/CTRL_BREAK_EVENT through
+# TerminateProcess, so the probe kills what it was asked about. Measured on
+# CI, not inferred — the child came back with exit 0xC0000142 after nothing
+# but an is_alive() call ([#74]). For a tool whose whole job is rescuing
+# sessions, a status read that ends them is the worst available bug, so
+# Windows asks the kernel instead of signalling.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+
+
+def _windows_is_alive(pid: int) -> bool:
+    """True while ``pid`` is running, without touching it.
+
+    ``STILL_ACTIVE`` is ambiguous by Windows' own design: a process that
+    exits with code 259 is indistinguishable from a running one. That is a
+    documented wart of GetExitCodeProcess, not something introduced here,
+    and the alternative (a wait-with-zero-timeout on the handle) needs
+    SYNCHRONIZE rights this deliberately does not ask for. Erring toward
+    "alive" also errs toward not reviving a session twice.
+    """
+    import ctypes  # Windows-only, and lazily — see locking.py / #70
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Without explicit restypes a 64-bit HANDLE truncates to int, which
+    # leaks the handle and can still look truthy — a plausible wrong answer
+    # is worse than an error.
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE,
+                                       ctypes.POINTER(wintypes.DWORD))
+    k32.CloseHandle.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False  # gone, or never existed
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == _STILL_ACTIVE
+    finally:
+        k32.CloseHandle(handle)
+
+
 class PsProcessProbe:
     def __init__(self, timeout_seconds: float) -> None:
         # Sourced from config (interop_timeout_seconds) by the caller.
         self._timeout = timeout_seconds
 
     def is_alive(self, pid: int) -> bool:
+        if os.name == "nt":
+            return _windows_is_alive(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:

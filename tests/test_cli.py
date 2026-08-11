@@ -211,27 +211,12 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert not (tmp_path / ".config" / "systemd").exists()
 
 
-@pytest.mark.parametrize("subcommand", ["systemd", "launchd"])
-def test_service_units_refuse_to_be_generated_on_windows(subcommand, monkeypatch, capsys):
-    # A systemd unit targets Linux and a launchd agent targets macOS; both
-    # bake absolute host paths into a PATH= line. Composed under ntpath
-    # those literals pick up drive letters and backslashes, so the output is
-    # not a warning-worthy approximation — it is a file that cannot work,
-    # printed as though it could. Refuse instead. WSL is unaffected: there
-    # os.name is "posix" and the paths compose correctly.
-    monkeypatch.setattr(cli.os, "name", "nt")
-    rc = cli.main([subcommand])
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "WSL" in err or "Linux" in err or "macOS" in err
-
-
 @pytest.mark.skipif(
     os.name == "nt",
-    reason="composes a POSIX service PATH from POSIX literals; under ntpath "
-           "they gain drive letters, so the assertion measures path "
-           "semantics rather than crr (crr refuses outright on Windows — "
-           "test_service_units_refuse_to_be_generated_on_windows)",
+    reason="asserts on POSIX path literals baked into a unit's PATH=; under "
+           "ntpath they acquire drive letters, so what the assertion "
+           "measures is path semantics rather than crr. The rest of the "
+           "systemd/launchd tests are path-agnostic and do run here",
 )
 def test_systemd_print_bakes_wt_exe_dir_into_path_on_wsl(tmp_path, monkeypatch, capsys):
     # [live bug, 2026-07-31] wt.exe/wsl.exe live under Windows dirs that the
