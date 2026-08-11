@@ -699,6 +699,7 @@ def test_repair_crash_offer_explicit_no_declines(shell, tmp_path, capsys):
 def test_repair_crash_offer_yes_resumes(shell, tmp_path, capsys):
     if not _installed(shell):
         pytest.skip(f"{shell} not installed")
+    _skip_fish_pty_on_macos(shell)
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     bindir = _fake_claude_repair_bindir(tmp_path)
