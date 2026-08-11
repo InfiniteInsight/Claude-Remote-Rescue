@@ -16,11 +16,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest is deliberately absent: crr cannot be imported
-        # there at all (locking.py imports fcntl at module scope), so the
-        # job could only ever be red. A permanently red board trains people
-        # to ignore CI — the habit that let #65 sit broken for weeks. It
-        # joins the matrix in the same change as the Windows lock.
+        # windows-latest still absent, but for a different reason than
+        # before: crr now imports and runs there (#70). What is left is 48
+        # failing tests, almost all POSIX assumptions in the SUITE, surveyed
+        # in their own issue. It rejoins when that list is empty — a
+        # permanently red job trains people to ignore CI, which is how #65
+        # stayed broken for weeks.
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     runs-on: ${{ matrix.os }}
