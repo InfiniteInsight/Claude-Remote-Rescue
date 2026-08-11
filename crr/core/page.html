@@ -162,6 +162,12 @@
   #notice.ok    { background: #123a22; color: #7fe0a0; border-color: #1c5233; }
   #notice.error { background: #3a1616; color: #f08b8b; border-color: #5a2222; }
   #notice.warn  { background: #3a2f12; color: #e0a53b; border-color: #5a4a1c; }
+  .conflict-warn {
+    display: block; margin: 6px 0 8px; padding: 8px 10px; border-radius: 6px;
+    background: #3a1616; color: #f0a8a8; border: 1px solid #6a2626;
+    font-size: 13px; line-height: 1.45;
+  }
+  .conflict-warn b { color: #ffd7d7; }
   #notice .notice-retry {
     margin-left: 10px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
     background: transparent; color: inherit; border: 1px solid currentColor;
@@ -768,6 +774,22 @@ function renderCard(s, uncertain, groupColor, latest) {
     });
     actions.appendChild(b);
   }
+  // [#48] Two live claudes on this conversation, both writing to one
+  // transcript and both reachable from the phone. The user has to pick one
+  // to end before anything else on this card is safe to offer — a warning
+  // they can scroll past would leave the second agent running indefinitely.
+  if (s.conflict) {
+    var warn = el("div", "conflict-warn");
+    warn.innerHTML =
+      "<b>TWO AGENTS ON THIS CONVERSATION.</b> Another claude is live on " +
+      "the same transcript. Whichever you leave running keeps writing to it, " +
+      "and both can be woken from your phone. End this one, or end the other " +
+      "on its own card \u2014 the remaining actions are withheld until one is gone.";
+    actions.appendChild(warn);
+    addBtn("End this one", "close", true);
+    actions.appendChild(searchBtnFor(s));   // read-only, always safe
+    return;
+  }
   if (s.state === "crashed") {
     addBtn("Reopen", "reopen", false, false);
     addBtn("Dismiss", "dismiss", false, false);
@@ -799,11 +821,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   }
   // Read-only transcript search scoped to THIS session (GET /api/recall, not
   // an action) — available in every state, uses the shared search box's text.
-  var searchBtn = el("button");
-  searchBtn.textContent = "Search";
-  searchBtn.title = BUTTON_HELP["Search"];
-  searchBtn.addEventListener("click", function () { runRecall(s.session_id); });
-  actions.appendChild(searchBtn);
+  actions.appendChild(searchBtnFor(s));
   // Per-session auto-kick toggle (spec 2026-08-07, Slice 3): reflects the
   // resolved 3-state `autokick` card field. Shown on every card regardless
   // of state — the sid-keyed preference outlives a crash/revive cycle, so
@@ -850,6 +868,13 @@ function renderCard(s, uncertain, groupColor, latest) {
 // error (the session is live and the message says how to attach), so it gets
 // its own amber notice rather than green success or red failure
 // ([user request, 2026-08-09]).
+function searchBtnFor(s) {
+  var b = el("button");
+  b.textContent = "Search";
+  b.title = BUTTON_HELP["Search"];
+  b.addEventListener("click", function () { runRecall(s.session_id); });
+  return b;
+}
 function noticeKind(j) { return j.ok ? (j.degraded ? "warn" : "ok") : "error"; }
 function noticeText(j, okFallback) {
   var msg = j.message || (j.ok ? okFallback : "action failed");

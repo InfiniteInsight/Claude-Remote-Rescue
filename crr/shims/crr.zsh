@@ -110,6 +110,12 @@ claude() {
       esac
     done
     if [ -n "$_sid" ]; then
+      # [#48] Refuse to become a SECOND claude on a conversation that
+      # already has one. Non-zero means the user chose to abort (or
+      # there was no tty to ask) — do not launch.
+      if ! _crr conflict-check --sid "$_sid"; then
+        return 1
+      fi
       _crr claude-resume --pid "$$" --cwd "$PWD" --session-id "$_sid" >/dev/null
       _cur_sid="$_sid"
     else

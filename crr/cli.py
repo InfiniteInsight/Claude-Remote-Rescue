@@ -93,6 +93,10 @@ def _reachability_by_sid(
     config: cfg.Config,
     *,
     read_session_state: Callable[[], Mapping[str, Any]] | None = None,
+    # (#48) Reuse the caller's single per-poll process snapshot when it has
+    # one. Taking a second `ps -A` here is exactly what batching exists to
+    # avoid, and there is a test enforcing one snapshot per poll.
+    owners: Mapping[int, Sequence[int]] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """``{session_id: (remote_control, waiting_for)}`` for ``assemble_sessions``.
 
@@ -136,7 +140,8 @@ def _reachability_by_sid(
     # but this is a HEURISTIC, not an exact identity. A mismatch fails CLOSED
     # (no match -> `unknown` -> no kick, no claim), so the cost is a missed
     # detection, never a wrong restart or a fabricated badge.
-    groups = probe.claude_group_pids([e["pid"] for e in sessions])
+    groups = (owners if owners is not None
+              else probe.claude_group_pids([e["pid"] for e in sessions]))
     out: dict[str, tuple[str, str]] = {}
     for entry in sessions:
         sid = entry["claude"]["session_id"]
@@ -488,6 +493,13 @@ def _build_parser() -> argparse.ArgumentParser:
     rca.add_argument("--pid", type=int, required=True, help="the shell's pid")
     rca.set_defaults(func=_cmd_remote_control_args)
 
+    conf = sub.add_parser(
+        "conflict-check",
+        help="[shim] refuse to start a second claude on a live conversation",
+    )
+    conf.add_argument("--sid", required=True)
+    conf.set_defaults(func=_cmd_conflict_check)
+
     repair = sub.add_parser(
         "repair-check",
         help="[shim] read/clear a session's relaunch/close flag",
@@ -748,13 +760,17 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     scan = store.scan()
     settings_store = settings.SettingsStore(sd)
+    _owners = probe.claude_group_pids(
+        [e["pid"] for e in scan.entries if e.get("claude") is not None])
     payload = status.assemble_sessions(
         scan.entries,
         boot,
         probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
-        reachability_by_sid=_reachability_by_sid(scan.entries, probe, config),
+        reachability_by_sid=_reachability_by_sid(
+            scan.entries, probe, config, owners=_owners),
+        claude_owners=_owners,
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
         autokick_config_default=config.get("remote_control_autokick"),
@@ -1042,6 +1058,60 @@ def _cmd_remote_control_args(args: argparse.Namespace) -> int:
             print(token)
     except Exception:
         return 0
+    return 0
+
+
+def _cmd_conflict_check(args: argparse.Namespace) -> int:
+    """[shim] Refuse to start a second claude on a conversation that already
+    has one (#48).
+
+    The dashboard card reports a conflict after both agents exist. This
+    stops the second from being created, which is the only point at which
+    the situation is still free to avoid.
+
+    Exit 0 means clear to launch. Non-zero means the shim must not launch.
+    A conflict with no tty aborts: unattended must never be the path that
+    starts the duplicate. With a tty the user chooses, and there is no third
+    "carry on anyway" — leaving both running is the failure.
+
+    HONEST LIMIT: only an explicit-sid resume can be checked here. A fresh
+    launch gets a brand-new sid (no conflict is possible), but `--continue`
+    resolves its sid inside claude, after the last point crr could
+    intervene, so that path is not covered.
+    """
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    config = _load_config()
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    sessions = [e for e in store.scan().entries if e.get("claude") is not None]
+    owners = probe.claude_group_pids([e["pid"] for e in sessions])
+    pids = status.owners_of_sid(sessions, owners, args.sid)
+    if len(pids) < 1:
+        return 0  # nothing else is on this conversation
+    listed = ", ".join(str(p) for p in pids)
+    warning = (f"crr: {args.sid[:8]} is already live as pid(s) {listed}. Starting "
+               "another claude on it would give one conversation two agents, both "
+               "writing to the same transcript.")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"{warning} Refusing to start a second one.", file=sys.stderr)
+        return 3
+    print(warning, file=sys.stderr)
+    try:
+        answer = input("End the existing one and continue? [k]ill / [a]bort: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\ncrr: aborted — nothing started, nothing killed.", file=sys.stderr)
+        return 3
+    if answer not in ("k", "kill"):
+        print("crr: aborted — the existing session is untouched.", file=sys.stderr)
+        return 3
+    boot = boot_identity.detect()
+    flags = FlagStore(sd)
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    grace = config.get("close_grace_seconds")
+    with mutation_lock(sd):
+        for pid in pids:
+            res = ops.close(store, controller, flags, boot, probe, pid, grace=grace)
+            print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0
 
 

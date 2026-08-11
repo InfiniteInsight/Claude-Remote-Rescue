@@ -4091,3 +4091,100 @@ def test_a_dead_pid_state_file_never_licenses_a_claim(tmp_path, monkeypatch):
     # absent key, and `assemble_sessions` reads both the same way.
     assert got[sid] == ("unknown", ""), \
         "a dead pid's stale file must license neither a verdict nor waiting_for"
+
+
+# --- shim-side conflict block (#48) ---------------------------------------
+#
+# The card warning reports a second agent after it exists. This refuses to
+# create one. Only the explicit-sid resume path can be checked — a fresh
+# launch gets a brand-new sid (no conflict possible) and `--continue`
+# resolves its sid inside claude, after the point crr could intervene.
+
+def _seed_conflict(tmp_path, sid):
+    store = JournalStore(tmp_path)
+    for pid in (1687, 1957):
+        store.write(new_entry(pid=pid, cwd="/p", host="tmux", shell="fish",
+                              boot_id="B", now=_NOW_STR,
+                              claude={"session_id": sid, "sid_source": "injected",
+                                      "started": _NOW_STR}))
+    return store
+
+
+_NOW_STR = "2026-08-10T00:00:00Z"
+_CSID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def test_conflict_check_is_silent_and_clear_when_nothing_else_owns_the_sid(
+    tmp_path, monkeypatch, capsys
+):
+    # ONE existing owner is already a conflict — the shim is about to add a
+    # second. "Clear to launch" means nothing is running on this sid at all,
+    # which is the normal case: a crashed conversation being resumed.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _seed_conflict(tmp_path, _CSID)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {"claude_group_pids":
+                                                 lambda s, pids: {1687: [], 1957: []}})())
+    assert cli.main(["conflict-check", "--sid", _CSID]) == 0
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+
+
+def test_one_existing_owner_already_blocks(tmp_path, monkeypatch, capsys):
+    # The case that matters most: you resume from a second terminal a
+    # conversation the reviver already has parked.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _seed_conflict(tmp_path, _CSID)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {"claude_group_pids":
+                                                 lambda s, pids: {1957: [1957]}})())
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    assert cli.main(["conflict-check", "--sid", _CSID]) != 0
+
+
+def test_conflict_check_aborts_without_a_tty_rather_than_creating_a_second_agent(
+    tmp_path, monkeypatch, capsys
+):
+    # Unattended must never be the path that starts the duplicate.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _seed_conflict(tmp_path, _CSID)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {"claude_group_pids":
+                                                 lambda s, pids: {1687: [11], 1957: [1957]}})())
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    rc = cli.main(["conflict-check", "--sid", _CSID])
+    assert rc != 0
+    assert "already live" in capsys.readouterr().err.lower()
+
+
+def test_conflict_check_kills_the_others_when_the_user_chooses_to(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _seed_conflict(tmp_path, _CSID)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {"claude_group_pids":
+                                                 lambda s, pids: {1687: [11], 1957: [1957]}})())
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "k")
+    closed = []
+    monkeypatch.setattr(cli.ops, "close",
+                        lambda *a, **k: closed.append(a[5]) or cli.ops.OpResult(True, "closed"))
+    assert cli.main(["conflict-check", "--sid", _CSID]) == 0
+    assert sorted(closed) == [1687, 1957]
+
+
+def test_conflict_check_aborts_when_the_user_declines(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _seed_conflict(tmp_path, _CSID)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {"claude_group_pids":
+                                                 lambda s, pids: {1687: [11], 1957: [1957]}})())
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "a")
+    closed = []
+    monkeypatch.setattr(cli.ops, "close", lambda *a, **k: closed.append(1))
+    assert cli.main(["conflict-check", "--sid", _CSID]) != 0
+    assert closed == [], "aborting must not kill anything"

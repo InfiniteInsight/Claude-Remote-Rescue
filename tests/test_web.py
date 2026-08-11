@@ -904,12 +904,12 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_48():
+def test_page_version_is_49():
     """v48: header reachability summary + a "not connected" filter
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 48
+    assert web.PAGE_VERSION == 49
 
 
 def test_page_renders_the_parked_state():
@@ -1525,3 +1525,30 @@ def test_a_refusal_is_stamped_too():
                  action_provider=lambda o, p: (False, "is live", False))
     assert resp.status == 409
     contracts.validate_action_result(json.loads(resp.body))
+
+
+# --- a conflicted card forces a choice (#48) ------------------------------
+#
+# Two live claudes on one conversation is not something to warn about and
+# move on from: whichever the user ignores keeps writing to the same
+# transcript, and both are reachable from the phone. So the card's ordinary
+# actions are withheld until one of the two is killed.
+
+def test_a_conflicted_card_says_two_agents_are_on_it():
+    page = web.render_page()
+    assert "s.conflict" in page
+    assert "TWO AGENTS" in page.upper()
+
+
+def test_a_conflicted_card_offers_the_kill_and_withholds_the_rest():
+    page = web.render_page()
+    arm = page.split("if (s.conflict)")[1].split("} else")[0]
+    # The one action it does offer, and the reason the others are gone.
+    assert '"close"' in arm, "no way to resolve the conflict from the card"
+    assert "return" in arm, "ordinary actions must not be reachable while conflicted"
+
+
+def test_the_conflict_warning_is_not_a_dismissible_toast():
+    # A toast scrolls away and the conflict does not. It belongs on the card.
+    page = web.render_page()
+    assert "conflict-warn" in page

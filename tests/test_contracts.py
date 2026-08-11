@@ -62,6 +62,7 @@ def _session_card():
         "waiting_for": "",
         "autokick": "on",
         "adopted": False,
+        "conflict": False,
     }
 
 
@@ -233,7 +234,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_12():
+def test_sessions_contract_version_is_13():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -249,7 +250,7 @@ def test_sessions_contract_version_is_12():
     # Phases 1-3). The only bump so far that RETIRES members: a v11
     # consumer has no case for "unreachable" AND its `dropped` branch is
     # now dead code, so this one is not a widening.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 12
+    assert contracts.SESSIONS_CONTRACT_VERSION == 13
 
 
 def test_states_enum_includes_parked():
