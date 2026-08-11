@@ -3157,6 +3157,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
 
 def _cmd_systemd(args: argparse.Namespace) -> int:
+    if _refuse_service_units_on_windows("systemd", "Linux"):
+        return 2
     if args.install and args.uninstall:
         print("crr systemd: --install and --uninstall are mutually exclusive", file=sys.stderr)
         return 2
@@ -3266,7 +3268,33 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refuse_service_units_on_windows(subcommand: str, target: str) -> bool:
+    """True (having explained itself) when this host cannot generate the unit.
+
+    Both generators bake absolute host paths into the unit's ``PATH=``.
+    Composed under ``ntpath`` those pick up drive letters and backslashes,
+    so what gets printed is not a rough draft of a working unit — it is a
+    file that cannot work, presented as though it could. Refusing keeps the
+    null result null (see AGENTS.md on not turning "unknown" into a claim).
+
+    WSL is deliberately unaffected: ``os.name`` is ``"posix"`` there and the
+    paths compose correctly, which is the case that actually ships.
+    """
+    if os.name != "nt":
+        return False
+    print(
+        f"crr {subcommand}: refusing — a {subcommand} unit targets {target}, "
+        "and generating one from Windows composes its PATH with Windows "
+        "path semantics, so the result would be silently unusable. "
+        "Run this inside WSL (or on the target host).",
+        file=sys.stderr,
+    )
+    return True
+
+
 def _cmd_launchd(args: argparse.Namespace) -> int:
+    if _refuse_service_units_on_windows("launchd", "macOS"):
+        return 2
     if args.install and args.uninstall:
         print("crr launchd: --install and --uninstall are mutually exclusive", file=sys.stderr)
         return 2

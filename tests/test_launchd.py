@@ -9,6 +9,7 @@ real-tool gate (the analogue of ``systemd-analyze verify`` / ``node
 asserts carry the semantic weight.
 """
 
+import os
 import plistlib
 import shutil
 import subprocess
@@ -70,6 +71,13 @@ def test_mac_path_baseline_includes_homebrew_dirs():
     assert "/usr/local/bin" in launchd._MAC_PATH_DIRS       # Intel
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="resolves a service PATH from POSIX literals; under ntpath "
+           "they gain drive letters, so this measures path semantics "
+           "rather than crr. crr refuses to generate either unit on "
+           "Windows — see test_cli.py::test_service_units_refuse_to_be_generated_on_windows",
+)
 def test_resolve_service_path_includes_crr_dir_and_reports_missing(monkeypatch):
     # crr's own dir always leads the PATH; unresolved service binaries are
     # reported (a silent missing `claude` would kill every revival on exec).

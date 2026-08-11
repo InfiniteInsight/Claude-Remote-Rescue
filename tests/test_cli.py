@@ -211,6 +211,28 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert not (tmp_path / ".config" / "systemd").exists()
 
 
+@pytest.mark.parametrize("subcommand", ["systemd", "launchd"])
+def test_service_units_refuse_to_be_generated_on_windows(subcommand, monkeypatch, capsys):
+    # A systemd unit targets Linux and a launchd agent targets macOS; both
+    # bake absolute host paths into a PATH= line. Composed under ntpath
+    # those literals pick up drive letters and backslashes, so the output is
+    # not a warning-worthy approximation — it is a file that cannot work,
+    # printed as though it could. Refuse instead. WSL is unaffected: there
+    # os.name is "posix" and the paths compose correctly.
+    monkeypatch.setattr(cli.os, "name", "nt")
+    rc = cli.main([subcommand])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "WSL" in err or "Linux" in err or "macOS" in err
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="composes a POSIX service PATH from POSIX literals; under ntpath "
+           "they gain drive letters, so the assertion measures path "
+           "semantics rather than crr (crr refuses outright on Windows — "
+           "test_service_units_refuse_to_be_generated_on_windows)",
+)
 def test_systemd_print_bakes_wt_exe_dir_into_path_on_wsl(tmp_path, monkeypatch, capsys):
     # [live bug, 2026-07-31] wt.exe/wsl.exe live under Windows dirs that the
     # baked SERVICE_BINARIES loop never sees, so the deployed service PATH
@@ -3686,18 +3708,35 @@ def test_adopt_takeover_refusal_prints_to_stderr_and_returns_1(tmp_path, monkeyp
 
 def _probe_lock_held(tmp_path) -> bool:
     """True if the shared mutation lock is currently held by someone else
-    (probed via a fresh, independent file descriptor — flock contends
-    across descriptions even within one process)."""
-    import fcntl
+    (probed via a fresh, independent file descriptor — both backends contend
+    across descriptions/handles even within one process).
 
+    Deliberately NOT skipped off POSIX. The invariant under test — the lock
+    is held for the whole read-modify-write — is one crr claims on every
+    platform, and locking.py's Windows backend (#70) has no other test that
+    puts it under contention. Skipping here would hide exactly what that
+    port introduced, so the probe dispatches instead: ``LK_NBLCK`` is the
+    msvcrt spelling of ``LOCK_EX | LOCK_NB``, failing rather than waiting
+    when the range is already taken.
+    """
     from crr.adapters.locking import _LOCK_NAME
     fd = os.open(str(tmp_path / _LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            return False
+        import fcntl
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
         fcntl.flock(fd, fcntl.LOCK_UN)
         return False
-    except BlockingIOError:
-        return True
     finally:
         os.close(fd)
 

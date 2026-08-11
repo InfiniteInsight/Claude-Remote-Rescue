@@ -1,0 +1,15 @@
+# Line endings are load-bearing in two places, so they are pinned rather
+# than left to the checkout's autocrlf setting.
+#
+# page.html: crr/core/page.py carries a sha256 pin of these bytes, and every
+# open dashboard compares PAGE_VERSION to decide whether to reload. A CRLF
+# checkout changes the bytes, so the pin cannot match — the guard test is
+# what noticed (#72), but the served page would differ too. Normalising the
+# read instead of the file would let a CRLF tree pass the guard while
+# serving different bytes, which is the failure the pin exists to catch.
+*.html text eol=lf
+
+# Shims: a POSIX shell will not run a script with CRLF line endings — the
+# \r rides along into the last argument of every line.
+crr/shims/* text eol=lf
+*.sh text eol=lf
