@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from crr import cli
+from crr.adapters import state_dir as state_dir_mod
 from crr.core import contracts
 
 _CRR_BIN = str(Path(sys.executable).parent / "crr")
@@ -62,11 +63,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _require_shell(shell: str) -> None:
-    """Skip when this host does not have the shell under test."""
-    if shutil.which(_SHELLS[shell]["argv"][0]) is None:
-        pytest.skip(f"{shell} not installed on this host")
-
 
 def _installed(shell):
     return shutil.which(shell) is not None
@@ -81,13 +77,30 @@ def _make_shim(shell, tmp_path, capsys) -> Path:
     return shim
 
 
-def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
-    _require_shell(shell)
+def _shell_env(state_dir, **extra) -> dict:
+    """Env for a shim subprocess, including where crr ACTUALLY stores state.
+
+    CRR_STATE exists because the scripts used to hardcode
+    $XDG_STATE_HOME/crr, which is simply wrong on macOS —
+    ``state_dir.resolve`` sends Darwin to ~/Library/Application Support/crr
+    and ignores XDG. The shims were writing to the right place; the
+    assertions were reading a directory that only exists on Linux (#43).
+    Built in one place so the five call sites cannot drift.
+    """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(state_dir),
         "XDG_STATE_HOME": str(state_dir),
     }
+    env["CRR_STATE"] = str(
+        state_dir_mod.resolve(platform.system(), env, Path(env["HOME"]))
+    )
+    env.update(extra)
+    return env
+
+
+def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
+    env = _shell_env(state_dir)
     return subprocess.run(
         _SHELLS[shell]["argv"] + [script],
         env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
@@ -101,7 +114,7 @@ def test_shim_registers_a_valid_entry(shell, tmp_path, capsys):
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     pid = _SHELLS[shell]["pid"]
-    script = f'source "{shim}"\ncat "$XDG_STATE_HOME/crr/tabs/{pid}.json"\n'
+    script = f'source "{shim}"\ncat "$CRR_STATE/tabs/{pid}.json"\n'
     result = _run(shell, script, state)
     assert result.returncode == 0, result.stderr
 
@@ -145,12 +158,8 @@ def _fake_claude_bindir(tmp_path) -> Path:
 
 
 def _run_with_fake_claude(shell, script, state_dir, bindir, record, journal=None) -> subprocess.CompletedProcess:
-    env = {
-        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-        "HOME": str(state_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "CRR_TEST_RECORD": str(record),
-    }
+    env = _shell_env(state_dir, PATH=f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                     CRR_TEST_RECORD=str(record))
     if journal is not None:
         env["CRR_TEST_JOURNAL"] = str(journal)
     return subprocess.run(
@@ -171,7 +180,7 @@ def _fake_claude_dumping_journal(tmp_path) -> Path:
         "#!/usr/bin/env bash\n"
         'printf "%s\\n" "$@" > "$CRR_TEST_RECORD"\n'
         '[ -n "$CRR_TEST_JOURNAL" ] && '
-        'cat "$XDG_STATE_HOME/crr/tabs/$PPID.json" > "$CRR_TEST_JOURNAL" 2>/dev/null\n'
+        'cat "$CRR_STATE/tabs/$PPID.json" > "$CRR_TEST_JOURNAL" 2>/dev/null\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -386,7 +395,7 @@ def test_bash_shim_records_last_cmd(tmp_path, capsys):
     script = (
         f'source "{shim}"\n'
         "true marker-command\n"
-        'cat "$XDG_STATE_HOME/crr/tabs/$$.json"\n'
+        'cat "$CRR_STATE/tabs/$$.json"\n'
     )
     result = _run("bash", script, state)
     assert result.returncode == 0, result.stderr
@@ -425,8 +434,8 @@ def _fake_claude_repair_bindir(tmp_path) -> Path:
         '[ -f "$CRR_TEST_COUNT" ] && n=$(cat "$CRR_TEST_COUNT")\n'
         'n=$((n+1)); echo "$n" > "$CRR_TEST_COUNT"\n'
         'if [ "$n" -eq 1 ] && [ -n "$CRR_TEST_FLAG" ]; then\n'
-        '  mkdir -p "$XDG_STATE_HOME/crr/relaunch"\n'
-        '  printf %s "$CRR_TEST_FLAG" > "$XDG_STATE_HOME/crr/relaunch/$PPID"\n'
+        '  mkdir -p "$CRR_STATE/relaunch"\n'
+        '  printf %s "$CRR_TEST_FLAG" > "$CRR_STATE/relaunch/$PPID"\n'
         "fi\n"
         "codes=($CRR_TEST_EXITS)\n"
         "idx=$((n-1))\n"
@@ -439,14 +448,13 @@ def _fake_claude_repair_bindir(tmp_path) -> Path:
 
 
 def _repair_env(state_dir, bindir, tmp_path, exits, flag=None, extra=None):
-    env = {
-        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-        "HOME": str(state_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "CRR_TEST_RECORD": str(tmp_path / "record"),
-        "CRR_TEST_COUNT": str(tmp_path / "count"),
-        "CRR_TEST_EXITS": exits,
-    }
+    env = _shell_env(
+        state_dir,
+        PATH=f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        CRR_TEST_RECORD=str(tmp_path / "record"),
+        CRR_TEST_COUNT=str(tmp_path / "count"),
+        CRR_TEST_EXITS=exits,
+    )
     if flag is not None:
         env["CRR_TEST_FLAG"] = flag
     if extra:
@@ -511,8 +519,8 @@ def test_repair_stale_flag_cleared_at_wrapper_start(shell, tmp_path, capsys):
     bindir = _fake_claude_repair_bindir(tmp_path)
     pid = _SHELLS[shell]["pid"]
     pre = (
-        'mkdir -p "$XDG_STATE_HOME/crr/relaunch"\n'
-        f'printf "relaunch stale-sid" > "$XDG_STATE_HOME/crr/relaunch/{pid}"'
+        'mkdir -p "$CRR_STATE/relaunch"\n'
+        f'printf "relaunch stale-sid" > "$CRR_STATE/relaunch/{pid}"'
     )
     script = _repair_script(shell, shim, pre=pre)
     env = _repair_env(state, bindir, tmp_path, exits="0")
@@ -860,12 +868,7 @@ def _fake_crr_bin(tmp_path) -> Path:
 
 
 def _rescue_check_env(state_dir, record) -> dict:
-    return {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": str(state_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "CRR_TEST_RECORD": str(record),
-    }
+    return _shell_env(state_dir, CRR_TEST_RECORD=str(record))
 
 
 @pytest.mark.parametrize("shell", list(_SHELLS))
@@ -923,8 +926,7 @@ def test_rescue_check_is_silent_no_op_when_crr_binary_is_absent(shell, tmp_path,
     script = f'source "{shim}"\n'
     result = subprocess.run(
         _INTERACTIVE_ARGV[shell] + [script],
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(state),
-             "XDG_STATE_HOME": str(state)},
+        env=_shell_env(state),
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
