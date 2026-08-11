@@ -316,8 +316,12 @@ an invisible default is an invisible prior.
   `setsid`/pty tricks for ghost/tty states — all proven in ccresume.
 - Web: stdlib-only HTTP tests + `node --check` page-JS gate.
 - Platform adapter tests are gated by platform detection and skip
-  cleanly elsewhere; CI matrix: ubuntu + macos runners (Windows adapter
-  tested on real hardware initially).
+  cleanly elsewhere; CI matrix: ubuntu + macos + windows runners.
+  Windows measures *portability of the suite*, not a supported target:
+  crr has no boot-identity adapter there (#75) and no process probe
+  beyond `is_alive` (#74), so the tests that need either skip with that
+  reason named. Green on Windows means the code loads and the
+  platform-neutral logic holds — not that crr runs.
 
 ## Licensing / naming
 
