@@ -524,3 +524,15 @@ def test_conflict_is_False_not_None_when_the_probe_cannot_answer():
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     payload = assemble_sessions(_two_entries(sid), FakeBoot(), FakeProbe())
     assert [c["conflict"] for c in payload["sessions"]] == [False, False]
+
+
+def test_owners_of_sid_names_the_processes_a_user_would_choose_between():
+    from crr.core.status import owners_of_sid
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    sessions = _two_entries(sid)
+    assert owners_of_sid(sessions, {1687: [1160061], 1957: [1957]}, sid) == [1687, 1957]
+    # The lingering shell owns nothing: not a process anyone should be
+    # offered the chance to kill.
+    assert owners_of_sid(sessions, {1687: [], 1957: [1957]}, sid) == [1957]
+    assert owners_of_sid(sessions, {}, sid) == []
+    assert owners_of_sid(sessions, {1687: [1]}, "another-sid") == []

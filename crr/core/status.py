@@ -73,6 +73,20 @@ class _MemoTtyProbe:
         return pid in self._tty_pids
 
 
+def owners_of_sid(sessions, owners, sid: str) -> list[int]:
+    """Journaled pids that currently own a live claude for ``sid`` (#48).
+
+    The pid-level counterpart to ``_conflicting_sids``: the shim needs to
+    name the process a user would be choosing to end, not merely learn that
+    a conflict exists.
+    """
+    return sorted(
+        entry["pid"] for entry in sessions
+        if (entry.get("claude") or {}).get("session_id") == sid
+        and owners.get(entry["pid"])
+    )
+
+
 def _conflicting_sids(sessions, owners) -> set[str]:
     """Sids whose conversation has MORE THAN ONE live claude behind it (#48).
 
