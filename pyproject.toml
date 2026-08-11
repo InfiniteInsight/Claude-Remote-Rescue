@@ -39,3 +39,6 @@ include = ["crr*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+  "real_boot_identity: opt out of conftest's boot-identity stand-in — for the tests that assert what detect() really does on this platform",
+]
