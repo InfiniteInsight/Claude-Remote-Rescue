@@ -16,13 +16,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest still absent, but for a different reason than
-        # before: crr now imports and runs there (#70). What is left is 48
-        # failing tests, almost all POSIX assumptions in the SUITE, surveyed
-        # in their own issue. It rejoins when that list is empty — a
-        # permanently red job trains people to ignore CI, which is how #65
-        # stayed broken for weeks.
-        os: [ubuntu-latest, macos-latest]
+        # windows-latest rejoins here (#72). It was held out while the suite
+        # could not pass there; a permanently red job trains people to
+        # ignore CI, which is how #65 stayed broken for weeks. Keeping it
+        # out had the mirror-image cost: nothing measured Windows, so #70's
+        # regressions were invisible until someone went looking.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
