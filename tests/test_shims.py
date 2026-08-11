@@ -19,7 +19,6 @@ adapter is Linux-only in Phase 1) and to shells that are installed.
 import json
 import os
 import platform
-import pty
 import re
 import shutil
 import subprocess
@@ -27,6 +26,14 @@ import sys
 from pathlib import Path
 
 import pytest
+
+# [#70] `pty`/`termios` are POSIX-only, and a module-level import runs at
+# COLLECTION — before any skipif can fire. On Windows that turned a skip
+# into a collection error. Skip the module first, then import.
+if os.name != "posix":  # pragma: no cover - Windows CI
+    pytest.skip("shim tests need a POSIX shell host", allow_module_level=True)
+
+import pty  # noqa: E402  (deliberately after the platform guard)
 
 from crr import cli
 from crr.adapters import state_dir as state_dir_mod
