@@ -49,10 +49,23 @@ _INTERACTIVE_ARGV = {
     "fish": ["fish", "--no-config", "-i", "-c"],
 }
 
+# [#43] Was Linux-only. macOS defaults to zsh and ships bash, so gating the
+# WHOLE file on Linux meant the shims — the layer every session goes
+# through — were never executed on the platform half the users are on. The
+# gate is now what it always meant: a POSIX host with crr installed. Each
+# test additionally skips the individual shells this host does not have
+# (fish is commonly absent on a stock macOS runner), so a missing shell
+# costs that shell's coverage rather than the file's.
 pytestmark = pytest.mark.skipif(
-    platform.system() != "Linux" or not Path(_CRR_BIN).exists(),
-    reason="needs Linux + an installed crr console script",
+    os.name != "posix" or not Path(_CRR_BIN).exists(),
+    reason="needs a POSIX host + an installed crr console script",
 )
+
+
+def _require_shell(shell: str) -> None:
+    """Skip when this host does not have the shell under test."""
+    if shutil.which(_SHELLS[shell]["argv"][0]) is None:
+        pytest.skip(f"{shell} not installed on this host")
 
 
 def _installed(shell):
@@ -69,6 +82,7 @@ def _make_shim(shell, tmp_path, capsys) -> Path:
 
 
 def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
+    _require_shell(shell)
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(state_dir),
