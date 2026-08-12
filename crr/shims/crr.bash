@@ -83,16 +83,20 @@ claude() {
 
   # Element-wise flag detection: match whole arguments, never a substring
   # of prompt text (a prompt like "explain -r" is a fresh launch).
-  local _arg _resuming=
+  # `--continue` is tracked separately from the rest: it is the one resume
+  # shape that names no conversation yet still lands on a specific one
+  # (#68). No early break — an argv carrying both -c and an explicit
+  # --resume sid must still be seen as having the sid.
+  local _arg _resuming= _continuing=
   for _arg in "$@"; do
     case "$_arg" in
-      -r|--resume|--resume=*|-c|--continue|--session-id|--session-id=*)
-        _resuming=1; break ;;
+      -c|--continue) _resuming=1; _continuing=1 ;;
+      -r|--resume|--resume=*|--session-id|--session-id=*) _resuming=1 ;;
     esac
   done
   # The conversation the repair loop resumes: injected sid on a fresh
   # launch, explicit sid on a resume, sid of each consumed relaunch flag.
-  local _cur_sid=
+  local _cur_sid= _cc=
   if [ -n "$_resuming" ]; then
     # Extract an explicit resume sid if one was given (-r <sid>,
     # --resume <sid|=sid>, --session-id <sid|=sid>); a value that starts with
@@ -121,6 +125,26 @@ claude() {
       _crr claude-resume --pid "$$" --cwd "$PWD" --session-id "$_sid" >/dev/null
       _cur_sid="$_sid"
     else
+      # [#68] `--continue` hands crr no sid, but the conversation it will
+      # resume is predictable — the newest transcript here — and crr
+      # already uses that same prediction to journal this launch below.
+      # Check it BEFORE launching, so the duplicate is prevented rather
+      # than merely reported by the dashboard card. Only for
+      # -c/--continue: a bare `--resume` opens claude's picker, where the
+      # user may choose any conversation, and forcing a kill choice about
+      # the newest would be wrong.
+      if [ -n "$_continuing" ]; then
+        _crr conflict-check --cwd "$PWD"
+        _cc=$?
+        # 2 means this crr does not understand --cwd — an older deploy
+        # than this shim. Unanswered is not a refusal: the shim's standing
+        # contract is that crr can never break a launch, and the conflict
+        # card still catches it after the fact. Every other non-zero IS
+        # the refusal.
+        if [ "$_cc" -ne 0 ] && [ "$_cc" -ne 2 ]; then
+          return 1
+        fi
+      fi
       _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
     fi
     command claude $(_crr_rc_args) "$@"
@@ -170,6 +194,11 @@ claude() {
       command claude --resume "$_cur_sid" $(_crr_rc_args)
       _code=$?
     else
+      # [#68] Deliberately NOT conflict-checked, unlike the launch path
+      # above: this is crash recovery resuming the conversation that just
+      # died in THIS shell. The only agent it could collide with is the
+      # one that is already gone, and prompting here would ask the user to
+      # kill their own dead session.
       _crr claude-resume --pid "$$" --cwd "$PWD" >/dev/null
       command claude --continue $(_crr_rc_args)
       _code=$?

@@ -497,7 +497,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "conflict-check",
         help="[shim] refuse to start a second claude on a live conversation",
     )
-    conf.add_argument("--sid", required=True)
+    # Neither is required at the argparse level, and deliberately not a
+    # required mutually-exclusive group: three shims call this, and a
+    # group would change the error surface for all of them. The command
+    # errors explicitly when given neither.
+    conf.add_argument("--sid", help="the conversation being resumed explicitly")
+    conf.add_argument(
+        "--cwd",
+        help="[#68] no explicit sid (`--continue`): predict the conversation "
+             "from the newest transcript in this directory and check that",
+    )
     conf.set_defaults(func=_cmd_conflict_check)
 
     repair = sub.add_parser(
@@ -1061,6 +1070,27 @@ def _cmd_remote_control_args(args: argparse.Namespace) -> int:
     return 0
 
 
+def _conflict_target(args: argparse.Namespace) -> tuple[str | None, bool]:
+    """Return ``(sid_to_check, was_predicted)`` for a conflict check.
+
+    An explicit ``--sid`` is taken as given. Otherwise the sid is derived
+    from ``--cwd`` through the SAME function the shim's no-sid resume path
+    already uses to journal one (``resume.derive_resume_sid``), so the
+    conversation crr refuses to duplicate and the conversation crr records
+    can never disagree — two predictors would eventually drift.
+    """
+    if args.sid:
+        return args.sid, False
+    if not args.cwd:
+        return None, False
+    derived = resume.derive_resume_sid(
+        None, transcript_source.list_transcripts(args.cwd)
+    )
+    if derived is None:
+        return None, True
+    return derived[0], True
+
+
 def _cmd_conflict_check(args: argparse.Namespace) -> int:
     """[shim] Refuse to start a second claude on a conversation that already
     has one (#48).
@@ -1074,22 +1104,52 @@ def _cmd_conflict_check(args: argparse.Namespace) -> int:
     starts the duplicate. With a tty the user chooses, and there is no third
     "carry on anyway" — leaving both running is the failure.
 
-    HONEST LIMIT: only an explicit-sid resume can be checked here. A fresh
-    launch gets a brand-new sid (no conflict is possible), but `--continue`
-    resolves its sid inside claude, after the last point crr could
-    intervene, so that path is not covered.
+    Two ways in. ``--sid`` is an explicit resume: the conversation is
+    stated, so the check is exact. ``--cwd`` is `--continue` (#68), which
+    resolves its conversation inside claude — after the last point crr
+    could intervene — so there is no sid to be given one. crr predicts it
+    the same way ``claude-resume`` already does on that exact path: the
+    newest transcript in the cwd.
+
+    A prediction can be wrong, and the wrong direction is destructive —
+    offering to kill a session the user was not about to resume. Three
+    things keep that cheap rather than dangerous: the refusal names the
+    sid, it says the sid was derived from the newest transcript so a wrong
+    guess is visible before answering, and anything other than an explicit
+    "k" aborts. What the prediction misses is still caught after the fact
+    by the dashboard's conflict card (``status._conflicting_sids``), which
+    needs no prediction at all — this only moves the catch earlier, to
+    while it is still free.
+
+    NOT covered, deliberately: a bare ``--resume`` with no sid opens
+    claude's interactive picker, where the user may choose any
+    conversation. Predicting "the newest" there would force a kill choice
+    about a session they were not going to open. That case is left to the
+    post-hoc card.
     """
     sd = state_dir.state_dir()
     store = JournalStore(sd)
     config = _load_config()
+    sid, predicted = _conflict_target(args)
+    if sid is None:
+        if not (args.sid or args.cwd):
+            print("crr conflict-check: need --sid or --cwd", file=sys.stderr)
+            return 2
+        return 0  # nothing to resume from this cwd — nothing to conflict with
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sessions = [e for e in store.scan().entries if e.get("claude") is not None]
     owners = probe.claude_group_pids([e["pid"] for e in sessions])
-    pids = status.owners_of_sid(sessions, owners, args.sid)
+    pids = status.owners_of_sid(sessions, owners, sid)
     if len(pids) < 1:
         return 0  # nothing else is on this conversation
     listed = ", ".join(str(p) for p in pids)
-    warning = (f"crr: {args.sid[:8]} is already live as pid(s) {listed}. Starting "
+    # Predicted sids say so. "is already live" states a fact; for a guess
+    # that would be a claim crr has not earned, and the user needs to be
+    # able to notice it is wrong before choosing to kill something.
+    subject = (f"the newest transcript here ({sid[:8]}) — what `--continue` "
+               "would resume — is already live"
+               if predicted else f"{sid[:8]} is already live")
+    warning = (f"crr: {subject} as pid(s) {listed}. Starting "
                "another claude on it would give one conversation two agents, both "
                "writing to the same transcript.")
     if not (sys.stdin.isatty() and sys.stdout.isatty()):

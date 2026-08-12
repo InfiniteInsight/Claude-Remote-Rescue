@@ -4213,3 +4213,122 @@ def test_conflict_check_aborts_when_the_user_declines(tmp_path, monkeypatch, cap
     monkeypatch.setattr(cli.ops, "close", lambda *a, **k: closed.append(1))
     assert cli.main(["conflict-check", "--sid", _CSID]) != 0
     assert closed == [], "aborting must not kill anything"
+
+
+# --- conflict-check --cwd: the `--continue` half of the guard (#68) -------
+#
+# `--continue` resolves its conversation inside claude, after the shim has
+# handed off, so there is no sid to check. crr predicts it the same way
+# `claude-resume` already does on this exact path — newest transcript in
+# the cwd — and checks that. A prediction can be wrong, which is why the
+# refusal names the sid and says where it came from, and why empty input
+# still aborts: a bad guess costs a keystroke, never a session.
+
+def _probe_owning(pids_by_owner):
+    return lambda t: type("P", (), {"claude_group_pids":
+                                    lambda s, pids: pids_by_owner})()
+
+
+def test_conflict_check_by_cwd_predicts_the_sid_continue_would_resume(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    _seed_conflict(tmp_path / "state", _CSID)
+    # Two transcripts; the newest is the live one, and it is the one
+    # `--continue` picks. The older must not be what gets checked.
+    _write_transcript_file(tmp_path / "home", "/p",
+                           "11111111-aaaa-4aaa-8aaa-111111111111", mtime=1000)
+    _write_transcript_file(tmp_path / "home", "/p", _CSID, mtime=5000)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        _probe_owning({1687: [11], 1957: [1957]}))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    rc = cli.main(["conflict-check", "--cwd", "/p"])
+    assert rc != 0, "a live conversation in this cwd must block --continue"
+    err = capsys.readouterr().err
+    assert _CSID[:8] in err
+    # The user has to be able to spot a wrong prediction before answering,
+    # so the message says the sid was derived, not observed.
+    assert "newest" in err.lower()
+
+
+def test_conflict_check_by_cwd_is_clear_when_the_newest_is_not_live(
+    tmp_path, monkeypatch, capsys
+):
+    # An older conversation being live is not this launch's problem:
+    # `--continue` is not going to resume it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    _seed_conflict(tmp_path / "state", _CSID)
+    newest = "22222222-bbbb-4bbb-8bbb-222222222222"
+    _write_transcript_file(tmp_path / "home", "/p", _CSID, mtime=1000)
+    _write_transcript_file(tmp_path / "home", "/p", newest, mtime=5000)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        _probe_owning({1687: [11], 1957: [1957]}))
+    assert cli.main(["conflict-check", "--cwd", "/p"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+
+
+def test_conflict_check_by_cwd_is_clear_when_there_is_nothing_to_predict(
+    tmp_path, monkeypatch, capsys
+):
+    # No transcripts here: `--continue` has nothing to resume, so there is
+    # nothing to conflict with. Never block on an absence.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    _seed_conflict(tmp_path / "state", _CSID)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        _probe_owning({1687: [11], 1957: [1957]}))
+    assert cli.main(["conflict-check", "--cwd", "/nowhere"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+
+
+def test_conflict_check_by_cwd_forces_the_same_choice_as_an_explicit_sid(
+    tmp_path, monkeypatch, capsys
+):
+    # The whole point of #68: --continue is not a softer warning path. Same
+    # prompt, same kill, no "carry on anyway".
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    _seed_conflict(tmp_path / "state", _CSID)
+    _write_transcript_file(tmp_path / "home", "/p", _CSID, mtime=5000)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        _probe_owning({1687: [11], 1957: [1957]}))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "k")
+    closed = []
+    monkeypatch.setattr(cli.ops, "close",
+                        lambda *a, **k: closed.append(a[-1]) or cli.ops.OpResult(True, "closed"))
+    assert cli.main(["conflict-check", "--cwd", "/p"]) == 0
+    assert closed == [1687, 1957]
+
+
+def test_conflict_check_by_cwd_aborts_on_empty_input_so_a_bad_guess_is_cheap(
+    tmp_path, monkeypatch, capsys
+):
+    # The load-bearing safety property for a PREDICTED sid: if crr guessed
+    # the wrong conversation, hitting Enter must leave everything alone.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    _seed_conflict(tmp_path / "state", _CSID)
+    _write_transcript_file(tmp_path / "home", "/p", _CSID, mtime=5000)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        _probe_owning({1687: [11], 1957: [1957]}))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+    closed = []
+    monkeypatch.setattr(cli.ops, "close", lambda *a, **k: closed.append(1))
+    assert cli.main(["conflict-check", "--cwd", "/p"]) != 0
+    assert closed == [], "a wrong prediction must never cost a session"
+
+
+def test_conflict_check_needs_something_to_check(capsys):
+    # Neither --sid nor --cwd: refuse explicitly rather than silently
+    # returning "clear to launch", which would disable the guard.
+    rc = cli.main(["conflict-check"])
+    assert rc != 0
+    assert "--sid" in capsys.readouterr().err

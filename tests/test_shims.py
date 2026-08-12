@@ -958,3 +958,125 @@ def test_rescue_check_is_silent_no_op_when_crr_binary_is_absent(shell, tmp_path,
     assert result.returncode == 0, result.stderr
     assert "/nonexistent/crr" not in result.stderr
     assert "rescue-check" not in result.stderr
+
+
+# --- the two-agents guard actually gates the launch (#48, #68) ------------
+#
+# The layer that matters here is the shim, not the CLI: `crr conflict-check`
+# returning non-zero proves nothing on its own — what has to hold is that
+# claude never starts. Both call sites are exercised by swapping _CRR_BIN
+# for a stub after sourcing, so the decision can be forced without needing
+# a real live claude process to conflict with.
+
+def _stub_crr(tmp_path, name, conflict_exit) -> Path:
+    """A stand-in crr that exits `conflict_exit` for conflict-check.
+
+    Everything else answers 0 with no output, which is what the wrapper's
+    other calls (register, claude-resume, remote-control-args,
+    repair-check) already treat as "nothing to do".
+    """
+    stub = tmp_path / name
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = conflict-check ]; then\n'
+        f'  printf "%s\\n" "$@" >> "$CRR_TEST_CONFLICT"\n'
+        f"  exit {conflict_exit}\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _run_guarded(shell, tmp_path, capsys, cmdline, conflict_exit):
+    """Run `claude <cmdline>` with conflict-check forced to `conflict_exit`.
+
+    Returns (claude_argv_or_None, conflict_check_argv_text).
+    """
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_bindir(tmp_path)
+    record = tmp_path / "argv"
+    conflict = tmp_path / "conflict"
+    stub = _stub_crr(tmp_path, "stub-crr", conflict_exit)
+    setter = ("set -g _CRR_BIN" if shell == "fish" else "_CRR_BIN=")
+    joiner = " " if shell == "fish" else ""
+    script = (f'source "{shim}"\n'
+              f'{setter}{joiner}"{stub}"\n'
+              f"claude {cmdline}\n")
+    env_extra = {"CRR_TEST_CONFLICT": str(conflict)}
+    env = _shell_env(state, PATH=f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                     CRR_TEST_RECORD=str(record), **env_extra)
+    result = subprocess.run(
+        _SHELLS[shell]["argv"] + [script],
+        env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+    )
+    argv = record.read_text().split("\n") if record.exists() else None
+    asked = conflict.read_text() if conflict.exists() else ""
+    return argv, asked, result
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_a_refused_continue_never_starts_claude(shell, tmp_path, capsys):
+    # #68's whole point. Exit 3 is conflict-check's refusal; the wrapper
+    # must abandon the launch, not merely report it.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    argv, asked, result = _run_guarded(shell, tmp_path, capsys, "--continue", 3)
+    assert "--cwd" in asked, f"{shell}: --continue was not conflict-checked"
+    assert argv is None, f"{shell}: claude STARTED despite a refusal ({argv})"
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_a_refused_explicit_resume_never_starts_claude(shell, tmp_path, capsys):
+    # The #48 path, which had no shim-level test at all — the CLI was
+    # covered, the gate it is supposed to operate was not.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    argv, asked, result = _run_guarded(shell, tmp_path, capsys, f"--resume {sid}", 3)
+    assert f"--sid\n{sid}" in asked, f"{shell}: the sid was not checked"
+    assert argv is None, f"{shell}: claude STARTED despite a refusal ({argv})"
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_a_cleared_continue_launches_normally(shell, tmp_path, capsys):
+    # The control case: exit 0 must not become an accidental block.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    argv, asked, result = _run_guarded(shell, tmp_path, capsys, "--continue", 0)
+    assert "--cwd" in asked
+    assert argv is not None and "--continue" in argv, result.stderr
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_an_older_crr_that_cannot_answer_does_not_block_the_launch(shell, tmp_path, capsys):
+    # A shim regenerated ahead of `crr deploy` passes --cwd to a crr that
+    # has never heard of it; argparse exits 2. Treating "could not answer"
+    # as "refused" would make --continue permanently unusable, and _crr
+    # swallows stderr, so the user would get no explanation. The standing
+    # shim contract is that crr can never break a launch — the conflict
+    # card still catches this after the fact.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    argv, asked, result = _run_guarded(shell, tmp_path, capsys, "--continue", 2)
+    assert "--cwd" in asked
+    assert argv is not None and "--continue" in argv, (
+        f"{shell}: an unanswerable check blocked the launch: {result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+def test_a_bare_resume_picker_is_not_conflict_checked(shell, tmp_path, capsys):
+    # `claude --resume` with no sid opens claude's interactive picker. The
+    # user may choose any conversation, so predicting "the newest" and
+    # forcing a kill choice about it would be wrong. Left to the post-hoc
+    # conflict card, deliberately — this test is the record of that choice.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    argv, asked, result = _run_guarded(shell, tmp_path, capsys, "--resume", 3)
+    assert asked == "", f"{shell}: the picker path was conflict-checked: {asked!r}"
+    assert argv is not None and "--resume" in argv, result.stderr

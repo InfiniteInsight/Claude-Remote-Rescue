@@ -82,12 +82,19 @@ function claude
 
     # Element-wise flag detection: whole arguments only, never a substring
     # of prompt text (a prompt like "explain -r" is a fresh launch).
+    # `--continue` is tracked separately from the rest: it is the one
+    # resume shape that names no conversation yet still lands on a
+    # specific one (#68). No early break — an argv carrying both -c and an
+    # explicit --resume sid must still be seen as having the sid.
     set -l _resuming 0
+    set -l _continuing 0
     for _arg in $argv
         switch $_arg
-            case -r --resume '--resume=*' -c --continue --session-id '--session-id=*'
+            case -c --continue
                 set _resuming 1
-                break
+                set _continuing 1
+            case -r --resume '--resume=*' --session-id '--session-id=*'
+                set _resuming 1
         end
     end
     # The conversation the repair loop resumes: injected sid on a fresh
@@ -128,6 +135,26 @@ function claude
             _crr claude-resume --pid $fish_pid --cwd $PWD --session-id $_sid >/dev/null
             set _cur_sid $_sid
         else
+            # [#68] `--continue` hands crr no sid, but the conversation it
+            # will resume is predictable — the newest transcript here —
+            # and crr already uses that same prediction to journal this
+            # launch below. Check it BEFORE launching, so the duplicate is
+            # prevented rather than merely reported by the dashboard card.
+            # Only for -c/--continue: a bare `--resume` opens claude's
+            # picker, where the user may choose any conversation, and
+            # forcing a kill choice about the newest would be wrong.
+            if test $_continuing -eq 1
+                _crr conflict-check --cwd $PWD
+                set -l _cc $status
+                # 2 means this crr does not understand --cwd — an older
+                # deploy than this shim. Unanswered is not a refusal: the
+                # shim's standing contract is that crr can never break a
+                # launch, and the conflict card still catches it after the
+                # fact. Every other non-zero IS the refusal.
+                if test $_cc -ne 0; and test $_cc -ne 2
+                    return 1
+                end
+            end
             _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
         end
         command claude (_crr_rc_args) $argv
@@ -187,6 +214,11 @@ function claude
         if test -n "$_cur_sid"
             command claude --resume $_cur_sid (_crr_rc_args)
         else
+            # [#68] Deliberately NOT conflict-checked, unlike the launch
+            # path above: this is crash recovery resuming the conversation
+            # that just died in THIS shell. The only agent it could
+            # collide with is the one that is already gone, and prompting
+            # here would ask the user to kill their own dead session.
             _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
             command claude --continue (_crr_rc_args)
         end
