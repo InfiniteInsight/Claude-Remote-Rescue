@@ -555,7 +555,18 @@ def _resolve_service_bin(explicit: str | None) -> str:
     return _resolve_crr_bin(None)
 
 
-def _power_holder(system: str, wsl: bool):
+def _live_claude_count(entries, owners) -> int:
+    """How many journaled sessions have a LIVE claude process right now.
+
+    Counting entries instead of owners would keep the machine awake for
+    conversations that already ended — a journal row is a record, not a
+    heartbeat. A pid missing from ``owners`` is not live: absent is not
+    alive.
+    """
+    return sum(1 for e in entries if owners.get(e["pid"]))
+
+
+def _power_holder(system: str, wsl: bool, max_hours: float | None = None):
     """The PowerHolder for this host.
 
     WSL is checked FIRST and deliberately. `platform.system()` returns
@@ -564,14 +575,15 @@ def _power_holder(system: str, wsl: bool):
     Windows host's power state. It would hold successfully, report
     success, and protect nothing.
     """
+    cap = cfg.DEFAULTS["power_block_max_hours"] if max_hours is None else max_hours
     if wsl:
-        return power_hold_windows.WindowsPowerHolder()
+        return power_hold_windows.WindowsPowerHolder(max_hours=cap)
     if system == "Linux":
         return power_hold_linux.LinuxPowerHolder()
     if system == "Darwin":
         return power_hold_macos.MacPowerHolder()
     if system == "Windows":
-        return power_hold_windows.WindowsPowerHolder()
+        return power_hold_windows.WindowsPowerHolder(max_hours=cap)
     raise NotImplementedError(f"no power-hold adapter for {system!r} yet")
 
 
