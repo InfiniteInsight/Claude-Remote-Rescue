@@ -55,26 +55,45 @@ walks the user through.
 
 | | sleep | restart |
 |---|---|---|
-| **Linux** | runtime — `systemd-inhibit --what=idle`, see caveat below | runtime, complete — `--what=shutdown --mode=block`; `systemctl reboot` refuses and names crr |
+| **Linux** | runtime, complete — `systemd-inhibit --what=sleep`; the lid still works, see below | runtime, complete — `--what=shutdown --mode=block`; `systemctl reboot` refuses and names crr |
 | **Windows / WSL** | runtime blocks idle sleep (`ES_SYSTEM_REQUIRED`) | runtime blocks interactive restart (`ShutdownBlockReasonCreate`); **Windows Update needs hardening**, then measurement |
 | **macOS** | runtime blocks idle (`caffeinate -i`) | **unavailable.** Deferred — see "macOS" below |
 
 **Lid close is never blocked, on any platform.** On Windows and macOS the
-runtime mechanisms already ignore the lid. On Linux this is a live
-constraint on the implementation: the inhibitor must be `--what=idle`, and
-must **not** include `sleep`, because a `sleep` inhibitor blocks lid close
-too. `pmset -a disablesleep 1` is likewise excluded from macOS hardening
-for the same reason.
+runtime mechanisms already ignore the lid. `pmset -a disablesleep 1` is
+excluded from macOS hardening because it would block the lid.
 
-**Unverified, native Linux desktops only.** `--what=idle` inhibits
-*logind's* `IdleAction`. On GNOME and KDE, sleep-on-idle is usually driven
-by the session's own idle tracking, which may honour
-`org.freedesktop.ScreenSaver` / `org.gnome.SessionManager` inhibitors
-instead. This could not be measured — there is no Linux desktop on hand,
-only WSL, which has no session at all. The implementation must verify it on
-a real desktop before `crr doctor` claims idle sleep is held there; until
-then it reports the Linux idle hold as **unverified**, not as working. The
-shutdown half is unaffected.
+### Linux: it is `sleep`, not `idle` — and that is the opposite of the obvious choice
+
+An earlier draft of this design specified `--what=idle` and proposed a
+regression test *enforcing* that `sleep` never appear, on the reasoning
+that a `sleep` inhibitor would block lid close. Both halves were wrong, per
+`logind.conf(5)`:
+
+| setting | default | consequence |
+|---|---|---|
+| `LidSwitchIgnoreInhibited=` | **`yes`** | logind suspends on lid close **even while a `sleep` block inhibitor is held** |
+| `IdleAction=` | **`ignore`** | logind performs no idle action at all unless configured |
+| `HandleSuspendKeyIgnoreInhibited=` | `no` | the suspend key *does* respect inhibitors |
+
+So `--what=idle` inhibits `IdleAction`, which is **disabled by default** —
+it would hold successfully, report success, and protect nothing. That is
+the silent-false-claim failure this project exists to avoid, and the
+proposed test would have locked it in.
+
+`--what=sleep` is correct. GNOME and KDE suspend on idle by asking logind
+to `Suspend()` as an unprivileged user, which is precisely what a `sleep`
+lock inhibits — and the lid remains exempt by default.
+
+**Two conditions the implementation must check rather than assume**, because
+both are defaults a user can change:
+
+- If `LidSwitchIgnoreInhibited=no` on this host, a `sleep` lock *does*
+  block the lid, violating the builder's explicit requirement. crr reads
+  the effective value and, if it is `no`, refuses the sleep hold and says
+  why rather than silently blocking the lid.
+- If `IdleAction=` is set to something other than `ignore`, `idle` becomes
+  meaningful and can be added alongside.
 
 ## Architecture
 
@@ -93,7 +112,9 @@ crr/cli.py                 selects the adapter; owns crr-awake
 ```python
 @dataclass(frozen=True)
 class Decision:
-    want: frozenset[str]      # subset of {"idle", "shutdown"}
+    want: frozenset[str]      # subset of {"sleep", "shutdown"}
+                              # "sleep" means AUTOMATIC sleep only —
+                              # lid close is never in scope anywhere
     reason: str               # shown in the OS's own blocking UI
     withheld: str | None      # why nothing is held, for doctor
 ```
@@ -128,13 +149,42 @@ claim in either direction: on `None`, crr holds nothing and says why.
 The same property `crr/adapters/locking.py` already argues for: "release on
 process death … crr's whole purpose is surviving processes that die badly."
 
-- **Linux** — `systemd-inhibit --what=idle:shutdown --mode=block …`
+- **Linux** — `systemd-inhibit --what=sleep:shutdown --mode=block …`
 - **macOS** — `caffeinate -i`
 - **Windows** — one `powershell.exe` holding *both* locks: a
   `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` for sleep and
-  a hidden window's `ShutdownBlockReasonCreate` for restart. In phase 1 that
-  window is also the tray icon's window, so the tray and the blocker are one
+  a window's `ShutdownBlockReasonCreate` for restart. In phase 1 that window
+  is also the tray icon's window, so the tray and the blocker are one
   object, not two.
+
+### Windows: the window must be visible when it blocks
+
+`ShutdownBlockReasonCreate` returning `TRUE` was measured on this host and
+proves only that the reason **registers**. It does not prove the shutdown is
+**blocked**. Per "Shutdown Changes for Windows Vista":
+
+> the system does not allow console applications or applications without a
+> visible window to cancel shutdown. These applications are automatically
+> terminated if they do not respond to `WM_QUERYENDSESSION` or
+> `WM_ENDSESSION` within 5 seconds or if they return **FALSE** in response
+> to `WM_QUERYENDSESSION`.
+
+A tray app's owner form is normally hidden, so the naive implementation
+registers a reason that is then ignored — success reported, nothing
+protected, the same failure mode as the Linux `idle` mistake above.
+
+The design therefore makes the window **visible at the moment it matters**:
+on `WM_QUERYENDSESSION` the tray app shows its confirmation dialog (below),
+which *is* a visible window, and only then returns `FALSE`. The registered
+block reason remains, so crr is also named on the Blocked Shutdown Resolver
+screen if the 5-second window elapses.
+
+**Still unverified:** whether a *hidden* window's registered reason appears
+on the BSDR screen at all. Raymond Chen's account of untitled helper windows
+showing up there suggests it does, but that is inference, not measurement,
+and the design does not depend on it. Verifying means letting Windows
+attempt a real restart; until someone does, `crr doctor` reports the Windows
+restart block as **registered, efficacy unverified**.
 
 ### Selection: WSL takes the Windows holder, not the Linux one
 
@@ -250,7 +300,7 @@ Off by default. All keys configurable per the existing `config.toml` /
 `DEFAULTS` mechanism, which means the config-defaults version bumps.
 
 ```toml
-power_block             = "off"   # "off" | "idle" | "idle+shutdown"
+power_block             = "off"   # "off" | "sleep" | "sleep+shutdown"
 power_block_requires_ac = true
 power_block_max_hours   = 12
 power_poll_seconds      = 30
@@ -300,9 +350,16 @@ platform with no current users (#43). `crr doctor` states the gap.
   no-battery desktop case and an unreadable-probe case.
 - **Orphan defence** — a test spawns the holder, closes its stdin, and
   asserts it exits. This is the load-bearing safety test.
-- **Lid** — an assertion that the Linux inhibitor argument contains `idle`
-  and **never** `sleep`. It is one word away from blocking lid close, so the
-  regression gets its own test with the reason in the message.
+- **Lid** — the Linux inhibitor argument must contain `sleep`, because
+  `idle` inhibits `IdleAction`, which is `ignore` by default and therefore
+  protects nothing. A second test asserts that when `LidSwitchIgnoreInhibited`
+  reads `no` on the host, crr **withholds** the sleep hold rather than
+  blocking the lid. Both carry the reasoning in the failure message: an
+  earlier draft of this spec got this backwards, and the wrong version looks
+  more obviously correct than the right one.
+- **Windows visibility** — a test asserts the confirmation dialog is shown
+  before `FALSE` is returned to `WM_QUERYENDSESSION`, since an invisible
+  window cannot cancel shutdown at all.
 - **Windows** — the tray/blocker is exercised on `windows-latest`, which
   rejoined the matrix in #72. What cannot run there is skipped with a stated
   reason, per that issue's convention.
