@@ -5,6 +5,8 @@ through sysfs (`/sys/class/power_supply/AC1/online`), which is why ONE
 Linux adapter serves both native Linux and WSL.
 """
 
+import subprocess as _sp
+import sys as _sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,8 @@ from crr.adapters.power_source import (MacPowerSource, SysfsPowerSource,
 from crr.adapters.power_hold_linux import (LinuxPowerHolder, inhibit_argv,
                                            lid_is_exempt)
 from crr.adapters.power_hold_macos import MacPowerHolder, caffeinate_argv
+from crr.adapters.power_hold_windows import (WindowsPowerHolder,
+                                             holder_argv, holder_script)
 
 
 def _supply(root: Path, name: str, **files: str) -> None:
@@ -188,3 +192,55 @@ def test_macos_holder_ignores_a_shutdown_request_it_cannot_serve():
     holder.hold(frozenset({"sleep", "shutdown"}), "r")
     assert holder.held() == frozenset({"sleep"})
     assert len(spawned) == 1
+
+
+def test_windows_claims_both_capabilities():
+    assert WindowsPowerHolder().capabilities() == frozenset(
+        {"sleep", "shutdown"})
+
+
+def test_script_sets_execution_state_for_sleep():
+    s = holder_script(frozenset({"sleep"}), "crr: 1 Claude session live")
+    assert "SetThreadExecutionState" in s
+    assert "0x80000001" in s or ("ES_CONTINUOUS" in s and "ES_SYSTEM_REQUIRED" in s)
+    assert "ShutdownBlockReasonCreate" not in s
+
+
+def test_script_registers_a_block_reason_for_shutdown():
+    s = holder_script(frozenset({"sleep", "shutdown"}), "crr: 2 live")
+    assert "ShutdownBlockReasonCreate" in s
+    assert "crr: 2 live" in s
+
+
+def test_script_exits_when_stdin_closes():
+    # THE orphan defence. Without this a killed crr leaves a PowerShell
+    # holding a shutdown block forever, and the user has a machine that
+    # refuses to restart with nothing left running to explain why.
+    s = holder_script(frozenset({"sleep"}), "r")
+    assert "ReadLine" in s, "no stdin-EOF loop: an orphan would hold forever"
+
+
+def test_script_self_releases_after_the_cap():
+    s = holder_script(frozenset({"sleep"}), "r", max_hours=12)
+    assert "12" in s
+
+
+def test_argv_runs_powershell_noninteractively_with_stdin_open():
+    argv = holder_argv()
+    assert argv[0] == "powershell.exe"
+    assert "-NoProfile" in argv
+    assert "-Command" in argv
+    assert "-NonInteractive" not in argv, (
+        "the holder READS stdin as its liveness signal; -NonInteractive "
+        "would defeat the orphan defence")
+
+
+def test_a_stdin_eof_child_exits_promptly():
+    # Platform-independent proof of the MECHANISM the Windows script uses:
+    # a child reading stdin to EOF must exit when the pipe closes. The
+    # PowerShell equivalent is asserted by inspection above; this asserts
+    # the pattern actually terminates a process.
+    proc = _sp.Popen([_sys.executable, "-c",
+                      "import sys; sys.stdin.read()"], stdin=_sp.PIPE)
+    proc.stdin.close()
+    assert proc.wait(timeout=10) == 0
