@@ -21,6 +21,7 @@ import os
 import platform
 import select
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -378,6 +379,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="dashboard bind port (default: config dashboard_port = 8377)")
     w.set_defaults(func=_cmd_web)
 
+    awake = sub.add_parser(
+        "awake",
+        help="[service] hold the machine awake while a Claude session is live",
+    )
+    awake.add_argument("--once", action="store_true",
+                       help="run a single poll and exit (for testing and cron-style use)")
+    awake.set_defaults(func=_cmd_awake)
+
     sysd = sub.add_parser(
         "systemd",
         help="print (or --install) the systemd user watchdog timer + service",
@@ -623,6 +632,94 @@ def _power_poll_once(holder, source, entries, owners, config) -> power.Decision:
     else:
         holder.release()
     return decision
+
+
+def _power_entries_and_owners(store, probe):
+    """Journaled claude sessions and their live owner pids (one snapshot)."""
+    entries = [e for e in store.scan().entries if e.get("claude") is not None]
+    owners = probe.claude_group_pids([e["pid"] for e in entries])
+    return entries, owners
+
+
+def _cmd_awake(args: argparse.Namespace) -> int:
+    """[service] Hold the machine awake while a Claude session is live.
+
+    Runs until stopped. The hold is a child of THIS process, so stopping
+    this loop is what releases it — there is no other handle. The
+    `finally` is therefore load-bearing, not tidiness.
+
+    The config is loaded once here and reused for the FIRST poll, then
+    re-read at the bottom of every subsequent iteration — turning the
+    feature off must not require restarting the unit.
+    """
+    system = platform.system()
+    wsl = host.is_wsl()
+    config = _load_config()
+    try:
+        holder = _power_holder(system, wsl, config.get("power_block_max_hours"))
+    except NotImplementedError as exc:
+        print(f"crr awake: {exc}", file=sys.stderr)
+        return 2
+    source = _power_source(system, config.get("interop_timeout_seconds"))
+    sd = state_dir.state_dir()
+    store = JournalStore(sd)
+    rc = 0
+    # Set only after a poll COMPLETES without raising, for --once. A clean
+    # `--once` poll is a handoff to the next cron tick, not an exit from a
+    # service: releasing here would make every cron tick a
+    # hold-then-immediately-drop no-op, defeating the point of holding at
+    # all. Because it is set after `_power_poll_once` returns, a poll that
+    # raises under --once can never reach it, so that path still releases
+    # below — there is no next tick coming from a process that just died.
+    hand_off = False
+
+    # SIGTERM -> KeyboardInterrupt. `systemctl --user stop crr-awake` sends
+    # SIGTERM, and Python installs a converting handler for SIGINT but NOT
+    # for SIGTERM -- an unhandled SIGTERM terminates the process at once,
+    # skipping `except`/`finally` entirely (verified empirically: a bare
+    # `kill -TERM` on an unmodified loop exits 143 with neither branch
+    # run). Routing SIGTERM through the same KeyboardInterrupt path the
+    # tests exercise is what makes "the unit was stopped" and "the
+    # simulated stop in the test" the same code path here, not two.
+    def _stop(signum, frame):  # noqa: ARG001 - required signal handler shape
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _stop)
+    try:
+        try:
+            while True:
+                probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+                entries, owners = _power_entries_and_owners(store, probe)
+                _power_poll_once(holder, source, entries, owners, config)
+                if args.once:
+                    hand_off = True
+                    break
+                time.sleep(config.get("power_poll_seconds"))
+                config = _load_config()   # re-read: turning it off must not need a restart
+        except KeyboardInterrupt:
+            pass
+        except Exception as exc:            # noqa: BLE001 - see finally
+            print(f"crr awake: {exc}", file=sys.stderr)
+            rc = 1
+        finally:
+            # LOAD-BEARING. Whatever ends this loop -- stop signal, crash,
+            # a bad poll -- the hold must not outlive it. On Windows the
+            # holder's stdin-EOF fallback would also catch this, but
+            # relying on a fallback for the ordinary path is how the
+            # fallback stops being exercised. The one exception is
+            # `hand_off` (see above): a clean single `--once` poll leaves
+            # the hold standing on purpose.
+            if not hand_off:
+                holder.release()
+    finally:
+        # Restore whatever SIGTERM handling this process had before —
+        # `_cmd_awake` runs inside the same interpreter as every other
+        # crr subcommand and, in tests, the same interpreter as the rest
+        # of the suite. Leaving a raise-on-SIGTERM handler installed
+        # process-wide after this command returns would be a surprise to
+        # whatever runs next.
+        signal.signal(signal.SIGTERM, previous_sigterm)
+    return rc
 
 
 def _resolve_crr_bin(explicit: str | None) -> str:
