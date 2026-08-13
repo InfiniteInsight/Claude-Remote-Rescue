@@ -102,12 +102,20 @@ Requires Python ≥ 3.11 and `tmux`. Zero runtime dependencies otherwise.
    ```sh
    crr shim fish >> ~/.config/fish/config.fish     # or: bash -> ~/.bashrc, zsh -> ~/.zshrc
    ```
-2. **Watchdog + dashboard** — install the user services (autonomous revival
-   + a dashboard that survives logout/reboot):
+2. **Watchdog + dashboard + keep-awake** — install the user services
+   (autonomous revival, a dashboard that survives logout/reboot, and the
+   keep-awake loop):
    ```sh
    crr systemd --install       # Linux; prints first with no args, so you can inspect
    crr launchd --install       # macOS (launchd user agents) — see docs/TESTING-macos.md
    ```
+   Both install **three** units: revive, web, and `crr-awake`. The
+   keep-awake loop does nothing until you turn it on — `power_block` is
+   `off` by default (see [Keeping the machine awake](#keeping-the-machine-awake)).
+
+   `crr schtasks` (Windows/WSL) installs the watchdog and dashboard
+   **only** — no keep-awake task. Run `crr awake` yourself there, or
+   install the systemd units inside WSL.
 3. **Expose the dashboard on your tailnet** (loopback-only by default):
    ```sh
    tailscale serve --bg 8377
@@ -142,9 +150,11 @@ macOS is unit-tested but not yet hardware-verified — if you're trying it there
 | `crr archive --list` | List archived (revival-preserved) sessions: reason, archived-at, sid8, cwd |
 | `crr recall <query> [--pid N \| --sid ID \| --all] [--cwd DIR] [-n N]` | Search a session's transcript for earlier conversation (print-only, never re-injects) |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |
-| `crr systemd [--install\|--uninstall]` | Print (or install/uninstall) the Linux watchdog timer + dashboard service |
-| `crr launchd [--install\|--uninstall]` | Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard) |
-| `crr schtasks [--install\|--uninstall]` | Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard) |
+| `crr awake [--once]` | [service] Hold the machine awake while a Claude session is live. The loop, not a durable OS reservation: the hold is a child process of this command, so stopping it releases the hold. Off unless `power_block` is set. Lid close is never blocked |
+| `crr power [--release]` | Report what crr is holding awake and why — or why not. `--release` stops the keep-awake loop (that *is* the release; there is no other handle) |
+| `crr systemd [--install\|--uninstall]` | Print (or install/uninstall) the Linux user units: watchdog timer + dashboard + keep-awake (`crr-awake.service`) |
+| `crr launchd [--install\|--uninstall]` | Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard + keep-awake) |
+| `crr schtasks [--install\|--uninstall]` | Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard). **No keep-awake task** — the command says so; run `crr awake` yourself or use `crr systemd --install` inside WSL |
 | `crr config --effective` | Every config key with its value and origin (`configured` / `default`) |
 | `crr doctor` | Install-health checklist |
 | `crr shim <shell>` | Print the shell shim to source from your rc file (fish/bash/zsh) |
@@ -153,3 +163,59 @@ macOS is unit-tested but not yet hardware-verified — if you're trying it there
 
 Targets: headless Linux (now), macOS / Linux-desktop / Windows-WSL (later).
 Shells: zsh, bash, fish.
+
+## Keeping the machine awake
+
+A remote Claude session dies when the machine it runs on sleeps. `crr awake`
+is a loop that holds the machine up **only while a Claude session is
+actually live**, and drops the hold the moment the last one ends.
+
+**It is off by default.** A tool that silently stops your laptop from
+sleeping is not a tool you asked for, so nothing happens until you set
+`power_block` in `config.toml`:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `power_block` | `"off"` | `"off"`, `"sleep"`, or `"sleep+shutdown"`. What to hold while a session is live |
+| `power_block_requires_ac` | `true` | Only hold while on AC. On battery — or when the power source **cannot be read** — crr holds nothing and says so |
+| `power_block_max_hours` | `12` | Windows/WSL only: the holder child expires after this, so a crashed crr cannot pin the host awake forever |
+| `power_poll_seconds` | `30` | How often the loop re-decides |
+| `power_state_max_age_multiplier` | `3` | A report older than `power_poll_seconds ×` this is treated as UNKNOWN, not as still-true |
+
+```sh
+crr awake            # run the loop in the foreground (Ctrl-C releases)
+crr awake --once     # one decide-and-apply pass, then release and exit
+crr power            # what is held right now, and why — or why not
+crr power --release  # stop the loop, which IS the release
+```
+
+**Closing the lid is never blocked**, on any platform. On Linux the hold is
+`systemd-inhibit --what=sleep --mode=block`, and logind exempts the lid
+from inhibitors by default; on a host that has turned that exemption off
+(`LidSwitchIgnoreInhibited=no`) — or whose logind config crr cannot read —
+crr **refuses the sleep hold and prints why** rather than touching the lid.
+
+**The hold is a child process of `crr awake`, not a durable OS
+reservation.** That is deliberate: it cannot outlive crr. It also means
+there is no separate "unhold" button — stopping the loop is the release,
+which is exactly what `crr power --release` does (`systemctl --user stop
+crr-awake.service`, or the launchd equivalent on macOS). If you started
+the loop by hand rather than through a unit — the headless escape hatch —
+stop that process directly; `crr power --release` will say so if the unit
+stop finds nothing.
+
+**A hold is never invisible.** `crr awake` stamps a small `power.json` in
+the state dir after every poll, and `crr power` / `crr doctor` read it
+from their own separate processes. They distinguish four things that used
+to look alike:
+
+- `holding: sleep — <reason>` — a live, current, trusted claim.
+- `holding: nothing — <reason>` — a **known** nothing (`power_block is
+  off`, `no live claude session`, `on battery`).
+- `holding: unknown — <reason>` — the report cannot be trusted right now:
+  the loop that wrote it is gone, its last report is too old, the file is
+  corrupt — or a hold was **asked for and not obtained**. `crr doctor`
+  shows these as `[WARN]`, never `[ok  ]`.
+- `NOT holding: sleep — asked for and not obtained` alongside a real
+  hold — a **partial** hold; crr got some of what you asked for and names
+  the rest.
