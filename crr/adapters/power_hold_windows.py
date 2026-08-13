@@ -130,12 +130,28 @@ explicit that an application without a visible window cannot cancel
 shutdown. Making the window visible at the moment it matters is the tray
 plan's job; this holder registers the reason and reports its efficacy as
 unverified.
+
+SECOND KNOWN LIMIT, same shape: ``held()`` is a LIVENESS poll, not proof of
+acquisition. It reports the requested set whenever the child process is
+still running, and nothing reads back from the child to confirm the two
+API calls actually succeeded. If ``Add-Type`` fails under
+``$ErrorActionPreference='Stop'`` -- a missing assembly, a constrained
+language mode, an AppLocker policy -- the ``& { ... }`` statement aborts
+before either lock is taken, yet the PowerShell host process stays alive
+reading stdin, so ``held()`` reports BOTH locks while ZERO protection is
+in place. Closing this would need the child to write an acquisition
+receipt back over stdout and ``held()`` to require it. Until then the
+limit is recorded rather than assumed, which is what makes it shippable:
+a consumer must treat ``held()`` as "the holder is running", not as "the
+machine is protected".
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
+
+from crr.core.config import DEFAULTS
 
 _ES_CONTINUOUS = "0x80000000"
 _ES_SYSTEM_REQUIRED = "0x00000001"
@@ -152,6 +168,13 @@ _ES_SLEEP_FLAGS = "0x80000001"
 # treats it as "wait forever" (the exact opposite of a backstop). Clamp
 # defensively at both ends.
 _INT32_MAX_MS = 2147483647
+
+# Teardown budget. Measured normal teardown is ~2.07s (stdin close -> EOF ->
+# both release calls -> [Environment]::Exit(0)), so blowing a 10s wait means
+# something is genuinely wrong and escalating beats swallowing it: the
+# process may still hold ShutdownBlockReasonCreate.
+_RELEASE_WAIT_SECONDS = 10
+_FORCE_WAIT_SECONDS = 5
 
 # Control characters (0x00-0x1F, plus DEL) that must never reach the
 # emitted script unescaped: a newline or carriage return in `reason`
@@ -215,7 +238,7 @@ def _ps_oneline_string(csharp_lines: list[str]) -> str:
 
 
 def holder_script(want: frozenset[str], reason: str,
-                  max_hours: int = 12) -> str:
+                  max_hours: float = DEFAULTS["power_block_max_hours"]) -> str:
     """The PowerShell program that holds the locks until stdin closes.
 
     The body is emitted as ONE PowerShell statement -- see point 6 in the
@@ -317,7 +340,11 @@ def holder_script(want: frozenset[str], reason: str,
 
 
 class WindowsPowerHolder:
-    def __init__(self, spawn=None, max_hours: int = 12) -> None:
+    # max_hours defaults to the versioned config prior, never a repeated
+    # literal: `power_block_max_hours` is already a named key, and a second
+    # copy here is a second answer to the same question.
+    def __init__(self, spawn=None,
+                 max_hours: float = DEFAULTS["power_block_max_hours"]) -> None:
         self._spawn = spawn or (lambda argv, **kw: subprocess.Popen(argv, **kw))
         self._max_hours = max_hours
         self._proc = None
@@ -340,13 +367,19 @@ class WindowsPowerHolder:
             stderr=subprocess.DEVNULL,
             text=True,
         )
+        # Tracked BEFORE the write, not after. A BrokenPipeError on the
+        # write would otherwise leave a spawned child with no handle to it
+        # -- and a Windows interop child does not die with its WSL parent,
+        # so "untracked" means "unkillable".
+        self._proc = proc
         script = holder_script(effective, reason, max_hours=self._max_hours)
         if getattr(proc, "stdin", None) is not None:
             proc.stdin.write(script)
             proc.stdin.flush()
             # Deliberately NOT closed: the open pipe is the liveness
             # signal. Closing it here would make the holder exit at once.
-        self._proc = proc
+        # Claimed only once the script actually reached the child: a
+        # process that never received the script holds nothing.
         self._held = effective
 
     def _alive(self) -> bool:
@@ -355,16 +388,54 @@ class WindowsPowerHolder:
     def held(self) -> frozenset[str]:
         return self._held if self._alive() else frozenset()
 
+    @staticmethod
+    def _reaped(proc, timeout: float) -> bool:
+        """True only when ``wait`` actually returned -- i.e. confirmed dead."""
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _signal(proc, name: str) -> None:
+        try:
+            getattr(proc, name)()
+        except Exception:
+            pass
+
     def release(self) -> None:
-        if self._proc is not None:
-            try:
-                if getattr(self._proc, "stdin", None) is not None:
-                    self._proc.stdin.close()   # EOF -> the script unwinds
-                self._proc.wait(timeout=10)
-            except Exception:
-                try:
-                    self._proc.terminate()
-                except Exception:
-                    pass
-            self._proc = None
+        """Close stdin, then escalate until the child is CONFIRMED reaped.
+
+        The handle is dropped only on confirmation. The old version fired
+        terminate() and then cleared ``_proc``/``_held`` unconditionally
+        with no re-wait: crr was left with no handle to a PowerShell that
+        may still hold ``ShutdownBlockReasonCreate``, permanently
+        uncleanable, ``held()`` reporting nothing held, and the user facing
+        a machine that refuses to restart with nothing left to explain why.
+
+        Deliberately no ``finally:`` around the bookkeeping -- that is
+        exactly the shape that reinstates the bug.
+        """
+        proc = self._proc
+        if proc is None:
+            self._held = frozenset()
+            return
+        try:
+            if getattr(proc, "stdin", None) is not None:
+                proc.stdin.close()             # EOF -> the script unwinds
+        except Exception:
+            pass
+        if not self._reaped(proc, _RELEASE_WAIT_SECONDS):
+            self._signal(proc, "terminate")
+            if not self._reaped(proc, _FORCE_WAIT_SECONDS):
+                self._signal(proc, "kill")
+                if not self._reaped(proc, _FORCE_WAIT_SECONDS):
+                    # Neither terminate nor kill confirmed it dead. KEEP
+                    # the handle and KEEP reporting the set: a live child
+                    # may genuinely still be holding, and the next hold()
+                    # retries release(). Reporting an empty hold here would
+                    # be the same lie, just quieter.
+                    return
+        self._proc = None
         self._held = frozenset()

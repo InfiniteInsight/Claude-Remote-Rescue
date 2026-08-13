@@ -5,9 +5,11 @@ through sysfs (`/sys/class/power_supply/AC1/online`), which is why ONE
 Linux adapter serves both native Linux and WSL.
 """
 
+import os
 import re
 import subprocess as _sp
 import sys as _sys
+import time
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,8 @@ import pytest
 from crr.adapters.power_source import (MacPowerSource, SysfsPowerSource,
                                        _parse_pmset)
 from crr.adapters.power_hold_linux import (LinuxPowerHolder, inhibit_argv,
-                                           lid_is_exempt)
+                                           lid_exemption, lid_is_exempt,
+                                           logind_sources)
 from crr.adapters.power_hold_macos import MacPowerHolder, caffeinate_argv
 from crr.adapters.power_hold_windows import (WindowsPowerHolder,
                                              holder_argv, holder_script)
@@ -130,14 +133,36 @@ def test_lid_exemption_is_read_not_assumed(conf, exempt):
     assert lid_is_exempt(conf) is exempt
 
 
+def _logind(root: Path, rel: str, text: str) -> Path:
+    """Write a logind config source at ``rel`` under a fake filesystem root.
+
+    ``rel`` is always relative -- `root / "/etc/..."` would silently
+    discard `root` and point at the REAL host config.
+    """
+    assert not rel.startswith("/"), "rel must be relative or root is discarded"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class _LiveProc:
+    """A spawn result that stays alive and reaps cleanly."""
+
+    def __init__(self): self.terminated = False
+    def poll(self): return None
+    def terminate(self): self.terminated = True
+    def wait(self, timeout=None): return 0
+
+
 def test_holder_refuses_to_block_sleep_when_the_lid_is_not_exempt(tmp_path):
     # The builder's hard requirement is that closing the lid always
     # sleeps. On a host that has turned the default off, a sleep lock
     # would break that, so crr withholds instead.
-    conf = tmp_path / "logind.conf"
-    conf.write_text("LidSwitchIgnoreInhibited=no\n", encoding="utf-8")
+    _logind(tmp_path, "etc/systemd/logind.conf",
+            "LidSwitchIgnoreInhibited=no\n")
     spawned = []
-    holder = LinuxPowerHolder(logind_conf=conf,
+    holder = LinuxPowerHolder(conf_root=tmp_path,
                               spawn=lambda argv, **kw: spawned.append(argv))
     holder.hold(frozenset({"sleep"}), "r")
     assert spawned == [], "blocked sleep on a host where that blocks the lid"
@@ -147,20 +172,15 @@ def test_holder_refuses_to_block_sleep_when_the_lid_is_not_exempt(tmp_path):
 def test_holder_still_blocks_shutdown_when_the_lid_is_not_exempt(tmp_path):
     # Only the sleep half is unsafe there; shutdown is unaffected by lid
     # handling, so withholding it too would be over-correction.
-    conf = tmp_path / "logind.conf"
-    conf.write_text("LidSwitchIgnoreInhibited=no\n", encoding="utf-8")
+    _logind(tmp_path, "etc/systemd/logind.conf",
+            "LidSwitchIgnoreInhibited=no\n")
     spawned = []
-
-    class _P:
-        def poll(self): return None
-        def terminate(self): pass
-        def wait(self, timeout=None): return 0
 
     def _spawn(argv, **kw):
         spawned.append(argv)
-        return _P()
+        return _LiveProc()
 
-    holder = LinuxPowerHolder(logind_conf=conf, spawn=_spawn)
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
     holder.hold(frozenset({"sleep", "shutdown"}), "r")
     assert holder.held() == frozenset({"shutdown"})
     what = spawned[0][spawned[0].index("--what") + 1]
@@ -168,8 +188,227 @@ def test_holder_still_blocks_shutdown_when_the_lid_is_not_exempt(tmp_path):
 
 
 def test_capabilities_are_both_on_linux(tmp_path):
-    holder = LinuxPowerHolder(logind_conf=tmp_path / "absent.conf")
+    holder = LinuxPowerHolder(conf_root=tmp_path / "absent")
     assert holder.capabilities() == frozenset({"sleep", "shutdown"})
+
+
+# --- the effective logind config, not just one file -----------------------
+# logind's RECOMMENDED override mechanism is a drop-in, not an edit to
+# logind.conf. A holder that reads only /etc/systemd/logind.conf therefore
+# reads a file the host may have deliberately overridden -- and the failure
+# is the one thing that must never happen: `LidSwitchIgnoreInhibited=no` in
+# a drop-in, read as the compiled-in `yes`, so crr holds `sleep` and closing
+# the lid stops suspending the machine.
+
+@pytest.mark.parametrize("rel", [
+    "etc/systemd/logind.conf.d/90-crr.conf",
+    "run/systemd/logind.conf.d/90-crr.conf",
+    "usr/lib/systemd/logind.conf.d/90-crr.conf",
+])
+def test_a_dropin_saying_no_withholds_sleep_from_every_dropin_dir(tmp_path, rel):
+    # A stock main file that never mentions the key, plus a drop-in that
+    # turns the exemption off -- exactly the shape a distro package ships.
+    _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n#NAutoVTs=6\n")
+    _logind(tmp_path, rel, "[Login]\nLidSwitchIgnoreInhibited=no\n")
+    assert lid_exemption(tmp_path) is False, (
+        f"{rel} overrides the main file; missing it means crr holds sleep "
+        "and closing the lid no longer suspends")
+
+
+def test_the_usr_lib_main_conf_is_a_source_too(tmp_path):
+    # On Fedora-likes /usr/lib/systemd/logind.conf is the ONLY main file;
+    # /etc/systemd/logind.conf does not exist at all.
+    _logind(tmp_path, "usr/lib/systemd/logind.conf",
+            "[Login]\nLidSwitchIgnoreInhibited=no\n")
+    assert lid_exemption(tmp_path) is False
+
+
+def test_a_dropin_that_says_nothing_leaves_the_default_alone(tmp_path):
+    # The real drop-in on this host (unattended-upgrades) sets an unrelated
+    # key. Treating any drop-in's mere existence as "not exempt" would make
+    # crr refuse to block sleep on every Ubuntu box -- protecting nothing,
+    # from the other direction.
+    _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    _logind(tmp_path, "usr/lib/systemd/logind.conf.d/10-maxdelay.conf",
+            "[Login]\nInhibitDelayMaxSec=30\n")
+    assert lid_exemption(tmp_path) is True
+
+
+def test_no_config_source_at_all_is_the_compiled_in_default_not_unknown(tmp_path):
+    # KNOWN, not unknown: with no config anywhere, logind uses its
+    # compiled-in LidSwitchIgnoreInhibited=yes. Mirrors the AC probe's
+    # empty-directory-is-a-desktop case.
+    assert lid_exemption(tmp_path) is True
+
+
+def test_a_source_that_exists_but_cannot_be_read_is_unknown_not_safe(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    conf = _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    conf.chmod(0o000)
+    try:
+        assert lid_exemption(tmp_path) is None, (
+            "never read the config is not the same as safe to hold sleep")
+    finally:
+        conf.chmod(0o644)
+
+
+def test_a_dropin_dir_that_cannot_be_listed_is_unknown_not_empty(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    d = tmp_path / "etc/systemd/logind.conf.d"
+    d.mkdir(parents=True)
+    d.chmod(0o000)
+    try:
+        assert lid_exemption(tmp_path) is None, (
+            "an unlistable drop-in dir is unknown; reporting it as empty is "
+            "the same defect as reporting an unreadable file as exempt")
+    finally:
+        d.chmod(0o755)
+
+
+def test_a_definite_no_beats_an_unreadable_sibling(tmp_path):
+    # Precedence-proof by construction: ANY source saying no wins, so the
+    # answer never depends on implementing logind's precedence rules.
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    _logind(tmp_path, "etc/systemd/logind.conf",
+            "LidSwitchIgnoreInhibited=no\n")
+    other = _logind(tmp_path, "usr/lib/systemd/logind.conf", "[Login]\n")
+    other.chmod(0o000)
+    try:
+        assert lid_exemption(tmp_path) is False
+    finally:
+        other.chmod(0o644)
+
+
+def test_the_collector_finds_every_source_logind_would_read(tmp_path):
+    main = _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    lib_main = _logind(tmp_path, "usr/lib/systemd/logind.conf", "[Login]\n")
+    dropin = _logind(tmp_path, "run/systemd/logind.conf.d/50-x.conf", "[Login]\n")
+    _logind(tmp_path, "run/systemd/logind.conf.d/notes.txt", "ignored\n")
+    paths, complete = logind_sources(tmp_path)
+    assert complete is True
+    found = set(paths)
+    assert {main, lib_main, dropin} <= found
+    assert not any(p.name.endswith(".txt") for p in paths), (
+        "logind reads *.conf drop-ins only")
+
+
+def test_the_real_host_config_is_exempt_so_crr_is_not_over_corrected(tmp_path):
+    # Guard against the opposite failure: an implementation that returns
+    # False/None on a stock box never blocks sleep anywhere. Measured
+    # 2026-08-13 on this host -- a readable /etc/systemd/logind.conf plus
+    # /usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf,
+    # neither setting the key.
+    if not Path("/etc/systemd/logind.conf").exists():
+        pytest.skip("no logind config on this host")
+    if lid_exemption(Path("/")) is None:
+        pytest.skip("host logind config is unreadable by this user")
+    assert lid_exemption(Path("/")) is True
+
+
+def test_the_withheld_reason_does_not_claim_a_setting_it_never_read(tmp_path):
+    # Two different withholdings with two different reasons. Reporting
+    # "this host sets LidSwitchIgnoreInhibited=no" when the config could
+    # not be read is a confident claim about a fact never established.
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    conf = _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    conf.chmod(0o000)
+    try:
+        holder = LinuxPowerHolder(conf_root=tmp_path,
+                                  spawn=lambda argv, **kw: _LiveProc())
+        holder.hold(frozenset({"sleep"}), "r")
+    finally:
+        conf.chmod(0o644)
+    assert holder.held() == frozenset()
+    reason = holder.withheld() or ""
+    assert "LidSwitchIgnoreInhibited=no" not in reason, (
+        f"claims a setting it never read: {reason!r}")
+    assert "read" in reason or "unknown" in reason, reason
+
+
+# --- the spawn either worked or it did not --------------------------------
+
+def test_a_systemd_inhibit_that_fails_is_not_reported_as_a_hold(tmp_path):
+    # Measured on this host (WSL, no logind session), 2026-08-13:
+    #   systemd-inhibit --what=sleep --mode=block --who=crr --why=x sleep 1
+    #   -> stderr "Failed to inhibit: Access denied", exit 1, in
+    #   milliseconds.
+    # With stderr=DEVNULL and an unconditional `self._held = effective`,
+    # held() reported the full set, then reported empty with withheld()
+    # None -- no reason recorded anywhere, because the stderr that
+    # explained it was discarded at the source.
+    fail = [_sys.executable, "-c",
+            "import sys; sys.stderr.write('Failed to inhibit: Access denied\\n');"
+            " sys.exit(1)"]
+
+    def _spawn(argv, **kw):
+        return _sp.Popen(fail, **kw)   # a REAL process, real exit, real stderr
+
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
+    holder.hold(frozenset({"sleep"}), "r")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and holder.held():
+        time.sleep(0.02)
+    assert holder.held() == frozenset(), (
+        "reported a hold from a systemd-inhibit that had already exited 1")
+    reason = holder.withheld() or ""
+    assert "Access denied" in reason, (
+        f"the stderr that explains the failure must survive: {reason!r}")
+    holder.release()
+
+
+def test_release_never_reads_stderr_from_a_child_it_could_not_reap(tmp_path):
+    # `stream.read()` on a LIVE child's pipe does not raise -- it blocks
+    # until EOF, i.e. forever, wedging the poll loop this adapter exists to
+    # stay off. So the drain must be gated on a CONFIRMED exit, not run
+    # unconditionally after a wait() that may have timed out.
+    # A raising stub would NOT discriminate: _drain_stderr catches
+    # Exception, so the raise is swallowed and the broken version passes.
+    # The real failure is a BLOCK, so record the call instead.
+    class _Stderr:
+        def __init__(self): self.read_called = False
+
+        def read(self):
+            self.read_called = True      # in reality: blocks until EOF
+            return b""
+
+        def close(self): pass
+
+    class _Unreapable:
+        def __init__(self): self.stderr = _Stderr()
+        def poll(self): return None
+        def terminate(self): pass
+
+        def wait(self, timeout=None):
+            raise _sp.TimeoutExpired(cmd="systemd-inhibit", timeout=timeout)
+
+    proc = _Unreapable()
+    holder = LinuxPowerHolder(conf_root=tmp_path,
+                              spawn=lambda argv, **kw: proc)
+    holder.hold(frozenset({"sleep"}), "r")
+    holder.release()
+    assert not proc.stderr.read_called, (
+        "drained stderr from a child that wait() never confirmed dead -- "
+        "that read blocks until EOF, wedging the poll loop forever")
+    assert holder.held() == frozenset()
+
+
+def test_a_live_inhibit_still_reports_its_hold(tmp_path):
+    # The reap must not turn a WORKING hold into a withheld one.
+    stay = [_sys.executable, "-c", "import time; time.sleep(30)"]
+    holder = LinuxPowerHolder(conf_root=tmp_path,
+                              spawn=lambda argv, **kw: _sp.Popen(stay, **kw))
+    holder.hold(frozenset({"sleep", "shutdown"}), "r")
+    try:
+        assert holder.held() == frozenset({"sleep", "shutdown"})
+        assert holder.withheld() is None
+    finally:
+        holder.release()
+    assert holder.held() == frozenset()
 
 
 def test_macos_can_hold_sleep_but_not_shutdown():
@@ -265,8 +504,15 @@ def test_script_exits_when_stdin_closes():
 
 
 def test_script_self_releases_after_the_cap():
+    # `"12" in s` was the original assertion and it proved nothing: the
+    # emitted script carries a leading `# max_hours=12` comment, so a
+    # completely dead deadline still passed. Assert the millisecond value
+    # actually inside the bounded wait.
     s = holder_script(frozenset({"sleep"}), "r", max_hours=12)
-    assert "12" in s
+    match = re.search(r"WaitAny\(\s*@\(\$readTask\)\s*,\s*\[int\](\d+)\s*\)", s)
+    assert match is not None, "no bounded wait carrying a deadline at all"
+    assert int(match.group(1)) == 12 * 3600 * 1000, (
+        "the cap must reach the wait, not just the comment above it")
 
 
 def test_the_deadline_is_a_bounded_wait_not_a_loop_around_a_blocking_read():
@@ -392,6 +638,120 @@ def test_the_whole_script_is_one_statement_so_nothing_is_left_to_steal():
         "the script body must be a single wrapped statement -- trailing "
         "top-level lines after the stdin read are exactly what the "
         "byte-stealing race corrupts")
+
+
+# --- release must never lose the handle to a live shutdown blocker --------
+
+class _StubStdin:
+    def __init__(self, raise_on_write=None):
+        self.closed = False
+        self.written = []
+        self._raise = raise_on_write
+
+    def write(self, text):
+        if self._raise is not None:
+            raise self._raise
+        self.written.append(text)
+
+    def flush(self): pass
+    def close(self): self.closed = True
+
+
+class _StubProc:
+    """A PowerShell stand-in whose first N waits time out."""
+
+    def __init__(self, waits_that_timeout=0, dies_on="", stdin=None):
+        self.stdin = _StubStdin() if stdin is None else stdin
+        self._left = waits_that_timeout
+        self._dies_on = dies_on        # "" | "terminate" | "kill" | "never"
+        self.calls = []
+        self.alive = True
+
+    def poll(self): return None if self.alive else 0
+
+    def wait(self, timeout=None):
+        self.calls.append("wait")
+        if self._left > 0:
+            self._left -= 1
+            raise _sp.TimeoutExpired(cmd="powershell.exe", timeout=timeout)
+        self.alive = False
+        return 0
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if self._dies_on == "terminate":
+            self._left = 0
+
+    def kill(self):
+        self.calls.append("kill")
+        if self._dies_on == "kill":
+            self._left = 0
+
+
+def _windows_holder_holding(proc):
+    holder = WindowsPowerHolder(spawn=lambda argv, **kw: proc)
+    holder.hold(frozenset({"sleep", "shutdown"}), "r")
+    assert holder.held() == frozenset({"sleep", "shutdown"})
+    return holder
+
+
+def test_release_escalates_and_confirms_the_reap_before_forgetting_it():
+    # If wait(timeout=10) raises, terminate() alone is not proof of death.
+    # Clearing _proc/_held there leaves crr with NO handle to a PowerShell
+    # that may still hold ShutdownBlockReasonCreate: permanently
+    # uncleanable, held() says nothing is held, and the user gets a machine
+    # that refuses to restart with nothing left to explain why.
+    proc = _StubProc(waits_that_timeout=1, dies_on="terminate")
+    holder = _windows_holder_holding(proc)
+    holder.release()
+    assert proc.stdin.closed, "the EOF signal must still be sent first"
+    assert proc.calls.count("wait") >= 2, (
+        f"terminate() with no re-wait is not a confirmed reap: {proc.calls}")
+    assert "terminate" in proc.calls
+    assert holder.held() == frozenset()
+
+
+def test_release_kills_when_terminate_is_not_enough():
+    proc = _StubProc(waits_that_timeout=2, dies_on="kill")
+    holder = _windows_holder_holding(proc)
+    holder.release()
+    assert proc.calls.count("terminate") == 1
+    assert proc.calls.count("kill") == 1
+    assert proc.calls.count("wait") >= 3
+    assert holder.held() == frozenset()
+
+
+def test_release_keeps_reporting_a_process_it_could_not_reap():
+    # Measured normal teardown is ~2.07s, so exhausting terminate AND kill
+    # means something is genuinely wrong. Silently reporting "nothing is
+    # held" there is the branch's whole defect class: succeeding loudly
+    # while a process may still be blocking restart. Keep the handle so the
+    # next hold() can retry, and keep saying what may still be held.
+    proc = _StubProc(waits_that_timeout=99, dies_on="never")
+    holder = _windows_holder_holding(proc)
+    holder.release()
+    assert "kill" in proc.calls
+    assert holder.held() == frozenset({"sleep", "shutdown"}), (
+        "an unreaped PowerShell may still hold the shutdown block; saying "
+        "nothing is held is the lie that makes it uncleanable")
+    proc._left = 0                       # it finally dies
+    holder.release()
+    assert holder.held() == frozenset()
+
+
+def test_a_broken_pipe_on_the_script_write_still_leaves_a_tracked_child():
+    # _proc assigned AFTER the write means a BrokenPipeError orphans a
+    # child crr has no handle to -- on Windows that child does not die with
+    # its WSL parent.
+    proc = _StubProc(stdin=_StubStdin(raise_on_write=BrokenPipeError()))
+    holder = WindowsPowerHolder(spawn=lambda argv, **kw: proc)
+    with pytest.raises(BrokenPipeError):
+        holder.hold(frozenset({"sleep", "shutdown"}), "r")
+    assert holder.held() == frozenset(), (
+        "a script that never reached the child holds nothing")
+    holder.release()
+    assert proc.calls, f"release() could not reach the child: {proc.calls}"
+    assert not proc.alive
 
 
 def test_argv_runs_powershell_noninteractively_with_stdin_open():

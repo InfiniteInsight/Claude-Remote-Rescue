@@ -699,7 +699,7 @@ git commit -m "feat(adapters): AC probe, tri-state, one path for Linux and WSL"
 
 **Interfaces:**
 - Consumes: `PowerHolder` protocol (Task 4)
-- Produces: `LinuxPowerHolder(logind_conf: Path | None = None, spawn=subprocess.Popen)` with `.capabilities()`, `.hold(want, reason)`, `.release()`, `.held()`; module functions `inhibit_argv(want, reason) -> list[str]` and `lid_is_exempt(conf_text: str) -> bool`
+- Produces: `LinuxPowerHolder(conf_root: Path | None = None, spawn=subprocess.Popen)` with `.capabilities()`, `.hold(want, reason)`, `.release()`, `.held()`, `.withheld()`; module functions `inhibit_argv(want, reason) -> list[str]`, `lid_is_exempt(conf_text: str) -> bool` (pure single-text parser), `logind_sources(root) -> tuple[list[Path], bool]` and `lid_exemption(root) -> bool | None` (the effective config across main files AND drop-ins; `None` = unknown)
 
 **READ THIS BEFORE WRITING CODE.** An earlier draft of the spec specified
 `--what=idle` and a test *enforcing* that `sleep` never appear. Both were
@@ -757,14 +757,36 @@ def test_lid_exemption_is_read_not_assumed(conf, exempt):
     assert lid_is_exempt(conf) is exempt
 
 
+def _logind(root: Path, rel: str, text: str) -> Path:
+    """Write a logind config source at ``rel`` under a fake filesystem root.
+
+    ``rel`` is always relative -- `root / "/etc/..."` would silently
+    discard `root` and point at the REAL host config.
+    """
+    assert not rel.startswith("/"), "rel must be relative or root is discarded"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class _LiveProc:
+    """A spawn result that stays alive and reaps cleanly."""
+
+    def __init__(self): self.terminated = False
+    def poll(self): return None
+    def terminate(self): self.terminated = True
+    def wait(self, timeout=None): return 0
+
+
 def test_holder_refuses_to_block_sleep_when_the_lid_is_not_exempt(tmp_path):
     # The builder's hard requirement is that closing the lid always
     # sleeps. On a host that has turned the default off, a sleep lock
     # would break that, so crr withholds instead.
-    conf = tmp_path / "logind.conf"
-    conf.write_text("LidSwitchIgnoreInhibited=no\n", encoding="utf-8")
+    _logind(tmp_path, "etc/systemd/logind.conf",
+            "LidSwitchIgnoreInhibited=no\n")
     spawned = []
-    holder = LinuxPowerHolder(logind_conf=conf,
+    holder = LinuxPowerHolder(conf_root=tmp_path,
                               spawn=lambda argv, **kw: spawned.append(argv))
     holder.hold(frozenset({"sleep"}), "r")
     assert spawned == [], "blocked sleep on a host where that blocks the lid"
@@ -774,20 +796,15 @@ def test_holder_refuses_to_block_sleep_when_the_lid_is_not_exempt(tmp_path):
 def test_holder_still_blocks_shutdown_when_the_lid_is_not_exempt(tmp_path):
     # Only the sleep half is unsafe there; shutdown is unaffected by lid
     # handling, so withholding it too would be over-correction.
-    conf = tmp_path / "logind.conf"
-    conf.write_text("LidSwitchIgnoreInhibited=no\n", encoding="utf-8")
+    _logind(tmp_path, "etc/systemd/logind.conf",
+            "LidSwitchIgnoreInhibited=no\n")
     spawned = []
-
-    class _P:
-        def poll(self): return None
-        def terminate(self): pass
-        def wait(self, timeout=None): return 0
 
     def _spawn(argv, **kw):
         spawned.append(argv)
-        return _P()
+        return _LiveProc()
 
-    holder = LinuxPowerHolder(logind_conf=conf, spawn=_spawn)
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
     holder.hold(frozenset({"sleep", "shutdown"}), "r")
     assert holder.held() == frozenset({"shutdown"})
     what = spawned[0][spawned[0].index("--what") + 1]
@@ -795,8 +812,227 @@ def test_holder_still_blocks_shutdown_when_the_lid_is_not_exempt(tmp_path):
 
 
 def test_capabilities_are_both_on_linux(tmp_path):
-    holder = LinuxPowerHolder(logind_conf=tmp_path / "absent.conf")
+    holder = LinuxPowerHolder(conf_root=tmp_path / "absent")
     assert holder.capabilities() == frozenset({"sleep", "shutdown"})
+
+
+# --- the effective logind config, not just one file -----------------------
+# logind's RECOMMENDED override mechanism is a drop-in, not an edit to
+# logind.conf. A holder that reads only /etc/systemd/logind.conf therefore
+# reads a file the host may have deliberately overridden -- and the failure
+# is the one thing that must never happen: `LidSwitchIgnoreInhibited=no` in
+# a drop-in, read as the compiled-in `yes`, so crr holds `sleep` and closing
+# the lid stops suspending the machine.
+
+@pytest.mark.parametrize("rel", [
+    "etc/systemd/logind.conf.d/90-crr.conf",
+    "run/systemd/logind.conf.d/90-crr.conf",
+    "usr/lib/systemd/logind.conf.d/90-crr.conf",
+])
+def test_a_dropin_saying_no_withholds_sleep_from_every_dropin_dir(tmp_path, rel):
+    # A stock main file that never mentions the key, plus a drop-in that
+    # turns the exemption off -- exactly the shape a distro package ships.
+    _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n#NAutoVTs=6\n")
+    _logind(tmp_path, rel, "[Login]\nLidSwitchIgnoreInhibited=no\n")
+    assert lid_exemption(tmp_path) is False, (
+        f"{rel} overrides the main file; missing it means crr holds sleep "
+        "and closing the lid no longer suspends")
+
+
+def test_the_usr_lib_main_conf_is_a_source_too(tmp_path):
+    # On Fedora-likes /usr/lib/systemd/logind.conf is the ONLY main file;
+    # /etc/systemd/logind.conf does not exist at all.
+    _logind(tmp_path, "usr/lib/systemd/logind.conf",
+            "[Login]\nLidSwitchIgnoreInhibited=no\n")
+    assert lid_exemption(tmp_path) is False
+
+
+def test_a_dropin_that_says_nothing_leaves_the_default_alone(tmp_path):
+    # The real drop-in on this host (unattended-upgrades) sets an unrelated
+    # key. Treating any drop-in's mere existence as "not exempt" would make
+    # crr refuse to block sleep on every Ubuntu box -- protecting nothing,
+    # from the other direction.
+    _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    _logind(tmp_path, "usr/lib/systemd/logind.conf.d/10-maxdelay.conf",
+            "[Login]\nInhibitDelayMaxSec=30\n")
+    assert lid_exemption(tmp_path) is True
+
+
+def test_no_config_source_at_all_is_the_compiled_in_default_not_unknown(tmp_path):
+    # KNOWN, not unknown: with no config anywhere, logind uses its
+    # compiled-in LidSwitchIgnoreInhibited=yes. Mirrors the AC probe's
+    # empty-directory-is-a-desktop case.
+    assert lid_exemption(tmp_path) is True
+
+
+def test_a_source_that_exists_but_cannot_be_read_is_unknown_not_safe(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    conf = _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    conf.chmod(0o000)
+    try:
+        assert lid_exemption(tmp_path) is None, (
+            "never read the config is not the same as safe to hold sleep")
+    finally:
+        conf.chmod(0o644)
+
+
+def test_a_dropin_dir_that_cannot_be_listed_is_unknown_not_empty(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    d = tmp_path / "etc/systemd/logind.conf.d"
+    d.mkdir(parents=True)
+    d.chmod(0o000)
+    try:
+        assert lid_exemption(tmp_path) is None, (
+            "an unlistable drop-in dir is unknown; reporting it as empty is "
+            "the same defect as reporting an unreadable file as exempt")
+    finally:
+        d.chmod(0o755)
+
+
+def test_a_definite_no_beats_an_unreadable_sibling(tmp_path):
+    # Precedence-proof by construction: ANY source saying no wins, so the
+    # answer never depends on implementing logind's precedence rules.
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    _logind(tmp_path, "etc/systemd/logind.conf",
+            "LidSwitchIgnoreInhibited=no\n")
+    other = _logind(tmp_path, "usr/lib/systemd/logind.conf", "[Login]\n")
+    other.chmod(0o000)
+    try:
+        assert lid_exemption(tmp_path) is False
+    finally:
+        other.chmod(0o644)
+
+
+def test_the_collector_finds_every_source_logind_would_read(tmp_path):
+    main = _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    lib_main = _logind(tmp_path, "usr/lib/systemd/logind.conf", "[Login]\n")
+    dropin = _logind(tmp_path, "run/systemd/logind.conf.d/50-x.conf", "[Login]\n")
+    _logind(tmp_path, "run/systemd/logind.conf.d/notes.txt", "ignored\n")
+    paths, complete = logind_sources(tmp_path)
+    assert complete is True
+    found = set(paths)
+    assert {main, lib_main, dropin} <= found
+    assert not any(p.name.endswith(".txt") for p in paths), (
+        "logind reads *.conf drop-ins only")
+
+
+def test_the_real_host_config_is_exempt_so_crr_is_not_over_corrected(tmp_path):
+    # Guard against the opposite failure: an implementation that returns
+    # False/None on a stock box never blocks sleep anywhere. Measured
+    # 2026-08-13 on this host -- a readable /etc/systemd/logind.conf plus
+    # /usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf,
+    # neither setting the key.
+    if not Path("/etc/systemd/logind.conf").exists():
+        pytest.skip("no logind config on this host")
+    if lid_exemption(Path("/")) is None:
+        pytest.skip("host logind config is unreadable by this user")
+    assert lid_exemption(Path("/")) is True
+
+
+def test_the_withheld_reason_does_not_claim_a_setting_it_never_read(tmp_path):
+    # Two different withholdings with two different reasons. Reporting
+    # "this host sets LidSwitchIgnoreInhibited=no" when the config could
+    # not be read is a confident claim about a fact never established.
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    conf = _logind(tmp_path, "etc/systemd/logind.conf", "[Login]\n")
+    conf.chmod(0o000)
+    try:
+        holder = LinuxPowerHolder(conf_root=tmp_path,
+                                  spawn=lambda argv, **kw: _LiveProc())
+        holder.hold(frozenset({"sleep"}), "r")
+    finally:
+        conf.chmod(0o644)
+    assert holder.held() == frozenset()
+    reason = holder.withheld() or ""
+    assert "LidSwitchIgnoreInhibited=no" not in reason, (
+        f"claims a setting it never read: {reason!r}")
+    assert "read" in reason or "unknown" in reason, reason
+
+
+# --- the spawn either worked or it did not --------------------------------
+
+def test_a_systemd_inhibit_that_fails_is_not_reported_as_a_hold(tmp_path):
+    # Measured on this host (WSL, no logind session), 2026-08-13:
+    #   systemd-inhibit --what=sleep --mode=block --who=crr --why=x sleep 1
+    #   -> stderr "Failed to inhibit: Access denied", exit 1, in
+    #   milliseconds.
+    # With stderr=DEVNULL and an unconditional `self._held = effective`,
+    # held() reported the full set, then reported empty with withheld()
+    # None -- no reason recorded anywhere, because the stderr that
+    # explained it was discarded at the source.
+    fail = [_sys.executable, "-c",
+            "import sys; sys.stderr.write('Failed to inhibit: Access denied\\n');"
+            " sys.exit(1)"]
+
+    def _spawn(argv, **kw):
+        return _sp.Popen(fail, **kw)   # a REAL process, real exit, real stderr
+
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
+    holder.hold(frozenset({"sleep"}), "r")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and holder.held():
+        time.sleep(0.02)
+    assert holder.held() == frozenset(), (
+        "reported a hold from a systemd-inhibit that had already exited 1")
+    reason = holder.withheld() or ""
+    assert "Access denied" in reason, (
+        f"the stderr that explains the failure must survive: {reason!r}")
+    holder.release()
+
+
+def test_release_never_reads_stderr_from_a_child_it_could_not_reap(tmp_path):
+    # `stream.read()` on a LIVE child's pipe does not raise -- it blocks
+    # until EOF, i.e. forever, wedging the poll loop this adapter exists to
+    # stay off. So the drain must be gated on a CONFIRMED exit, not run
+    # unconditionally after a wait() that may have timed out.
+    # A raising stub would NOT discriminate: _drain_stderr catches
+    # Exception, so the raise is swallowed and the broken version passes.
+    # The real failure is a BLOCK, so record the call instead.
+    class _Stderr:
+        def __init__(self): self.read_called = False
+
+        def read(self):
+            self.read_called = True      # in reality: blocks until EOF
+            return b""
+
+        def close(self): pass
+
+    class _Unreapable:
+        def __init__(self): self.stderr = _Stderr()
+        def poll(self): return None
+        def terminate(self): pass
+
+        def wait(self, timeout=None):
+            raise _sp.TimeoutExpired(cmd="systemd-inhibit", timeout=timeout)
+
+    proc = _Unreapable()
+    holder = LinuxPowerHolder(conf_root=tmp_path,
+                              spawn=lambda argv, **kw: proc)
+    holder.hold(frozenset({"sleep"}), "r")
+    holder.release()
+    assert not proc.stderr.read_called, (
+        "drained stderr from a child that wait() never confirmed dead -- "
+        "that read blocks until EOF, wedging the poll loop forever")
+    assert holder.held() == frozenset()
+
+
+def test_a_live_inhibit_still_reports_its_hold(tmp_path):
+    # The reap must not turn a WORKING hold into a withheld one.
+    stay = [_sys.executable, "-c", "import time; time.sleep(30)"]
+    holder = LinuxPowerHolder(conf_root=tmp_path,
+                              spawn=lambda argv, **kw: _sp.Popen(stay, **kw))
+    holder.hold(frozenset({"sleep", "shutdown"}), "r")
+    try:
+        assert holder.held() == frozenset({"sleep", "shutdown"})
+        assert holder.withheld() is None
+    finally:
+        holder.release()
+    assert holder.held() == frozenset()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -829,6 +1065,31 @@ The one case that breaks this: a host that has set
 ``LidSwitchIgnoreInhibited=no``. There a sleep lock WOULD block the lid, so
 ``hold()`` withholds the sleep half and says so rather than quietly
 violating the requirement.
+
+**That setting is read from the EFFECTIVE config, not from one file.**
+logind's recommended override mechanism is a drop-in
+(``{/etc,/run,/usr/lib}/systemd/logind.conf.d/*.conf``), not an edit to
+``logind.conf``, and on Fedora-likes ``/usr/lib/systemd/logind.conf`` is
+the only main file that exists. Reading ``/etc/systemd/logind.conf`` alone
+means a host that turned the exemption off in a drop-in reads back as the
+compiled-in ``yes`` -- crr holds ``sleep`` and closing the lid stops
+suspending the machine, which is the one outcome this design must never
+produce.
+
+The rule here is deliberately NOT logind's precedence algorithm: **if any
+source says a falsey value, withhold sleep.** That is precedence-proof
+without implementing precedence, and it errs toward "do not touch the
+lid". ``systemd-analyze cat-config`` would give the truly effective
+config, but this runs on a poll path and shelling out there is what the
+rest of these adapters exist to avoid.
+
+Three-way, mirroring ``power_source.SysfsPowerSource.on_ac()``:
+
+- No config source exists at all -> logind's compiled-in default (``yes``)
+  applies. That is a KNOWN True, not an unknown.
+- A source exists but cannot be read (or a drop-in directory cannot even be
+  listed) -> unknown, ``None``. Never a positive "safe to hold".
+- Otherwise the parsed answer.
 """
 
 from __future__ import annotations
@@ -837,7 +1098,19 @@ import re
 import subprocess
 from pathlib import Path
 
-LOGIND_CONF = Path("/etc/systemd/logind.conf")
+# Relative on purpose: joined onto an injectable root so the whole set is
+# testable against a fake filesystem. `root / "/etc/..."` would silently
+# discard root and read the real host.
+LOGIND_MAIN = (
+    "etc/systemd/logind.conf",
+    # The only main file on Fedora-likes; absent on Debian-likes.
+    "usr/lib/systemd/logind.conf",
+)
+LOGIND_DROPIN_DIRS = (
+    "etc/systemd/logind.conf.d",
+    "run/systemd/logind.conf.d",
+    "usr/lib/systemd/logind.conf.d",
+)
 
 _LID_RE = re.compile(
     r"^\s*LidSwitchIgnoreInhibited\s*=\s*(\S+)", re.IGNORECASE | re.MULTILINE
@@ -848,19 +1121,71 @@ _FALSEY = ("no", "false", "0", "off")
 def lid_is_exempt(conf_text: str) -> bool:
     """True when closing the lid sleeps even while an inhibitor is held.
 
-    Defaults to True because logind's own default is ``yes``; a commented
-    line is not a setting, so the regex deliberately anchors on a line that
-    does not start with ``#``.
+    The pure single-text parser. Defaults to True because logind's own
+    default is ``yes``; a commented line is not a setting, and ``^\\s*``
+    under ``re.MULTILINE`` already cannot match ``#LidSwitch...``, so
+    ``match is None`` covers the commented case with no extra guard.
     """
     match = None
     for candidate in _LID_RE.finditer(conf_text):
-        line = conf_text[:candidate.start()].split("\n")[-1]
-        if line.lstrip().startswith("#"):
-            continue
         match = candidate
     if match is None:
         return True
     return match.group(1).strip().lower() not in _FALSEY
+
+
+def logind_sources(root: Path) -> tuple[list[Path], bool]:
+    """Every file logind would read under ``root``, and whether the walk
+    was complete.
+
+    Returns ``(candidate_paths, complete)``. The main files are returned as
+    candidates whether or not they exist -- the reader discriminates
+    "absent" from "unreadable", which a bare ``list[Path]`` cannot carry.
+    ``complete`` is False when a drop-in directory exists but could not be
+    listed: an unlistable directory is unknown, and returning it as empty
+    would be the same defect this whole function fixes.
+    """
+    root = Path(root)
+    paths = [root / rel for rel in LOGIND_MAIN]
+    complete = True
+    for rel in LOGIND_DROPIN_DIRS:
+        try:
+            entries = sorted((root / rel).iterdir())
+        except FileNotFoundError:
+            continue                      # no such drop-in dir: not a source
+        except OSError:
+            complete = False              # it exists; we just cannot see in
+            continue
+        paths.extend(e for e in entries if e.name.endswith(".conf"))
+    return paths, complete
+
+
+def lid_exemption(root: Path) -> bool | None:
+    """Three-way lid exemption across every logind config source.
+
+    ``True`` exempt (a sleep inhibitor leaves the lid alone), ``False`` not
+    exempt (a sleep inhibitor WOULD block the lid), ``None`` unknown.
+    """
+    paths, complete = logind_sources(root)
+    unknown = not complete
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue                      # not a source on this distro
+        except OSError:
+            unknown = True                # exists, unreadable: not a "yes"
+            continue
+        if not lid_is_exempt(text):
+            # A definite falsey value anywhere wins outright, so the answer
+            # never depends on precedence -- and it beats an unreadable
+            # sibling, because False and None both withhold anyway.
+            return False
+    if unknown:
+        return None
+    # Either every source is silent on the key or there are no sources at
+    # all; both land on logind's compiled-in default, which is `yes`.
+    return True
 
 
 def inhibit_argv(want: frozenset[str], reason: str) -> list[str]:
@@ -880,8 +1205,10 @@ def inhibit_argv(want: frozenset[str], reason: str) -> list[str]:
 class LinuxPowerHolder:
     """Holds via a systemd-inhibit child process."""
 
-    def __init__(self, logind_conf: Path | None = None, spawn=None) -> None:
-        self._conf = LOGIND_CONF if logind_conf is None else Path(logind_conf)
+    def __init__(self, conf_root: Path | None = None, spawn=None) -> None:
+        # The filesystem root the logind config is read from. Injectable so
+        # the whole source set (main files AND drop-in dirs) is testable.
+        self._root = Path("/") if conf_root is None else Path(conf_root)
         self._spawn = spawn or (lambda argv, **kw: subprocess.Popen(argv, **kw))
         self._proc = None
         self._held: frozenset[str] = frozenset()
@@ -894,50 +1221,115 @@ class LinuxPowerHolder:
         """Why part of the request was dropped, for doctor."""
         return self._withheld
 
-    def _lid_exempt(self) -> bool:
-        try:
-            text = self._conf.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return True  # logind's own default
-        return lid_is_exempt(text)
-
     def hold(self, want: frozenset[str], reason: str) -> None:
         self._withheld = None
         effective = set(want)
-        if "sleep" in effective and not self._lid_exempt():
-            effective.discard("sleep")
-            self._withheld = (
-                "not blocking sleep: this host sets "
-                "LidSwitchIgnoreInhibited=no, so a sleep inhibitor would "
-                "also block closing the lid"
-            )
+        if "sleep" in effective:
+            exempt = lid_exemption(self._root)
+            if exempt is not True:
+                effective.discard("sleep")
+                # Two different withholdings need two different reasons:
+                # saying "this host sets LidSwitchIgnoreInhibited=no" when
+                # the config could not be read asserts a fact never
+                # established.
+                self._withheld = (
+                    "not blocking sleep: this host sets "
+                    "LidSwitchIgnoreInhibited=no (in logind.conf or a "
+                    "drop-in), so a sleep inhibitor would also block "
+                    "closing the lid"
+                    if exempt is False else
+                    "not blocking sleep: could not read this host's logind "
+                    "configuration, so whether a sleep inhibitor would also "
+                    "block closing the lid is unknown"
+                )
         effective_fs = frozenset(effective)
         if effective_fs == self._held and self._alive():
             return
         self.release()
         if not effective_fs:
             return
+        # stderr is CAPTURED, not discarded. systemd-inhibit exits nonzero
+        # in milliseconds on a host with no logind session or a polkit
+        # denial (measured on this WSL box, 2026-08-13: "Failed to inhibit:
+        # Access denied", exit 1), and with DEVNULL the one line that
+        # explains why was destroyed at the source -- held() went full set,
+        # then empty, with withheld() None and no reason recorded anywhere.
         self._proc = self._spawn(
             inhibit_argv(effective_fs, reason),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
         self._held = effective_fs
+        # Poll once: a denied inhibit is usually already gone. It often is
+        # not scheduled yet either, which is why held() reaps too rather
+        # than trusting this one call.
+        self._reap_if_dead()
+
+    def _reap_if_dead(self) -> None:
+        """Drop the claim (and record why) if the child has already exited."""
+        proc = self._proc
+        if proc is None or proc.poll() is None:
+            return
+        detail = self._drain_stderr(proc)
+        code = proc.returncode
+        if code:
+            self._withheld = (
+                f"systemd-inhibit exited {code} without holding anything"
+                + (f": {detail}" if detail else "")
+            )
+        # Drop the handle so this runs exactly ONCE. It is called from both
+        # hold() and every held(), and a second pass would read a stderr
+        # stream it already closed -- overwriting the recorded reason with
+        # a detail-free one, i.e. destroying the explanation a second time.
+        # The child is exited and already reaped by poll(); there is
+        # nothing left to do with it.
+        self._proc = None
+        self._held = frozenset()
+
+    @staticmethod
+    def _drain_stderr(proc) -> str:
+        """Read stderr from an EXITED child. Never call this on a live one:
+        it would block the poll path forever."""
+        stream = getattr(proc, "stderr", None)
+        if stream is None:
+            return ""
+        try:
+            raw = stream.read() or b""
+        except Exception:
+            return ""
+        finally:
+            try:
+                stream.close()          # or an fd leaks per hold/release
+            except Exception:
+                pass
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        return " ".join(raw.split())
 
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
     def held(self) -> frozenset[str]:
+        self._reap_if_dead()
         return self._held if self._alive() else frozenset()
 
     def release(self) -> None:
         if self._proc is not None:
+            reaped = False
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=5)
+                reaped = True
             except Exception:
                 pass
+            # Gated on a CONFIRMED exit. `stream.read()` on a live child's
+            # pipe does not raise -- it blocks until EOF, i.e. forever,
+            # wedging the poll loop. An unreaped child's fd is closed by
+            # the OS when the Popen object is dropped, so skipping the
+            # drain here costs nothing.
+            if reaped:
+                self._drain_stderr(self._proc)
             self._proc = None
         self._held = frozenset()
 ```
@@ -1100,7 +1492,7 @@ git commit -m "feat(adapters): macOS hold via caffeinate -i, sleep only"
 
 **Interfaces:**
 - Consumes: `PowerHolder` protocol (Task 4)
-- Produces: `WindowsPowerHolder(spawn=None)` with the four methods; `holder_script(want: frozenset[str], reason: str) -> str`; `holder_argv() -> list[str]`
+- Produces: `WindowsPowerHolder(spawn=None, max_hours=DEFAULTS["power_block_max_hours"])` with the four methods; `holder_script(want: frozenset[str], reason: str, max_hours=DEFAULTS["power_block_max_hours"]) -> str`; `holder_argv() -> list[str]`
 
 **The most dangerous task in the plan.** A Windows interop child does not
 die with its WSL parent. An orphan would block restarts forever with no crr
@@ -1154,8 +1546,15 @@ def test_script_exits_when_stdin_closes():
 
 
 def test_script_self_releases_after_the_cap():
+    # `"12" in s` was the original assertion and it proved nothing: the
+    # emitted script carries a leading `# max_hours=12` comment, so a
+    # completely dead deadline still passed. Assert the millisecond value
+    # actually inside the bounded wait.
     s = holder_script(frozenset({"sleep"}), "r", max_hours=12)
-    assert "12" in s
+    match = re.search(r"WaitAny\(\s*@\(\$readTask\)\s*,\s*\[int\](\d+)\s*\)", s)
+    assert match is not None, "no bounded wait carrying a deadline at all"
+    assert int(match.group(1)) == 12 * 3600 * 1000, (
+        "the cap must reach the wait, not just the comment above it")
 
 
 def test_argv_runs_powershell_noninteractively_with_stdin_open():
@@ -1216,63 +1615,124 @@ Both locks live in ONE process so there is one lifetime to reason about:
 ``ShutdownBlockReasonCreate`` for restart. Both were measured callable
 UNELEVATED from WSL on 2026-08-12.
 
-Seven things this file must never lose — see the module docstring in
-`crr/adapters/power_hold_windows.py` for the full account, with dates and
-measured timings, of why each one is there:
+Seven things this file must never lose:
 
 1. **The stdin-EOF exit.** A Windows interop child does NOT die with its
-   WSL parent; the open pipe is the liveness signal.
+   WSL parent. Without this wait, a killed crr leaves a PowerShell holding
+   a shutdown block forever — a machine that refuses to restart with
+   nothing left running to explain why. That is the exact class of
+   unexplained behaviour crr exists to eliminate, so the mechanism (not a
+   timer) is the primary defence.
 2. **``ES_SYSTEM_REQUIRED`` only, never ``ES_DISPLAY_REQUIRED``.** The lid
    must keep working and the screen must be allowed to turn off.
-3. **The deadline is ONE bounded async wait on the RAW stdin stream, never
-   a loop around a blocking read, and never ``[Console]::In``.** A
+3. **The deadline is ONE bounded async wait on the RAW stdin stream,
+   never a loop around a blocking read, and never ``[Console]::In``.**
+   ``[Console]::In.ReadLine()`` blocks synchronously, so a
    ``while (deadline) { ReadLine() }`` loop only re-checks the deadline
-   *between* completed reads and never re-fires once blocked in the one
-   and only read. ``[Console]::In.ReadLineAsync()`` is ALSO wrong: that
-   reader wraps a ``SyncTextReader`` and runs synchronously on the calling
-   thread despite returning a ``Task``, so ``.Wait(ms)`` never gets a
-   chance to time out either. The fix reads the raw, unwrapped stream from
-   ``[Console]::OpenStandardInput()`` via ``Stream.ReadAsync``, bounded by
-   ``[System.Threading.Tasks.Task]::WaitAny(@($readTask), ms)``.
+   *between* completed reads. Since ``hold()`` writes the script once and
+   never sends a second line, the process would enter ``ReadLine`` a
+   single time and block there for the rest of its life — the deadline
+   would never re-fire and ``max_hours`` would be dead code wearing a
+   passing string-match test. Confirmed live on 2026-08-12: a holder
+   spawned with ``max_hours=0.0006`` (~2.16s), stdin left open with no
+   further writes, was still alive at t=25s.
+
+   The first fix attempt swapped in ``[Console]::In.ReadLineAsync()``
+   awaited via ``Task.Wait(ms)``. That is ALSO wrong, and was caught the
+   same way: measured live on 2026-08-13, the assignment
+   ``$readTask = [Console]::In.ReadLineAsync()`` itself did not return
+   control for 30+ seconds with stdin held open and no data sent — so
+   ``.Wait(ms)`` never even started timing. ``[Console]::In`` wraps a
+   ``SyncTextReader``, and ``ReadLineAsync()`` on that reader runs
+   synchronously on the calling thread despite returning a ``Task``. The
+   working fix reads the RAW stream from
+   ``[Console]::OpenStandardInput()`` (unwrapped, genuinely async) via
+   ``Stream.ReadAsync`` and bounds it with
+   ``[System.Threading.Tasks.Task]::WaitAny(@($readTask), ms)``, which
+   returns ``-1`` on timeout (the read stays pending, harmless — the
+   process is exiting either way) or the completed index on EOF.
 4. **The P/Invoke signature block is ONE PowerShell source line, never a
-   here-string.** ``@" ... "@`` silently executes nothing at all — not
-   the assignment, not any statement before or after it — when piped to
-   ``-Command -`` over a non-console stdin. The fix is a normal
-   double-quoted string with backtick-escaped inner quotes and
-   `` `n ``-escaped line breaks, so the *value* is multi-line C# while the
-   *source* stays one line.
-5. **The script ends with an explicit ``[Environment]::Exit(0)``, never
-   falls off the end.** ``-Command -`` behaves like an interactive
-   session: once it finishes running whatever was piped to it, it goes
-   back to reading stdin for the *next command* rather than quitting.
-   Releasing the locks is necessary but not sufficient for "the process is
-   gone."
+   here-string.** ``$sig = @" ... "@`` is what the original design and
+   the first fix attempt both used. Measured live on 2026-08-13: fed
+   through ``powershell.exe -NoProfile -Command -`` over a piped (not
+   console) stdin, a ``@" ... "@`` block never executes ANYTHING in the
+   script that contains it — not the here-string assignment, not any
+   statement before or after it — even after real EOF, even holding
+   stdin open for several seconds first. The failure is silent: exit code
+   0, zero output, every single time, regardless of the here-string's
+   content (confirmed with a trivial one-line body, not just the real
+   DllImport signatures). Multi-line constructs that DON'T require the
+   parser to buffer across lines (a plain multi-statement script, a
+   single-line ``@($x)`` array subexpression) execute immediately and
+   correctly over the same piped stdin; only the here-string's inherent
+   "keep reading until a line starts with the closing token" parsing was
+   silently broken here. The fix builds the C# signature block as ONE
+   PowerShell line: a normal double-quoted string with embedded double
+   quotes backtick-escaped (`` `" ``) and line breaks inserted via
+   PowerShell's own `` `n `` escape, so nothing about the *PowerShell
+   source* spans multiple lines even though the *string value* does.
+5. **The script ends with an explicit exit, never falls off the end.**
+   ``powershell.exe -Command -`` behaves like an interactive session: once
+   it finishes running whatever was piped to it, it goes back to reading
+   stdin for the *next command*, it does not quit. Confirmed live on
+   2026-08-13 with full tracing: every statement in the script — sig
+   build, Add-Type, both P/Invoke calls, the WaitAny deadline firing
+   (idx=-1) or completing (EOF), both release calls — ran to completion
+   in ~2.4s, and the *process* was still alive and reported so 30 seconds
+   later, because after the last statement it just waited for another
+   command on the same still-open stdin. ``[Environment]::Exit(0)`` as
+   the final statement is what actually ends the process. Releasing the
+   locks is necessary but not sufficient for "the process is gone" — both
+   are required, and they are different lines of PowerShell.
 6. **The whole script is ONE PowerShell statement, never multiple
-   top-level lines.** Our own ``$stdin.ReadAsync($buf, 0, 1)`` and
-   ``-Command -``'s own read of "the rest of the piped script" pull from
-   the SAME kernel pipe. Whenever PowerShell statements remain unparsed
-   after the read, the two reads race for the same bytes — measured live,
-   100% reproducible, the internal read sometimes wins and steals a byte
-   meant for our own trailing text, corrupting it by exactly one dropped
-   character and completing the "wait" almost instantly instead of
-   honouring the deadline. Not an orphaned process — the stolen byte still
-   made ``WaitAny`` return, so the release calls and the exit still ran,
-   just hours early — but ``held()`` silently reports a hold that has
-   already stopped holding anything. Wrapping the entire body as
-   ``& { stmt1; stmt2; ...; }`` forces the parser to consume the complete
-   statement before executing any of it.
+   top-level lines.** This is the one that actually explains why a
+   sleep-only hold worked throughout this file's history while a
+   sleep+shutdown hold quietly self-released hours early. Our own
+   ``$stdin.ReadAsync($buf, 0, 1)`` and ``-Command -``'s own read of "the
+   rest of the piped script" pull from the SAME kernel pipe. Whenever
+   PowerShell statements remained unparsed after the read (true for
+   sleep+shutdown, which has release calls after the wait; not true for a
+   bare sleep-only script with nothing left to run), the two reads raced
+   for the same bytes. Measured live on 2026-08-13, 100% reproducible for
+   a fixed script: the internal read sometimes won that race and stole
+   ONE byte meant for our own trailing PowerShell text, corrupting it by
+   exactly one dropped character (``SetThreadExecutionState`` read back
+   as ``SetThreadExectionState``; ``uint32`` read back as ``unt32``) and
+   completing the "wait" almost instantly instead of honouring the
+   deadline. The failure mode is NOT an orphaned process — the stolen
+   byte still made ``WaitAny`` return, so both release calls still ran
+   and the process still exited (just ~1.7 hours early for a 2-hour
+   ``max_hours=0.0006`` test, i.e. at ~0.5s instead of ~2.2s) — it is
+   ``held()`` reporting a hold that has silently stopped holding
+   anything. Wrapping the entire body as ``& { stmt1; stmt2; ...; }``
+   forces the parser to consume the complete statement before executing
+   any of it, so by the time the internal read fires there is nothing of
+   our own script left in the pipe to steal. NOTE: the original design's
+   blocking ``[Console]::In.ReadLine()`` had this exact same contention
+   whenever ``shutdown`` was requested, since its release calls also
+   follow the read — this was never sleep-only-safe either, it was just
+   never measured with tracing precise enough to catch a race that a
+   sleep-only script cannot exhibit.
 7. **``reason`` is sanitized, never trusted, before it reaches the
-   script.** Point 6 made the whole script ONE PowerShell statement, so a
-   newline inside ``reason`` is no longer cosmetic — it is a second
-   top-level line. Measured live: an unsanitized ``reason`` containing
-   ``\n`` produced a script that silently executed NOTHING when piped to
-   the real host — alive at 12s against a 2.16s deadline, exit 0, zero
-   stderr, only EOF ended it, i.e. ``held()`` reporting BOTH locks
-   acquired with ZERO protection in place. ``reason`` is cosmetic display
-   text for the OS's blocking UI, so a bad ``reason`` must degrade the
-   MESSAGE, never the HOLD: strip every control character to a space,
-   collapse the resulting whitespace, THEN double single quotes — never
-   raise.
+   script.** Point 6 made the whole script ONE PowerShell statement, which
+   means a newline (or any other control character) inside ``reason``
+   is no longer cosmetic — it is a second top-level line the parser sees
+   as separate from the statement above. Measured live 2026-08-13: an
+   unsanitized ``reason`` containing ``\n`` produced a script that
+   silently executed NOTHING at all when piped to the real host — alive
+   at 12s against a 2.16s deadline, exit 0, zero stderr, only EOF ended
+   it, i.e. ``held()`` reporting BOTH locks acquired with ZERO
+   protection actually in place. This is the worst outcome the whole
+   design can produce — reporting protection that does not exist — so it
+   is fixed even though nothing in ``crr`` calls ``hold()`` with an
+   attacker- or user-controlled ``reason`` today (the sole producer,
+   ``crr/core/power.py``, builds a fixed ``"crr: N Claude session(s)
+   live"`` string). ``reason`` is cosmetic display text for the OS's
+   blocking UI, so a bad ``reason`` must degrade the MESSAGE, never the
+   HOLD: ``_sanitize_reason`` strips every control character (0x00-0x1F,
+   plus DEL) to a space, collapses the resulting whitespace runs, and
+   only THEN doubles single quotes for the PowerShell string literal —
+   never raises.
 
 KNOWN LIMIT, recorded rather than assumed: registration returning TRUE
 proves the reason REGISTERS, not that shutdown is BLOCKED. Microsoft is
@@ -1280,6 +1740,20 @@ explicit that an application without a visible window cannot cancel
 shutdown. Making the window visible at the moment it matters is the tray
 plan's job; this holder registers the reason and reports its efficacy as
 unverified.
+
+SECOND KNOWN LIMIT, same shape: ``held()`` is a LIVENESS poll, not proof of
+acquisition. It reports the requested set whenever the child process is
+still running, and nothing reads back from the child to confirm the two
+API calls actually succeeded. If ``Add-Type`` fails under
+``$ErrorActionPreference='Stop'`` -- a missing assembly, a constrained
+language mode, an AppLocker policy -- the ``& { ... }`` statement aborts
+before either lock is taken, yet the PowerShell host process stays alive
+reading stdin, so ``held()`` reports BOTH locks while ZERO protection is
+in place. Closing this would need the child to write an acquisition
+receipt back over stdout and ``held()`` to require it. Until then the
+limit is recorded rather than assumed, which is what makes it shippable:
+a consumer must treat ``held()`` as "the holder is running", not as "the
+machine is protected".
 """
 
 from __future__ import annotations
@@ -1287,21 +1761,41 @@ from __future__ import annotations
 import re
 import subprocess
 
+from crr.core.config import DEFAULTS
+
 _ES_CONTINUOUS = "0x80000000"
 _ES_SYSTEM_REQUIRED = "0x00000001"
 # ES_CONTINUOUS | ES_SYSTEM_REQUIRED, precomputed and embedded as a single
 # literal so the script text carries the combined flag value directly
-# rather than an -bor expression PowerShell evaluates at runtime.
+# rather than an -bor expression PowerShell evaluates at runtime. Same
+# numeric value either way; this form is what the test (and a reader
+# grepping the emitted script) can see without evaluating PowerShell.
 _ES_SLEEP_FLAGS = "0x80000001"
 
 # Task.Wait(int millisecondsTimeout) takes a signed Int32. A caller passing
-# an absurd max_hours must not overflow into a negative value.
+# an absurd max_hours must not overflow into a negative value -- .NET
+# either rejects a negative timeout outright or, for -1 specifically,
+# treats it as "wait forever" (the exact opposite of a backstop). Clamp
+# defensively at both ends.
 _INT32_MAX_MS = 2147483647
 
-# Control characters that must never reach the emitted script unescaped --
-# see point 7 above. A newline breaks the one-PowerShell-statement
-# invariant by adding a top-level line the parser will not see as part of
-# the same statement.
+# Teardown budget. Measured normal teardown is ~2.07s (stdin close -> EOF ->
+# both release calls -> [Environment]::Exit(0)), so blowing a 10s wait means
+# something is genuinely wrong and escalating beats swallowing it: the
+# process may still hold ShutdownBlockReasonCreate.
+_RELEASE_WAIT_SECONDS = 10
+_FORCE_WAIT_SECONDS = 5
+
+# Control characters (0x00-0x1F, plus DEL) that must never reach the
+# emitted script unescaped: a newline or carriage return in `reason`
+# breaks the one-PowerShell-statement invariant (module docstring, point
+# 6) by adding a top-level line the parser will not see as part of the
+# same statement. Measured live 2026-08-13: with a raw `\n` in `reason`,
+# the emitted 3-line script silently executed NOTHING when piped to the
+# real host -- alive well past its deadline, exit 0, zero stderr, only
+# EOF ended it. held() would report both locks acquired while nothing
+# was actually held. `reason` is cosmetic display text for the OS's
+# blocking UI, so a bad reason must degrade the MESSAGE, never the HOLD.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
@@ -1309,15 +1803,26 @@ _WHITESPACE_RUN_RE = re.compile(r"\s+")
 def _sanitize_reason(reason: str) -> str:
     """Make ``reason`` safe to embed in the ONE-line script, without ever
     raising: strip control characters (collapsing the whitespace they
-    leave behind), THEN double single quotes for the PowerShell string
-    literal."""
+    leave behind), THEN double any single quotes for the PowerShell
+    string literal. Order matters -- quote-doubling first would not help
+    a newline, and control-stripping after quote-doubling could still
+    leave a stray control character sitting next to a doubled quote.
+    """
     no_control = _CONTROL_CHARS_RE.sub(" ", reason)
     collapsed = _WHITESPACE_RUN_RE.sub(" ", no_control).strip()
     return collapsed.replace("'", "''")
 
 
 def _timeout_ms(max_hours: float) -> int:
-    """``max_hours`` in milliseconds, clamped to fit a signed 32-bit int."""
+    """``max_hours`` in milliseconds, clamped to fit a signed 32-bit int.
+
+    ``round()``, not ``int()`` truncation: ``0.0006 * 3600 * 1000`` is
+    ``2159.9999999999995`` as a float, and truncating silently emits a
+    literal (``2159``) that does not match the arithmetic it was derived
+    from -- exactly the kind of unrecorded drift this codebase's
+    provenance rules exist to catch, even though a 1ms error is harmless
+    at the values this is actually called with.
+    """
     ms = round(max_hours * 3600 * 1000)
     return max(0, min(ms, _INT32_MAX_MS))
 
@@ -1329,19 +1834,36 @@ def holder_argv() -> list[str]:
 
 def _ps_oneline_string(csharp_lines: list[str]) -> str:
     """A SINGLE PowerShell source line whose STRING VALUE holds ``\\n``-
-    joined C# lines. Not a here-string -- see point 4 above."""
+    joined C# lines.
+
+    Not a here-string (``@" ... "@``): measured live on 2026-08-13, that
+    construct silently executes nothing at all when piped to
+    ``powershell.exe -Command -`` over a non-console stdin (see the module
+    docstring, point 4). Embedded ``"`` is backtick-escaped and line
+    breaks are PowerShell's own ``` `n ``` escape, so the *value* is
+    multi-line C# while the *source* stays one line.
+    """
     escaped = (line.replace('"', '`"') for line in csharp_lines)
     return '"' + "`n".join(escaped) + '"'
 
 
 def holder_script(want: frozenset[str], reason: str,
-                  max_hours: int = 12) -> str:
+                  max_hours: float = DEFAULTS["power_block_max_hours"]) -> str:
     """The PowerShell program that holds the locks until stdin closes.
 
-    The body is emitted as ONE PowerShell statement -- see point 6 above.
+    The body is emitted as ONE PowerShell statement -- see point 6 in the
+    module docstring for why: our own internal stdin read and
+    ``-Command -``'s own read of "the rest of the script" pull from the
+    SAME kernel pipe, and any of our script left unparsed when our read
+    fires is exactly what that read can steal a byte from.
     """
     safe = _sanitize_reason(reason)
     # Only declare the P/Invoke signatures for what `want` actually calls.
+    # Declaring ShutdownBlockReasonCreate/Destroy on a sleep-only hold
+    # would be harmless at runtime but makes the emitted script lie about
+    # what the process is going to do -- and a sleep-only script that
+    # mentions ShutdownBlockReasonCreate is indistinguishable, on
+    # inspection, from one that registers a block it doesn't release.
     sig_lines: list[str] = []
     if "sleep" in want:
         sig_lines += [
@@ -1374,9 +1896,28 @@ def holder_script(want: frozenset[str], reason: str,
         ]
     timeout_ms = _timeout_ms(max_hours)
     # THE orphan defence: ONE asynchronous read on the RAW stdin stream,
-    # bounded by the full deadline. WaitAny returns -1 on timeout or the
-    # completed index on EOF -- either way execution falls through to the
-    # release statements below.
+    # bounded by the full deadline. WaitAny returns -1 on timeout (the
+    # WSL parent is presumably alive but max_hours elapsed; the pending
+    # read is abandoned harmlessly since the process exits right after)
+    # or the completed index on EOF (the WSL parent died and closed the
+    # pipe) -- either way execution falls through to the release
+    # statements below.
+    #
+    # Deliberately NOT `while (deadline) { ReadLine() }`: ReadLine()
+    # blocks synchronously, so a loop around it only re-checks the
+    # deadline between completed reads and never re-fires while blocked
+    # in the one and only read.
+    #
+    # Deliberately NOT [Console]::In (ReadLine or ReadLineAsync):
+    # [Console]::In wraps a SyncTextReader, and ReadLineAsync() on it
+    # runs synchronously on the calling thread despite returning a Task
+    # -- measured live, the assignment itself did not return for 30+
+    # seconds with stdin open and no data, so a .Wait(ms) after it never
+    # got a chance to time out. OpenStandardInput() returns the raw,
+    # unwrapped Stream, whose ReadAsync() is genuinely async.
+    #
+    # Do not re-issue a read in a loop -- multiple pending reads on the
+    # same stream is its own bug.
     stmts += [
         "$stdin = [Console]::OpenStandardInput()",
         "$buf = New-Object byte[] 1",
@@ -1390,16 +1931,30 @@ def holder_script(want: frozenset[str], reason: str,
         stmts.append(
             f"$null = $api::SetThreadExecutionState([uint32]'{_ES_CONTINUOUS}')"
         )
+    # [Environment]::Exit(0), not a bare `exit`: `powershell.exe
+    # -Command -` behaves like an interactive session and does not quit
+    # when it runs out of piped script -- it goes back to reading stdin
+    # for the NEXT command. Releasing the locks above is necessary but
+    # not sufficient for "the orphan is gone"; this is what actually
+    # ends the process once the deadline fires or EOF arrives.
     stmts.append("[Environment]::Exit(0)")
-    # A leading comment, OUTSIDE the statement: `#` comments to end-of-line,
-    # and since the statement is deliberately kept on ONE line, an inline
-    # comment would silently comment out every statement after it.
+    # A leading comment line, OUTSIDE the statement below, documents
+    # max_hours for a human reading the emitted script. It cannot go
+    # INSIDE the "; "-joined statement: `#` comments to end-of-line, and
+    # since the statement is deliberately kept on ONE line (see the
+    # docstring above), an inline comment would silently comment out
+    # every statement after it -- including the release calls and the
+    # exit.
     body = "; ".join(stmts)
     return f"# max_hours={max_hours}\n& {{ {body} }}\n"
 
 
 class WindowsPowerHolder:
-    def __init__(self, spawn=None, max_hours: int = 12) -> None:
+    # max_hours defaults to the versioned config prior, never a repeated
+    # literal: `power_block_max_hours` is already a named key, and a second
+    # copy here is a second answer to the same question.
+    def __init__(self, spawn=None,
+                 max_hours: float = DEFAULTS["power_block_max_hours"]) -> None:
         self._spawn = spawn or (lambda argv, **kw: subprocess.Popen(argv, **kw))
         self._max_hours = max_hours
         self._proc = None
@@ -1422,13 +1977,19 @@ class WindowsPowerHolder:
             stderr=subprocess.DEVNULL,
             text=True,
         )
+        # Tracked BEFORE the write, not after. A BrokenPipeError on the
+        # write would otherwise leave a spawned child with no handle to it
+        # -- and a Windows interop child does not die with its WSL parent,
+        # so "untracked" means "unkillable".
+        self._proc = proc
         script = holder_script(effective, reason, max_hours=self._max_hours)
         if getattr(proc, "stdin", None) is not None:
             proc.stdin.write(script)
             proc.stdin.flush()
             # Deliberately NOT closed: the open pipe is the liveness
             # signal. Closing it here would make the holder exit at once.
-        self._proc = proc
+        # Claimed only once the script actually reached the child: a
+        # process that never received the script holds nothing.
         self._held = effective
 
     def _alive(self) -> bool:
@@ -1437,18 +1998,56 @@ class WindowsPowerHolder:
     def held(self) -> frozenset[str]:
         return self._held if self._alive() else frozenset()
 
+    @staticmethod
+    def _reaped(proc, timeout: float) -> bool:
+        """True only when ``wait`` actually returned -- i.e. confirmed dead."""
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _signal(proc, name: str) -> None:
+        try:
+            getattr(proc, name)()
+        except Exception:
+            pass
+
     def release(self) -> None:
-        if self._proc is not None:
-            try:
-                if getattr(self._proc, "stdin", None) is not None:
-                    self._proc.stdin.close()   # EOF -> the script unwinds
-                self._proc.wait(timeout=10)
-            except Exception:
-                try:
-                    self._proc.terminate()
-                except Exception:
-                    pass
-            self._proc = None
+        """Close stdin, then escalate until the child is CONFIRMED reaped.
+
+        The handle is dropped only on confirmation. The old version fired
+        terminate() and then cleared ``_proc``/``_held`` unconditionally
+        with no re-wait: crr was left with no handle to a PowerShell that
+        may still hold ``ShutdownBlockReasonCreate``, permanently
+        uncleanable, ``held()`` reporting nothing held, and the user facing
+        a machine that refuses to restart with nothing left to explain why.
+
+        Deliberately no ``finally:`` around the bookkeeping -- that is
+        exactly the shape that reinstates the bug.
+        """
+        proc = self._proc
+        if proc is None:
+            self._held = frozenset()
+            return
+        try:
+            if getattr(proc, "stdin", None) is not None:
+                proc.stdin.close()             # EOF -> the script unwinds
+        except Exception:
+            pass
+        if not self._reaped(proc, _RELEASE_WAIT_SECONDS):
+            self._signal(proc, "terminate")
+            if not self._reaped(proc, _FORCE_WAIT_SECONDS):
+                self._signal(proc, "kill")
+                if not self._reaped(proc, _FORCE_WAIT_SECONDS):
+                    # Neither terminate nor kill confirmed it dead. KEEP
+                    # the handle and KEEP reporting the set: a live child
+                    # may genuinely still be holding, and the next hold()
+                    # retries release(). Reporting an empty hold here would
+                    # be the same lie, just quieter.
+                    return
+        self._proc = None
         self._held = frozenset()
 ```
 
