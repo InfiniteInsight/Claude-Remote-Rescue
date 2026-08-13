@@ -589,6 +589,46 @@ def test_power_release_stops_the_unit_rather_than_pretending(
     assert ran and "stop" in " ".join(ran[0])
 
 
+def test_power_release_clears_the_state_file_when_the_stop_succeeds(
+        tmp_path, monkeypatch, capsys):
+    # A released hold must not leave a stale claim behind for the next
+    # `crr power`/`crr doctor` to read.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
+    assert cli.main(["power", "--release"]) == 0
+    assert power_state.read(tmp_path) is None
+
+
+def test_power_release_clears_the_state_file_even_when_the_stop_command_fails(
+        tmp_path, monkeypatch, capsys):
+    # Fix round 2 (2026-08-13): measured with a dead-writer file present,
+    # `crr power --release` against a unit that had already crashed (not
+    # loaded) exited 1 and the stale file survived -- leaving `crr
+    # doctor` stuck at [WARN] forever with no path back to green even
+    # after the user did exactly the right recovery action. A crashed
+    # loop is precisely when this file is stale and the user is trying to
+    # clear it, so the clear must not be conditioned on the stop
+    # command's own exit code.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
+    assert cli.main(["power", "--release"]) == 1  # the stop command's own failure is still reported
+    assert power_state.read(tmp_path) is None      # but the stale file is gone regardless
+
+
+def test_power_release_clearing_a_missing_file_does_not_raise(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    assert cli.main(["power", "--release"]) == 0
+
+
 def test_power_names_both_the_live_and_the_state_file_reason_when_nothing_is_held(
         tmp_path, monkeypatch, capsys):
     # Regression pin (fix round 1, review pass 2): the original Task 6
@@ -732,6 +772,167 @@ def test_doctor_names_unknown_when_the_writer_is_dead(tmp_path, monkeypatch, cap
     assert "power hold" in out
     assert "unknown" in out.lower()
     assert "holding nothing" not in out
+
+
+def test_doctor_warns_when_a_real_mode_is_configured_but_no_loop_has_ever_reported(
+        tmp_path, monkeypatch, capsys):
+    # Fix round 2 (2026-08-13): "power_block=off, no loop has reported"
+    # is the correct, harmless default and stays [ok]. But a user who
+    # configured `power_block=sleep` and whose `crr-awake` has never once
+    # reported is asking for protection and getting none -- a green check
+    # here is the same "succeeds loudly, protects nothing" failure this
+    # whole feature exists to end, just moved from the hold itself to the
+    # health check ABOUT the hold.
+    #
+    # `crr doctor` parses config.toml DIRECTLY (its own comment explains
+    # why: its parse attempt doubles as the source `config` for the
+    # systemctl check, so a second independent `_load_config()` call
+    # would double-print a warning) -- monkeypatching `cli._load_config`
+    # has NO effect on doctor's power_block. A real config.toml is
+    # required here.
+    (tmp_path / "config.toml").write_text('power_block = "sleep"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    # No power_state.write() -- the loop has genuinely never reported.
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[WARN] power hold" in out
+    assert "holding nothing" in out
+
+
+def test_doctor_stays_ok_when_power_block_is_off_and_no_loop_has_reported(
+        tmp_path, monkeypatch, capsys):
+    # The default, harmless state on a fresh install: nothing has ever
+    # asked for protection, so nothing missing it is not a warning.
+    # power_block=off is the DEFAULT (no config.toml needed to assert it).
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[ok  ] power hold" in out
+
+
+def test_doctor_stays_ok_when_a_real_mode_is_configured_and_the_loop_is_running_but_idle(
+        tmp_path, monkeypatch, capsys):
+    # Distinguish "never reported" from "reported, and legitimately has
+    # nothing to hold right now" (e.g. no live session this poll) -- the
+    # latter is the loop doing its job correctly and must stay [ok].
+    (tmp_path / "config.toml").write_text('power_block = "sleep"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset(), "no live claude session", os.getpid(), time.time()))
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[ok  ] power hold" in out
+
+
+# --- the reviewer's three exact corrupt-input probes, at the CLI level -----
+# (fix round 2, 2026-08-13) -- measured with a hold GENUINELY ACTIVE
+# (powershell.exe child confirmed alive via tasklist.exe): a truncated
+# power.json read as the all-clear, and a malformed `held` field either
+# crashed both commands or silently rendered letter-soup as a real answer.
+# Neither `crr power` nor `crr doctor` may raise on any of these, and both
+# must say "unknown", never "nothing" and never a garbage held set.
+
+def test_power_survives_truncated_json_and_reports_unknown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.path_for(tmp_path).write_text('{"held": ["sleep"], "pid":', encoding="utf-8")
+    rc = cli.main(["power"])  # must not raise
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unknown" in out.lower()
+    assert "holding: nothing" not in out
+    assert "holding: sleep" not in out
+
+
+def test_doctor_survives_truncated_json_and_reports_unknown(tmp_path, monkeypatch, capsys):
+    # power_block defaults to "off" here (no config.toml written): the
+    # unknown branch is [WARN] unconditionally, regardless of mode -- see
+    # the next test for the "real mode + corrupt file" combination the
+    # reviewer specifically measured (hold genuinely active, file
+    # truncated), verified rather than inferred from this one.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    power_state.path_for(tmp_path).write_text('{"held": ["sleep"], "pid":', encoding="utf-8")
+    rc = cli.main(["doctor"])  # must not raise
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[WARN] power hold" in out
+    assert "unknown" in out.lower()
+
+
+def test_doctor_warns_on_a_corrupt_file_while_a_real_mode_is_configured(
+        tmp_path, monkeypatch, capsys):
+    # The reviewer's exact measured conditions: `power_block` names a
+    # real mode (a hold was genuinely being asked for) AND the state file
+    # is corrupt (a hold may genuinely be active but unreadable). Checked
+    # directly rather than inferred from the "off" case above -- the
+    # unknown branch and the never-reported branch are different code
+    # paths in `_cmd_doctor` and nothing guarantees they agree without a
+    # test that exercises both conditions together.
+    (tmp_path / "config.toml").write_text('power_block = "sleep"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.path_for(tmp_path).write_text('{"held": ["sleep"], "pid":', encoding="utf-8")
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[WARN] power hold" in out
+    assert "unknown" in out.lower()
+    assert "holding nothing" not in out
+
+
+def test_power_survives_a_non_list_held_field_without_raising(tmp_path, monkeypatch, capsys):
+    # The reviewer's exact probe: `{"held": 5, ...}` used to raise
+    # `TypeError: 'int' object is not iterable` out of `crr power`.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": 5,
+                                 "reason": "r", "pid": os.getpid(), "updated": time.time()})
+    rc = cli.main(["power"])  # must not raise
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unknown" in out.lower()
+
+
+def test_power_survives_a_string_held_field_without_iterating_its_letters(
+        tmp_path, monkeypatch, capsys):
+    # The reviewer's other exact probe: `{"held": "sleep"}` never raised
+    # (a string IS iterable) but used to silently render as
+    # "holding: e, l, p, s" -- garbage that looks like a real answer.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": "sleep",
+                                 "reason": "r", "pid": os.getpid(), "updated": time.time()})
+    rc = cli.main(["power"])  # must not raise
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unknown" in out.lower()
+    assert "e, l" not in out and "holding: e" not in out
 
 
 # --- the actual bug, cross-process (fix round 1, 2026-08-13) ---------------

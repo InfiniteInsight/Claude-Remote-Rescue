@@ -795,14 +795,22 @@ def _power_report(sd: Path, config: cfg.Config) -> power.Report:
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     data = power_state.read(sd)
     pid_alive = False
-    if data is not None:
+    # `isinstance(data, dict)`, not `data is not None`: `data` may also be
+    # `power.UNREADABLE` (fix round 2 — a corrupt/truncated file, distinct
+    # from a genuinely missing one) or, in principle, a malformed shape
+    # `interpret` hasn't validated yet. Only a real dict has a `pid` worth
+    # reading; `interpret` below owns deciding what a bad shape MEANS.
+    if isinstance(data, dict):
         writer_pid = data.get("pid")
-        # >0, not just int: os.kill(0, 0) targets THIS process's own
-        # group and os.kill(-N, 0) a process GROUP, both of which read as
-        # "alive" — a corrupt/truncated file carrying pid 0 (or negative)
-        # alongside a fresh-looking timestamp must not let a positive
-        # hold claim through on garbage.
-        if isinstance(writer_pid, int) and writer_pid > 0:
+        # >0 and not a bool, not just int: os.kill(0, 0) targets THIS
+        # process's own group and os.kill(-N, 0) a process GROUP, both of
+        # which read as "alive" — a corrupt/truncated file carrying pid 0
+        # (or negative, or JSON `true`/`false`, which Python parses as a
+        # bool that `isinstance(x, int)` alone would accept) alongside a
+        # fresh-looking timestamp must not let a positive hold claim
+        # through on garbage.
+        if (isinstance(writer_pid, int) and not isinstance(writer_pid, bool)
+                and writer_pid > 0):
             pid_alive = probe.is_alive(writer_pid)
     max_age = config.get("power_poll_seconds") * config.get("power_state_max_age_multiplier")
     return power.interpret(data, time.time(), pid_alive, max_age)
@@ -855,7 +863,16 @@ def _cmd_power(args: argparse.Namespace) -> int:
             cmds = [["launchctl", "bootout", f"gui/{os.getuid()}/{launchd.AWAKE_LABEL}"]]
         else:
             cmds = [systemd.stop_awake_command()]
-        return 0 if _run_commands(cmds, "power") else 1
+        ok = _run_commands(cmds, "power")
+        # Cleared regardless of the stop command's own exit code (fix
+        # round 2). Measured: a unit that isn't loaded (a loop that
+        # already crashed) makes `_run_commands` fail with rc=1, and the
+        # state file survived — leaving `crr doctor` stuck at [WARN]
+        # forever with no path back to green even after the user did
+        # exactly the right recovery action. A crashed loop is exactly
+        # when this file is stale and the user is trying to clear it.
+        power_state.clear(state_dir.state_dir())
+        return 0 if ok else 1
 
     try:
         holder = _power_holder(system, wsl, config.get("power_block_max_hours"))
@@ -1071,7 +1088,19 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
                    f"holding {', '.join(sorted(power_report.held))} — {power_report.reason}; "
                    "release with: crr power --release")
         else:
-            _check("power hold", True,
+            # `never_reported` alone is not a WARN: `power_block=off` and
+            # no loop ever having run is the correct, harmless default.
+            # It IS a WARN when `power_block` names a real mode — a user
+            # who asked for sleep-blocking and whose loop has never once
+            # reported is not "configured off", they are "configured on
+            # and getting nothing", and a green check here would be
+            # exactly the "succeeds loudly, protects nothing" failure
+            # this whole feature exists to end, just moved one level up
+            # from the hold itself to the health check ABOUT the hold
+            # (fix round 2, 2026-08-13).
+            asked_for_real_blocking = str(config.get("power_block")) != "off"
+            never_protected = power_report.never_reported and asked_for_real_blocking
+            _check("power hold", not never_protected,
                    f"holding nothing — "
                    f"{_nothing_held_reason(power_report, power_decision.withheld)}")
 

@@ -89,6 +89,29 @@ def unmet(capabilities: frozenset[str], want: frozenset[str]) -> tuple[str, ...]
 POWER_SNAPSHOT_VERSION = 1
 
 
+class _Unreadable:
+    """Sentinel: the snapshot file EXISTS but could not be trusted — invalid
+    JSON, or valid JSON that isn't an object. Deliberately not ``None``.
+
+    Fix round 2 (2026-08-13) measured why the distinction matters: with a
+    hold genuinely active, truncating ``power.json`` made ``read()``
+    return ``None`` the same as a file that never existed — and
+    ``interpret`` read that as the KNOWN-nothing branch, printing
+    "holding: nothing" while a real hold was live. Absent and unparseable
+    are different claims: absent means no loop has ever written anything;
+    unparseable may be hiding a real, currently active hold that a crash
+    mid-write or a filesystem fault clipped. Only ``crr.adapters.
+    power_state.read`` constructs this; ``interpret`` is the only thing
+    licensed to turn it into a message.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "UNREADABLE"
+
+
+UNREADABLE = _Unreadable()
+
+
 def snapshot(held: frozenset[str], reason: str, pid: int, updated: float) -> dict:
     """The record `crr awake` stamps to disk after every poll.
 
@@ -115,14 +138,54 @@ class Report:
     ``unknown`` and an empty ``held`` are different claims, and the whole
     point of this type is to keep them from collapsing into each other:
     ``unknown`` set means "the state file cannot be trusted right now" —
-    dead writer, or a report too old to still describe reality. Empty
-    ``held`` with ``unknown`` unset is a POSITIVE claim: crr really is
-    holding nothing, and ``reason`` says why (which may itself be "no
-    keep-awake loop has reported" — a known nothing, not a guess).
+    dead writer, a report too old to still describe reality, or a
+    snapshot too malformed to trust at all. Empty ``held`` with
+    ``unknown`` unset is a POSITIVE claim: crr really is holding nothing,
+    and ``reason`` says why (which may itself be "no keep-awake loop has
+    reported" — a known nothing, not a guess).
+
+    ``never_reported`` is ``True`` on ONLY the "no file at all" branch —
+    distinct from ``unknown``, which means a report exists but can't be
+    trusted right now. It exists so a caller (``crr doctor``) can tell
+    "the loop is off, as configured" from "the loop is supposed to be
+    running and never has been" without parsing ``reason`` text to find
+    out — a positive claim belongs in a typed field, not something a
+    caller reconstructs by string-matching.
     """
     held: frozenset[str]
     reason: str | None
     unknown: str | None
+    never_reported: bool = False
+
+
+def _malformed(data: dict) -> str | None:
+    """Why a present, parsed dict cannot be trusted as a snapshot, or
+    ``None`` if its shape is fine.
+
+    Every field is checked before any of it is used — `crr power` and
+    `crr doctor` both call this indirectly through `interpret`, and
+    fix round 2 measured the alternative: `{"held": 5, ...}` raised an
+    uncaught ``TypeError`` out of both commands, and `{"held": "sleep"}`
+    (a string is iterable, so nothing here crashed) silently rendered as
+    "holding: e, l, p, s". A shape check is not optional decoration; it is
+    what stands between an untrusted file on disk and a claim this
+    process prints as fact. ``v`` is checked too — a version field nothing
+    ever reads is worse than no version field, because it LOOKS like
+    protection.
+    """
+    if data.get("v") != POWER_SNAPSHOT_VERSION:
+        return (f"the last report is snapshot version {data.get('v')!r}, "
+                f"expected {POWER_SNAPSHOT_VERSION}")
+    held = data.get("held")
+    if not isinstance(held, list) or not all(isinstance(h, str) for h in held):
+        return "the last report's held set is malformed"
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return "the last report's pid is malformed"
+    updated = data.get("updated")
+    if not isinstance(updated, (int, float)) or isinstance(updated, bool):
+        return "the last report has no timestamp"
+    return None
 
 
 def interpret(
@@ -131,13 +194,21 @@ def interpret(
     pid_alive: bool,
     max_age_seconds: float,
 ) -> Report:
-    """Turn a raw (possibly absent, orphaned, or stale) snapshot into a Report.
+    """Turn a raw (possibly absent, unreadable, malformed, orphaned, or
+    stale) snapshot into a Report.
 
-    Three questions, in order, and the first one a `None` answers:
+    In order, and the first one a `None` (or ``UNREADABLE``) answers:
 
     - No file at all -> a KNOWN nothing (no loop has ever reported), not
       an unknown -- `crr awake` has genuinely never run, or has always
-      been off. ``unknown`` stays ``None``.
+      been off. ``unknown`` stays ``None``, ``never_reported`` is ``True``.
+    - The file exists but couldn't be parsed (``data is UNREADABLE``), or
+      parsed to something that isn't even a JSON object -> UNKNOWN. A
+      corrupt file might be hiding a real, currently active hold.
+    - The parsed dict's SHAPE is wrong (missing/mistyped ``held``/``pid``/
+      ``updated``, or a ``v`` that doesn't match ``POWER_SNAPSHOT_VERSION``)
+      -> UNKNOWN, via `_malformed`. Never a raise, never a rendered
+      garbage set.
     - The writer pid is dead -> UNKNOWN. The file may describe reality at
       the moment it was written, but nothing has updated it since the one
       process that could have released the hold vanished — reporting its
@@ -148,18 +219,22 @@ def interpret(
       same reason: a loop that has stopped POLLING (hung, wedged, blocked
       on I/O) is not proven to still hold what it last wrote either.
 
-    Only past all three does the recorded ``held``/``reason`` get trusted.
+    Only past all five does the recorded ``held``/``reason`` get trusted.
     """
     if data is None:
-        return Report(frozenset(), "no keep-awake loop has reported", None)
+        return Report(frozenset(), "no keep-awake loop has reported", None,
+                      never_reported=True)
+    if data is UNREADABLE or not isinstance(data, dict):
+        return Report(frozenset(), None,
+                      "the last report could not be read "
+                      "(power.json is corrupt or unreadable)")
+    reason_malformed = _malformed(data)
+    if reason_malformed:
+        return Report(frozenset(), None, reason_malformed)
     if not pid_alive:
         return Report(frozenset(), None,
                       "the keep-awake loop that wrote this is gone")
-    updated = data.get("updated")
-    if not isinstance(updated, (int, float)):
-        return Report(frozenset(), None, "last report has no timestamp")
-    age = now - updated
+    age = now - data["updated"]
     if age > max_age_seconds:
         return Report(frozenset(), None, f"last report is {int(age)}s old")
-    held = data.get("held") or ()
-    return Report(frozenset(held), data.get("reason") or None, None)
+    return Report(frozenset(data["held"]), data.get("reason") or None, None)

@@ -5,8 +5,8 @@ testable without a platform. `withheld` exists because "crr is not holding
 anything" is useless to a user without the reason.
 """
 
-from crr.core.power import (Decision, POWER_SNAPSHOT_VERSION, Report, decide,
-                            interpret, snapshot, unmet)
+from crr.core.power import (Decision, POWER_SNAPSHOT_VERSION, Report,
+                            UNREADABLE, decide, interpret, snapshot, unmet)
 
 
 def test_off_holds_nothing():
@@ -132,7 +132,19 @@ def test_snapshot_is_json_shaped_and_versioned():
 def test_interpret_missing_file_is_a_known_nothing_not_an_unknown():
     # No loop has EVER reported -- a fact, not a guess.
     r = interpret(None, now=1000.0, pid_alive=False, max_age_seconds=90)
-    assert r == Report(frozenset(), "no keep-awake loop has reported", None)
+    assert r == Report(frozenset(), "no keep-awake loop has reported", None,
+                       never_reported=True)
+    assert r.never_reported is True
+
+
+def test_interpret_never_reported_is_false_once_something_has():
+    # `never_reported` is a narrow, ONE-branch fact, not a general
+    # "nothing is held right now" flag -- a live report saying "nothing"
+    # is a different claim (the loop DID run and legitimately holds
+    # nothing), and doctor must be able to tell them apart.
+    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0)
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.never_reported is False
 
 
 def test_interpret_dead_writer_is_unknown_never_nothing():
@@ -175,3 +187,121 @@ def test_interpret_exactly_at_the_age_boundary_is_still_trusted():
     r = interpret(data, now=1090.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is None
     assert r.held == frozenset({"sleep"})
+
+
+# --- shape-checking an untrusted snapshot (fix round 2, 2026-08-13) --------
+#
+# Measured with a hold GENUINELY ACTIVE (a live holder-child pid,
+# confirmed via tasklist.exe): truncating power.json made `crr power`
+# print "holding: nothing" (absent and unreadable both collapsed to
+# `None`, read as the known-nothing branch) and `{"held": 5, ...}` raised
+# an uncaught `TypeError: 'int' object is not iterable` out of BOTH `crr
+# power` and `crr doctor` -- the exact same failure family as round 1's
+# finding (an unknown, or a crash, standing in for a positive claim),
+# just a second way in. `interpret` must never trust an untrusted file's
+# shape, and must never raise regardless of what's in it.
+
+def test_interpret_treats_the_unreadable_sentinel_as_unknown_not_nothing():
+    # `power_state.read` returns this for a corrupt/truncated file --
+    # deliberately NOT the same value as `None` (a genuinely missing
+    # file). Collapsing them was the round-2 bug.
+    r = interpret(UNREADABLE, now=1000.0, pid_alive=False, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
+    assert r.never_reported is False  # NOT the same claim as "no file"
+
+
+def test_interpret_rejects_a_wrong_snapshot_version():
+    # A version field nothing ever compares is worse than none -- it
+    # looks like protection and provides none. A future v2 snapshot must
+    # not be silently trusted through the v1 shape assumptions below.
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    data["v"] = 2
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "version" in r.unknown
+    assert r.held == frozenset()
+
+
+def test_interpret_rejects_a_non_list_held_field_without_raising():
+    # The reviewer's exact probe: `{"held": 5, ...}` used to raise
+    # `TypeError: 'int' object is not iterable` out of `frozenset(held)`.
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": 5, "reason": "r",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
+
+
+def test_interpret_rejects_a_string_held_field_without_iterating_its_letters():
+    # The reviewer's other exact probe: `{"held": "sleep"}` never raised
+    # (a string IS iterable) but silently rendered as
+    # `frozenset({"s","l","e","p"})` -- "holding: e, l, p, s", garbage
+    # that looks like a real answer.
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": "sleep", "reason": "r",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
+    assert "e" not in r.held and "s" not in r.held
+
+
+def test_interpret_rejects_a_held_list_with_non_string_items():
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": [1, 2], "reason": "r",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
+
+
+def test_interpret_rejects_a_non_int_pid():
+    # `pid_alive=True` here, DELIBERATELY -- not the realistic value a
+    # real caller would compute for a non-int pid (which would itself be
+    # `False`, and the "dead writer" branch would then produce the SAME
+    # `unknown is not None` outcome for a different reason, making a
+    # weakened version of this check invisible to this test). Passing
+    # `True` isolates the shape check itself: this must be rejected on
+    # its own, not merely because it also fails a different, unrelated
+    # guard elsewhere.
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"], "reason": "r",
+            "pid": "not-a-pid", "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "pid" in r.unknown
+    assert r.held == frozenset()
+
+
+def test_interpret_rejects_a_bool_pid():
+    # bool is an int subclass in Python -- JSON `true`/`false` must not
+    # be accepted as a real pid. `pid_alive=True` for the same isolation
+    # reason as above.
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"], "reason": "r",
+            "pid": True, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "pid" in r.unknown
+    assert r.held == frozenset()
+
+
+def test_interpret_rejects_a_non_numeric_updated_field():
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"], "reason": "r",
+            "pid": 4242, "updated": "not-a-timestamp"}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
+
+
+def test_interpret_never_raises_on_an_empty_dict():
+    r = interpret({}, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
+
+
+def test_interpret_never_raises_on_a_non_dict_json_value():
+    # Defensive: `power_state.read` should already turn this into
+    # `UNREADABLE`, but `interpret` must not assume its caller got that
+    # right -- a non-dict `data` must still resolve to unknown, not a
+    # crash (e.g. `data.get` on a list).
+    r = interpret([1, 2, 3], now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()
