@@ -394,7 +394,10 @@ def test_release_never_reads_stderr_from_a_child_it_could_not_reap(tmp_path):
     assert not proc.stderr.read_called, (
         "drained stderr from a child that wait() never confirmed dead -- "
         "that read blocks until EOF, wedging the poll loop forever")
-    assert holder.held() == frozenset()
+    # NOT frozenset() -- issue #77. wait() never confirmed this child
+    # dead, so it may still hold systemd-inhibit's lock; release() must
+    # keep reporting the set rather than clearing it unconditionally.
+    assert holder.held() == frozenset({"sleep"})
 
 
 def test_a_live_inhibit_still_reports_its_hold(tmp_path):
@@ -801,3 +804,90 @@ def test_an_unsupported_platform_raises_rather_than_pretending():
 def test_power_source_uses_sysfs_on_wsl_because_the_host_battery_is_exposed():
     from crr.adapters.power_source import SysfsPowerSource
     assert isinstance(_cli._power_source("Linux", 5.0), SysfsPowerSource)
+
+
+# --- Linux release must never lose the handle to a live inhibitor ---------
+# Issue #77: LinuxPowerHolder.release() called terminate() then wait(5) and
+# dropped _proc/_held UNCONDITIONALLY, with no kill() escalation and no
+# check of whether the wait actually confirmed death. A child that ignores
+# SIGTERM leaves crr with no handle to a process that may still hold
+# systemd-inhibit's lock, while held() reports nothing is held -- the SAME
+# defect fixed on the Windows side (see the _StubProc release tests above).
+# Both platforms now share the ladder in crr/adapters/_proc.py.
+
+class _LinuxStubProc:
+    """A systemd-inhibit stand-in whose first N waits time out."""
+
+    def __init__(self, waits_that_timeout=0, dies_on=""):
+        self._left = waits_that_timeout
+        self._dies_on = dies_on        # "" | "terminate" | "kill" | "never"
+        self.calls = []
+        self.alive = True
+        self.stderr = None
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def wait(self, timeout=None):
+        self.calls.append("wait")
+        if self._left > 0:
+            self._left -= 1
+            raise _sp.TimeoutExpired(cmd="systemd-inhibit", timeout=timeout)
+        self.alive = False
+        return 0
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if self._dies_on == "terminate":
+            self._left = 0
+
+    def kill(self):
+        self.calls.append("kill")
+        if self._dies_on == "kill":
+            self._left = 0
+
+
+def _linux_holder_holding(proc, tmp_path):
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=lambda argv, **kw: proc)
+    holder.hold(frozenset({"sleep"}), "r")
+    assert holder.held() == frozenset({"sleep"})
+    return holder
+
+
+def test_linux_release_keeps_the_handle_when_the_child_cannot_be_reaped(tmp_path):
+    # THE red test for issue #77. Against today's (buggy) release(), this
+    # fails: the old code calls terminate() then wait(5) once, then clears
+    # _proc/_held no matter what -- even a child whose wait() ever
+    # confirms death. A live child may still hold systemd-inhibit's lock;
+    # reporting held() empty there is the same lie the Windows holder was
+    # fixed for.
+    proc = _LinuxStubProc(waits_that_timeout=99, dies_on="never")
+    holder = _linux_holder_holding(proc, tmp_path)
+    holder.release()
+    assert holder._proc is not None, (
+        "release() dropped the handle to a child it never confirmed dead")
+    assert holder.held() == frozenset({"sleep"}), (
+        "an unreaped systemd-inhibit may still hold the lock; reporting "
+        "nothing held is the lie that makes it uncleanable")
+
+
+def test_linux_release_escalates_terminate_before_kill(tmp_path):
+    # kill must never be tried before terminate, and must only be reached
+    # once an earlier wait has already failed to confirm death.
+    proc = _LinuxStubProc(waits_that_timeout=2, dies_on="kill")
+    holder = _linux_holder_holding(proc, tmp_path)
+    holder.release()
+    assert "terminate" in proc.calls and "kill" in proc.calls
+    assert proc.calls.index("terminate") < proc.calls.index("kill"), (
+        f"kill before terminate: {proc.calls}")
+    assert proc.calls.count("wait") >= 2, (
+        f"kill must only be reached after an earlier wait failed: {proc.calls}")
+    assert holder.held() == frozenset()
+
+
+def test_linux_release_confirms_a_normal_reap_and_drops_the_handle(tmp_path):
+    proc = _LinuxStubProc(waits_that_timeout=0)
+    holder = _linux_holder_holding(proc, tmp_path)
+    holder.release()
+    assert holder._proc is None
+    assert holder.held() == frozenset()

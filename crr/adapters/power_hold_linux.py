@@ -51,6 +51,9 @@ import re
 import subprocess
 from pathlib import Path
 
+from crr.adapters._proc import (FORCE_WAIT_SECONDS, RELEASE_WAIT_SECONDS,
+                                release_child, signal_child)
+
 # Relative on purpose: joined onto an injectable root so the whole set is
 # testable against a fake filesystem. `root / "/etc/..."` would silently
 # discard root and read the real host.
@@ -268,20 +271,43 @@ class LinuxPowerHolder:
         return self._held if self._alive() else frozenset()
 
     def release(self) -> None:
-        if self._proc is not None:
-            reaped = False
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=5)
-                reaped = True
-            except Exception:
-                pass
-            # Gated on a CONFIRMED exit. `stream.read()` on a live child's
-            # pipe does not raise -- it blocks until EOF, i.e. forever,
-            # wedging the poll loop. An unreaped child's fd is closed by
-            # the OS when the Popen object is dropped, so skipping the
-            # drain here costs nothing.
-            if reaped:
-                self._drain_stderr(self._proc)
-            self._proc = None
+        """Signal, then escalate until the child is CONFIRMED reaped.
+
+        The old version called ``terminate()`` then ``wait(5)`` ONCE and
+        cleared ``_proc``/``_held`` unconditionally -- even when the wait
+        raised. A child that ignores SIGTERM left crr with no handle to a
+        process that may still hold ``systemd-inhibit``'s lock,
+        permanently uncleanable, ``held()`` reporting nothing held. The
+        same defect was fixed on the Windows side; this shares that fix's
+        ladder (``crr.adapters._proc.release_child``) rather than keeping
+        two copies that would only drift apart again.
+
+        There is no stdin to close here (unlike the Windows holder):
+        ``terminate()`` IS the graceful request, sent up front so the
+        ladder's own first wait is checking whether that already worked
+        rather than waiting out the whole first-wait budget for nothing.
+
+        The handle is dropped only on confirmation. Deliberately no
+        ``finally:`` around the bookkeeping -- that is exactly the shape
+        that reinstates the bug.
+        """
+        proc = self._proc
+        if proc is None:
+            self._held = frozenset()
+            return
+        signal_child(proc, "terminate")
+        if not release_child(proc, RELEASE_WAIT_SECONDS, FORCE_WAIT_SECONDS):
+            # Neither the initial terminate nor the escalation to kill
+            # confirmed it dead. KEEP the handle and KEEP reporting the
+            # set: a live child may genuinely still be holding, and the
+            # next hold() retries release(). Reporting an empty hold here
+            # would be the same lie, just quieter.
+            return
+        # Gated on a CONFIRMED exit. `stream.read()` on a live child's
+        # pipe does not raise -- it blocks until EOF, i.e. forever,
+        # wedging the poll loop. An unreaped child's fd is closed by
+        # the OS when the Popen object is dropped, so skipping the
+        # drain here costs nothing.
+        self._drain_stderr(proc)
+        self._proc = None
         self._held = frozenset()

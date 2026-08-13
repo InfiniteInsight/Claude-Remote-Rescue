@@ -151,6 +151,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+from crr.adapters._proc import (FORCE_WAIT_SECONDS, RELEASE_WAIT_SECONDS,
+                                release_child)
 from crr.core.config import DEFAULTS
 
 _ES_CONTINUOUS = "0x80000000"
@@ -172,9 +174,9 @@ _INT32_MAX_MS = 2147483647
 # Teardown budget. Measured normal teardown is ~2.07s (stdin close -> EOF ->
 # both release calls -> [Environment]::Exit(0)), so blowing a 10s wait means
 # something is genuinely wrong and escalating beats swallowing it: the
-# process may still hold ShutdownBlockReasonCreate.
-_RELEASE_WAIT_SECONDS = 10
-_FORCE_WAIT_SECONDS = 5
+# process may still hold ShutdownBlockReasonCreate. Shared with the Linux
+# holder via crr.adapters._proc (RELEASE_WAIT_SECONDS / FORCE_WAIT_SECONDS)
+# so the two platforms cannot drift to different patience.
 
 # Control characters (0x00-0x1F, plus DEL) that must never reach the
 # emitted script unescaped: a newline or carriage return in `reason`
@@ -388,22 +390,6 @@ class WindowsPowerHolder:
     def held(self) -> frozenset[str]:
         return self._held if self._alive() else frozenset()
 
-    @staticmethod
-    def _reaped(proc, timeout: float) -> bool:
-        """True only when ``wait`` actually returned -- i.e. confirmed dead."""
-        try:
-            proc.wait(timeout=timeout)
-            return True
-        except Exception:
-            return False
-
-    @staticmethod
-    def _signal(proc, name: str) -> None:
-        try:
-            getattr(proc, name)()
-        except Exception:
-            pass
-
     def release(self) -> None:
         """Close stdin, then escalate until the child is CONFIRMED reaped.
 
@@ -413,6 +399,14 @@ class WindowsPowerHolder:
         may still hold ``ShutdownBlockReasonCreate``, permanently
         uncleanable, ``held()`` reporting nothing held, and the user facing
         a machine that refuses to restart with nothing left to explain why.
+
+        The escalation ladder itself (wait -> terminate+wait -> kill+wait)
+        lives once, shared with the Linux holder, in
+        ``crr.adapters._proc.release_child`` -- this method's own job is
+        only the Windows-specific graceful step: closing stdin, which is
+        the EOF signal the script's own async read is waiting on, so it
+        must happen before the ladder's first wait or that wait is just
+        waiting on nothing.
 
         Deliberately no ``finally:`` around the bookkeeping -- that is
         exactly the shape that reinstates the bug.
@@ -426,16 +420,12 @@ class WindowsPowerHolder:
                 proc.stdin.close()             # EOF -> the script unwinds
         except Exception:
             pass
-        if not self._reaped(proc, _RELEASE_WAIT_SECONDS):
-            self._signal(proc, "terminate")
-            if not self._reaped(proc, _FORCE_WAIT_SECONDS):
-                self._signal(proc, "kill")
-                if not self._reaped(proc, _FORCE_WAIT_SECONDS):
-                    # Neither terminate nor kill confirmed it dead. KEEP
-                    # the handle and KEEP reporting the set: a live child
-                    # may genuinely still be holding, and the next hold()
-                    # retries release(). Reporting an empty hold here would
-                    # be the same lie, just quieter.
-                    return
+        if not release_child(proc, RELEASE_WAIT_SECONDS, FORCE_WAIT_SECONDS):
+            # Neither the graceful EOF, terminate, nor kill confirmed it
+            # dead. KEEP the handle and KEEP reporting the set: a live
+            # child may genuinely still be holding, and the next hold()
+            # retries release(). Reporting an empty hold here would be
+            # the same lie, just quieter.
+            return
         self._proc = None
         self._held = frozenset()
