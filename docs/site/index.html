@@ -34,6 +34,7 @@
     <li><a href="#restore-prompt">Restore prompt</a></li>
     <li><a href="#install">Install</a></li>
     <li><a href="#commands">Commands</a></li>
+    <li><a href="#keeping-awake">Keeping the machine awake</a></li>
     <li><a href="#dashboard">Dashboard</a></li>
     <li><a href="#security">Security model</a></li>
     <li><a href="#status">Status</a></li>
@@ -129,12 +130,22 @@
       <pre><code>crr shim fish &gt;&gt; ~/.config/fish/config.fish     # or: bash -&gt; ~/.bashrc, zsh -&gt; ~/.zshrc</code></pre>
     </li>
     <li>
-      <strong>Watchdog + dashboard</strong> — install the user services
-      (autonomous revival + a dashboard that survives logout/reboot):
+      <strong>Watchdog + dashboard + keep-awake</strong> — install the user
+      services (autonomous revival, a dashboard that survives
+      logout/reboot, and the keep-awake loop):
       <pre><code>crr systemd --install       # prints first with no args, so you can inspect</code></pre>
-      macOS uses <code>crr launchd --install</code>; Windows/WSL uses
-      <code>crr schtasks --install</code>. All three accept
-      <code>--uninstall</code> to reverse the install.
+      macOS uses <code>crr launchd --install</code>. Both install
+      <strong>three</strong> units: revive, web, and <code>crr-awake</code>.
+      The keep-awake loop does nothing until you turn it on —
+      <code>power_block</code> is <code>off</code> by default (see
+      <a href="#keeping-awake">Keeping the machine awake</a>).
+      <br><br>
+      <strong>Windows/WSL is different:</strong> there is no keep-awake
+      Scheduled Task — <code>crr schtasks --install</code> installs the
+      watchdog and dashboard <strong>only</strong>. Run
+      <code>crr awake</code> yourself there, or install the systemd units
+      inside WSL. All three commands accept <code>--uninstall</code> to
+      reverse the install.
     </li>
     <li>
       <strong>Expose the dashboard on your tailnet</strong> (loopback-only by default):
@@ -169,9 +180,11 @@
       <tr><td><code>crr diagnose [--json]</code></td><td>Explain why the previous boot / sessions may have died</td></tr>
       <tr><td><code>crr gc</code></td><td>Drop archive records past the retention window</td></tr>
       <tr><td><code>crr web [--port N]</code></td><td>Serve the dashboard (loopback only)</td></tr>
-      <tr><td><code>crr systemd [--install|--uninstall]</code></td><td>Print (or install/uninstall) the Linux watchdog timer + dashboard service</td></tr>
-      <tr><td><code>crr launchd [--install|--uninstall]</code></td><td>Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard)</td></tr>
-      <tr><td><code>crr schtasks [--install|--uninstall]</code></td><td>Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard)</td></tr>
+      <tr><td><code>crr awake [--once]</code></td><td>[service] Hold the machine awake while a Claude session is live. The loop, not a durable OS reservation: the hold is a child process of this command, so stopping it releases the hold. Off unless <code>power_block</code> is set. Lid close is never blocked</td></tr>
+      <tr><td><code>crr power [--release]</code></td><td>Report what crr is holding awake and why — or why not. <code>--release</code> stops the keep-awake loop (that <em>is</em> the release; there is no other handle)</td></tr>
+      <tr><td><code>crr systemd [--install|--uninstall]</code></td><td>Print (or install/uninstall) the Linux watchdog timer + dashboard + keep-awake (<code>crr-awake.service</code>)</td></tr>
+      <tr><td><code>crr launchd [--install|--uninstall]</code></td><td>Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard + keep-awake)</td></tr>
+      <tr><td><code>crr schtasks [--install|--uninstall]</code></td><td>Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard). <strong>No keep-awake task</strong> — the command says so; run <code>crr awake</code> yourself or use <code>crr systemd --install</code> inside WSL</td></tr>
       <tr><td><code>crr config --effective</code></td><td>Every config key with its value and origin (<code>configured</code> / <code>default</code>)</td></tr>
       <tr><td><code>crr doctor</code></td><td>Install-health checklist</td></tr>
       <tr><td><code>crr shim &lt;shell&gt;</code></td><td>Print the shell shim to source from your rc file (fish/bash/zsh)</td></tr>
@@ -179,6 +192,36 @@
       <tr><td><code>crr rescue-check</code></td><td>[shim] Once per boot, offer to re-home rescued conversations into visible tabs</td></tr>
     </tbody>
   </table>
+</section>
+
+<section id="keeping-awake">
+  <h2>Keeping the machine awake</h2>
+  <p>
+    A remote Claude session dies when the machine it runs on sleeps.
+    <code>crr awake</code> is a loop that holds the machine up
+    <strong>only while a Claude session is actually live</strong>, and
+    drops the hold the moment the last one ends.
+  </p>
+  <p>
+    <strong>It is off by default.</strong> Nothing happens until you set
+    <code>power_block</code> to <code>"sleep"</code> or
+    <code>"sleep+shutdown"</code> in <code>config.toml</code> — and by
+    default the hold only applies while on AC power; on battery, or when
+    the power source can't be read, crr holds nothing and says so.
+    <strong>Closing the lid is never blocked, on any platform.</strong>
+  </p>
+  <pre><code>crr awake            # run the loop in the foreground (Ctrl-C releases)
+crr power            # what is held right now, and why — or why not
+crr power --release  # stop the loop, which IS the release</code></pre>
+  <p>
+    The hold is a child process of <code>crr awake</code>, not a durable
+    OS reservation — it cannot outlive crr, and there is no separate
+    "unhold" button. Stopping the loop is the release, and
+    <code>crr power --release</code> is how you do it, including on a
+    headless host, where there's no dashboard button and this command is
+    the whole story: it stops the unit crr installed, or tells you to
+    stop your own process if you started the loop by hand.
+  </p>
 </section>
 
 <section id="dashboard">
