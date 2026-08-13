@@ -44,6 +44,7 @@ from crr.adapters import (power_hold_linux, power_hold_macos,
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import deploy
+from crr.core import power
 from crr.core import bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -596,6 +597,32 @@ def _power_source(system: str, timeout: float):
     if system == "Darwin":
         return power_source.MacPowerSource(timeout)
     return power_source.SysfsPowerSource()
+
+
+def _power_poll_once(holder, source, entries, owners, config) -> power.Decision:
+    """One decide-and-apply step. Returns the Decision so callers can report it.
+
+    The AC probe is consulted ONLY when the answer can change the outcome
+    — a probe that is never called cannot fail, and on a desktop the
+    question is meaningless.
+
+    Nothing here remembers what is held: the holder owns that, and a second
+    copy of the state would be a second thing to get wrong.
+    """
+    live = _live_claude_count(entries, owners)
+    requires_ac = bool(config.get("power_block_requires_ac"))
+    on_ac = source.on_ac() if requires_ac else True
+    decision = power.decide(
+        live_sessions=live,
+        on_ac=on_ac,
+        mode=str(config.get("power_block")),
+        requires_ac=requires_ac,
+    )
+    if decision.want:
+        holder.hold(decision.want, decision.reason)
+    else:
+        holder.release()
+    return decision
 
 
 def _resolve_crr_bin(explicit: str | None) -> str:
