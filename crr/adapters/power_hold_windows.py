@@ -5,7 +5,7 @@ Both locks live in ONE process so there is one lifetime to reason about:
 ``ShutdownBlockReasonCreate`` for restart. Both were measured callable
 UNELEVATED from WSL on 2026-08-12.
 
-Six things this file must never lose:
+Seven things this file must never lose:
 
 1. **The stdin-EOF exit.** A Windows interop child does NOT die with its
    WSL parent. Without this wait, a killed crr leaves a PowerShell holding
@@ -103,6 +103,26 @@ Six things this file must never lose:
    follow the read — this was never sleep-only-safe either, it was just
    never measured with tracing precise enough to catch a race that a
    sleep-only script cannot exhibit.
+7. **``reason`` is sanitized, never trusted, before it reaches the
+   script.** Point 6 made the whole script ONE PowerShell statement, which
+   means a newline (or any other control character) inside ``reason``
+   is no longer cosmetic — it is a second top-level line the parser sees
+   as separate from the statement above. Measured live 2026-08-13: an
+   unsanitized ``reason`` containing ``\n`` produced a script that
+   silently executed NOTHING at all when piped to the real host — alive
+   at 12s against a 2.16s deadline, exit 0, zero stderr, only EOF ended
+   it, i.e. ``held()`` reporting BOTH locks acquired with ZERO
+   protection actually in place. This is the worst outcome the whole
+   design can produce — reporting protection that does not exist — so it
+   is fixed even though nothing in ``crr`` calls ``hold()`` with an
+   attacker- or user-controlled ``reason`` today (the sole producer,
+   ``crr/core/power.py``, builds a fixed ``"crr: N Claude session(s)
+   live"`` string). ``reason`` is cosmetic display text for the OS's
+   blocking UI, so a bad ``reason`` must degrade the MESSAGE, never the
+   HOLD: ``_sanitize_reason`` strips every control character (0x00-0x1F,
+   plus DEL) to a space, collapses the resulting whitespace runs, and
+   only THEN doubles single quotes for the PowerShell string literal —
+   never raises.
 
 KNOWN LIMIT, recorded rather than assumed: registration returning TRUE
 proves the reason REGISTERS, not that shutdown is BLOCKED. Microsoft is
@@ -114,6 +134,7 @@ unverified.
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 _ES_CONTINUOUS = "0x80000000"
@@ -131,6 +152,32 @@ _ES_SLEEP_FLAGS = "0x80000001"
 # treats it as "wait forever" (the exact opposite of a backstop). Clamp
 # defensively at both ends.
 _INT32_MAX_MS = 2147483647
+
+# Control characters (0x00-0x1F, plus DEL) that must never reach the
+# emitted script unescaped: a newline or carriage return in `reason`
+# breaks the one-PowerShell-statement invariant (module docstring, point
+# 6) by adding a top-level line the parser will not see as part of the
+# same statement. Measured live 2026-08-13: with a raw `\n` in `reason`,
+# the emitted 3-line script silently executed NOTHING when piped to the
+# real host -- alive well past its deadline, exit 0, zero stderr, only
+# EOF ended it. held() would report both locks acquired while nothing
+# was actually held. `reason` is cosmetic display text for the OS's
+# blocking UI, so a bad reason must degrade the MESSAGE, never the HOLD.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _sanitize_reason(reason: str) -> str:
+    """Make ``reason`` safe to embed in the ONE-line script, without ever
+    raising: strip control characters (collapsing the whitespace they
+    leave behind), THEN double any single quotes for the PowerShell
+    string literal. Order matters -- quote-doubling first would not help
+    a newline, and control-stripping after quote-doubling could still
+    leave a stray control character sitting next to a doubled quote.
+    """
+    no_control = _CONTROL_CHARS_RE.sub(" ", reason)
+    collapsed = _WHITESPACE_RUN_RE.sub(" ", no_control).strip()
+    return collapsed.replace("'", "''")
 
 
 def _timeout_ms(max_hours: float) -> int:
@@ -177,7 +224,7 @@ def holder_script(want: frozenset[str], reason: str,
     SAME kernel pipe, and any of our script left unparsed when our read
     fires is exactly what that read can steal a byte from.
     """
-    safe = reason.replace("'", "''")
+    safe = _sanitize_reason(reason)
     # Only declare the P/Invoke signatures for what `want` actually calls.
     # Declaring ShutdownBlockReasonCreate/Destroy on a sleep-only hold
     # would be harmless at runtime but makes the emitted script lie about

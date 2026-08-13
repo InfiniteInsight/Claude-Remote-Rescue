@@ -1140,8 +1140,17 @@ def test_script_exits_when_stdin_closes():
     # THE orphan defence. Without this a killed crr leaves a PowerShell
     # holding a shutdown block forever, and the user has a machine that
     # refuses to restart with nothing left running to explain why.
+    #
+    # NOTE: this assertion was corrected after implementation. The
+    # shipped script does NOT use [Console]::In / ReadLine -- that reader
+    # wraps a SyncTextReader and blocks the calling thread synchronously
+    # even through its "Async" method, measured live 2026-08-13 (see
+    # `crr/adapters/power_hold_windows.py`'s module docstring, point 3).
+    # The orphan defence is [Console]::OpenStandardInput() (the raw,
+    # unwrapped stream) read via Stream.ReadAsync.
     s = holder_script(frozenset({"sleep"}), "r")
-    assert "ReadLine" in s, "no stdin-EOF loop: an orphan would hold forever"
+    assert "OpenStandardInput" in s and "ReadAsync" in s, (
+        "no async stdin read: an orphan would hold forever")
 
 
 def test_script_self_releases_after_the_cap():
@@ -1207,7 +1216,7 @@ Both locks live in ONE process so there is one lifetime to reason about:
 ``ShutdownBlockReasonCreate`` for restart. Both were measured callable
 UNELEVATED from WSL on 2026-08-12.
 
-Six things this file must never lose — see the module docstring in
+Seven things this file must never lose — see the module docstring in
 `crr/adapters/power_hold_windows.py` for the full account, with dates and
 measured timings, of why each one is there:
 
@@ -1252,6 +1261,18 @@ measured timings, of why each one is there:
    already stopped holding anything. Wrapping the entire body as
    ``& { stmt1; stmt2; ...; }`` forces the parser to consume the complete
    statement before executing any of it.
+7. **``reason`` is sanitized, never trusted, before it reaches the
+   script.** Point 6 made the whole script ONE PowerShell statement, so a
+   newline inside ``reason`` is no longer cosmetic — it is a second
+   top-level line. Measured live: an unsanitized ``reason`` containing
+   ``\n`` produced a script that silently executed NOTHING when piped to
+   the real host — alive at 12s against a 2.16s deadline, exit 0, zero
+   stderr, only EOF ended it, i.e. ``held()`` reporting BOTH locks
+   acquired with ZERO protection in place. ``reason`` is cosmetic display
+   text for the OS's blocking UI, so a bad ``reason`` must degrade the
+   MESSAGE, never the HOLD: strip every control character to a space,
+   collapse the resulting whitespace, THEN double single quotes — never
+   raise.
 
 KNOWN LIMIT, recorded rather than assumed: registration returning TRUE
 proves the reason REGISTERS, not that shutdown is BLOCKED. Microsoft is
@@ -1263,6 +1284,7 @@ unverified.
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 _ES_CONTINUOUS = "0x80000000"
@@ -1275,6 +1297,23 @@ _ES_SLEEP_FLAGS = "0x80000001"
 # Task.Wait(int millisecondsTimeout) takes a signed Int32. A caller passing
 # an absurd max_hours must not overflow into a negative value.
 _INT32_MAX_MS = 2147483647
+
+# Control characters that must never reach the emitted script unescaped --
+# see point 7 above. A newline breaks the one-PowerShell-statement
+# invariant by adding a top-level line the parser will not see as part of
+# the same statement.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _sanitize_reason(reason: str) -> str:
+    """Make ``reason`` safe to embed in the ONE-line script, without ever
+    raising: strip control characters (collapsing the whitespace they
+    leave behind), THEN double single quotes for the PowerShell string
+    literal."""
+    no_control = _CONTROL_CHARS_RE.sub(" ", reason)
+    collapsed = _WHITESPACE_RUN_RE.sub(" ", no_control).strip()
+    return collapsed.replace("'", "''")
 
 
 def _timeout_ms(max_hours: float) -> int:
@@ -1301,7 +1340,7 @@ def holder_script(want: frozenset[str], reason: str,
 
     The body is emitted as ONE PowerShell statement -- see point 6 above.
     """
-    safe = reason.replace("'", "''")
+    safe = _sanitize_reason(reason)
     # Only declare the P/Invoke signatures for what `want` actually calls.
     sig_lines: list[str] = []
     if "sleep" in want:

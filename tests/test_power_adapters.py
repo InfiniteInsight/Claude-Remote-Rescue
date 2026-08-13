@@ -213,6 +213,40 @@ def test_script_registers_a_block_reason_for_shutdown():
     assert "crr: 2 live" in s
 
 
+def test_a_newline_in_the_reason_cannot_break_the_one_line_invariant():
+    # reason is cosmetic display text for the OS's blocking UI, so a bad
+    # reason must degrade the MESSAGE, never the HOLD. Confirmed live
+    # 2026-08-13: before this fix, holder_script({"sleep","shutdown"},
+    # "crr: a\nb") emitted a 3-top-level-line script that silently
+    # executed NOTHING when piped to the real host -- alive at 12s
+    # against a 2.16s deadline, exit 0, zero stderr, only EOF ended it.
+    # held() would report both locks acquired while nothing was held.
+    clean = holder_script(frozenset({"sleep", "shutdown"}), "crr: a live")
+    dirty_lf = holder_script(frozenset({"sleep", "shutdown"}), "crr: a\nb")
+    dirty_crlf = holder_script(frozenset({"sleep", "shutdown"}), "crr: a\r\nb")
+    clean_lines = [line for line in clean.splitlines() if line.strip()]
+    for dirty in (dirty_lf, dirty_crlf):
+        dirty_lines = [line for line in dirty.splitlines() if line.strip()]
+        assert len(dirty_lines) == len(clean_lines) == 2, (
+            "a newline (or CRLF) in reason must not add a top-level line "
+            "-- that is exactly what breaks the one-PowerShell-statement "
+            "invariant and silences the whole script")
+        assert "crr: a b" in dirty, "sanitized reason should stay readable"
+
+
+def test_a_control_character_in_the_reason_is_stripped():
+    s = holder_script(frozenset({"sleep", "shutdown"}), "crr: a\x00\x07b")
+    lines = [line for line in s.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert "\x00" not in s and "\x07" not in s
+    assert "crr: a b" in s
+
+
+def test_a_quote_in_the_reason_is_still_escaped():
+    s = holder_script(frozenset({"sleep", "shutdown"}), "crr: it's live")
+    assert "it''s live" in s
+
+
 def test_script_exits_when_stdin_closes():
     # THE orphan defence. Without this a killed crr leaves a PowerShell
     # holding a shutdown block forever, and the user has a machine that
