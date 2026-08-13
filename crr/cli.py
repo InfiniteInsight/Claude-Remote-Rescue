@@ -3434,6 +3434,10 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
             crr_bin, path, state_home, port, wsl_distro,
             restart_seconds=config.get("web_restart_seconds"),
         ),
+        systemd.AWAKE_SERVICE_NAME: systemd.awake_service_unit(
+            crr_bin, path, state_home,
+            restart_seconds=config.get("web_restart_seconds"),
+        ),
     }
 
     # extras (wt.exe/wsl.exe) only degrade tab spawning, never revival —
@@ -3469,13 +3473,16 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     if args.uninstall:
         ud = systemd.unit_dir(Path.home())
         ok = _run_commands(systemd.disable_commands(), "systemd")
-        for name in (systemd.SERVICE_NAME, systemd.TIMER_NAME, systemd.WEB_SERVICE_NAME):
+        for name in (
+            systemd.SERVICE_NAME, systemd.TIMER_NAME,
+            systemd.WEB_SERVICE_NAME, systemd.AWAKE_SERVICE_NAME,
+        ):
             (ud / name).unlink(missing_ok=True)
         if not ok:
             print("crr systemd: unit files removed, but disabling FAILED (see above)",
                   file=sys.stderr)
             return 1
-        print(f"uninstalled watchdog + dashboard units from {ud}")
+        print(f"uninstalled watchdog + dashboard + keep-awake units from {ud}")
         return 0
 
     if args.install:
@@ -3483,7 +3490,7 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
         systemd.write_units(ud, units)
         if not _run_commands(systemd.critical_enable_commands(), "systemd"):
             print(f"crr systemd: units written to {ud} but enabling FAILED (see above); "
-                  "the watchdog/dashboard are NOT running", file=sys.stderr)
+                  "the watchdog/dashboard/keep-awake are NOT running", file=sys.stderr)
             return 1
         # linger is judged separately: on WSL2 `loginctl enable-linger`
         # reliably exits 1 (a benign dbus quirk) even though the services
@@ -3501,7 +3508,7 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
                 "services will stop at logout unless linger is enabled another way",
                 file=sys.stderr,
             )
-        print(f"installed watchdog + dashboard units to {ud} and enabled them")
+        print(f"installed watchdog + dashboard + keep-awake units to {ud} and enabled them")
         return 0
 
     # Default: print for inspection (no changes to the user manager).
