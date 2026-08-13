@@ -490,3 +490,98 @@ def test_awake_finishes_release_even_when_a_second_sigint_lands_mid_release(tmp_
     rc, output = _run_awake_and_signal_twice(tmp_path, signal.SIGINT)
     assert rc == 0, output
     assert "release-done" in output, output
+
+
+def test_power_reports_what_is_held_and_why(tmp_path, monkeypatch, capsys):
+    holder = _FakeHolder()
+    holder.hold(frozenset({"sleep"}), "crr: 2 Claude sessions live")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
+                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
+                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    assert cli.main(["power"]) == 0
+    out = capsys.readouterr().out
+    assert "sleep" in out
+
+
+def test_power_names_the_release_command_whenever_something_is_held(
+        tmp_path, monkeypatch, capsys):
+    # The block must never be a trap: if crr is holding the machine
+    # awake, the way to stop it has to be on screen.
+    holder = _FakeHolder()
+    holder.hold(frozenset({"sleep"}), "r")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
+                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
+                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "crr power --release" in out or "stop" in out
+
+
+def test_power_reports_the_withheld_reason_when_nothing_is_held(
+        tmp_path, monkeypatch, capsys):
+    # "crr is holding nothing" is useless without the reason.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(False))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
+                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
+                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    cli.main(["power"])
+    assert "battery" in capsys.readouterr().out
+
+
+def test_power_states_capabilities_this_platform_lacks(tmp_path, monkeypatch, capsys):
+    # macOS cannot block a shutdown. Silently holding half of what was
+    # asked, and reporting success, is the failure this project keeps
+    # finding.
+    monkeypatch.setattr(cli, "_power_holder",
+                        lambda *a, **k: _FakeHolder(caps=frozenset({"sleep"})))
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {"power_block": "sleep+shutdown",
+                                 "power_block_requires_ac": True,
+                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
+                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "shutdown" in out and "unavailable" in out.lower()
+
+
+def test_power_release_stops_the_unit_rather_than_pretending(
+        tmp_path, monkeypatch, capsys):
+    # The hold is a child of `crr awake`; this process has no handle to
+    # it. Stopping the unit IS the release.
+    ran = []
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    assert cli.main(["power", "--release"]) == 0
+    assert ran and "stop" in " ".join(ran[0])
+
+
+def test_doctor_names_what_power_is_holding(tmp_path, monkeypatch, capsys):
+    # `crr doctor` must never omit an active hold — the same fact `crr
+    # power` prints, on the checklist a user actually runs.
+    holder = _FakeHolder()
+    holder.hold(frozenset({"sleep"}), "crr: 1 Claude session live")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "power hold" in out and "sleep" in out

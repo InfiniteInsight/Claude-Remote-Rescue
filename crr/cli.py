@@ -387,6 +387,17 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="run a single poll and exit (for testing and cron-style use)")
     awake.set_defaults(func=_cmd_awake)
 
+    pwr = sub.add_parser(
+        "power",
+        help="report what crr is holding awake, and why (or why not)",
+    )
+    pwr.add_argument(
+        "--release", action="store_true",
+        help="stop the crr-awake unit — the hold is its child process, so "
+             "stopping the unit IS the release",
+    )
+    pwr.set_defaults(func=_cmd_power)
+
     sysd = sub.add_parser(
         "systemd",
         help="print (or --install) the systemd user watchdog timer + service",
@@ -742,6 +753,48 @@ def _cmd_awake(args: argparse.Namespace) -> int:
     return rc
 
 
+def _cmd_power(args: argparse.Namespace) -> int:
+    """Report what crr is holding, or stop the loop that holds it."""
+    system = platform.system()
+    wsl = host.is_wsl()
+    config = _load_config()
+    if args.release:
+        # There is no handle to another process's child: stopping the loop
+        # IS the release. Anything else would be a button that looks like
+        # it did something and did not.
+        if system == "Darwin" and not wsl:
+            cmds = [["launchctl", "bootout", f"gui/{os.getuid()}/{launchd.AWAKE_LABEL}"]]
+        else:
+            cmds = [systemd.stop_awake_command()]
+        return 0 if _run_commands(cmds, "power") else 1
+
+    try:
+        holder = _power_holder(system, wsl, config.get("power_block_max_hours"))
+    except NotImplementedError as exc:
+        print(f"crr power: {exc}", file=sys.stderr)
+        return 2
+    source = _power_source(system, config.get("interop_timeout_seconds"))
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    store = JournalStore(state_dir.state_dir())
+    entries, owners = _power_entries_and_owners(store, probe)
+    live = _live_claude_count(entries, owners)
+    requires_ac = bool(config.get("power_block_requires_ac"))
+    on_ac = source.on_ac() if requires_ac else True
+    decision = power.decide(live_sessions=live, on_ac=on_ac,
+                            mode=str(config.get("power_block")),
+                            requires_ac=requires_ac)
+    held = holder.held()
+    if held:
+        print(f"holding: {', '.join(sorted(held))} — {decision.reason}")
+        print("release with: crr power --release")
+    else:
+        print(f"holding: nothing — {decision.withheld or 'no reason recorded'}")
+    missing = power.unmet(holder.capabilities(), decision.want)
+    if missing:
+        print(f"unavailable on this platform: {', '.join(missing)}")
+    return 0
+
+
 def _resolve_crr_bin(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -882,6 +935,42 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     else:
         config = cfg.Config()
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
+
+    # Power hold (spec 2026-08-12, Task 6). Needs `config` (just resolved
+    # above), so this can't sit right next to the boot-identity check —
+    # what matters is that `crr doctor` never omits an active hold, not
+    # the exact position. Same three facts `crr power` prints: held,
+    # withheld, and — the point macOS exists to prove — unavailable.
+    power_system = platform.system()
+    power_wsl = host.is_wsl()
+    try:
+        power_holder = _power_holder(power_system, power_wsl,
+                                     config.get("power_block_max_hours"))
+    except NotImplementedError as exc:
+        _check("power hold", False, str(exc))
+    else:
+        power_probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+        power_entries, power_owners = _power_entries_and_owners(store, power_probe)
+        power_live = _live_claude_count(power_entries, power_owners)
+        power_requires_ac = bool(config.get("power_block_requires_ac"))
+        power_source_adapter = _power_source(power_system, config.get("interop_timeout_seconds"))
+        power_on_ac = power_source_adapter.on_ac() if power_requires_ac else True
+        power_decision = power.decide(
+            live_sessions=power_live, on_ac=power_on_ac,
+            mode=str(config.get("power_block")), requires_ac=power_requires_ac,
+        )
+        power_held = power_holder.held()
+        if power_held:
+            _check("power hold", True,
+                   f"holding {', '.join(sorted(power_held))} — {power_decision.reason}; "
+                   "release with: crr power --release")
+        else:
+            _check("power hold", True,
+                   f"holding nothing — {power_decision.withheld or 'no reason recorded'}")
+        power_missing = power.unmet(power_holder.capabilities(), power_decision.want)
+        if power_missing:
+            _check("power hold capabilities", False,
+                   f"unavailable on this platform: {', '.join(power_missing)}")
 
     # The reachability detector's own falsifiability (plan 2026-08-10, Task
     # 7). Claude Code never persists `replBridgeError`, so a bridge that
