@@ -5,10 +5,11 @@ wiring that finally calls them.
 """
 
 import os
+import select
 import signal
 import subprocess
 import sys
-import threading
+import time
 
 import pytest
 
@@ -344,78 +345,148 @@ def test_awake_once_does_not_orphan_the_holds_child_process(tmp_path, monkeypatc
             holder.proc.wait(timeout=5)
 
 
-def test_awake_finishes_release_even_when_a_second_sigterm_lands_mid_release(
-    tmp_path, monkeypatch
-):
-    # A second stop signal landing WHILE release() is running (double
-    # Ctrl-C, `systemctl restart` re-sending SIGTERM mid-teardown) must
-    # not abort the release with the hold's handle already gone. Release
-    # ladders run up to 15s (systemd-inhibit teardown, the Windows
-    # child's stop sequence) -- long enough for a second signal to be
-    # realistic. Fixed by ignoring SIGTERM for the duration of the
-    # release path specifically, rather than leaving whatever handler
-    # preceded ours in place -- that is usually SIG_DFL (instant kill),
-    # which is the exact bug this guards against.
-    release_started = threading.Event()
-    release_done = threading.Event()
-    calls = []
+# --- harness for the two "second signal lands mid-release" tests below ---
+#
+# These send TWO real OS signals at a running `crr awake`. The first
+# version of this test signaled the pytest process itself (via
+# os.kill(os.getpid(), ...)). Under a mutation that removed the SIG_IGN
+# guard, the second signal re-entered _stop() and raised an unhandled
+# KeyboardInterrupt out of `holder.release()` -- which, because it was
+# delivered to the pytest process's own main thread mid-test, escaped
+# the test entirely and aborted the whole pytest SESSION (not just this
+# test): later tests showed as "deselected", not failed. A regression
+# that looks like broken CI infrastructure is worse than the bug it
+# guards against. So these two tests run `crr awake` as a genuine CHILD
+# process instead and signal THAT -- a mutation can only ever kill the
+# child, which shows up as a normal non-zero/timeout assertion failure.
+_AWAKE_HARNESS = '''\
+import pathlib
+import sys
+import time
 
-    class _SlowReleaseHolder:
-        def capabilities(self):
-            return frozenset({"sleep"})
+from crr import cli
 
-        def hold(self, want, reason):
-            calls.append(("hold", want, reason))
 
-        def release(self):
-            calls.append(("release-start",))
-            release_started.set()
-            # A stand-in for a slow teardown ladder. Deliberately not
-            # time.sleep: this test also patches cli.time.sleep, and
-            # cli.time IS the real `time` module object (same module in
-            # sys.modules) -- patching cli.time.sleep patches time.sleep
-            # everywhere, including here, which would turn this "sleep"
-            # into another SIGTERM-sender instead of a wait.
-            threading.Event().wait(0.5)
-            calls.append(("release-done",))
-            release_done.set()
+class _FakeSource:
+    def on_ac(self):
+        return True
 
-        def held(self):
-            return frozenset()
 
-    holder = _SlowReleaseHolder()
-    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
-    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
-    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_load_config",
-                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
-                                 "power_poll_seconds": 0, "power_block_max_hours": 12,
-                                 "interop_timeout_seconds": 5})
-    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+class _SlowReleaseHolder:
+    def capabilities(self):
+        return frozenset({{"sleep"}})
 
-    previous_handler = signal.getsignal(signal.SIGTERM)
-    ticks = {"n": 0}
+    def hold(self, want, reason):
+        print("hold", flush=True)
 
-    def fake_sleep(_seconds):
-        ticks["n"] += 1
-        if ticks["n"] >= 2:
-            os.kill(os.getpid(), signal.SIGTERM)   # first stop signal
+    def release(self):
+        print("release-start", flush=True)
+        time.sleep({ladder})   # stand-in for a slow teardown ladder
+        print("release-done", flush=True)
 
-    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    def held(self):
+        return frozenset()
 
-    def send_second_sigterm():
-        if release_started.wait(timeout=2):
-            os.kill(os.getpid(), signal.SIGTERM)   # second, mid-release
 
-    sender = threading.Thread(target=send_second_sigterm, daemon=True)
-    sender.start()
+holder = _SlowReleaseHolder()
+cli._power_holder = lambda *a, **k: holder
+cli._power_source = lambda *a, **k: _FakeSource()
+cli.state_dir.state_dir = lambda: pathlib.Path({tmp_path!r})
+cli._load_config = lambda: {{
+    "power_block": "sleep",
+    "power_block_requires_ac": True,
+    "power_poll_seconds": {poll_seconds},
+    "power_block_max_hours": 12,
+    "interop_timeout_seconds": 5,
+}}
+cli._power_entries_and_owners = lambda *a, **k: ([{{"pid": 1}}], {{1: [11]}})
+
+rc = cli.main(["awake"])
+print("rc=" + str(rc), flush=True)
+sys.exit(rc)
+'''
+
+
+def _wait_for_marker(proc, marker, output_lines, timeout):
+    """Read lines from ``proc.stdout`` until one contains ``marker``.
+
+    Bounded by ``timeout`` via ``select`` so a hung/misbehaving child
+    cannot block the test suite forever. Returns False on timeout or EOF
+    (process exited without ever printing the marker) instead of raising,
+    so callers get a normal assertion failure with the captured output.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            return False
+        line = proc.stdout.readline()
+        if line == "":
+            return False  # EOF: the child exited before printing it
+        output_lines.append(line.rstrip("\n"))
+        if marker in line:
+            return True
+
+
+def _run_awake_and_signal_twice(tmp_path, sig, poll_seconds=30, ladder=1.0, gap=0.4):
+    """Spawn `crr awake` as a real child process, send ``sig`` once while
+    it idles between polls (the ordinary stop path), then again ``gap``
+    seconds into its (simulated, ``ladder``-second) release -- while
+    release is still running. Returns ``(returncode, output_lines)``.
+    """
+    script = tmp_path / "run_awake.py"
+    script.write_text(_AWAKE_HARNESS.format(
+        tmp_path=str(tmp_path), poll_seconds=poll_seconds, ladder=ladder,
+    ))
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    output_lines = []
     try:
-        rc = cli.main(["awake"])
+        assert _wait_for_marker(proc, "hold", output_lines, timeout=5), (
+            f"child never reached its first poll; output so far: {output_lines}")
+        proc.send_signal(sig)   # first stop signal, while idling between polls
+        assert _wait_for_marker(proc, "release-start", output_lines, timeout=5), (
+            f"child never entered release(); output so far: {output_lines}")
+        time.sleep(gap)   # let release() get partway through its ladder
+        proc.send_signal(sig)   # second stop signal, mid-release
+        remaining = proc.stdout.read()
+        if remaining:
+            output_lines.extend(remaining.splitlines())
+        rc = proc.wait(timeout=5)
     finally:
-        sender.join(timeout=2)
-        # Belt-and-braces, same reasoning as the other SIGTERM test.
-        signal.signal(signal.SIGTERM, previous_handler)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    return rc, output_lines
 
-    assert rc == 0
-    assert release_done.is_set()
-    assert calls[-1] == ("release-done",), calls
+
+def test_awake_finishes_release_even_when_a_second_sigterm_lands_mid_release(tmp_path):
+    # A second SIGTERM landing WHILE release() is running (`systemctl
+    # restart` re-sending SIGTERM mid-teardown) must not abort the
+    # release with the hold's handle already gone. Release ladders run
+    # up to 15s (systemd-inhibit teardown, the Windows child's stop
+    # sequence) -- long enough for a second signal to be realistic.
+    # Fixed by ignoring SIGTERM for the duration of the release path
+    # specifically, rather than leaving whatever handler preceded ours in
+    # place -- that is usually SIG_DFL (instant kill), which is the exact
+    # bug this guards against.
+    rc, output = _run_awake_and_signal_twice(tmp_path, signal.SIGTERM)
+    assert rc == 0, output
+    assert "release-done" in output, output
+
+
+def test_awake_finishes_release_even_when_a_second_sigint_lands_mid_release(tmp_path):
+    # The double-Ctrl-C half of the same finding. SIGINT already raises
+    # KeyboardInterrupt via Python's own default handler -- with no guard,
+    # a second one landing mid-release raises it AGAIN, right back into
+    # `holder.release()`, aborting it exactly like an unguarded second
+    # SIGTERM does. Verified before the fix: two SIGINTs 0.5s apart into a
+    # 1.5s release left "release-done" never printed.
+    rc, output = _run_awake_and_signal_twice(tmp_path, signal.SIGINT)
+    assert rc == 0, output
+    assert "release-done" in output, output

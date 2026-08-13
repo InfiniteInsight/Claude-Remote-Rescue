@@ -676,7 +676,13 @@ def _cmd_awake(args: argparse.Namespace) -> int:
     def _stop(signum, frame):  # noqa: ARG001 - required signal handler shape
         raise KeyboardInterrupt
 
+    # SIGINT needs no handler installed here -- Python's own default SIGINT
+    # disposition already raises KeyboardInterrupt, which is exactly the
+    # stop signal the loop below already catches. It IS captured here
+    # (unchanged) so the release-guard below has something correct to
+    # restore afterward, mirroring SIGTERM exactly.
     previous_sigterm = signal.signal(signal.SIGTERM, _stop)
+    previous_sigint = signal.getsignal(signal.SIGINT)
     try:
         try:
             while True:
@@ -704,27 +710,35 @@ def _cmd_awake(args: argparse.Namespace) -> int:
             # tried and measured to leak exactly that: the child is alive
             # immediately after --once returns; on Windows/WSL only the
             # stdin-EOF fallback eventually reaps it (~6s later) -- and
-            # relying on that fallback for the ORDINARY exit path is what
-            # the comment below about the fallback explicitly warns against.
-            # A second SIGTERM landing WHILE this release is running
-            # (double Ctrl-C, `systemctl restart`) must not abort it with
-            # the handle already gone -- release ladders run up to 15s
-            # (systemd-inhibit teardown, the Windows child's stop sequence).
-            # Ignore SIGTERM for the duration of release specifically, not
-            # by leaving `previous_sigterm` in place -- that is usually
-            # SIG_DFL (instant kill), which is the exact failure this
-            # guards against. The outer `finally` below still restores the
-            # real previous handler once release has actually finished.
+            # relying on that fallback for the ORDINARY exit path is the
+            # thing this whole function exists to avoid depending on.
+            #
+            # A second stop signal landing WHILE this release is running
+            # (double Ctrl-C = two SIGINTs, or a second SIGTERM from
+            # `systemctl restart`) must not abort it with the handle
+            # already gone -- release ladders run up to 15s (systemd-inhibit
+            # teardown, the Windows child's stop sequence). Ignore BOTH
+            # signals for the duration of release specifically, not by
+            # leaving whatever handler preceded ours in place: for SIGTERM
+            # that is usually SIG_DFL (instant kill); for SIGINT it is
+            # ordinarily Python's default handler, which raises
+            # KeyboardInterrupt right back into the middle of `release()`
+            # -- verified: two SIGINTs during a release abort it the same
+            # way two SIGTERMs did. The outer `finally` below still
+            # restores the real previous handlers once release has
+            # actually finished.
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             holder.release()
     finally:
-        # Restore whatever SIGTERM handling this process had before —
-        # `_cmd_awake` runs inside the same interpreter as every other
+        # Restore whatever SIGTERM/SIGINT handling this process had before
+        # -- `_cmd_awake` runs inside the same interpreter as every other
         # crr subcommand and, in tests, the same interpreter as the rest
-        # of the suite. Leaving a raise-on-SIGTERM handler installed
-        # process-wide after this command returns would be a surprise to
-        # whatever runs next.
+        # of the suite. Leaving a raise-on-SIGTERM handler or an ignored
+        # SIGINT installed process-wide after this command returns would
+        # be a surprise to whatever runs next.
         signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
     return rc
 
 
