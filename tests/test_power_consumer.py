@@ -6,6 +6,9 @@ wiring that finally calls them.
 
 import os
 import signal
+import subprocess
+import sys
+import threading
 
 import pytest
 
@@ -140,6 +143,18 @@ def test_poll_holds_only_what_the_platform_can_do():
 
 
 def test_awake_once_polls_exactly_once_and_exits_zero(tmp_path, monkeypatch, capsys):
+    # --once must still release on the way out, even after a poll that
+    # decided to hold. The hold is a CHILD PROCESS bounded by THIS
+    # process's lifetime, not a durable OS-level reservation --once can
+    # hand off and walk away from. On Linux/macOS that child
+    # (`systemd-inhibit ... sleep infinity` / `caffeinate -i`) is spawned
+    # with stdin=DEVNULL, so it has no liveness channel back to a dead
+    # parent: skipping the release here would orphan it permanently, with
+    # no handle and no visible cause, on every single cron tick. (An
+    # earlier version of this test asserted ["hold"] only, on the theory
+    # that --once should hand a successful hold off to the next tick --
+    # that was measured to leak exactly the orphan described above and
+    # was wrong; release-every-time is correct.)
     holder = _FakeHolder()
     monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
     monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
@@ -150,7 +165,7 @@ def test_awake_once_polls_exactly_once_and_exits_zero(tmp_path, monkeypatch, cap
                                  "interop_timeout_seconds": 5})
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     assert cli.main(["awake", "--once"]) == 0
-    assert [c[0] for c in holder.calls] == ["hold"]
+    assert [c[0] for c in holder.calls] == ["hold", "release"]
 
 
 def test_awake_releases_when_the_loop_is_asked_to_stop(tmp_path, monkeypatch):
@@ -268,3 +283,139 @@ def test_awake_releases_on_a_real_sigterm_not_just_simulated_keyboardinterrupt(
     # _cmd_awake must not leak its SIGTERM handler into the rest of the
     # process once it returns.
     assert signal.getsignal(signal.SIGTERM) is previous_handler
+
+
+def test_awake_once_does_not_orphan_the_holds_child_process(tmp_path, monkeypatch):
+    # Not just the call list: a fake `hold()` that spawns a REAL child
+    # process, mirroring how every platform holder actually works
+    # (`systemd-inhibit ... sleep infinity`, `caffeinate -i`, the Windows
+    # interop child), and a `release()` that tears it down. --once must
+    # leave no such child behind. On Linux/macOS the child's stdin is
+    # already closed (DEVNULL), so it has no liveness channel back to a
+    # dead parent -- an un-released hold here is a PERMANENT orphan, not
+    # merely a delayed cleanup, and this is what caught that: an earlier
+    # version of this loop skipped the release for a successful --once
+    # poll, and this test's process would have still been alive with no
+    # handle left to stop it.
+    class _RealChildHolder:
+        def __init__(self):
+            self.calls = []
+            self.proc = None
+
+        def capabilities(self):
+            return frozenset({"sleep"})
+
+        def hold(self, want, reason):
+            self.calls.append(("hold", want, reason))
+            if self.proc is None:
+                self.proc = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    stdin=subprocess.DEVNULL,
+                )
+
+        def release(self):
+            self.calls.append(("release",))
+            if self.proc is not None:
+                self.proc.terminate()
+                self.proc.wait(timeout=5)
+                self.proc = None
+
+        def held(self):
+            return frozenset({"sleep"}) if self.proc is not None else frozenset()
+
+    holder = _RealChildHolder()
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
+                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
+                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+
+    try:
+        assert cli.main(["awake", "--once"]) == 0
+        assert holder.proc is None, "release() must have cleared its child handle"
+    finally:
+        # Belt-and-braces: if the assertion above ever fails, don't leave
+        # a real process running past this test.
+        if holder.proc is not None:
+            holder.proc.kill()
+            holder.proc.wait(timeout=5)
+
+
+def test_awake_finishes_release_even_when_a_second_sigterm_lands_mid_release(
+    tmp_path, monkeypatch
+):
+    # A second stop signal landing WHILE release() is running (double
+    # Ctrl-C, `systemctl restart` re-sending SIGTERM mid-teardown) must
+    # not abort the release with the hold's handle already gone. Release
+    # ladders run up to 15s (systemd-inhibit teardown, the Windows
+    # child's stop sequence) -- long enough for a second signal to be
+    # realistic. Fixed by ignoring SIGTERM for the duration of the
+    # release path specifically, rather than leaving whatever handler
+    # preceded ours in place -- that is usually SIG_DFL (instant kill),
+    # which is the exact bug this guards against.
+    release_started = threading.Event()
+    release_done = threading.Event()
+    calls = []
+
+    class _SlowReleaseHolder:
+        def capabilities(self):
+            return frozenset({"sleep"})
+
+        def hold(self, want, reason):
+            calls.append(("hold", want, reason))
+
+        def release(self):
+            calls.append(("release-start",))
+            release_started.set()
+            # A stand-in for a slow teardown ladder. Deliberately not
+            # time.sleep: this test also patches cli.time.sleep, and
+            # cli.time IS the real `time` module object (same module in
+            # sys.modules) -- patching cli.time.sleep patches time.sleep
+            # everywhere, including here, which would turn this "sleep"
+            # into another SIGTERM-sender instead of a wait.
+            threading.Event().wait(0.5)
+            calls.append(("release-done",))
+            release_done.set()
+
+        def held(self):
+            return frozenset()
+
+    holder = _SlowReleaseHolder()
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
+                                 "power_poll_seconds": 0, "power_block_max_hours": 12,
+                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    ticks = {"n": 0}
+
+    def fake_sleep(_seconds):
+        ticks["n"] += 1
+        if ticks["n"] >= 2:
+            os.kill(os.getpid(), signal.SIGTERM)   # first stop signal
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+
+    def send_second_sigterm():
+        if release_started.wait(timeout=2):
+            os.kill(os.getpid(), signal.SIGTERM)   # second, mid-release
+
+    sender = threading.Thread(target=send_second_sigterm, daemon=True)
+    sender.start()
+    try:
+        rc = cli.main(["awake"])
+    finally:
+        sender.join(timeout=2)
+        # Belt-and-braces, same reasoning as the other SIGTERM test.
+        signal.signal(signal.SIGTERM, previous_handler)
+
+    assert rc == 0
+    assert release_done.is_set()
+    assert calls[-1] == ("release-done",), calls

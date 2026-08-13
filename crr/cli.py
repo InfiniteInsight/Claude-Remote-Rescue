@@ -664,14 +664,6 @@ def _cmd_awake(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     store = JournalStore(sd)
     rc = 0
-    # Set only after a poll COMPLETES without raising, for --once. A clean
-    # `--once` poll is a handoff to the next cron tick, not an exit from a
-    # service: releasing here would make every cron tick a
-    # hold-then-immediately-drop no-op, defeating the point of holding at
-    # all. Because it is set after `_power_poll_once` returns, a poll that
-    # raises under --once can never reach it, so that path still releases
-    # below — there is no next tick coming from a process that just died.
-    hand_off = False
 
     # SIGTERM -> KeyboardInterrupt. `systemctl --user stop crr-awake` sends
     # SIGTERM, and Python installs a converting handler for SIGINT but NOT
@@ -692,7 +684,6 @@ def _cmd_awake(args: argparse.Namespace) -> int:
                 entries, owners = _power_entries_and_owners(store, probe)
                 _power_poll_once(holder, source, entries, owners, config)
                 if args.once:
-                    hand_off = True
                     break
                 time.sleep(config.get("power_poll_seconds"))
                 config = _load_config()   # re-read: turning it off must not need a restart
@@ -702,15 +693,30 @@ def _cmd_awake(args: argparse.Namespace) -> int:
             print(f"crr awake: {exc}", file=sys.stderr)
             rc = 1
         finally:
-            # LOAD-BEARING. Whatever ends this loop -- stop signal, crash,
-            # a bad poll -- the hold must not outlive it. On Windows the
-            # holder's stdin-EOF fallback would also catch this, but
-            # relying on a fallback for the ordinary path is how the
-            # fallback stops being exercised. The one exception is
-            # `hand_off` (see above): a clean single `--once` poll leaves
-            # the hold standing on purpose.
-            if not hand_off:
-                holder.release()
+            # LOAD-BEARING, unconditionally, INCLUDING a clean --once exit.
+            # The hold is a CHILD PROCESS bounded by this process's
+            # lifetime, not a durable OS-level reservation this process can
+            # walk away from: on Linux/macOS the child
+            # (`systemd-inhibit ... sleep infinity` / `caffeinate -i`) is
+            # spawned with stdin=DEVNULL, so it has NO liveness channel back
+            # to a dead parent and would sit there forever, reparented, with
+            # no handle and no visible cause. Skipping this for --once was
+            # tried and measured to leak exactly that: the child is alive
+            # immediately after --once returns; on Windows/WSL only the
+            # stdin-EOF fallback eventually reaps it (~6s later) -- and
+            # relying on that fallback for the ORDINARY exit path is what
+            # the comment below about the fallback explicitly warns against.
+            # A second SIGTERM landing WHILE this release is running
+            # (double Ctrl-C, `systemctl restart`) must not abort it with
+            # the handle already gone -- release ladders run up to 15s
+            # (systemd-inhibit teardown, the Windows child's stop sequence).
+            # Ignore SIGTERM for the duration of release specifically, not
+            # by leaving `previous_sigterm` in place -- that is usually
+            # SIG_DFL (instant kill), which is the exact failure this
+            # guards against. The outer `finally` below still restores the
+            # real previous handler once release has actually finished.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            holder.release()
     finally:
         # Restore whatever SIGTERM handling this process had before —
         # `_cmd_awake` runs inside the same interpreter as every other
