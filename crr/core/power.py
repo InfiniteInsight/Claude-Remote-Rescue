@@ -58,3 +58,14 @@ def decide(
                             "on battery (power_block_requires_ac is true)")
     plural = "" if live_sessions == 1 else "s"
     return Decision(want, f"crr: {live_sessions} Claude session{plural} live")
+
+
+def unmet(capabilities: frozenset[str], want: frozenset[str]) -> tuple[str, ...]:
+    """What was asked for that this platform cannot deliver.
+
+    Exists so `crr doctor` can state the gap. Holding half of what was
+    requested while reporting success is the failure mode this whole
+    design keeps running into: a hold that succeeds loudly and protects
+    nothing.
+    """
+    return tuple(sorted(want - capabilities))

@@ -5,7 +5,7 @@ testable without a platform. `withheld` exists because "crr is not holding
 anything" is useless to a user without the reason.
 """
 
-from crr.core.power import Decision, decide
+from crr.core.power import Decision, decide, unmet
 
 
 def test_off_holds_nothing():
@@ -75,3 +75,20 @@ def test_decision_is_frozen():
     d = decide(live_sessions=1, on_ac=True, mode="sleep", requires_ac=True)
     with pytest.raises(dataclasses.FrozenInstanceError):
         d.want = frozenset()
+
+
+def test_unmet_is_empty_when_the_platform_can_do_it_all():
+    assert unmet(frozenset({"sleep", "shutdown"}),
+                 frozenset({"sleep", "shutdown"})) == ()
+
+
+def test_unmet_names_what_this_platform_cannot_deliver():
+    # macOS: caffeinate holds sleep, nothing holds shutdown. Doctor must
+    # say so rather than silently holding half of what was asked.
+    assert unmet(frozenset({"sleep"}),
+                 frozenset({"sleep", "shutdown"})) == ("shutdown",)
+
+
+def test_unmet_is_sorted_so_output_is_stable():
+    assert unmet(frozenset(), frozenset({"shutdown", "sleep"})) == (
+        "shutdown", "sleep")
