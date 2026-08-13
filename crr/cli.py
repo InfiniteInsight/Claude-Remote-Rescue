@@ -4022,6 +4022,12 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
             return 2
         if not _run_commands(scheduled_task.delete_task_commands(), "schtasks"):
             print("crr schtasks: task removal FAILED (see above)", file=sys.stderr)
+            # The note prints on the FAILURE path too. A half-removed
+            # install is exactly when a user needs to know which pieces
+            # this command was ever responsible for -- and the keep-awake
+            # loop was never one of them, so they must not go hunting for
+            # a task to remove that does not exist.
+            print(_SCHTASKS_NO_AWAKE)
             return 1
         print("removed watchdog + dashboard Scheduled Tasks")
         print(_SCHTASKS_NO_AWAKE)
@@ -4034,6 +4040,11 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
             return 2
         if not _run_commands(cmds, "schtasks"):
             print("crr schtasks: task creation FAILED (see above)", file=sys.stderr)
+            # Same on the install side, and this is the path that matters
+            # most: a PARTIAL install is the state in which a user is most
+            # likely to assume the missing piece is the keep-awake one and
+            # retry, rather than learning it was never offered here.
+            print(_SCHTASKS_NO_AWAKE)
             return 1
         print("created watchdog + dashboard Scheduled Tasks")
         print(_SCHTASKS_NO_AWAKE)

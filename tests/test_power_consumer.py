@@ -1555,3 +1555,40 @@ def test_power_release_explains_the_schtasks_gap_when_the_stop_fails(
     err = capsys.readouterr().err
     assert "schtasks" in err
     assert "crr awake" in err
+
+
+def test_schtasks_states_the_keep_awake_gap_on_the_install_path(monkeypatch, capsys):
+    # The bare `crr schtasks` print is not where the affected user is --
+    # they are at `--install`, which is the command that leaves them with
+    # a watchdog, a dashboard, and no hold.
+    monkeypatch.setattr(cli, "_load_config", lambda: {
+        "watchdog_interval_seconds": 60, "dashboard_port": 8377})
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/fake/schtasks.exe")
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    assert cli.main(["schtasks", "--install"]) == 0
+    out = capsys.readouterr().out
+    assert "keep-awake" in out and "crr awake" in out
+
+
+def test_schtasks_states_the_keep_awake_gap_even_when_the_install_fails(
+        monkeypatch, capsys):
+    # A PARTIAL install is when a user is most likely to assume the
+    # missing piece is the keep-awake one and retry.
+    monkeypatch.setattr(cli, "_load_config", lambda: {
+        "watchdog_interval_seconds": 60, "dashboard_port": 8377})
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/fake/schtasks.exe")
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    assert cli.main(["schtasks", "--install"]) == 1
+    out = capsys.readouterr().out
+    assert "keep-awake" in out and "crr awake" in out
+
+
+def test_schtasks_states_the_keep_awake_gap_on_the_uninstall_path(
+        monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_load_config", lambda: {
+        "watchdog_interval_seconds": 60, "dashboard_port": 8377})
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/fake/schtasks.exe")
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    assert cli.main(["schtasks", "--uninstall"]) == 0
+    out = capsys.readouterr().out
+    assert "keep-awake" in out and "crr awake" in out
