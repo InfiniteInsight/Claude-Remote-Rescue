@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from crr.adapters._proc import (FORCE_WAIT_SECONDS, RELEASE_WAIT_SECONDS,
@@ -67,6 +68,31 @@ LOGIND_DROPIN_DIRS = (
     "run/systemd/logind.conf.d",
     "usr/lib/systemd/logind.conf.d",
 )
+
+# How long `hold()` will wait for a just-spawned child to prove it died
+# (final fix wave, 2026-08-13).
+#
+# Measured on this host (WSL, no logind session), 5/5 runs: the `poll()`
+# issued immediately after `Popen` returns None EVERY time, and the denied
+# `systemd-inhibit` then exits 1 about 11ms later. A single immediate poll
+# therefore never caught the denial -- `held()`, called microseconds later
+# by `_stamp_power_state`, still said {"sleep"} for a hold that lasted
+# 11ms, and every subsequent poll re-lost the same race because `hold()`
+# respawns. crr stamped, printed and doctored a permanent green "holding:
+# sleep" over nothing.
+#
+# 250ms is ~20x the measured exit. It is a CEILING, not a cost: the loop
+# below returns the instant the child exits, so the failure path pays
+# ~11ms and only a genuinely successful hold (a child that never exits)
+# pays the full budget -- once per `power_poll_seconds`, which defaults to
+# 30. `proc.wait(timeout=...)` would make the FAILURE path pay it too.
+#
+# A module constant, not a config key, for the same reason
+# `_proc.RELEASE_WAIT_SECONDS`/`FORCE_WAIT_SECONDS` are: this is
+# mechanical timing internal to one adapter, measured rather than chosen,
+# with no policy for a user to express.
+SPAWN_SETTLE_SECONDS = 0.25
+_SPAWN_POLL_SECONDS = 0.005
 
 _LID_RE = re.compile(
     r"^\s*LidSwitchIgnoreInhibited\s*=\s*(\S+)", re.IGNORECASE | re.MULTILINE
@@ -217,9 +243,23 @@ class LinuxPowerHolder:
             stderr=subprocess.PIPE,
         )
         self._held = effective_fs
-        # Poll once: a denied inhibit is usually already gone. It often is
-        # not scheduled yet either, which is why held() reaps too rather
-        # than trusting this one call.
+        # Wait, briefly and boundedly, for the child to prove it died.
+        #
+        # This used to be ONE immediate poll, on the theory that "a denied
+        # inhibit is usually already gone" and that `held()` reaping later
+        # would cover the rest. Measured false on this host: the immediate
+        # poll returns None 5/5 times and the denial lands ~11ms later,
+        # while `held()` is called MICROSECONDS later by
+        # `_stamp_power_state` -- so "later" never arrived and the state
+        # file recorded a hold that had already failed. `held()` still
+        # reaps (nothing here is removed), but it can no longer be the
+        # only thing standing between a denied inhibit and a green
+        # "holding: sleep".
+        deadline = time.monotonic() + SPAWN_SETTLE_SECONDS
+        while self._proc is not None and self._proc.poll() is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_SPAWN_POLL_SECONDS)
         self._reap_if_dead()
 
     def _reap_if_dead(self) -> None:
