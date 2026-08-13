@@ -84,7 +84,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 16
+    # v17 (fix round 1, 2026-08-13): power_state_max_age_multiplier.
+    assert cfg.CONFIG_DEFAULTS_VERSION == 17
 
 
 def test_context_pressure_fraction_defaults():
@@ -238,5 +239,12 @@ def test_power_block_keys_exist_with_safe_defaults():
     assert cfg.DEFAULTS["power_poll_seconds"] == 30
 
 
+def test_power_state_max_age_multiplier_default():
+    # fix round 1 (2026-08-13): the staleness threshold for the awake
+    # loop's cross-process state file — a named prior, not a bare `3` in
+    # cli._power_report.
+    assert cfg.DEFAULTS["power_state_max_age_multiplier"] == 3
+
+
 def test_config_defaults_version_covers_the_power_keys():
-    assert cfg.CONFIG_DEFAULTS_VERSION >= 16
+    assert cfg.CONFIG_DEFAULTS_VERSION >= 17

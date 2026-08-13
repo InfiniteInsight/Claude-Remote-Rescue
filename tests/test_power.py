@@ -5,7 +5,8 @@ testable without a platform. `withheld` exists because "crr is not holding
 anything" is useless to a user without the reason.
 """
 
-from crr.core.power import Decision, decide, unmet
+from crr.core.power import (Decision, POWER_SNAPSHOT_VERSION, Report, decide,
+                            interpret, snapshot, unmet)
 
 
 def test_off_holds_nothing():
@@ -106,3 +107,71 @@ def test_ports_declare_the_power_protocols():
         "self", "want", "reason"]
     assert list(inspect.signature(ports.PowerSource.on_ac).parameters) == [
         "self"]
+
+
+# --- cross-process visibility: snapshot() / interpret() (fix round 1, ------
+# --- 2026-08-13) -------------------------------------------------------
+#
+# `crr power`/`crr doctor` run in a process separate from `crr awake` and
+# have no handle to what its holder holds -- constructing a fresh holder
+# and asking `.held()` measured as the actual bug (a real `crr awake`
+# holding, sampled from a separate `crr power`, reported "holding:
+# nothing"). These tests cover the PURE interpretation half of the fix:
+# turning a raw (possibly absent/orphaned/stale) snapshot dict into an
+# honest Report, with no I/O and no clock of its own.
+
+def test_snapshot_is_json_shaped_and_versioned():
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    assert data["v"] == POWER_SNAPSHOT_VERSION
+    assert data["held"] == ["sleep"]  # a sorted list, not a frozenset -- JSON has no set type
+    assert data["reason"] == "crr: 1 Claude session live"
+    assert data["pid"] == 4242
+    assert data["updated"] == 1000.0
+
+
+def test_interpret_missing_file_is_a_known_nothing_not_an_unknown():
+    # No loop has EVER reported -- a fact, not a guess.
+    r = interpret(None, now=1000.0, pid_alive=False, max_age_seconds=90)
+    assert r == Report(frozenset(), "no keep-awake loop has reported", None)
+
+
+def test_interpret_dead_writer_is_unknown_never_nothing():
+    # The exact conflation this fix exists to end: a dead writer's last
+    # claim must not be read as "released".
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    r = interpret(data, now=1001.0, pid_alive=False, max_age_seconds=90)
+    assert r.unknown is not None
+    assert r.held == frozenset()  # never assert what a dead writer claimed
+    assert r.reason is None
+
+
+def test_interpret_stale_timestamp_is_unknown_never_nothing():
+    # A wedged loop (hung, blocked) stops polling without dying -- a live
+    # pid alone is not proof the last claim still holds.
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    r = interpret(data, now=1000.0 + 200, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "200" in r.unknown
+    assert r.held == frozenset()
+
+
+def test_interpret_fresh_alive_report_is_trusted():
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r == Report(frozenset({"sleep"}), "crr: 1 Claude session live", None)
+
+
+def test_interpret_fresh_alive_report_with_nothing_held_is_trusted_too():
+    # A live, current report saying "nothing" IS a positive claim (crr
+    # really is holding nothing right now) -- distinct from `unknown`.
+    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0)
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r == Report(frozenset(), "power_block is off", None)
+
+
+def test_interpret_exactly_at_the_age_boundary_is_still_trusted():
+    # age == max_age_seconds is not YET stale -- only strictly older is.
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    r = interpret(data, now=1090.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is None
+    assert r.held == frozenset({"sleep"})

@@ -14,6 +14,8 @@ import time
 import pytest
 
 from crr import cli
+from crr.adapters import power_state
+from crr.core import power
 from crr.core.config import DEFAULTS
 
 
@@ -492,17 +494,33 @@ def test_awake_finishes_release_even_when_a_second_sigint_lands_mid_release(tmp_
     assert "release-done" in output, output
 
 
+# Fix round 1 (2026-08-13): `crr power`/`crr doctor` used to ask a
+# freshly-constructed holder `.held()` for what is held. Measured on this
+# host: with a REAL `crr awake` holding (a live holder-child pid), a
+# separate `crr power` process printed "holding: nothing" -- `.held()`
+# only ever answers about a child THAT process's holder spawned, never a
+# separate process's. The fix is a state file the awake loop stamps after
+# every poll (crr.core.power.snapshot/interpret,
+# crr.adapters.power_state); these tests write that file directly rather
+# than relying on a holder's in-memory `.held()`, because that in-memory
+# state is exactly what a separate reader process can never see.
+
+def _POWER_CFG(**over):
+    base = {"power_block": "sleep", "power_block_requires_ac": True,
+            "power_poll_seconds": 30, "power_block_max_hours": 12,
+            "interop_timeout_seconds": 5, "power_state_max_age_multiplier": 3}
+    base.update(over)
+    return base
+
+
 def test_power_reports_what_is_held_and_why(tmp_path, monkeypatch, capsys):
-    holder = _FakeHolder()
-    holder.hold(frozenset({"sleep"}), "crr: 2 Claude sessions live")
-    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
     monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_load_config",
-                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
-                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
-                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 2 Claude sessions live", os.getpid(), time.time()))
     assert cli.main(["power"]) == 0
     out = capsys.readouterr().out
     assert "sleep" in out
@@ -512,16 +530,13 @@ def test_power_names_the_release_command_whenever_something_is_held(
         tmp_path, monkeypatch, capsys):
     # The block must never be a trap: if crr is holding the machine
     # awake, the way to stop it has to be on screen.
-    holder = _FakeHolder()
-    holder.hold(frozenset({"sleep"}), "r")
-    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
     monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_load_config",
-                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
-                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
-                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "r", os.getpid(), time.time()))
     cli.main(["power"])
     out = capsys.readouterr().out
     assert "crr power --release" in out or "stop" in out
@@ -529,15 +544,17 @@ def test_power_names_the_release_command_whenever_something_is_held(
 
 def test_power_reports_the_withheld_reason_when_nothing_is_held(
         tmp_path, monkeypatch, capsys):
-    # "crr is holding nothing" is useless without the reason.
+    # "crr is holding nothing" is useless without the reason -- and that
+    # reason has to come from what the loop actually recorded (the state
+    # file), not from this separate process recomputing its own guess.
     monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
     monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(False))
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_load_config",
-                        lambda: {"power_block": "sleep", "power_block_requires_ac": True,
-                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
-                                 "interop_timeout_seconds": 5})
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset(), "on battery (power_block_requires_ac is true)",
+        os.getpid(), time.time()))
     cli.main(["power"])
     assert "battery" in capsys.readouterr().out
 
@@ -545,16 +562,15 @@ def test_power_reports_the_withheld_reason_when_nothing_is_held(
 def test_power_states_capabilities_this_platform_lacks(tmp_path, monkeypatch, capsys):
     # macOS cannot block a shutdown. Silently holding half of what was
     # asked, and reporting success, is the failure this project keeps
-    # finding.
+    # finding. `unmet` is computed live (unaffected by the state-file
+    # fix -- `capabilities()`/`decide()` do no I/O and never depended on
+    # `.held()`), so no state file is needed for this one.
     monkeypatch.setattr(cli, "_power_holder",
                         lambda *a, **k: _FakeHolder(caps=frozenset({"sleep"})))
     monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_load_config",
-                        lambda: {"power_block": "sleep+shutdown",
-                                 "power_block_requires_ac": True,
-                                 "power_poll_seconds": 30, "power_block_max_hours": 12,
-                                 "interop_timeout_seconds": 5})
+                        lambda: _POWER_CFG(power_block="sleep+shutdown"))
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     cli.main(["power"])
     out = capsys.readouterr().out
@@ -573,15 +589,281 @@ def test_power_release_stops_the_unit_rather_than_pretending(
     assert ran and "stop" in " ".join(ran[0])
 
 
-def test_doctor_names_what_power_is_holding(tmp_path, monkeypatch, capsys):
-    # `crr doctor` must never omit an active hold — the same fact `crr
-    # power` prints, on the checklist a user actually runs.
-    holder = _FakeHolder()
-    holder.hold(frozenset({"sleep"}), "crr: 1 Claude session live")
-    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: holder)
+def test_power_names_both_the_live_and_the_state_file_reason_when_nothing_is_held(
+        tmp_path, monkeypatch, capsys):
+    # Regression pin (fix round 1, review pass 2): the original Task 6
+    # STOP condition on a `power_block=off` host expected
+    # "holding: nothing — power_block is off". Moving the "nothing held"
+    # source to the state file briefly LOST that fact (it printed only
+    # "no keep-awake loop has reported", never naming the config). Both
+    # must appear: the live reason answers "why isn't crr holding
+    # anything right now", the state-file reason answers "has the loop
+    # ever run".
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
     monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG(power_block="off"))
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    # No power_state.write() here -- this is the real default state on a
+    # fresh host: `crr-awake` has never run.
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "holding: nothing — power_block is off / no keep-awake loop has reported" in out
+
+
+def test_power_does_not_double_print_when_live_and_state_file_reasons_agree(
+        tmp_path, monkeypatch, capsys):
+    # `crr awake` last wrote the SAME reason `decide()` computes live right
+    # now (the ordinary steady-state case: an up-to-date loop and a fresh
+    # `crr power` call agree). The two must collapse into one clause, not
+    # print the same sentence twice joined by " / ".
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG(power_block="off"))
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset(), "power_block is off", os.getpid(), time.time()))
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "holding: nothing — power_block is off" in out
+    assert "power_block is off / power_block is off" not in out
+
+
+def test_power_state_pid_zero_is_unknown_not_a_claim(tmp_path, monkeypatch, capsys):
+    # A corrupt/truncated power.json carrying pid 0 alongside a
+    # fresh-looking timestamp must not license a positive hold claim:
+    # os.kill(0, 0) targets the CALLER's own process group and would read
+    # as "alive" if not guarded.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", 0, time.time()))
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "unknown" in out.lower()
+    assert "holding: sleep" not in out
+    assert "holding: nothing" not in out
+
+
+def test_power_prints_unknown_when_the_writer_is_dead(tmp_path, monkeypatch, capsys):
+    # A crashed/killed `crr awake` leaves its last snapshot on disk.
+    # Reading that as "holding: nothing" would be a false all-clear: once
+    # the writer is gone, whatever the OS actually did with that last hold
+    # is genuinely unknown, not "released".
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    time.sleep(0.05)  # give the OS a beat to fully clear the pid
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time()))
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "unknown" in out.lower()
+    assert "holding: nothing" not in out  # must not read as the all-clear
+
+
+def test_power_prints_unknown_when_the_last_report_is_stale(tmp_path, monkeypatch, capsys):
+    # A wedged loop (hung, blocked on I/O) stops polling without dying --
+    # `is_alive` alone would still call it trustworthy. The timestamp is
+    # what catches that.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: _POWER_CFG(power_poll_seconds=10,
+                                           power_state_max_age_multiplier=3))
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live",
+        os.getpid(), time.time() - 1000))  # far past 10 * 3 = 30s
+    cli.main(["power"])
+    out = capsys.readouterr().out
+    assert "unknown" in out.lower()
+    assert "holding: nothing" not in out
+
+
+def test_doctor_names_what_power_is_holding(tmp_path, monkeypatch, capsys):
+    # `crr doctor` must never omit an active hold, and the line must be
+    # internally consistent. The regression this pins: an earlier version
+    # of this test patched neither `_load_config` nor
+    # `_power_entries_and_owners`, so doctor fell through to real defaults
+    # (mode "off") while a `_FakeHolder` still claimed "sleep" was held --
+    # measured output was "holding sleep — " with nothing after the dash,
+    # and this test's own assertions passed anyway. Every input is pinned
+    # here so the line asserted is the one a real hold actually produces.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
     rc = cli.main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "power hold" in out and "sleep" in out
+    # The exact line, not just a substring match on either half -- the
+    # bug this pins was each half individually present while their
+    # combination was malformed ("holding sleep — " with nothing after).
+    assert ("  [ok  ] power hold — holding sleep — crr: 1 Claude session live; "
+            "release with: crr power --release") in out
+
+
+def test_doctor_names_unknown_when_the_writer_is_dead(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    time.sleep(0.05)
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time()))
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "power hold" in out
+    assert "unknown" in out.lower()
+    assert "holding nothing" not in out
+
+
+# --- the actual bug, cross-process (fix round 1, 2026-08-13) ---------------
+#
+# Every test above patches `cli._power_holder`/`cli._power_source` IN THIS
+# SAME PROCESS, which is exactly the shape that missed the original bug:
+# an in-process fake can't demonstrate that a SEPARATE process's holder is
+# invisible to this one, because there was only ever one holder object the
+# whole test ever touched. The review that caught this ran a real `crr
+# awake` and measured a live holder-child pid while a separate `crr power`
+# printed "holding: nothing". These two harnesses reproduce that exactly:
+# two genuinely different `subprocess.Popen` processes, agreeing only
+# through the state file on disk -- nothing shared in memory.
+
+_AWAKE_CROSS_PROCESS_HARNESS = '''\
+import pathlib
+from crr import cli
+
+
+class _FakeSource:
+    def on_ac(self):
+        return True
+
+
+class _HoldingHolder:
+    """Stands in for a real systemd-inhibit/caffeinate/Windows holder:
+    `.held()` answers from ITS OWN in-memory state, exactly like every
+    real adapter -- the property that makes it invisible cross-process."""
+
+    def __init__(self):
+        self._held = frozenset()
+
+    def capabilities(self):
+        return frozenset({{"sleep"}})
+
+    def hold(self, want, reason):
+        self._held = want
+        print("hold", flush=True)
+
+    def release(self):
+        self._held = frozenset()
+        print("release", flush=True)
+
+    def held(self):
+        return self._held
+
+
+cli._power_holder = lambda *a, **k: _HoldingHolder()
+cli._power_source = lambda *a, **k: _FakeSource()
+cli.state_dir.state_dir = lambda: pathlib.Path({tmp_path!r})
+cli._load_config = lambda: {{
+    "power_block": "sleep",
+    "power_block_requires_ac": True,
+    "power_poll_seconds": {poll_seconds},
+    "power_block_max_hours": 12,
+    "interop_timeout_seconds": 5,
+    "power_state_max_age_multiplier": 3,
+}}
+cli._power_entries_and_owners = lambda *a, **k: ([{{"pid": 1}}], {{1: [11]}})
+
+cli.main(["awake"])
+'''
+
+_POWER_CROSS_PROCESS_HARNESS = '''\
+import pathlib
+import sys
+from crr import cli
+
+
+class _FakeSource:
+    def on_ac(self):
+        return True
+
+
+class _UnusedHolder:
+    """`crr power` still constructs A holder (for `.capabilities()`, used
+    by `unmet`) -- but this one is never `.hold()`-ed or asked `.held()`,
+    proving the reported hold came from the state file, not from here."""
+
+    def capabilities(self):
+        return frozenset({{"sleep", "shutdown"}})
+
+
+cli._power_holder = lambda *a, **k: _UnusedHolder()
+cli._power_source = lambda *a, **k: _FakeSource()
+cli.state_dir.state_dir = lambda: pathlib.Path({tmp_path!r})
+cli._load_config = lambda: {{
+    "power_block": "sleep",
+    "power_block_requires_ac": True,
+    "power_poll_seconds": 30,
+    "power_block_max_hours": 12,
+    "interop_timeout_seconds": 5,
+    "power_state_max_age_multiplier": 3,
+}}
+cli._power_entries_and_owners = lambda *a, **k: ([], {{}})
+
+rc = cli.main(["power"])
+sys.exit(rc)
+'''
+
+
+def test_power_sees_a_real_separate_awake_process_holding(tmp_path):
+    # The actual bug, reproduced: a genuinely separate `crr awake` process
+    # holding, sampled by a genuinely separate `crr power` process. Before
+    # the fix this printed "holding: nothing" -- the failure an in-process
+    # fake cannot exhibit, because it never has two processes to fail
+    # across.
+    awake_script = tmp_path / "run_awake.py"
+    awake_script.write_text(_AWAKE_CROSS_PROCESS_HARNESS.format(
+        tmp_path=str(tmp_path), poll_seconds=60))
+    awake_proc = subprocess.Popen(
+        [sys.executable, str(awake_script)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    output_lines = []
+    try:
+        assert _wait_for_marker(awake_proc, "hold", output_lines, timeout=5), (
+            f"awake child never reached its first poll; output so far: {output_lines}")
+
+        power_script = tmp_path / "run_power.py"
+        power_script.write_text(
+            _POWER_CROSS_PROCESS_HARNESS.format(tmp_path=str(tmp_path)))
+        power_result = subprocess.run(
+            [sys.executable, str(power_script)],
+            capture_output=True, text=True, timeout=10,
+        )
+    finally:
+        awake_proc.terminate()
+        awake_proc.wait(timeout=5)
+
+    assert power_result.returncode == 0, power_result.stdout + power_result.stderr
+    out = power_result.stdout
+    assert "sleep" in out
+    assert "holding: nothing" not in out
+    assert "unknown" not in out.lower()

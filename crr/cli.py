@@ -41,7 +41,7 @@ from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters import (power_hold_linux, power_hold_macos,
-                          power_hold_windows, power_source)
+                          power_hold_windows, power_source, power_state)
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import deploy
@@ -652,6 +652,23 @@ def _power_entries_and_owners(store, probe):
     return entries, owners
 
 
+def _stamp_power_state(sd: Path, holder, decision: power.Decision) -> None:
+    """Record what THIS process's holder actually holds, for a reader in a
+    SEPARATE `crr power`/`crr doctor` process (fix round 1, 2026-08-13).
+
+    `holder.held()` is only ever trustworthy from inside the process that
+    owns the hold — a fresh holder built by `crr power` has no handle to
+    THIS one and would answer about a child it never spawned. That gap
+    measured as the actual bug: a real `crr awake` holding, sampled from a
+    separate `crr power`, reported "holding: nothing" while the hold was
+    genuinely active. This is the one place with the truth, so this is
+    the one place that writes it down.
+    """
+    held = holder.held()
+    reason = decision.reason if held else (decision.withheld or "no reason recorded")
+    power_state.write(sd, power.snapshot(held, reason, os.getpid(), time.time()))
+
+
 def _cmd_awake(args: argparse.Namespace) -> int:
     """[service] Hold the machine awake while a Claude session is live.
 
@@ -699,7 +716,8 @@ def _cmd_awake(args: argparse.Namespace) -> int:
             while True:
                 probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
                 entries, owners = _power_entries_and_owners(store, probe)
-                _power_poll_once(holder, source, entries, owners, config)
+                decision = _power_poll_once(holder, source, entries, owners, config)
+                _stamp_power_state(sd, holder, decision)
                 if args.once:
                     break
                 time.sleep(config.get("power_poll_seconds"))
@@ -741,6 +759,13 @@ def _cmd_awake(args: argparse.Namespace) -> int:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             holder.release()
+            # Same finally as the release, on purpose: a clean stop (or a
+            # crash caught above) must not leave a state file describing a
+            # hold that no longer exists — that would be the exact
+            # "unknown becomes a positive claim" failure this file exists
+            # to prevent, just moved to the OFF side instead of the ON
+            # side.
+            power_state.clear(sd)
     finally:
         # Restore whatever SIGTERM/SIGINT handling this process had before
         # -- `_cmd_awake` runs inside the same interpreter as every other
@@ -751,6 +776,70 @@ def _cmd_awake(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
     return rc
+
+
+def _power_report(sd: Path, config: cfg.Config) -> power.Report:
+    """What crr is ACTUALLY holding, read from the awake loop's own
+    cross-process state file — never by constructing a fresh holder and
+    asking it `held()` (fix round 1, 2026-08-13: that measured as the
+    bug — a fresh holder in `crr power`'s own process has no handle to a
+    hold a SEPARATE `crr awake` process owns, and reported "holding:
+    nothing" while a real hold was active).
+
+    Staleness is judged against `power_poll_seconds *
+    power_state_max_age_multiplier`: the loop is expected to restamp on
+    every poll, so a report older than a few missed polls is exactly the
+    "wedged loop" case `interpret()` turns into UNKNOWN rather than a
+    trusted "nothing held".
+    """
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    data = power_state.read(sd)
+    pid_alive = False
+    if data is not None:
+        writer_pid = data.get("pid")
+        # >0, not just int: os.kill(0, 0) targets THIS process's own
+        # group and os.kill(-N, 0) a process GROUP, both of which read as
+        # "alive" — a corrupt/truncated file carrying pid 0 (or negative)
+        # alongside a fresh-looking timestamp must not let a positive
+        # hold claim through on garbage.
+        if isinstance(writer_pid, int) and writer_pid > 0:
+            pid_alive = probe.is_alive(writer_pid)
+    max_age = config.get("power_poll_seconds") * config.get("power_state_max_age_multiplier")
+    return power.interpret(data, time.time(), pid_alive, max_age)
+
+
+def _nothing_held_reason(report: power.Report, withheld: str | None) -> str:
+    """Why nothing is held, for the "holding: nothing" line.
+
+    ``withheld`` is the LIVE `decide()` answer to "why isn't crr holding
+    anything for me right now" (e.g. "power_block is off") — computed
+    fresh in THIS process, unlike `held()`, so it costs nothing to trust.
+    It is usually the more useful of the two facts and goes first. The
+    state file's own ``report.reason`` (e.g. "no keep-awake loop has
+    reported") is appended when it says something different, so neither
+    fact gets lost — dropping the live reason here was a regression fix
+    round 1 caught: the original STOP condition on a `power_block=off`
+    host expected to see "power_block is off" and briefly stopped naming
+    it once the state file became the only source consulted.
+    """
+    reasons = [r for r in (withheld, report.reason) if r]
+    deduped = list(dict.fromkeys(reasons))
+    return " / ".join(deduped) if deduped else "no reason recorded"
+
+
+def _print_power_report(report: power.Report, withheld: str | None) -> None:
+    """Render a Report for `crr power`.
+
+    ``unknown`` and "holding nothing" must never look alike on screen —
+    that conflation IS the bug this whole mechanism exists to end.
+    """
+    if report.unknown:
+        print(f"holding: unknown — {report.unknown}")
+    elif report.held:
+        print(f"holding: {', '.join(sorted(report.held))} — {report.reason}")
+        print("release with: crr power --release")
+    else:
+        print(f"holding: nothing — {_nothing_held_reason(report, withheld)}")
 
 
 def _cmd_power(args: argparse.Namespace) -> int:
@@ -773,9 +862,17 @@ def _cmd_power(args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr power: {exc}", file=sys.stderr)
         return 2
+    sd = state_dir.state_dir()
+
+    # `unmet`/`withheld` are platform-capability and live-config questions,
+    # independent of whether a hold is active right now — safe to compute
+    # here (unlike `held()`, `decide()`/`capabilities()` do no I/O and
+    # answer about THIS process's own inputs, not another process's
+    # child), and computed BEFORE the report print so its `withheld` can
+    # be folded into the "holding: nothing" line.
     source = _power_source(system, config.get("interop_timeout_seconds"))
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
-    store = JournalStore(state_dir.state_dir())
+    store = JournalStore(sd)
     entries, owners = _power_entries_and_owners(store, probe)
     live = _live_claude_count(entries, owners)
     requires_ac = bool(config.get("power_block_requires_ac"))
@@ -783,12 +880,9 @@ def _cmd_power(args: argparse.Namespace) -> int:
     decision = power.decide(live_sessions=live, on_ac=on_ac,
                             mode=str(config.get("power_block")),
                             requires_ac=requires_ac)
-    held = holder.held()
-    if held:
-        print(f"holding: {', '.join(sorted(held))} — {decision.reason}")
-        print("release with: crr power --release")
-    else:
-        print(f"holding: nothing — {decision.withheld or 'no reason recorded'}")
+
+    _print_power_report(_power_report(sd, config), decision.withheld)
+
     missing = power.unmet(holder.capabilities(), decision.want)
     if missing:
         print(f"unavailable on this platform: {', '.join(missing)}")
@@ -936,11 +1030,17 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         config = cfg.Config()
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
 
-    # Power hold (spec 2026-08-12, Task 6). Needs `config` (just resolved
-    # above), so this can't sit right next to the boot-identity check —
-    # what matters is that `crr doctor` never omits an active hold, not
-    # the exact position. Same three facts `crr power` prints: held,
-    # withheld, and — the point macOS exists to prove — unavailable.
+    # Power hold (spec 2026-08-12, Task 6; state-file read fixed round 1,
+    # 2026-08-13). Needs `config` (just resolved above), so this can't sit
+    # right next to the boot-identity check — what matters is that `crr
+    # doctor` never omits an active hold, not the exact position. Same
+    # facts `crr power` prints: held/unknown, withheld, and — the point
+    # macOS exists to prove — unavailable. `held`/`reason` come from the
+    # awake loop's cross-process state file (`_power_report`), never from
+    # asking a freshly-built holder to `held()` — a holder doctor
+    # constructs here has no handle to a hold a SEPARATE `crr awake`
+    # process owns, and asking it anyway is the exact bug this file exists
+    # to prevent.
     power_system = platform.system()
     power_wsl = host.is_wsl()
     try:
@@ -949,6 +1049,9 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         _check("power hold", False, str(exc))
     else:
+        # Computed BEFORE the report check (unlike Task 6's original
+        # order) so its `withheld` can be folded into "holding nothing" —
+        # same fix, same reason, as `_cmd_power`.
         power_probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
         power_entries, power_owners = _power_entries_and_owners(store, power_probe)
         power_live = _live_claude_count(power_entries, power_owners)
@@ -959,14 +1062,19 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
             live_sessions=power_live, on_ac=power_on_ac,
             mode=str(config.get("power_block")), requires_ac=power_requires_ac,
         )
-        power_held = power_holder.held()
-        if power_held:
+
+        power_report = _power_report(sd, config)
+        if power_report.unknown:
+            _check("power hold", False, f"unknown — {power_report.unknown}")
+        elif power_report.held:
             _check("power hold", True,
-                   f"holding {', '.join(sorted(power_held))} — {power_decision.reason}; "
+                   f"holding {', '.join(sorted(power_report.held))} — {power_report.reason}; "
                    "release with: crr power --release")
         else:
             _check("power hold", True,
-                   f"holding nothing — {power_decision.withheld or 'no reason recorded'}")
+                   f"holding nothing — "
+                   f"{_nothing_held_reason(power_report, power_decision.withheld)}")
+
         power_missing = power.unmet(power_holder.capabilities(), power_decision.want)
         if power_missing:
             _check("power hold capabilities", False,
