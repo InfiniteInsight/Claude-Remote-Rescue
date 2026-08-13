@@ -11,6 +11,8 @@ import pytest
 
 from crr.adapters.power_source import (MacPowerSource, SysfsPowerSource,
                                        _parse_pmset)
+from crr.adapters.power_hold_linux import (LinuxPowerHolder, inhibit_argv,
+                                           lid_is_exempt)
 
 
 def _supply(root: Path, name: str, **files: str) -> None:
@@ -77,3 +79,83 @@ def test_a_device_whose_type_is_unreadable_is_unknown_not_mains(tmp_path):
 ])
 def test_pmset_parsing(text, expected):
     assert _parse_pmset(text) is expected
+
+
+def test_inhibit_asks_for_sleep_not_idle():
+    # `idle` inhibits logind's IdleAction, which defaults to `ignore` — it
+    # would hold successfully and protect NOTHING. `sleep` is what GNOME
+    # and KDE's idle-suspend actually goes through. This is the opposite
+    # of the obvious choice; see the spec before "fixing" it.
+    argv = inhibit_argv(frozenset({"sleep"}), "crr: 2 Claude sessions live")
+    what = argv[argv.index("--what") + 1] if "--what" in argv else ""
+    joined = " ".join(argv)
+    assert "sleep" in what, f"must inhibit sleep, got {joined}"
+    assert "idle" not in what, (
+        "idle inhibits IdleAction, which defaults to ignore — a hold that "
+        f"protects nothing. Got {joined}")
+
+
+def test_inhibit_adds_shutdown_only_when_asked():
+    both = inhibit_argv(frozenset({"sleep", "shutdown"}), "r")
+    what = both[both.index("--what") + 1]
+    assert set(what.split(":")) == {"sleep", "shutdown"}
+
+
+def test_inhibit_is_block_mode_and_carries_the_reason():
+    argv = inhibit_argv(frozenset({"sleep"}), "crr: 1 Claude session live")
+    assert argv[0] == "systemd-inhibit"
+    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "block"
+    assert "crr: 1 Claude session live" in argv
+
+
+@pytest.mark.parametrize("conf,exempt", [
+    ("", True),                                    # unset -> default yes
+    ("#LidSwitchIgnoreInhibited=yes\n", True),     # commented -> default
+    ("LidSwitchIgnoreInhibited=yes\n", True),
+    ("LidSwitchIgnoreInhibited=no\n", False),
+    ("[Login]\nLidSwitchIgnoreInhibited = no\n", False),
+])
+def test_lid_exemption_is_read_not_assumed(conf, exempt):
+    assert lid_is_exempt(conf) is exempt
+
+
+def test_holder_refuses_to_block_sleep_when_the_lid_is_not_exempt(tmp_path):
+    # The builder's hard requirement is that closing the lid always
+    # sleeps. On a host that has turned the default off, a sleep lock
+    # would break that, so crr withholds instead.
+    conf = tmp_path / "logind.conf"
+    conf.write_text("LidSwitchIgnoreInhibited=no\n", encoding="utf-8")
+    spawned = []
+    holder = LinuxPowerHolder(logind_conf=conf,
+                              spawn=lambda argv, **kw: spawned.append(argv))
+    holder.hold(frozenset({"sleep"}), "r")
+    assert spawned == [], "blocked sleep on a host where that blocks the lid"
+    assert holder.held() == frozenset()
+
+
+def test_holder_still_blocks_shutdown_when_the_lid_is_not_exempt(tmp_path):
+    # Only the sleep half is unsafe there; shutdown is unaffected by lid
+    # handling, so withholding it too would be over-correction.
+    conf = tmp_path / "logind.conf"
+    conf.write_text("LidSwitchIgnoreInhibited=no\n", encoding="utf-8")
+    spawned = []
+
+    class _P:
+        def poll(self): return None
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+
+    def _spawn(argv, **kw):
+        spawned.append(argv)
+        return _P()
+
+    holder = LinuxPowerHolder(logind_conf=conf, spawn=_spawn)
+    holder.hold(frozenset({"sleep", "shutdown"}), "r")
+    assert holder.held() == frozenset({"shutdown"})
+    what = spawned[0][spawned[0].index("--what") + 1]
+    assert what == "shutdown"
+
+
+def test_capabilities_are_both_on_linux(tmp_path):
+    holder = LinuxPowerHolder(logind_conf=tmp_path / "absent.conf")
+    assert holder.capabilities() == frozenset({"sleep", "shutdown"})
