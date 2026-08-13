@@ -20,6 +20,11 @@ from crr.adapters.power_hold_macos import MacPowerHolder, caffeinate_argv
 from crr.adapters.power_hold_windows import (WindowsPowerHolder,
                                              holder_argv, holder_script)
 
+from crr import cli as _cli
+from crr.adapters.power_hold_linux import LinuxPowerHolder as _L
+from crr.adapters.power_hold_macos import MacPowerHolder as _M
+from crr.adapters.power_hold_windows import WindowsPowerHolder as _W
+
 
 def _supply(root: Path, name: str, **files: str) -> None:
     d = root / name
@@ -408,3 +413,31 @@ def test_a_stdin_eof_child_exits_promptly():
                       "import sys; sys.stdin.read()"], stdin=_sp.PIPE)
     proc.stdin.close()
     assert proc.wait(timeout=10) == 0
+
+
+def test_wsl_selects_the_windows_holder_despite_reporting_linux():
+    # platform.system() is "Linux" on WSL, so the obvious detect()-shaped
+    # selection picks systemd-inhibit — which runs INSIDE the VM and
+    # cannot affect the Windows host's power state at all. It would hold
+    # successfully and protect nothing.
+    assert isinstance(_cli._power_holder("Linux", wsl=True), _W)
+
+
+def test_native_linux_selects_systemd_inhibit():
+    assert isinstance(_cli._power_holder("Linux", wsl=False), _L)
+
+
+def test_macos_selects_caffeinate():
+    assert isinstance(_cli._power_holder("Darwin", wsl=False), _M)
+
+
+def test_an_unsupported_platform_raises_rather_than_pretending():
+    import pytest
+    with pytest.raises(NotImplementedError) as e:
+        _cli._power_holder("Plan9", wsl=False)
+    assert "Plan9" in str(e.value)
+
+
+def test_power_source_uses_sysfs_on_wsl_because_the_host_battery_is_exposed():
+    from crr.adapters.power_source import SysfsPowerSource
+    assert isinstance(_cli._power_source("Linux", 5.0), SysfsPowerSource)
