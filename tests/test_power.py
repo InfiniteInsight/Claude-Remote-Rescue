@@ -121,7 +121,7 @@ def test_ports_declare_the_power_protocols():
 # honest Report, with no I/O and no clock of its own.
 
 def test_snapshot_is_json_shaped_and_versioned():
-    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0, want=frozenset({"sleep"}))
     assert data["v"] == POWER_SNAPSHOT_VERSION
     assert data["held"] == ["sleep"]  # a sorted list, not a frozenset -- JSON has no set type
     assert data["reason"] == "crr: 1 Claude session live"
@@ -142,7 +142,7 @@ def test_interpret_never_reported_is_false_once_something_has():
     # "nothing is held right now" flag -- a live report saying "nothing"
     # is a different claim (the loop DID run and legitimately holds
     # nothing), and doctor must be able to tell them apart.
-    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0)
+    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0, want=frozenset())
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.never_reported is False
 
@@ -150,7 +150,7 @@ def test_interpret_never_reported_is_false_once_something_has():
 def test_interpret_dead_writer_is_unknown_never_nothing():
     # The exact conflation this fix exists to end: a dead writer's last
     # claim must not be read as "released".
-    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0, want=frozenset({"sleep"}))
     r = interpret(data, now=1001.0, pid_alive=False, max_age_seconds=90)
     assert r.unknown is not None
     assert r.held == frozenset()  # never assert what a dead writer claimed
@@ -160,7 +160,7 @@ def test_interpret_dead_writer_is_unknown_never_nothing():
 def test_interpret_stale_timestamp_is_unknown_never_nothing():
     # A wedged loop (hung, blocked) stops polling without dying -- a live
     # pid alone is not proof the last claim still holds.
-    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0, want=frozenset({"sleep"}))
     r = interpret(data, now=1000.0 + 200, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
     assert "200" in r.unknown
@@ -168,22 +168,23 @@ def test_interpret_stale_timestamp_is_unknown_never_nothing():
 
 
 def test_interpret_fresh_alive_report_is_trusted():
-    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0, want=frozenset({"sleep"}))
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
-    assert r == Report(frozenset({"sleep"}), "crr: 1 Claude session live", None)
+    assert r == Report(frozenset({"sleep"}), "crr: 1 Claude session live", None,
+                       want=frozenset({"sleep"}))
 
 
 def test_interpret_fresh_alive_report_with_nothing_held_is_trusted_too():
     # A live, current report saying "nothing" IS a positive claim (crr
     # really is holding nothing right now) -- distinct from `unknown`.
-    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0)
+    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0, want=frozenset())
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
-    assert r == Report(frozenset(), "power_block is off", None)
+    assert r == Report(frozenset(), "power_block is off", None, want=frozenset())
 
 
 def test_interpret_exactly_at_the_age_boundary_is_still_trusted():
     # age == max_age_seconds is not YET stale -- only strictly older is.
-    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0, want=frozenset({"sleep"}))
     r = interpret(data, now=1090.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is None
     assert r.held == frozenset({"sleep"})
@@ -213,10 +214,14 @@ def test_interpret_treats_the_unreadable_sentinel_as_unknown_not_nothing():
 
 def test_interpret_rejects_a_wrong_snapshot_version():
     # A version field nothing ever compares is worse than none -- it
-    # looks like protection and provides none. A future v2 snapshot must
-    # not be silently trusted through the v1 shape assumptions below.
-    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0)
-    data["v"] = 2
+    # looks like protection and provides none. A snapshot from a
+    # DIFFERENT schema version must not be silently trusted through this
+    # version's shape assumptions below. (Retargeted from the literal `2`
+    # by the `want` fix, 2026-08-13: `2` is now the CURRENT version, so
+    # pinning it would have quietly stopped testing anything. Derived
+    # from the constant so the next bump cannot re-break it.)
+    data = snapshot(frozenset({"sleep"}), "crr: 1 Claude session live", 4242, 1000.0, want=frozenset({"sleep"}))
+    data["v"] = POWER_SNAPSHOT_VERSION + 1
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
     assert "version" in r.unknown
@@ -235,7 +240,7 @@ def test_interpret_version_mismatch_message_cannot_be_forged_by_a_malicious_v():
         {"x": "\n[ok  ] forged\x1b[0m"},
         "\n[ok  ] forged\x1b[0m",
     ):
-        data = {"v": malicious_v, "held": ["sleep"], "reason": "r",
+        data = {"v": malicious_v, "want": ["sleep"], "held": ["sleep"], "reason": "r",
                 "pid": 4242, "updated": 1000.0}
         r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
         assert r.unknown is not None
@@ -247,7 +252,7 @@ def test_interpret_version_mismatch_message_cannot_be_forged_by_a_malicious_v():
 def test_interpret_rejects_a_non_list_held_field_without_raising():
     # The reviewer's exact probe: `{"held": 5, ...}` used to raise
     # `TypeError: 'int' object is not iterable` out of `frozenset(held)`.
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": 5, "reason": "r",
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": 5, "reason": "r",
             "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
@@ -259,7 +264,7 @@ def test_interpret_rejects_a_string_held_field_without_iterating_its_letters():
     # (a string IS iterable) but silently rendered as
     # `frozenset({"s","l","e","p"})` -- "holding: e, l, p, s", garbage
     # that looks like a real answer.
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": "sleep", "reason": "r",
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": "sleep", "reason": "r",
             "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
@@ -268,7 +273,7 @@ def test_interpret_rejects_a_string_held_field_without_iterating_its_letters():
 
 
 def test_interpret_rejects_a_held_list_with_non_string_items():
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": [1, 2], "reason": "r",
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": [1, 2], "reason": "r",
             "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
@@ -284,7 +289,7 @@ def test_interpret_rejects_a_non_int_pid():
     # `True` isolates the shape check itself: this must be rejected on
     # its own, not merely because it also fails a different, unrelated
     # guard elsewhere.
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"], "reason": "r",
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"], "reason": "r",
             "pid": "not-a-pid", "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
@@ -296,7 +301,7 @@ def test_interpret_rejects_a_bool_pid():
     # bool is an int subclass in Python -- JSON `true`/`false` must not
     # be accepted as a real pid. `pid_alive=True` for the same isolation
     # reason as above.
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"], "reason": "r",
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"], "reason": "r",
             "pid": True, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
@@ -305,7 +310,7 @@ def test_interpret_rejects_a_bool_pid():
 
 
 def test_interpret_rejects_a_non_numeric_updated_field():
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"], "reason": "r",
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"], "reason": "r",
             "pid": 4242, "updated": "not-a-timestamp"}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
@@ -345,7 +350,7 @@ def test_interpret_strips_a_newline_and_fake_line_from_reason():
     # can no longer start a new line of its own). What must be true is
     # that the whole thing renders as exactly one line, never a second
     # forged one.
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"],
             "reason": "crr: 1 Claude session live\n  [ok  ] forged check — nothing to see",
             "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
@@ -355,7 +360,7 @@ def test_interpret_strips_a_newline_and_fake_line_from_reason():
 
 
 def test_interpret_strips_ansi_escapes_from_reason():
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"],
             "reason": "crr: 1 Claude session live\x1b[31mRED\x1b[0m",
             "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
@@ -364,7 +369,7 @@ def test_interpret_strips_ansi_escapes_from_reason():
 
 
 def test_interpret_strips_control_characters_from_held_items():
-    data = {"v": POWER_SNAPSHOT_VERSION,
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"],
             "held": ["sleep\n  [ok  ] forged\x1b[31m"],
             "reason": "r", "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
@@ -376,8 +381,139 @@ def test_interpret_strips_control_characters_from_held_items():
 
 
 def test_interpret_strips_carriage_returns_too():
-    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"],
             "reason": "crr: 1 Claude session live\r  [WARN] forged",
             "pid": 4242, "updated": 1000.0}
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert "\r" not in r.reason
+
+
+# --- a hold that was REQUESTED and FAILED (critical 1, final fix wave, -----
+# --- 2026-08-13) -----------------------------------------------------------
+#
+# The snapshot recorded only what was OBTAINED. A reader therefore could
+# not tell "nothing was asked for" from "sleep was asked for and not
+# obtained" -- and the second rendered as a green all-clear: `crr power`
+# printed "holding: nothing — no reason recorded" and `crr doctor`
+# printed `[ok  ] power hold`, on a host where `systemd-inhibit
+# --mode=block` is denied outright for lack of a logind session. The fix
+# is a `want` field in the snapshot (hence the v2 bump) plus the two
+# rules below: nothing obtained out of a non-empty want is UNKNOWN, and a
+# PARTIAL hold names the part that was not obtained rather than reporting
+# the half it got as a success.
+
+def test_snapshot_records_what_was_asked_for_not_only_what_was_obtained():
+    data = snapshot(frozenset(), "denied", 4242, 1000.0,
+                    want=frozenset({"sleep"}))
+    assert data["want"] == ["sleep"]     # sorted list, same shape as `held`
+    assert data["held"] == []
+
+
+def test_interpret_is_unknown_when_a_hold_was_asked_for_and_nothing_obtained():
+    # The measured defect: writer produced `{"held": [], "reason": ...}`
+    # with a live pid and a fresh timestamp, and `interpret` returned a
+    # POSITIVE claim (`unknown=None, never_reported=False`).
+    data = snapshot(frozenset(), "systemd-inhibit exited 1: Access denied",
+                    4242, 1000.0, want=frozenset({"sleep"}))
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "sleep" in r.unknown          # names what was asked for
+    assert "Access denied" in r.unknown  # and why it was not obtained
+    assert r.held == frozenset()
+    assert r.never_reported is False
+
+
+def test_interpret_unknown_for_a_failed_hold_survives_a_missing_reason():
+    # Null results stay null: no recorded reason must still produce the
+    # UNKNOWN, never a green nothing and never a crash.
+    data = snapshot(frozenset(), "", 4242, 1000.0, want=frozenset({"sleep"}))
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "sleep" in r.unknown
+
+
+def test_interpret_carries_want_so_a_partial_hold_can_be_named():
+    # `sleep+shutdown` asked for, only `shutdown` obtained (the Linux
+    # holder withholds sleep on `LidSwitchIgnoreInhibited=no`). `held` is
+    # non-empty, so the "nothing obtained" rule above does NOT fire --
+    # without `want` on the Report this renders as an unqualified
+    # success, which is the same defect wearing a different hat.
+    data = snapshot(frozenset({"shutdown"}), "not blocking sleep: lid",
+                    4242, 1000.0, want=frozenset({"sleep", "shutdown"}))
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is None
+    assert r.held == frozenset({"shutdown"})
+    assert r.want == frozenset({"sleep", "shutdown"})
+    assert r.want - r.held == frozenset({"sleep"})
+
+
+def test_interpret_want_is_empty_when_nothing_was_asked_for():
+    data = snapshot(frozenset(), "power_block is off", 4242, 1000.0,
+                    want=frozenset())
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is None            # a KNOWN nothing, not a failure
+    assert r.want == frozenset()
+
+
+def test_interpret_rejects_a_malformed_want_field():
+    for bad in (5, "sleep", [1, 2], None):
+        data = {"v": POWER_SNAPSHOT_VERSION, "want": bad, "held": ["sleep"],
+                "reason": "r", "pid": 4242, "updated": 1000.0}
+        r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+        assert r.unknown is not None, bad
+        assert "want" in r.unknown, bad
+        assert r.held == frozenset(), bad
+
+
+def test_interpret_rejects_the_previous_snapshot_version():
+    # A v1 file (no `want` at all) predates the distinction this fix
+    # exists to make. Reading it through v2's rules would let a
+    # requested-and-failed hold back through as a green nothing, so it
+    # must read as UNKNOWN, not as a trusted v1 claim.
+    data = {"v": 1, "held": [], "reason": "no reason recorded",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is not None
+    assert "version" in r.unknown
+
+
+# --- minor 5: an item that sanitizes to nothing is not an item -------------
+
+def test_interpret_drops_held_items_that_sanitize_to_empty():
+    # `held: ["\n"]` type-checks as a list of str and sanitizes to "" --
+    # a TRUTHY frozenset({""}), which rendered as `holding:  — ...`: a
+    # positive claim about a hold with no name.
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": [], "held": ["\n", "sleep"],
+            "reason": "r", "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.held == frozenset({"sleep"})
+
+
+def test_interpret_all_held_items_sanitizing_to_empty_is_nothing_held():
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": [], "held": ["\n", "\x1b"],
+            "reason": "r", "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.held == frozenset()
+    assert r.unknown is None            # want is empty: a known nothing
+
+
+def test_interpret_drops_want_items_that_sanitize_to_empty():
+    # Same rule on the new field: a want item that is only control
+    # characters must not manufacture a phantom "asked for and not
+    # obtained" UNKNOWN out of an otherwise honest empty want.
+    data = {"v": POWER_SNAPSHOT_VERSION, "want": ["\n"], "held": [],
+            "reason": "power_block is off", "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.want == frozenset()
+    assert r.unknown is None
+
+
+def test_interpret_strips_control_characters_from_want_items():
+    data = {"v": POWER_SNAPSHOT_VERSION,
+            "want": ["sleep\n  [ok  ] forged\x1b[31m"], "held": [],
+            "reason": "r", "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    for item in r.want:
+        assert "\n" not in item and "\x1b" not in item and "\r" not in item
+    assert r.unknown is not None        # wanted something, obtained nothing
+    assert "\n" not in r.unknown and "\x1b" not in r.unknown

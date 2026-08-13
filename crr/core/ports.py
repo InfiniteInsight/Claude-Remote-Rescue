@@ -273,3 +273,20 @@ class PowerHolder(Protocol):
 
     def held(self) -> frozenset[str]:
         """What is currently held."""
+
+    # OPTIONAL, and deliberately not declared as a method here:
+    #
+    #     def withheld(self) -> str | None
+    #
+    # "why part of the last request was dropped by THIS HOST's
+    # configuration" -- distinct from `capabilities()`, which is what the
+    # PLATFORM can do. Only `LinuxPowerHolder` has an answer (the
+    # `LidSwitchIgnoreInhibited=no` case, and the unreadable-logind-config
+    # case); the Mac and Windows holders have none, and inventing an
+    # always-None one for them would be a claim, not an implementation.
+    #
+    # It is not declared because this Protocol is STRUCTURAL -- nothing
+    # subclasses it, so a default body here would never run for the
+    # holders that lack the method, and declaring it would make them
+    # non-conforming for a method they have nothing to say through.
+    # `crr.cli._holder_withheld` is the one reader, and it uses `getattr`.

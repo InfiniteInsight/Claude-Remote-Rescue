@@ -112,7 +112,19 @@ def unmet(capabilities: frozenset[str], want: frozenset[str]) -> tuple[str, ...]
 # I/O, no clock, no pid probing (all three are owned by the caller, same
 # split as `decide()` above) — so every honesty rule below is testable
 # without a loop to run or a process to kill.
-POWER_SNAPSHOT_VERSION = 1
+# v2 (final fix wave, 2026-08-13): added `want`. v1 recorded only what was
+# OBTAINED, so a reader could not distinguish "nothing was asked for" from
+# "sleep was asked for and NOT obtained" -- and the second rendered as a
+# green all-clear. Measured on a WSL host, where `systemd-inhibit
+# --mode=block` is denied outright for lack of a logind session: the writer
+# produced `{"held": [], "reason": "no reason recorded"}` with a live pid,
+# `interpret` returned a POSITIVE claim, `crr power` printed "holding:
+# nothing — no reason recorded" and `crr doctor` printed `[ok  ] power
+# hold`, all while `power_block="sleep"` and a session was live. A v1 file
+# is deliberately NOT read through v2's rules -- it has no `want`, so its
+# empty `held` cannot be told apart from the failure case, and the version
+# check below turns it into an honest UNKNOWN instead.
+POWER_SNAPSHOT_VERSION = 2
 
 
 class _Unreadable:
@@ -138,7 +150,8 @@ class _Unreadable:
 UNREADABLE = _Unreadable()
 
 
-def snapshot(held: frozenset[str], reason: str, pid: int, updated: float) -> dict:
+def snapshot(held: frozenset[str], reason: str, pid: int, updated: float,
+             *, want: frozenset[str]) -> dict:
     """The record `crr awake` stamps to disk after every poll.
 
     ``pid`` is the AWAKE LOOP's own pid (its liveness is what a reader can
@@ -147,9 +160,16 @@ def snapshot(held: frozenset[str], reason: str, pid: int, updated: float) -> dic
     the loop's own liveness is the fact that matters: if the loop that owns
     the hold is gone, whatever it held is unknown regardless of the
     child's own fate.
+
+    ``want`` is keyword-only and REQUIRED, with no default. A default of
+    ``frozenset()`` would mean "nothing was asked for" — a positive claim,
+    and precisely the one a caller that forgot to pass ``want`` is least
+    entitled to make. The one process that knows what was requested is the
+    one calling this, so it has no excuse not to say.
     """
     return {
         "v": POWER_SNAPSHOT_VERSION,
+        "want": sorted(want),
         "held": sorted(held),
         "reason": reason,
         "pid": pid,
@@ -177,11 +197,33 @@ class Report:
     running and never has been" without parsing ``reason`` text to find
     out — a positive claim belongs in a typed field, not something a
     caller reconstructs by string-matching.
+
+    ``want`` is what the writing loop ASKED FOR, and it is a typed field
+    for the same reason ``never_reported`` is: ``missing`` (asked for and
+    not obtained) is the fact both `crr power` and `crr doctor` need, and
+    neither should have to re-derive it by parsing ``reason`` prose. It is
+    meaningful only on a TRUSTED report — every ``unknown`` branch leaves
+    it empty, because a snapshot that cannot be trusted for ``held``
+    cannot be trusted for ``want`` either.
     """
     held: frozenset[str]
     reason: str | None
     unknown: str | None
     never_reported: bool = False
+    want: frozenset[str] = frozenset()
+
+    @property
+    def missing(self) -> frozenset[str]:
+        """Asked for and not obtained.
+
+        Non-empty with a non-empty ``held`` is a PARTIAL hold: crr got
+        some of what was requested. That must never render as an
+        unqualified success — holding half of what was asked while
+        reporting success is the failure this module's `unmet` docstring
+        already names, arriving here by a second route (the platform CAN
+        do it; this host's configuration meant crr didn't).
+        """
+        return self.want - self.held
 
 
 def _malformed(data: dict) -> str | None:
@@ -205,6 +247,12 @@ def _malformed(data: dict) -> str | None:
     held = data.get("held")
     if not isinstance(held, list) or not all(isinstance(h, str) for h in held):
         return "the last report's held set is malformed"
+    # Same check, same reason, on the v2 field. An untrusted `want` is
+    # worse than an untrusted `held`, not better: it is the field that
+    # decides whether an empty `held` is a green nothing or a failed hold.
+    want = data.get("want")
+    if not isinstance(want, list) or not all(isinstance(w, str) for w in want):
+        return "the last report's want set is malformed"
     pid = data.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
         return "the last report's pid is malformed"
@@ -245,7 +293,19 @@ def interpret(
       same reason: a loop that has stopped POLLING (hung, wedged, blocked
       on I/O) is not proven to still hold what it last wrote either.
 
-    Only past all five does the recorded ``held``/``reason`` get trusted.
+    Only past all five is the file itself trusted — and one honesty rule
+    then applies to its CONTENT (final fix wave, 2026-08-13):
+
+    - ``want`` is non-empty and ``held`` is empty -> UNKNOWN. The loop
+      asked the platform for a hold and got nothing back. It is alive and
+      current, so this is not staleness; it is a current report of a
+      FAILURE, and the recorded ``reason`` (the holder's ``withheld()``)
+      is folded into the message so the user is told what was asked for
+      and why it was not obtained.
+    - ``want`` non-empty and ``held`` non-empty but incomplete is NOT
+      unknown — something really is held — but ``Report.missing`` names
+      the rest, and callers must render it rather than reporting the half
+      they got as a success.
     """
     if data is None:
         return Report(frozenset(), "no keep-awake loop has reported", None,
@@ -268,7 +328,32 @@ def interpret(
     # different render paths, and requiring both to remember to sanitize
     # is how this kind of gap reappears. Every consumer of a `Report`
     # gets a `held`/`reason` that is already safe to print verbatim.
-    held = frozenset(_sanitize(h) for h in data["held"])
+    #
+    # An item that sanitizes to the EMPTY STRING is dropped, not kept.
+    # `held: ["\n"]` type-checks as a list of str and survived sanitizing
+    # as `frozenset({""})` -- truthy, so every "is anything held?" test
+    # downstream said yes and `crr power` rendered `holding:  — ...`: a
+    # positive claim about a hold with no name.
+    held = frozenset(s for s in (_sanitize(h) for h in data["held"]) if s)
+    want = frozenset(s for s in (_sanitize(w) for w in data["want"]) if s)
     raw_reason = data.get("reason")
     reason = _sanitize(raw_reason) if isinstance(raw_reason, str) else None
-    return Report(held, reason or None, None)
+    reason = reason or None
+    if want and not held:
+        # A hold was REQUESTED and NOTHING was obtained. The writer is
+        # alive and current, so this is not a stale claim -- it is a
+        # CURRENT report of a failure, and the one thing it must not
+        # become is the "crr really is holding nothing" positive claim
+        # that an empty `held` alone used to produce.
+        #
+        # ``reason`` is folded INTO the unknown string and left ``None``
+        # on the Report, exactly as the other four unknown branches do:
+        # a caller that renders `reason` separately would otherwise print
+        # the withheld explanation as if it were the reason a hold is
+        # ACTIVE.
+        return Report(
+            frozenset(), None,
+            f"asked to hold {', '.join(sorted(want))} and obtained nothing: "
+            f"{reason or 'no reason recorded'}",
+        )
+    return Report(held, reason, None, want=want)

@@ -520,7 +520,7 @@ def test_power_reports_what_is_held_and_why(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 2 Claude sessions live", os.getpid(), time.time()))
+        frozenset({"sleep"}), "crr: 2 Claude sessions live", os.getpid(), time.time(), want=frozenset({"sleep"})))
     assert cli.main(["power"]) == 0
     out = capsys.readouterr().out
     assert "sleep" in out
@@ -536,7 +536,7 @@ def test_power_names_the_release_command_whenever_something_is_held(
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "r", os.getpid(), time.time()))
+        frozenset({"sleep"}), "r", os.getpid(), time.time(), want=frozenset({"sleep"})))
     cli.main(["power"])
     out = capsys.readouterr().out
     assert "crr power --release" in out or "stop" in out
@@ -554,7 +554,7 @@ def test_power_reports_the_withheld_reason_when_nothing_is_held(
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     power_state.write(tmp_path, power.snapshot(
         frozenset(), "on battery (power_block_requires_ac is true)",
-        os.getpid(), time.time()))
+        os.getpid(), time.time(), want=frozenset()))
     cli.main(["power"])
     assert "battery" in capsys.readouterr().out
 
@@ -593,13 +593,27 @@ def test_power_release_clears_the_state_file_when_the_stop_succeeds(
         tmp_path, monkeypatch, capsys):
     # A released hold must not leave a stale claim behind for the next
     # `crr power`/`crr doctor` to read.
+    #
+    # RETARGETED (final fix wave, 2026-08-13). This test used to write the
+    # snapshot with `os.getpid()` -- a writer that is ALIVE and FRESH --
+    # and assert it was cleared, which is exactly the false clear Important
+    # 2 is about: it encoded the `ok` disjunct rather than the property.
+    # On the real healthy path the loop the stop command killed is DEAD by
+    # the time this reads the file, so a dead writer pid is what the
+    # scenario actually looks like. The property under test is unchanged
+    # and undiminished: a successful release leaves no stale claim behind.
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    stopped = subprocess.Popen([sys.executable, "-c", "pass"])
+    stopped.wait()
+    time.sleep(0.05)
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", stopped.pid,
+        time.time(), want=frozenset({"sleep"})))
     assert cli.main(["power", "--release"]) == 0
     assert power_state.read(tmp_path) is None
+    assert "did NOT clear" not in capsys.readouterr().err
 
 
 def test_power_release_does_not_clear_a_fresh_live_claim_when_the_stop_fails(
@@ -620,7 +634,7 @@ def test_power_release_does_not_clear_a_fresh_live_claim_when_the_stop_fails(
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time(), want=frozenset({"sleep"})))
     assert cli.main(["power", "--release"]) == 1
     assert power_state.read(tmp_path) is not None  # the live claim survives
     err = capsys.readouterr().err
@@ -642,7 +656,7 @@ def test_power_release_clears_an_already_untrustworthy_claim_even_when_the_stop_
     dead.wait()
     time.sleep(0.05)
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time(), want=frozenset({"sleep"})))
     assert cli.main(["power", "--release"]) == 1  # the stop command's own failure is still reported
     assert power_state.read(tmp_path) is None      # but the stale file is gone regardless
     assert "did NOT clear" not in capsys.readouterr().err
@@ -659,7 +673,7 @@ def test_power_release_clears_a_stale_claim_even_when_the_stop_fails(
                                            power_state_max_age_multiplier=3))
     power_state.write(tmp_path, power.snapshot(
         frozenset({"sleep"}), "crr: 1 Claude session live",
-        os.getpid(), time.time() - 1000))  # far past 10 * 3 = 30s
+        os.getpid(), time.time() - 1000, want=frozenset({"sleep"})))  # far past 10 * 3 = 30s
     assert cli.main(["power", "--release"]) == 1
     assert power_state.read(tmp_path) is None
 
@@ -728,7 +742,7 @@ def test_power_does_not_double_print_when_live_and_state_file_reasons_agree(
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG(power_block="off"))
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
     power_state.write(tmp_path, power.snapshot(
-        frozenset(), "power_block is off", os.getpid(), time.time()))
+        frozenset(), "power_block is off", os.getpid(), time.time(), want=frozenset()))
     cli.main(["power"])
     out = capsys.readouterr().out
     assert "holding: nothing — power_block is off" in out
@@ -746,7 +760,7 @@ def test_power_state_pid_zero_is_unknown_not_a_claim(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", 0, time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", 0, time.time(), want=frozenset({"sleep"})))
     cli.main(["power"])
     out = capsys.readouterr().out
     assert "unknown" in out.lower()
@@ -768,7 +782,7 @@ def test_power_prints_unknown_when_the_writer_is_dead(tmp_path, monkeypatch, cap
     dead.wait()
     time.sleep(0.05)  # give the OS a beat to fully clear the pid
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time(), want=frozenset({"sleep"})))
     cli.main(["power"])
     out = capsys.readouterr().out
     assert "unknown" in out.lower()
@@ -788,7 +802,7 @@ def test_power_prints_unknown_when_the_last_report_is_stale(tmp_path, monkeypatc
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
     power_state.write(tmp_path, power.snapshot(
         frozenset({"sleep"}), "crr: 1 Claude session live",
-        os.getpid(), time.time() - 1000))  # far past 10 * 3 = 30s
+        os.getpid(), time.time() - 1000, want=frozenset({"sleep"})))  # far past 10 * 3 = 30s
     cli.main(["power"])
     out = capsys.readouterr().out
     assert "unknown" in out.lower()
@@ -810,7 +824,7 @@ def test_doctor_names_what_power_is_holding(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time(), want=frozenset({"sleep"})))
     rc = cli.main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -830,7 +844,7 @@ def test_doctor_names_unknown_when_the_writer_is_dead(tmp_path, monkeypatch, cap
     dead.wait()
     time.sleep(0.05)
     power_state.write(tmp_path, power.snapshot(
-        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time()))
+        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time(), want=frozenset({"sleep"})))
     rc = cli.main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -894,7 +908,7 @@ def test_doctor_stays_ok_when_a_real_mode_is_configured_and_the_loop_is_running_
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
     power_state.write(tmp_path, power.snapshot(
-        frozenset(), "no live claude session", os.getpid(), time.time()))
+        frozenset(), "no live claude session", os.getpid(), time.time(), want=frozenset()))
     rc = cli.main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -973,7 +987,7 @@ def test_power_survives_a_non_list_held_field_without_raising(tmp_path, monkeypa
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
-    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": 5,
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": 5,
                                  "reason": "r", "pid": os.getpid(), "updated": time.time()})
     rc = cli.main(["power"])  # must not raise
     out = capsys.readouterr().out
@@ -991,7 +1005,7 @@ def test_power_survives_a_string_held_field_without_iterating_its_letters(
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
-    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": "sleep",
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": "sleep",
                                  "reason": "r", "pid": os.getpid(), "updated": time.time()})
     rc = cli.main(["power"])  # must not raise
     out = capsys.readouterr().out
@@ -1018,7 +1032,7 @@ def test_power_reason_with_a_forged_line_does_not_add_an_extra_line(
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
     forged_reason = "crr: 1 Claude session live\n  [ok  ] forged check \x1b[31mRED\x1b[0m"
-    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"],
                                  "reason": forged_reason,
                                  "pid": os.getpid(), "updated": time.time()})
     rc = cli.main(["power"])
@@ -1041,7 +1055,10 @@ def test_power_held_item_with_a_forged_line_does_not_add_an_extra_line(
     monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
     forged_held = "sleep\n  [ok  ] forged\x1b[31m"
-    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": [forged_held],
+    # `want` is empty here on purpose: this test counts LINES, and a
+    # `want` that the forged `held` cannot satisfy would legitimately add
+    # the "NOT holding" line, hiding whether a forged one also appeared.
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "want": [], "held": [forged_held],
                                  "reason": "r", "pid": os.getpid(), "updated": time.time()})
     rc = cli.main(["power"])
     out = capsys.readouterr().out
@@ -1061,7 +1078,7 @@ def test_doctor_reason_with_a_forged_line_does_not_forge_a_check(
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
     forged_reason = "crr: 1 Claude session live\n  [ok  ] forged check — everything fine"
-    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "want": ["sleep"], "held": ["sleep"],
                                  "reason": forged_reason,
                                  "pid": os.getpid(), "updated": time.time()})
     rc = cli.main(["doctor"])
@@ -1211,3 +1228,330 @@ def test_power_sees_a_real_separate_awake_process_holding(tmp_path):
     assert "sleep" in out
     assert "holding: nothing" not in out
     assert "unknown" not in out.lower()
+
+
+# --- critical 1: a hold that was REQUESTED and FAILED (final fix wave, -----
+# --- 2026-08-13) -----------------------------------------------------------
+#
+# `_stamp_power_state` recorded only `holder.held()`. With
+# `power_block="sleep"`, a live session, and a holder that FAILS (on this
+# WSL host `systemd-inhibit --mode=block` is denied outright -- "Failed to
+# inhibit: Access denied", exit 1 -- for lack of a logind session), the
+# writer produced `{"held": [], "reason": "no reason recorded"}` with its
+# own live pid. Measured end to end before the fix: `crr power` printed
+# "holding: nothing — no reason recorded" and `crr doctor` printed
+# "[ok  ] power hold — holding nothing — no reason recorded". Green, with
+# protection requested and none obtained.
+
+class _FailingHolder:
+    """Asked for a hold, obtains nothing, and says why -- the shape of a
+    denied `systemd-inhibit` (or an unreadable logind config)."""
+
+    def __init__(self, withheld="systemd-inhibit exited 1: Access denied",
+                 caps=frozenset({"sleep", "shutdown"})):
+        self._withheld = withheld
+        self._caps = caps
+        self.calls = []
+
+    def capabilities(self):
+        return self._caps
+
+    def hold(self, want, reason):
+        self.calls.append(("hold", want, reason))
+
+    def release(self):
+        self.calls.append(("release",))
+
+    def held(self):
+        return frozenset()
+
+    def withheld(self):
+        return self._withheld
+
+
+class _PartialHolder:
+    """Obtains SOME of what was asked -- the Linux holder on a host with
+    `LidSwitchIgnoreInhibited=no`, which drops the sleep half."""
+
+    def __init__(self):
+        self._held = frozenset()
+
+    def capabilities(self):
+        return frozenset({"sleep", "shutdown"})
+
+    def hold(self, want, reason):
+        self._held = want - {"sleep"}
+
+    def release(self):
+        self._held = frozenset()
+
+    def held(self):
+        return self._held
+
+    def withheld(self):
+        return ("not blocking sleep: this host sets "
+                "LidSwitchIgnoreInhibited=no")
+
+
+class _NoWithheldHolder(_FakeHolder):
+    """The macOS and Windows holders have no `withheld()` at all. Stamping
+    must not crash on them (nor invent a reason they never gave)."""
+
+
+def test_stamp_records_what_was_asked_for_not_only_what_was_obtained(tmp_path):
+    holder = _FailingHolder()
+    decision = power.decide(live_sessions=1, on_ac=True, mode="sleep",
+                            requires_ac=True)
+    holder.hold(decision.want, decision.reason)
+    cli._stamp_power_state(tmp_path, holder, decision)
+    data = power_state.read(tmp_path)
+    assert data["want"] == ["sleep"]
+    assert data["held"] == []
+
+
+def test_stamp_records_the_holders_withheld_reason_instead_of_a_placeholder(tmp_path):
+    # Important 3: `LinuxPowerHolder.withheld()` said "for doctor" and was
+    # read by nothing but its own tests. The literal "no reason recorded"
+    # went to disk instead, so the one explanation crr had was discarded
+    # at the only point it could have reached a user.
+    holder = _FailingHolder()
+    decision = power.decide(live_sessions=1, on_ac=True, mode="sleep",
+                            requires_ac=True)
+    holder.hold(decision.want, decision.reason)
+    cli._stamp_power_state(tmp_path, holder, decision)
+    assert power_state.read(tmp_path)["reason"] == (
+        "systemd-inhibit exited 1: Access denied")
+
+
+def test_stamp_does_not_crash_on_a_holder_without_a_withheld_method(tmp_path):
+    # The macOS/Windows holders don't have one. A `getattr` default, not an
+    # AttributeError, and not a Protocol default method (PowerHolder is
+    # structural -- nothing subclasses it, so a default body would never
+    # run).
+    holder = _NoWithheldHolder(caps=frozenset())
+    decision = power.decide(live_sessions=1, on_ac=True, mode="sleep",
+                            requires_ac=True)
+    holder.hold(decision.want, decision.reason)
+    cli._stamp_power_state(tmp_path, holder, decision)
+    data = power_state.read(tmp_path)
+    assert data["want"] == ["sleep"] and data["held"] == []
+
+
+def test_stamp_does_not_reuse_a_stale_withheld_reason_when_nothing_was_asked_for(
+        tmp_path):
+    # `LinuxPowerHolder.hold()` clears `_withheld` on entry; `release()`
+    # does NOT. The poll loop calls `release()` on every idle poll, so
+    # without this guard the last hold's reason ("not blocking sleep:
+    # LidSwitchIgnoreInhibited=no") is stamped onto a snapshot whose real
+    # reason is "no live claude session" -- a stale explanation presented
+    # as the current one.
+    holder = _FailingHolder()
+    holder.hold(frozenset({"sleep"}), "r")          # sets a withheld reason
+    idle = power.decide(live_sessions=0, on_ac=True, mode="sleep",
+                        requires_ac=True)
+    assert idle.want == frozenset()
+    cli._stamp_power_state(tmp_path, holder, idle)
+    reason = power_state.read(tmp_path)["reason"]
+    assert reason == "no live claude session"
+    assert "LidSwitch" not in reason and "Access denied" not in reason
+
+
+def test_power_reports_unknown_when_a_hold_was_asked_for_and_failed(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FailingHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners",
+                        lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset(), "systemd-inhibit exited 1: Access denied",
+        os.getpid(), time.time(), want=frozenset({"sleep"})))
+    assert cli.main(["power"]) == 0
+    out = capsys.readouterr().out
+    assert "holding: unknown" in out
+    assert "sleep" in out                       # names what was asked for
+    assert "Access denied" in out               # and why it was not obtained
+    assert "holding: nothing" not in out
+    assert "no reason recorded" not in out
+
+
+def test_doctor_warns_when_a_hold_was_asked_for_and_failed(
+        tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.toml").write_text('power_block = "sleep"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FailingHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners",
+                        lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset(), "systemd-inhibit exited 1: Access denied",
+        os.getpid(), time.time(), want=frozenset({"sleep"})))
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] power hold" in out
+    assert "[ok  ] power hold" not in out
+    assert "sleep" in out and "Access denied" in out
+    assert "holding nothing" not in out
+
+
+def test_power_names_the_half_of_a_partial_hold_it_did_not_obtain(
+        tmp_path, monkeypatch, capsys):
+    # `held` is non-empty, so the "obtained nothing" rule does NOT fire --
+    # and `unmet()` cannot cover this either, because the platform CAN do
+    # both (`capabilities()` is the static {"sleep","shutdown"}). Without
+    # `want` on the report this rendered as an unqualified success.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _PartialHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: _POWER_CFG(power_block="sleep+shutdown"))
+    monkeypatch.setattr(cli, "_power_entries_and_owners",
+                        lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"shutdown"}), "not blocking sleep: this host sets "
+        "LidSwitchIgnoreInhibited=no", os.getpid(), time.time(),
+        want=frozenset({"sleep", "shutdown"})))
+    assert cli.main(["power"]) == 0
+    out = capsys.readouterr().out
+    assert "holding: shutdown" in out
+    assert "not holding: sleep" in out.lower()
+    assert "LidSwitchIgnoreInhibited=no" in out
+
+
+def test_doctor_warns_on_a_partial_hold_rather_than_reporting_the_half_it_got(
+        tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.toml").write_text(
+        'power_block = "sleep+shutdown"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _PartialHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners",
+                        lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"shutdown"}), "not blocking sleep: this host sets "
+        "LidSwitchIgnoreInhibited=no", os.getpid(), time.time(),
+        want=frozenset({"sleep", "shutdown"})))
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] power hold —" in out
+    assert "shutdown" in out and "sleep" in out
+    assert "LidSwitchIgnoreInhibited=no" in out
+
+
+# --- minor 5: `holding: sleep — None`, and `held: ["\n"]` ------------------
+
+def test_power_never_renders_none_as_the_reason(tmp_path, monkeypatch, capsys):
+    # `interpret` maps an empty/absent `reason` to None on an otherwise
+    # TRUSTED report, and the render f-stringed it straight through.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners",
+                        lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION,
+                                 "want": ["sleep"], "held": ["sleep"],
+                                 "pid": os.getpid(), "updated": time.time()})
+    assert cli.main(["power"]) == 0
+    out = capsys.readouterr().out
+    assert "holding: sleep" in out
+    assert "None" not in out
+
+
+def test_doctor_never_renders_none_as_the_reason(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners",
+                        lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION,
+                                 "want": ["sleep"], "held": ["sleep"],
+                                 "pid": os.getpid(), "updated": time.time()})
+    assert cli.main(["doctor"]) == 0
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if "power hold —" in ln][0]
+    assert "None" not in line
+
+
+def test_power_does_not_render_a_held_item_that_is_only_control_characters(
+        tmp_path, monkeypatch, capsys):
+    # `held: ["\n"]` sanitizes to `frozenset({""})` -- TRUTHY, so the
+    # "something is held" branch fired and printed `holding:  — ...`: a
+    # positive claim naming nothing.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG(power_block="off"))
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION,
+                                 "want": [], "held": ["\n"],
+                                 "reason": "power_block is off",
+                                 "pid": os.getpid(), "updated": time.time()})
+    assert cli.main(["power"]) == 0
+    out = capsys.readouterr().out
+    assert "holding: nothing" in out
+    assert "holding:  " not in out
+
+
+# --- important 2: --release must not erase a fresh, live, trustworthy claim -
+
+def test_power_release_does_not_clear_a_fresh_live_claim_when_the_stop_succeeds(
+        tmp_path, monkeypatch, capsys):
+    # On the HEALTHY path the post-stop `_power_report` already sees a dead
+    # writer, so `already_untrustworthy` covers it and the `ok` disjunct is
+    # redundant. `ok` therefore only ever fired when the writer was STILL
+    # ALIVE and FRESH -- exactly when clearing is wrong. Reachable whenever
+    # the unit is loaded-but-inactive while a loop runs outside it (a manual
+    # `crr awake`, the spec's own headless escape hatch): `systemctl stop`
+    # exits 0 having stopped nothing, the file is deleted, and the next read
+    # is `never_reported=True` -- "no keep-awake loop has reported", the
+    # strongest false claim the type has, over a hold that is still active.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(),
+        time.time(), want=frozenset({"sleep"})))
+    assert cli.main(["power", "--release"]) == 0
+    assert power_state.read(tmp_path) is not None   # the live claim survives
+    err = capsys.readouterr().err
+    assert "did NOT clear" in err
+    assert "live report" in err
+
+
+# --- important 4: schtasks installs no keep-awake, and says so -------------
+
+def test_schtasks_states_that_it_installs_no_keep_awake(monkeypatch, capsys):
+    # README documents `crr schtasks` as the Windows/WSL install path, and
+    # it emits watchdog + dashboard and no hold at all. An honest STATED
+    # gap beats a half-working installer whose release path (`crr power
+    # --release` -> `systemctl`) targets a unit this path never wrote.
+    monkeypatch.setattr(cli, "_load_config", lambda: {
+        "watchdog_interval_seconds": 60, "dashboard_port": 8377})
+    assert cli.main(["schtasks"]) == 0
+    out = capsys.readouterr().out
+    assert "keep-awake" in out
+    assert "crr awake" in out
+
+
+def test_power_release_names_the_unit_it_stops(tmp_path, monkeypatch, capsys):
+    # A schtasks-installed host has no crr-awake unit; a bare `systemctl`
+    # error with no context is the "button that looks like it did
+    # something" this command's own docstring forbids.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    assert cli.main(["power", "--release"]) == 0
+    assert "crr-awake.service" in capsys.readouterr().out
+
+
+def test_power_release_explains_the_schtasks_gap_when_the_stop_fails(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    assert cli.main(["power", "--release"]) == 1
+    err = capsys.readouterr().err
+    assert "schtasks" in err
+    assert "crr awake" in err

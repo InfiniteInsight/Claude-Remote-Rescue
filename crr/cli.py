@@ -430,7 +430,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sch = sub.add_parser(
         "schtasks",
-        help="print (or --install) the Windows/WSL Scheduled Tasks (watchdog + dashboard)",
+        help="print (or --install) the Windows/WSL Scheduled Tasks "
+             "(watchdog + dashboard; NO keep-awake — see the command's note)",
     )
     sch.add_argument("--install", action="store_true",
                      help="run schtasks.exe to create the tasks (WSL host only)")
@@ -652,9 +653,46 @@ def _power_entries_and_owners(store, probe):
     return entries, owners
 
 
+# The last-resort text for "crr has nothing to say about why". It is a
+# LAST resort: every path that can name a real reason must do so before
+# falling back here, and `want` in the snapshot means an unexplained
+# nothing now renders as UNKNOWN rather than as a green all-clear.
+_NO_REASON = "no reason recorded"
+
+
+def _holder_withheld(holder) -> str | None:
+    """The holder's own explanation for dropping part of a request, if it
+    has one.
+
+    `LinuxPowerHolder.withheld()` existed, said "for doctor", and was read
+    by nothing but its own tests — so on `LidSwitchIgnoreInhibited=no`, or
+    when logind's config is unreadable, the sleep half was silently
+    dropped and nothing printed why (final fix wave, 2026-08-13). This is
+    the one call site that surfaces it.
+
+    `getattr`, not a default method on `ports.PowerHolder`: that Protocol
+    is STRUCTURAL — the Mac and Windows holders satisfy it without
+    subclassing, so a default body there would never run for them and the
+    AttributeError would survive. `unmet()` cannot cover this case either:
+    `capabilities()` is a static advertisement of what the PLATFORM can
+    do, and this is a fact about THIS HOST's configuration.
+    """
+    method = getattr(holder, "withheld", None)
+    if method is None:
+        return None
+    try:
+        value = method()
+    except Exception:                   # noqa: BLE001 - a diagnostic string
+        # A holder that cannot even explain itself must not take down the
+        # poll loop that is trying to record the explanation.
+        return None
+    return value if isinstance(value, str) and value else None
+
+
 def _stamp_power_state(sd: Path, holder, decision: power.Decision) -> None:
-    """Record what THIS process's holder actually holds, for a reader in a
-    SEPARATE `crr power`/`crr doctor` process (fix round 1, 2026-08-13).
+    """Record what THIS process's holder ASKED FOR and actually holds, for
+    a reader in a SEPARATE `crr power`/`crr doctor` process (fix round 1,
+    2026-08-13; `want` added in the final fix wave).
 
     `holder.held()` is only ever trustworthy from inside the process that
     owns the hold — a fresh holder built by `crr power` has no handle to
@@ -663,10 +701,45 @@ def _stamp_power_state(sd: Path, holder, decision: power.Decision) -> None:
     separate `crr power`, reported "holding: nothing" while the hold was
     genuinely active. This is the one place with the truth, so this is
     the one place that writes it down.
+
+    `held` ALONE was not enough truth. An empty `held` meant both "nothing
+    was asked for" and "sleep was asked for and denied" — and the second
+    rendered green. `want` is now stamped alongside it, and the reason
+    stamped for an unfulfilled request is the HOLDER's `withheld()`, not
+    the literal placeholder that used to go to disk.
     """
     held = holder.held()
-    reason = decision.reason if held else (decision.withheld or "no reason recorded")
-    power_state.write(sd, power.snapshot(held, reason, os.getpid(), time.time()))
+    missing = decision.want - held
+    if not decision.want:
+        # Nothing was asked for: `decide()` owns the explanation, and the
+        # holder's `withheld()` must NOT be consulted. `LinuxPowerHolder`
+        # clears `_withheld` in `hold()` but not in `release()`, and the
+        # poll loop calls `release()` on every idle poll — reading it here
+        # would stamp the LAST hold's reason ("not blocking sleep: ...")
+        # onto a snapshot whose real reason is "no live claude session".
+        reason = decision.withheld or _NO_REASON
+    elif not missing:
+        # Everything asked for was obtained: the OS-facing reason is the
+        # one that matters, and it is what the blocking UI already shows.
+        reason = decision.reason
+    else:
+        # Some or all of the request was dropped. The holder is the only
+        # thing that knows why.
+        withheld = _holder_withheld(holder)
+        if not held:
+            # NOTHING was obtained. `decision.reason` is the OS-facing
+            # "why crr wants this" text and would read as an explanation
+            # of the failure it is not; the holder's reason or an honest
+            # blank are the only two truthful options.
+            reason = withheld or _NO_REASON
+        elif withheld:
+            # A PARTIAL hold has two facts and must lose neither: why crr
+            # is holding at all, and why the rest was dropped.
+            reason = f"{decision.reason}; {withheld}"
+        else:
+            reason = decision.reason
+    power_state.write(sd, power.snapshot(held, reason, os.getpid(), time.time(),
+                                         want=decision.want))
 
 
 def _cmd_awake(args: argparse.Namespace) -> int:
@@ -832,19 +905,29 @@ def _nothing_held_reason(report: power.Report, withheld: str | None) -> str:
     """
     reasons = [r for r in (withheld, report.reason) if r]
     deduped = list(dict.fromkeys(reasons))
-    return " / ".join(deduped) if deduped else "no reason recorded"
+    return " / ".join(deduped) if deduped else _NO_REASON
 
 
 def _print_power_report(report: power.Report, withheld: str | None) -> None:
     """Render a Report for `crr power`.
 
     ``unknown`` and "holding nothing" must never look alike on screen —
-    that conflation IS the bug this whole mechanism exists to end.
+    that conflation IS the bug this whole mechanism exists to end. Nor may
+    a PARTIAL hold look like a complete one: `report.missing` is printed
+    on its own line, because "crr is holding the machine awake" and "crr
+    is holding half of what you asked for" are different promises.
     """
     if report.unknown:
         print(f"holding: unknown — {report.unknown}")
     elif report.held:
-        print(f"holding: {', '.join(sorted(report.held))} — {report.reason}")
+        # `report.reason` is None whenever the trusted snapshot carried an
+        # empty or absent `reason`; f-stringing it printed the literal
+        # "None" as if it were an explanation.
+        print(f"holding: {', '.join(sorted(report.held))} — "
+              f"{report.reason or _NO_REASON}")
+        if report.missing:
+            print(f"NOT holding: {', '.join(sorted(report.missing))} — "
+                  f"asked for and not obtained")
         print("release with: crr power --release")
     else:
         print(f"holding: nothing — {_nothing_held_reason(report, withheld)}")
@@ -863,7 +946,25 @@ def _cmd_power(args: argparse.Namespace) -> int:
             cmds = [["launchctl", "bootout", f"gui/{os.getuid()}/{launchd.AWAKE_LABEL}"]]
         else:
             cmds = [systemd.stop_awake_command()]
+        # NAME the thing being stopped before stopping it. `crr schtasks`
+        # (the documented Windows/WSL install path) installs no keep-awake
+        # task at all, so on such a host this shells to `systemctl` for a
+        # unit that was never written — and a bare systemctl error with no
+        # context is exactly the "button that looks like it did something
+        # and did not" this command exists to avoid.
+        print("stopping the keep-awake loop: " + " ".join(cmds[0]))
         ok = _run_commands(cmds, "power")
+        if not ok and not (system == "Darwin" and not wsl):
+            print(
+                "crr power: the stop command failed. If this host was set "
+                "up with `crr schtasks`, that path installs the watchdog "
+                "and dashboard only — there is no crr-awake unit to stop. "
+                "Stop the `crr awake` process directly (it holds the "
+                "machine awake as its own child, so ending it IS the "
+                "release), or install the unit with `crr systemd "
+                "--install`.",
+                file=sys.stderr,
+            )
         sd = state_dir.state_dir()
         # Read/interpret the CURRENT state BEFORE deciding whether to
         # clear (fix round 3, 2026-08-13). Round 2's "clear
@@ -878,12 +979,25 @@ def _cmd_power(args: argparse.Namespace) -> int:
         # anyway fabricated a fresh "holding: nothing — no keep-awake
         # loop has reported" while the hold was still genuinely active --
         # a false KNOWN-nothing standing in for a live claim, the exact
-        # class this whole feature exists to end. So: clear when the stop
-        # SUCCEEDED (the loop really did stop, so the file is now stale
-        # by definition), OR when the file's own claim was ALREADY
-        # untrustworthy (unreadable / dead writer / stale) -- but NEVER
-        # to erase a fresh, currently-trustworthy claim just because the
-        # stop command itself failed.
+        # class this whole feature exists to end.
+        #
+        # FINAL FIX WAVE (2026-08-13): the "clear when the stop SUCCEEDED"
+        # disjunct is gone. On the healthy path the post-stop
+        # `_power_report` below ALREADY reports the writer pid as dead, so
+        # `already_untrustworthy` covers it and the `ok` disjunct was pure
+        # redundancy there -- it could only ever fire when the writer was
+        # still alive and its report still fresh, which is precisely when
+        # clearing is wrong. Measured: live writer pid, fresh
+        # `held:["sleep"]`, `systemctl stop` exits 0 having stopped
+        # nothing (the unit is loaded-but-inactive while a loop runs
+        # OUTSIDE it -- a manual `crr awake`, the spec's own headless
+        # escape hatch), the file is deleted, and the next read is
+        # `never_reported=True`: "no keep-awake loop has reported", the
+        # strongest false claim this type can make, over a hold that is
+        # still active. So the rule is now one condition: clear only when
+        # the claim was ALREADY untrustworthy (unreadable / dead writer /
+        # stale / never written) -- never a fresh, currently-trustworthy
+        # one, whatever the stop command returned.
         report = _power_report(sd, config)
         # `report.never_reported` (no file ever existed) is grouped with
         # the "already untrustworthy" cases: there is no live claim there
@@ -892,15 +1006,24 @@ def _cmd_power(args: argparse.Namespace) -> int:
         # message below, which would otherwise misdescribe a file that
         # never existed as "a currently live report".
         already_untrustworthy = report.unknown is not None or report.never_reported
-        if ok or already_untrustworthy:
+        if already_untrustworthy:
             power_state.clear(sd)
         else:
+            # Worded for BOTH outcomes of the stop command, which is the
+            # point of dropping the `ok` disjunct: a fresh live report can
+            # now survive a stop that EXITED ZERO (the unit stopped
+            # nothing because the loop runs outside it). Saying "the stop
+            # command failed" here would be a claim this branch no longer
+            # knows to be true.
             print(
                 "crr power: did NOT clear power.json -- it still describes "
-                "a currently live report, and the stop command failed, so "
-                "clearing it now would hide a hold that may still be "
-                "active. Re-run `crr power --release` once the loop "
-                "actually stops (or investigate why it hasn't).",
+                "a currently live report (a keep-awake loop that is alive "
+                "and reporting fresh), so clearing it now would hide a "
+                "hold that may still be active. This happens when a loop "
+                "runs OUTSIDE the unit this command stops -- a manual "
+                "`crr awake` -- in which case the stop can exit 0 having "
+                "stopped nothing. Stop that loop, then re-run `crr power "
+                "--release`.",
                 file=sys.stderr,
             )
         return 0 if ok else 1
@@ -1115,9 +1238,19 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         if power_report.unknown:
             _check("power hold", False, f"unknown — {power_report.unknown}")
         elif power_report.held:
-            _check("power hold", True,
-                   f"holding {', '.join(sorted(power_report.held))} — {power_report.reason}; "
-                   "release with: crr power --release")
+            # A PARTIAL hold is a WARN, not an [ok]: `unmet()` below
+            # cannot catch it (the platform CAN do both — this host's
+            # configuration is why crr didn't), so without this the user
+            # who asked for sleep+shutdown and got only shutdown reads a
+            # green check. `reason or _NO_REASON` for the same reason
+            # `crr power` needs it: a trusted snapshot with an empty
+            # reason rendered the literal "None".
+            _detail = (f"holding {', '.join(sorted(power_report.held))}"
+                       + (f" but NOT {', '.join(sorted(power_report.missing))}"
+                          if power_report.missing else "")
+                       + f" — {power_report.reason or _NO_REASON}; "
+                       "release with: crr power --release")
+            _check("power hold", not power_report.missing, _detail)
         else:
             # `never_reported` alone is not a WARN: `power_block=off` and
             # no loop ever having run is the correct, harmless default.
@@ -3839,6 +3972,35 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     return 0
 
 
+# A STATED gap, not a silent one (final fix wave, 2026-08-13). `crr
+# systemd` and `crr launchd` both install a keep-awake unit; this path
+# installs the watchdog and dashboard only, so a user who follows the
+# README's Windows/WSL row gets no hold at all — and `crr power --release`
+# then shells to `systemctl` for a unit nobody wrote.
+#
+# The judgment call, made deliberately: an awake task WOULD mirror
+# `create_web_task_command` structurally (`/SC ONLOGON` already runs a
+# long-lived `crr web` the same way). What does not mirror is the
+# RELEASE. Whether `schtasks /End` on a `wsl.exe -e crr awake` task
+# actually reaps the loop INSIDE the distro is unverifiable from a Linux
+# checkout, and this module's own docstring already concedes "UNVERIFIED
+# from Linux CI". Shipping an installer whose stop button might leave the
+# hold running is the "succeeds loudly, protects nothing" defect wearing
+# an installer's clothes. An honest stated gap beats a half-working
+# installer, so the gap is stated everywhere this command speaks.
+_SCHTASKS_NO_AWAKE = (
+    "# NOTE: no keep-awake task is installed by this path — `crr awake` "
+    "(the loop\n"
+    "#       that holds the machine awake while a session is live, and "
+    "the loop\n"
+    "#       `crr power --release` stops) is NOT among the tasks above.\n"
+    "#       Run `crr awake` yourself on this host, or install the systemd\n"
+    "#       unit inside WSL with `crr systemd --install` (which does "
+    "include it).\n"
+    "#       `crr power` will report the hold either way."
+)
+
+
 def _cmd_schtasks(args: argparse.Namespace) -> int:
     if args.install and args.uninstall:
         print("crr schtasks: --install and --uninstall are mutually exclusive", file=sys.stderr)
@@ -3862,6 +4024,7 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
             print("crr schtasks: task removal FAILED (see above)", file=sys.stderr)
             return 1
         print("removed watchdog + dashboard Scheduled Tasks")
+        print(_SCHTASKS_NO_AWAKE)
         return 0
 
     if args.install:
@@ -3873,6 +4036,7 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
             print("crr schtasks: task creation FAILED (see above)", file=sys.stderr)
             return 1
         print("created watchdog + dashboard Scheduled Tasks")
+        print(_SCHTASKS_NO_AWAKE)
         return 0
 
     # Default: print the schtasks commands for inspection (no changes made).
@@ -3882,6 +4046,7 @@ def _cmd_schtasks(args: argparse.Namespace) -> int:
     print("# Remove with:")
     for cmd in scheduled_task.delete_task_commands():
         print("#   " + " ".join(_quote(part) for part in cmd))
+    print(_SCHTASKS_NO_AWAKE)
     return 0
 
 
