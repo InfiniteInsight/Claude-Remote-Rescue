@@ -1177,6 +1177,26 @@ Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
 
+> **This block was corrected after implementation.** The version
+> originally here failed its own Step-1 tests (the `0x80000001` literal
+> never appeared in the emitted text, and the `$sig` block declared
+> `ShutdownBlockReasonCreate` even on a sleep-only hold), and after those
+> were fixed a **Critical** review finding caught a second defect: the
+> `while (deadline) { ReadLine() }` loop only re-checks the deadline
+> *between* completed reads, so `max_hours` never actually fired as a
+> backstop. Chasing that fix down uncovered two more bugs that are
+> unrelated to the WaitAny loop itself: a `@" ... "@` here-string
+> silently executes nothing at all when piped to `-Command -` over a
+> non-console stdin, and — the one that actually explains the observed
+> failure — reading raw stdin from *inside* a script that `-Command -` is
+> itself still consuming from the same kernel pipe races the two readers,
+> silently corrupting trailing PowerShell text by one dropped character
+> and ending the hold hours early while `held()` keeps reporting success.
+> See `crr/adapters/power_hold_windows.py`'s module docstring for the
+> full, dated account of each defect and how it was measured live against
+> the real Windows host. The block below is the code that actually
+> passed, including the STOP CONDITION.
+
 Create `crr/adapters/power_hold_windows.py`:
 
 ```python
@@ -1187,16 +1207,51 @@ Both locks live in ONE process so there is one lifetime to reason about:
 ``ShutdownBlockReasonCreate`` for restart. Both were measured callable
 UNELEVATED from WSL on 2026-08-12.
 
-Two things this file must never lose:
+Six things this file must never lose — see the module docstring in
+`crr/adapters/power_hold_windows.py` for the full account, with dates and
+measured timings, of why each one is there:
 
 1. **The stdin-EOF exit.** A Windows interop child does NOT die with its
-   WSL parent. Without this loop, a killed crr leaves a PowerShell holding
-   a shutdown block forever — a machine that refuses to restart with
-   nothing left running to explain why. That is the exact class of
-   unexplained behaviour crr exists to eliminate, so the mechanism (not a
-   timer) is the primary defence.
+   WSL parent; the open pipe is the liveness signal.
 2. **``ES_SYSTEM_REQUIRED`` only, never ``ES_DISPLAY_REQUIRED``.** The lid
    must keep working and the screen must be allowed to turn off.
+3. **The deadline is ONE bounded async wait on the RAW stdin stream, never
+   a loop around a blocking read, and never ``[Console]::In``.** A
+   ``while (deadline) { ReadLine() }`` loop only re-checks the deadline
+   *between* completed reads and never re-fires once blocked in the one
+   and only read. ``[Console]::In.ReadLineAsync()`` is ALSO wrong: that
+   reader wraps a ``SyncTextReader`` and runs synchronously on the calling
+   thread despite returning a ``Task``, so ``.Wait(ms)`` never gets a
+   chance to time out either. The fix reads the raw, unwrapped stream from
+   ``[Console]::OpenStandardInput()`` via ``Stream.ReadAsync``, bounded by
+   ``[System.Threading.Tasks.Task]::WaitAny(@($readTask), ms)``.
+4. **The P/Invoke signature block is ONE PowerShell source line, never a
+   here-string.** ``@" ... "@`` silently executes nothing at all — not
+   the assignment, not any statement before or after it — when piped to
+   ``-Command -`` over a non-console stdin. The fix is a normal
+   double-quoted string with backtick-escaped inner quotes and
+   `` `n ``-escaped line breaks, so the *value* is multi-line C# while the
+   *source* stays one line.
+5. **The script ends with an explicit ``[Environment]::Exit(0)``, never
+   falls off the end.** ``-Command -`` behaves like an interactive
+   session: once it finishes running whatever was piped to it, it goes
+   back to reading stdin for the *next command* rather than quitting.
+   Releasing the locks is necessary but not sufficient for "the process is
+   gone."
+6. **The whole script is ONE PowerShell statement, never multiple
+   top-level lines.** Our own ``$stdin.ReadAsync($buf, 0, 1)`` and
+   ``-Command -``'s own read of "the rest of the piped script" pull from
+   the SAME kernel pipe. Whenever PowerShell statements remain unparsed
+   after the read, the two reads race for the same bytes — measured live,
+   100% reproducible, the internal read sometimes wins and steals a byte
+   meant for our own trailing text, corrupting it by exactly one dropped
+   character and completing the "wait" almost instantly instead of
+   honouring the deadline. Not an orphaned process — the stolen byte still
+   made ``WaitAny`` return, so the release calls and the exit still ran,
+   just hours early — but ``held()`` silently reports a hold that has
+   already stopped holding anything. Wrapping the entire body as
+   ``& { stmt1; stmt2; ...; }`` forces the parser to consume the complete
+   statement before executing any of it.
 
 KNOWN LIMIT, recorded rather than assumed: registration returning TRUE
 proves the reason REGISTERS, not that shutdown is BLOCKED. Microsoft is
@@ -1212,6 +1267,20 @@ import subprocess
 
 _ES_CONTINUOUS = "0x80000000"
 _ES_SYSTEM_REQUIRED = "0x00000001"
+# ES_CONTINUOUS | ES_SYSTEM_REQUIRED, precomputed and embedded as a single
+# literal so the script text carries the combined flag value directly
+# rather than an -bor expression PowerShell evaluates at runtime.
+_ES_SLEEP_FLAGS = "0x80000001"
+
+# Task.Wait(int millisecondsTimeout) takes a signed Int32. A caller passing
+# an absurd max_hours must not overflow into a negative value.
+_INT32_MAX_MS = 2147483647
+
+
+def _timeout_ms(max_hours: float) -> int:
+    """``max_hours`` in milliseconds, clamped to fit a signed 32-bit int."""
+    ms = round(max_hours * 3600 * 1000)
+    return max(0, min(ms, _INT32_MAX_MS))
 
 
 def holder_argv() -> list[str]:
@@ -1219,51 +1288,75 @@ def holder_argv() -> list[str]:
     return ["powershell.exe", "-NoProfile", "-Command", "-"]
 
 
+def _ps_oneline_string(csharp_lines: list[str]) -> str:
+    """A SINGLE PowerShell source line whose STRING VALUE holds ``\\n``-
+    joined C# lines. Not a here-string -- see point 4 above."""
+    escaped = (line.replace('"', '`"') for line in csharp_lines)
+    return '"' + "`n".join(escaped) + '"'
+
+
 def holder_script(want: frozenset[str], reason: str,
                   max_hours: int = 12) -> str:
-    """The PowerShell program that holds the locks until stdin closes."""
+    """The PowerShell program that holds the locks until stdin closes.
+
+    The body is emitted as ONE PowerShell statement -- see point 6 above.
+    """
     safe = reason.replace("'", "''")
-    lines = [
+    # Only declare the P/Invoke signatures for what `want` actually calls.
+    sig_lines: list[str] = []
+    if "sleep" in want:
+        sig_lines += [
+            '[DllImport("kernel32.dll", SetLastError=true)]',
+            "public static extern uint SetThreadExecutionState(uint esFlags);",
+        ]
+    if "shutdown" in want:
+        sig_lines += [
+            '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]',
+            "public static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string pwszReason);",
+            '[DllImport("user32.dll", SetLastError=true)]',
+            "public static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);",
+        ]
+    stmts = [
         "$ErrorActionPreference = 'Stop'",
         "Add-Type -AssemblyName System.Windows.Forms",
-        "$sig = @\"",
-        '[DllImport("kernel32.dll", SetLastError=true)]',
-        "public static extern uint SetThreadExecutionState(uint esFlags);",
-        '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]',
-        "public static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string pwszReason);",
-        '[DllImport("user32.dll", SetLastError=true)]',
-        "public static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);",
-        '"@',
+        f"$sig = {_ps_oneline_string(sig_lines)}",
         "$api = Add-Type -MemberDefinition $sig -Name CrrHold "
         "-Namespace CrrPower -PassThru",
     ]
     if "sleep" in want:
-        lines.append(
-            f"$null = $api::SetThreadExecutionState("
-            f"[uint32]'{_ES_CONTINUOUS}' -bor [uint32]'{_ES_SYSTEM_REQUIRED}')"
+        stmts.append(
+            f"$null = $api::SetThreadExecutionState([uint32]'{_ES_SLEEP_FLAGS}')"
         )
     if "shutdown" in want:
-        lines += [
+        stmts += [
             "$form = New-Object System.Windows.Forms.Form",
             "$handle = $form.Handle",
             f"$null = $api::ShutdownBlockReasonCreate($handle, '{safe}')",
         ]
-    lines += [
-        # THE orphan defence: when the WSL parent dies the pipe closes,
-        # ReadLine returns $null, and every lock is released below.
-        f"$deadline = (Get-Date).AddHours({max_hours})",
-        "while ((Get-Date) -lt $deadline) {",
-        "  $line = [Console]::In.ReadLine()",
-        "  if ($line -eq $null) { break }",
-        "}",
+    timeout_ms = _timeout_ms(max_hours)
+    # THE orphan defence: ONE asynchronous read on the RAW stdin stream,
+    # bounded by the full deadline. WaitAny returns -1 on timeout or the
+    # completed index on EOF -- either way execution falls through to the
+    # release statements below.
+    stmts += [
+        "$stdin = [Console]::OpenStandardInput()",
+        "$buf = New-Object byte[] 1",
+        "$readTask = $stdin.ReadAsync($buf, 0, 1)",
+        "$null = [System.Threading.Tasks.Task]::WaitAny("
+        f"@($readTask), [int]{timeout_ms})",
     ]
     if "shutdown" in want:
-        lines.append("$null = $api::ShutdownBlockReasonDestroy($handle)")
+        stmts.append("$null = $api::ShutdownBlockReasonDestroy($handle)")
     if "sleep" in want:
-        lines.append(
+        stmts.append(
             f"$null = $api::SetThreadExecutionState([uint32]'{_ES_CONTINUOUS}')"
         )
-    return "\n".join(lines) + "\n"
+    stmts.append("[Environment]::Exit(0)")
+    # A leading comment, OUTSIDE the statement: `#` comments to end-of-line,
+    # and since the statement is deliberately kept on ONE line, an inline
+    # comment would silently comment out every statement after it.
+    body = "; ".join(stmts)
+    return f"# max_hours={max_hours}\n& {{ {body} }}\n"
 
 
 class WindowsPowerHolder:

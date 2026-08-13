@@ -5,6 +5,7 @@ through sysfs (`/sys/class/power_supply/AC1/online`), which is why ONE
 Linux adapter serves both native Linux and WSL.
 """
 
+import re
 import subprocess as _sp
 import sys as _sys
 from pathlib import Path
@@ -216,13 +217,142 @@ def test_script_exits_when_stdin_closes():
     # THE orphan defence. Without this a killed crr leaves a PowerShell
     # holding a shutdown block forever, and the user has a machine that
     # refuses to restart with nothing left running to explain why.
+    # NOT [Console]::In / ReadLine: that reader blocks the calling thread
+    # synchronously (measured live, see the module docstring), so the
+    # mechanism reads the raw stdin stream instead.
     s = holder_script(frozenset({"sleep"}), "r")
-    assert "ReadLine" in s, "no stdin-EOF loop: an orphan would hold forever"
+    assert "OpenStandardInput" in s and "ReadAsync" in s, (
+        "no async stdin read: an orphan would hold forever")
 
 
 def test_script_self_releases_after_the_cap():
     s = holder_script(frozenset({"sleep"}), "r", max_hours=12)
     assert "12" in s
+
+
+def test_the_deadline_is_a_bounded_wait_not_a_loop_around_a_blocking_read():
+    # [Console]::In.ReadLine() blocks synchronously. A `while (deadline) {
+    # ReadLine() }` loop only re-checks the deadline BETWEEN completed
+    # reads -- if hold() never writes a second line, the process enters
+    # ReadLine once and blocks there for the rest of its life, and the
+    # deadline never fires. Confirmed live 2026-08-12: a real holder with
+    # max_hours=0.0006 (~2.16s) and stdin left open (no further writes,
+    # no EOF) was still alive at t=25s.
+    #
+    # The first fix attempt swapped in [Console]::In.ReadLineAsync()
+    # awaited via .Wait(ms) -- ALSO wrong, caught the same way. Confirmed
+    # live 2026-08-13: the assignment `$readTask =
+    # [Console]::In.ReadLineAsync()` itself did not return for 30+
+    # seconds with stdin open and no data sent, because [Console]::In
+    # wraps a SyncTextReader whose "async" methods still run
+    # synchronously on the calling thread. The working fix reads the RAW
+    # stream from [Console]::OpenStandardInput() (genuinely async) and
+    # bounds it with Task.WaitAny -- confirmed live on both branches:
+    # timeout fired at ~2.24s for a 2159ms deadline with stdin held open,
+    # and a real EOF completed the read at ~1.97s against a 30s deadline.
+    s = holder_script(frozenset({"sleep"}), "r", max_hours=1)
+    assert "while" not in s, (
+        "a while loop wrapped around a blocking ReadLine is exactly the "
+        "shape that let the deadline go dead: it only re-checks between "
+        "completed reads, and hold() never sends a second line")
+    assert "[Console]::In" not in s, (
+        "[Console]::In wraps a SyncTextReader: ReadLineAsync() on it "
+        "blocks the calling thread until data/EOF, so .Wait(ms) never "
+        "gets to time out. Measured 2026-08-13: 30s+ with stdin open. "
+        "Use [Console]::OpenStandardInput() -- the unwrapped Stream.")
+    assert "OpenStandardInput" in s and "ReadAsync" in s
+    assert re.search(r"WaitAny\(\s*@\(\$readTask\)\s*,\s*\[int\]\d+\s*\)", s), (
+        "expected a single bounded wait carrying a precomputed "
+        "millisecond literal, e.g. "
+        "[System.Threading.Tasks.Task]::WaitAny(@($readTask), [int]3600000)")
+    expected_ms = 1 * 3600 * 1000
+    assert str(expected_ms) in s
+
+
+def test_the_deadline_wait_clamps_to_int32_max_ms():
+    # A caller passing an absurd max_hours must not overflow into a
+    # negative wait, which Task.WaitAny(int) would either reject or treat
+    # as "return immediately" -- silently defeating the backstop.
+    s = holder_script(frozenset({"sleep"}), "r", max_hours=10**9)
+    match = re.search(r"WaitAny\(\s*@\(\$readTask\)\s*,\s*\[int\](\d+)\s*\)", s)
+    assert match is not None
+    assert int(match.group(1)) <= 2147483647
+
+
+def test_the_pinvoke_signature_is_not_a_herestring():
+    # @" ... "@ here-strings, found while re-verifying the WaitAny fix
+    # above against the real host. Confirmed live 2026-08-13: fed through
+    # powershell.exe -NoProfile -Command - over a piped (not console)
+    # stdin, a @" ... "@ block silently executes NOTHING in the script
+    # that contains it -- not the assignment, not any statement before or
+    # after it -- exit code 0, zero output, every time, regardless of the
+    # here-string's content (reproduced with a trivial one-line body, not
+    # just the real DllImport signatures). The fix keeps the signature
+    # block a single PowerShell source line: a normal double-quoted
+    # string with `n-escaped line breaks and backtick-escaped inner
+    # quotes, so the STRING VALUE is multi-line C# without the PowerShell
+    # SOURCE ever spanning multiple lines.
+    s = holder_script(frozenset({"sleep", "shutdown"}), "r")
+    assert '@"' not in s, (
+        "a here-string block silently swallows the whole script when "
+        "piped to powershell.exe -Command - over non-console stdin -- "
+        "confirmed live 2026-08-13, exit 0 with zero output every time")
+    assert "SetThreadExecutionState" in s
+    assert "ShutdownBlockReasonCreate" in s
+
+
+def test_the_script_exits_explicitly_rather_than_falling_off_the_end():
+    # powershell.exe -Command - behaves like an interactive session: once
+    # it finishes running whatever was piped to it, it goes back to
+    # reading stdin for the NEXT command -- it does not quit on its own.
+    # Confirmed live 2026-08-13 with full tracing: every statement ran to
+    # completion (including the WaitAny deadline firing and both release
+    # calls) in ~2.4s, and the *process* was still alive and reported so
+    # 30 seconds later. Releasing the locks is necessary but not
+    # sufficient for "the orphan is gone" -- the process itself has to
+    # exit too. [Environment]::Exit(0), not a bare `exit`: see the next
+    # test for why the exit call has to be the last thing inside a
+    # single wrapped statement rather than its own top-level line.
+    s = holder_script(frozenset({"sleep"}), "r")
+    assert "[Environment]::Exit(0)" in s, (
+        "the script must end by explicitly exiting the PowerShell host "
+        "process -- falling off the end leaves it alive, waiting for "
+        "the next interactive command on the same still-open stdin")
+
+
+def test_the_whole_script_is_one_statement_so_nothing_is_left_to_steal():
+    # The deepest bug found while re-verifying the WaitAny fix: reading
+    # raw stdin FROM WITHIN a script that -Command - is ITSELF still
+    # reading the rest of from the SAME kernel pipe races the two
+    # readers. Confirmed live 2026-08-13, 100% reproducible for a fixed
+    # script: whenever PowerShell statements remained unparsed after the
+    # WaitAny read (true for sleep+shutdown, which has release calls
+    # after the wait), the internal 1-byte $stdin.ReadAsync sometimes won
+    # the race and stole a byte -Command - had not yet consumed as "the
+    # rest of the script", corrupting the trailing text by exactly one
+    # dropped character (SetThreadExecutionState -> SetThreadExectionState;
+    # uint32 -> unt32) and making WaitAny complete almost instantly
+    # instead of honouring the deadline. Not an orphaned process -- the
+    # stolen byte still made WaitAny return, so the release calls and
+    # [Environment]::Exit(0) still ran, just ~1.7 hours early for a
+    # 2-hour test. held() would silently report a hold that had already
+    # stopped holding anything. Wrapping the ENTIRE body as a single
+    # `& { stmt1; stmt2; ...; }` statement forces the parser to consume
+    # it all before executing any of it, so there is nothing of our own
+    # script left in the pipe for the internal read to steal from.
+    s = holder_script(frozenset({"sleep", "shutdown"}), "r")
+    lines = [line for line in s.splitlines() if line.strip()]
+    assert len(lines) == 2, (
+        "expected exactly two top-level lines: a leading `# max_hours=` "
+        "comment (which cannot live inside the statement below -- a `#` "
+        "comment eats the rest of ITS OWN line) and the single wrapped "
+        f"statement carrying everything else. Got {len(lines)}: {lines!r}")
+    comment_line, stmt_line = lines
+    assert comment_line.startswith("#")
+    assert stmt_line.startswith("& {") and stmt_line.endswith("}"), (
+        "the script body must be a single wrapped statement -- trailing "
+        "top-level lines after the stdin read are exactly what the "
+        "byte-stealing race corrupts")
 
 
 def test_argv_runs_powershell_noninteractively_with_stdin_open():
