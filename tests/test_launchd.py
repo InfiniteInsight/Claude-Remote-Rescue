@@ -87,6 +87,30 @@ def test_resolve_service_path_includes_crr_dir_and_reports_missing(monkeypatch):
     assert set(missing) == set(launchd.SERVICE_BINARIES)
 
 
+def test_awake_agent_runs_the_loop_and_keeps_it_alive():
+    import plistlib
+    parsed = plistlib.loads(
+        launchd.awake_agent_plist("/opt/crr/bin/crr", "/usr/bin").encode("utf-8"))
+    assert parsed["Label"] == launchd.AWAKE_LABEL
+    assert parsed["ProgramArguments"] == ["/opt/crr/bin/crr", "awake"]
+    assert parsed["KeepAlive"] is True
+    # RunAtLoad mirrors web_agent_plist: without it, `launchctl load -w`
+    # marks the agent enabled but the hold does not actually start until
+    # the next login — `crr launchd --install` would silently install a
+    # hold that isn't holding.
+    assert parsed["RunAtLoad"] is True
+    assert parsed["EnvironmentVariables"]["PATH"] == "/usr/bin"
+
+
+def test_awake_agent_has_no_start_interval():
+    # It is a long-running loop, not a periodic job. A StartInterval would
+    # spawn a second loop alongside the first, and two holders would fight.
+    import plistlib
+    parsed = plistlib.loads(
+        launchd.awake_agent_plist("/opt/crr/bin/crr", "/usr/bin").encode("utf-8"))
+    assert "StartInterval" not in parsed
+
+
 def test_agent_dir_is_library_launchagents():
     from pathlib import Path
     assert launchd.agent_dir(Path("/Users/u")) == Path("/Users/u/Library/LaunchAgents")
@@ -101,19 +125,22 @@ def test_write_agents_writes_all_named_files(tmp_path):
     assert (tmp_path / launchd.WEB_PLIST).read_text() == "WEB"
 
 
-def test_enable_commands_load_both_agents(tmp_path):
+def test_enable_commands_load_all_agents(tmp_path):
     cmds = launchd.enable_commands(tmp_path)
     revive = str(tmp_path / launchd.REVIVE_PLIST)
     web = str(tmp_path / launchd.WEB_PLIST)
+    awake = str(tmp_path / launchd.AWAKE_PLIST)
     assert ["launchctl", "load", "-w", revive] in cmds
     assert ["launchctl", "load", "-w", web] in cmds
+    assert ["launchctl", "load", "-w", awake] in cmds
 
 
-def test_disable_commands_unload_both_agents(tmp_path):
+def test_disable_commands_unload_all_agents(tmp_path):
     cmds = launchd.disable_commands(tmp_path)
     assert cmds == [
         ["launchctl", "unload", "-w", str(tmp_path / launchd.REVIVE_PLIST)],
         ["launchctl", "unload", "-w", str(tmp_path / launchd.WEB_PLIST)],
+        ["launchctl", "unload", "-w", str(tmp_path / launchd.AWAKE_PLIST)],
     ]
 
 
@@ -128,6 +155,7 @@ def test_generated_plists_pass_plutil_lint(tmp_path):
     agents = {
         launchd.REVIVE_PLIST: launchd.revive_agent_plist(crr_bin=crr_bin, path=path, interval_seconds=30),
         launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin=crr_bin, path=path, port=8377),
+        launchd.AWAKE_PLIST: launchd.awake_agent_plist(crr_bin=crr_bin, path=path),
     }
     for p in launchd.write_agents(tmp_path, agents):
         result = subprocess.run(["plutil", "-lint", str(p)], capture_output=True, text=True)

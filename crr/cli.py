@@ -3536,6 +3536,7 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     agents = {
         launchd.REVIVE_PLIST: launchd.revive_agent_plist(crr_bin, path, interval),
         launchd.WEB_PLIST: launchd.web_agent_plist(crr_bin, path, port),
+        launchd.AWAKE_PLIST: launchd.awake_agent_plist(crr_bin, path),
     }
 
     if missing:
@@ -3550,13 +3551,13 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
         # Unload FIRST, then remove the plists — launchctl needs the plist
         # present on disk to unload it.
         ok = _run_commands(launchd.disable_commands(ad), "launchd")
-        for name in (launchd.REVIVE_PLIST, launchd.WEB_PLIST):
+        for name in (launchd.REVIVE_PLIST, launchd.WEB_PLIST, launchd.AWAKE_PLIST):
             (ad / name).unlink(missing_ok=True)
         if not ok:
             print("crr launchd: agent files removed, but unloading FAILED (see above)",
                   file=sys.stderr)
             return 1
-        print(f"uninstalled watchdog + dashboard agents from {ad}")
+        print(f"uninstalled watchdog + dashboard + keep-awake agents from {ad}")
         return 0
 
     if args.install:
@@ -3564,9 +3565,9 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
         launchd.write_agents(ad, agents)
         if not _run_commands(launchd.enable_commands(ad), "launchd"):
             print(f"crr launchd: agents written to {ad} but loading FAILED (see above); "
-                  "the watchdog/dashboard are NOT running", file=sys.stderr)
+                  "the watchdog/dashboard/keep-awake are NOT running", file=sys.stderr)
             return 1
-        print(f"installed watchdog + dashboard agents to {ad} and loaded them")
+        print(f"installed watchdog + dashboard + keep-awake agents to {ad} and loaded them")
         return 0
 
     # Default: print for inspection (no changes to the launchd user domain).

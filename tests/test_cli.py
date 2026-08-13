@@ -364,7 +364,7 @@ def test_systemd_print_omits_wsl_distro_name_when_not_wsl(tmp_path, monkeypatch,
     assert "WSL_DISTRO_NAME" not in out
 
 
-def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_launchd_print_emits_all_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
     rc = cli.main(["launchd"])  # default: print, no --install
@@ -372,6 +372,9 @@ def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatc
     assert rc == 0
     assert "com.claude-remote-rescue.revive.plist" in out
     assert "com.claude-remote-rescue.web.plist" in out
+    # crr-awake (own agent, own lifetime — see launchd.awake_agent_plist's
+    # docstring) rounds out the three agents.
+    assert "com.claude-remote-rescue.awake.plist" in out
     assert "/opt/crr/bin/crr" in out  # baked ProgramArguments
     assert "launchctl" in out and "load" in out  # printed enable guidance
     # Print mode must not touch the user's LaunchAgents dir.
@@ -709,6 +712,7 @@ def test_launchd_uninstall_unloads_before_removing_plists(tmp_path, monkeypatch,
     ad.mkdir(parents=True)
     (ad / cli.launchd.REVIVE_PLIST).write_text("x")
     (ad / cli.launchd.WEB_PLIST).write_text("x")
+    (ad / cli.launchd.AWAKE_PLIST).write_text("x")
     seen_at_unload = {}
 
     def fake_run(cmd, **k):
@@ -724,8 +728,10 @@ def test_launchd_uninstall_unloads_before_removing_plists(tmp_path, monkeypatch,
     assert rc == 0
     assert seen_at_unload[str(ad / cli.launchd.REVIVE_PLIST)] is True
     assert seen_at_unload[str(ad / cli.launchd.WEB_PLIST)] is True
+    assert seen_at_unload[str(ad / cli.launchd.AWAKE_PLIST)] is True
     assert not (ad / cli.launchd.REVIVE_PLIST).exists()
     assert not (ad / cli.launchd.WEB_PLIST).exists()
+    assert not (ad / cli.launchd.AWAKE_PLIST).exists()
 
 
 def test_launchd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):

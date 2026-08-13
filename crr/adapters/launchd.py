@@ -1,12 +1,14 @@
-"""launchd user-agent adapter (macOS) — generates the revive + web agents.
+"""launchd user-agent adapter (macOS) — generates the revive + web + awake
+agents.
 
 The macOS analogue of ``systemd.py``. A user agent in
-``~/Library/LaunchAgents`` fires ``crr revive`` on an interval and keeps
-``crr web`` alive, so revival and the dashboard are autonomous. This
-adapter only *builds and writes* the plist files and reports the load
-commands as data; running ``launchctl`` (a real change to the live user
-domain) is the composition root's job on explicit request, never a side
-effect of generation or tests.
+``~/Library/LaunchAgents`` fires ``crr revive`` on an interval, keeps
+``crr web`` alive, and keeps ``crr awake`` alive, so revival, the
+dashboard, and the keep-awake hold are all autonomous. This adapter only
+*builds and writes* the plist files and reports the load commands as data;
+running ``launchctl`` (a real change to the live user domain) is the
+composition root's job on explicit request, never a side effect of
+generation or tests.
 
 Plists are serialized with ``plistlib`` (stdlib — no runtime dep, correct
 Apple XML + DOCTYPE + escaping) rather than hand-written strings.
@@ -34,8 +36,10 @@ from pathlib import Path
 
 REVIVE_LABEL = "com.claude-remote-rescue.revive"
 WEB_LABEL = "com.claude-remote-rescue.web"
+AWAKE_LABEL = "com.claude-remote-rescue.awake"
 REVIVE_PLIST = REVIVE_LABEL + ".plist"
 WEB_PLIST = WEB_LABEL + ".plist"
+AWAKE_PLIST = AWAKE_LABEL + ".plist"
 
 # Binaries `crr revive` shells out to (directly or via the revived command).
 SERVICE_BINARIES = ("tmux", "ps", "claude")
@@ -111,6 +115,28 @@ def web_agent_plist(crr_bin: str, path: str, port: int) -> str:
     }).decode("utf-8")
 
 
+def awake_agent_plist(crr_bin: str, path: str) -> str:
+    """The loop that holds the machine awake while a session is live.
+
+    Its own agent rather than a job inside the web agent: the hold is a
+    child of whatever process owns it, and tying that to the dashboard
+    would couple "am I serving a page" to "may this machine sleep".
+
+    KeepAlive + RunAtLoad keep the loop running while logged in and bring
+    it back at login — same rationale as ``web_agent_plist``. No
+    StartInterval: `crr awake` is a long-running loop, not a periodic job,
+    and a StartInterval would spawn a second loop alongside the first, with
+    two holders fighting over the same machine.
+    """
+    return plistlib.dumps({
+        "Label": AWAKE_LABEL,
+        "ProgramArguments": [crr_bin, "awake"],
+        "KeepAlive": True,
+        "RunAtLoad": True,
+        "EnvironmentVariables": {"PATH": path},
+    }).decode("utf-8")
+
+
 def agent_dir(home: Path) -> Path:
     return home / "Library" / "LaunchAgents"
 
@@ -128,7 +154,7 @@ def write_agents(target_dir: Path, agents: dict[str, str]) -> list[Path]:
 
 
 def enable_commands(target_dir: Path) -> list[list[str]]:
-    """The commands that load both agents (data, not run).
+    """The commands that load all agents (data, not run).
 
     ``launchctl load -w`` marks the agents enabled and starts them; they
     then reload automatically at each login.
@@ -137,11 +163,12 @@ def enable_commands(target_dir: Path) -> list[list[str]]:
     return [
         ["launchctl", "load", "-w", str(target_dir / REVIVE_PLIST)],
         ["launchctl", "load", "-w", str(target_dir / WEB_PLIST)],
+        ["launchctl", "load", "-w", str(target_dir / AWAKE_PLIST)],
     ]
 
 
 def disable_commands(target_dir: Path) -> list[list[str]]:
-    """The commands that unload both agents (data, not run).
+    """The commands that unload all agents (data, not run).
 
     Callers must unload BEFORE removing the plist files — launchctl needs
     the plist present on disk to unload it.
@@ -150,4 +177,5 @@ def disable_commands(target_dir: Path) -> list[list[str]]:
     return [
         ["launchctl", "unload", "-w", str(target_dir / REVIVE_PLIST)],
         ["launchctl", "unload", "-w", str(target_dir / WEB_PLIST)],
+        ["launchctl", "unload", "-w", str(target_dir / AWAKE_PLIST)],
     ]
