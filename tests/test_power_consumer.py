@@ -602,23 +602,88 @@ def test_power_release_clears_the_state_file_when_the_stop_succeeds(
     assert power_state.read(tmp_path) is None
 
 
-def test_power_release_clears_the_state_file_even_when_the_stop_command_fails(
+def test_power_release_does_not_clear_a_fresh_live_claim_when_the_stop_fails(
         tmp_path, monkeypatch, capsys):
-    # Fix round 2 (2026-08-13): measured with a dead-writer file present,
-    # `crr power --release` against a unit that had already crashed (not
-    # loaded) exited 1 and the stale file survived -- leaving `crr
-    # doctor` stuck at [WARN] forever with no path back to green even
-    # after the user did exactly the right recovery action. A crashed
-    # loop is precisely when this file is stale and the user is trying to
-    # clear it, so the clear must not be conditioned on the stop
-    # command's own exit code.
+    # Fix round 3 (2026-08-13): round 2's "clear unconditionally" was
+    # ITSELF a bug. Measured: a WEDGED loop (SIGSTOPped, its hold's child
+    # still genuinely alive) fails to stop -- `systemctl --user stop`
+    # exits nonzero because the process never actually goes away -- and
+    # its stale-looking timestamp (in a real wedge, `unknown -- last
+    # report is 43s old`) was the ONLY evidence something was wrong.
+    # Clearing it unconditionally fabricated a fresh "holding: nothing --
+    # no keep-awake loop has reported" while the hold was still active: a
+    # false KNOWN-nothing standing in for a live claim, the exact class
+    # this whole feature exists to end. So here the claim is FRESH and
+    # TRUSTWORTHY (a live pid, a recent timestamp) and the stop FAILS --
+    # the file must survive, and the user must be told why on stderr.
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
     monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     power_state.write(tmp_path, power.snapshot(
         frozenset({"sleep"}), "crr: 1 Claude session live", os.getpid(), time.time()))
+    assert cli.main(["power", "--release"]) == 1
+    assert power_state.read(tmp_path) is not None  # the live claim survives
+    err = capsys.readouterr().err
+    assert "did NOT clear" in err
+    assert "live report" in err
+
+
+def test_power_release_clears_an_already_untrustworthy_claim_even_when_the_stop_fails(
+        tmp_path, monkeypatch, capsys):
+    # The complement: there is nothing left to protect when the file's
+    # OWN claim is already untrustworthy (here: a dead writer) -- the
+    # crashed-loop recovery case fix round 2 was originally written for
+    # still needs to work, just narrowed to not also catch a genuinely
+    # live claim.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    time.sleep(0.05)
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live", dead.pid, time.time()))
     assert cli.main(["power", "--release"]) == 1  # the stop command's own failure is still reported
     assert power_state.read(tmp_path) is None      # but the stale file is gone regardless
+    assert "did NOT clear" not in capsys.readouterr().err
+
+
+def test_power_release_clears_a_stale_claim_even_when_the_stop_fails(
+        tmp_path, monkeypatch, capsys):
+    # Same complement, staleness instead of a dead writer.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: _POWER_CFG(power_poll_seconds=10,
+                                           power_state_max_age_multiplier=3))
+    power_state.write(tmp_path, power.snapshot(
+        frozenset({"sleep"}), "crr: 1 Claude session live",
+        os.getpid(), time.time() - 1000))  # far past 10 * 3 = 30s
+    assert cli.main(["power", "--release"]) == 1
+    assert power_state.read(tmp_path) is None
+
+
+def test_power_release_clears_an_unreadable_claim_even_when_the_stop_fails(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    power_state.path_for(tmp_path).write_text('{"held": ["sleep"], "pid":', encoding="utf-8")
+    assert cli.main(["power", "--release"]) == 1
+    assert power_state.read(tmp_path) is None
+
+
+def test_power_release_clears_when_no_file_ever_existed_and_the_stop_fails(
+        tmp_path, monkeypatch, capsys):
+    # Nothing to protect (and clearing a missing file is a no-op) -- and
+    # the decline message must not fire for a file that never existed.
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: False)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    assert cli.main(["power", "--release"]) == 1
+    assert power_state.read(tmp_path) is None
+    assert "did NOT clear" not in capsys.readouterr().err
 
 
 def test_power_release_clearing_a_missing_file_does_not_raise(
@@ -933,6 +998,84 @@ def test_power_survives_a_string_held_field_without_iterating_its_letters(
     assert rc == 0
     assert "unknown" in out.lower()
     assert "e, l" not in out and "holding: e" not in out
+
+
+# --- forged output structure via reason/held content (fix round 3, --------
+# --- 2026-08-13) -------------------------------------------------------
+#
+# `held` items and `reason` were type-checked but never content-checked:
+# a held item or reason containing a newline plus a fake "[ok  ] ..."
+# line could forge doctor's checklist output, and a raw ANSI escape would
+# pass straight through to the terminal. Checked here at the CLI surface
+# (the actual place a user would see the forgery), on top of the
+# interpret()-level tests in test_power.py.
+
+def test_power_reason_with_a_forged_line_does_not_add_an_extra_line(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    forged_reason = "crr: 1 Claude session live\n  [ok  ] forged check \x1b[31mRED\x1b[0m"
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+                                 "reason": forged_reason,
+                                 "pid": os.getpid(), "updated": time.time()})
+    rc = cli.main(["power"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # "holding: sleep — ..." plus "release with: ..." -- exactly two
+    # lines, never a THIRD line forged out of the reason's embedded
+    # newline. `splitlines()` doesn't count the trailing newline as an
+    # extra element, so this is genuinely "how many lines got printed".
+    assert len(out.splitlines()) == 2
+    assert "\x1b" not in out
+    assert "\n  [ok  ]" not in out
+
+
+def test_power_held_item_with_a_forged_line_does_not_add_an_extra_line(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_load_config", lambda: _POWER_CFG())
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([], {}))
+    forged_held = "sleep\n  [ok  ] forged\x1b[31m"
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": [forged_held],
+                                 "reason": "r", "pid": os.getpid(), "updated": time.time()})
+    rc = cli.main(["power"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(out.splitlines()) == 2
+    assert "\x1b" not in out
+    assert "\n  [ok  ]" not in out
+
+
+def test_doctor_reason_with_a_forged_line_does_not_forge_a_check(
+        tmp_path, monkeypatch, capsys):
+    # The specific failure named by the reviewer: a forged "[ok  ] ..."
+    # line inside doctor's checklist output is the same lie as a wrong
+    # verdict, just with better typography.
+    monkeypatch.setattr(cli, "_power_holder", lambda *a, **k: _FakeHolder())
+    monkeypatch.setattr(cli, "_power_source", lambda *a, **k: _FakeSource(True))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_power_entries_and_owners", lambda *a, **k: ([{"pid": 1}], {1: [11]}))
+    forged_reason = "crr: 1 Claude session live\n  [ok  ] forged check — everything fine"
+    power_state.write(tmp_path, {"v": power.POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+                                 "reason": forged_reason,
+                                 "pid": os.getpid(), "updated": time.time()})
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.splitlines()
+    # Exactly one line contains "power hold" -- the forged text is merged
+    # into that SAME line (the newline that would have started a second
+    # one is gone), never its own separate "[ok  ] forged check" entry.
+    power_lines = [ln for ln in lines if "power hold" in ln]
+    assert len(power_lines) == 1
+    forged_lines = [ln for ln in lines
+                    if "forged check" in ln and "power hold" not in ln]
+    assert forged_lines == []
 
 
 # --- the actual bug, cross-process (fix round 1, 2026-08-13) ---------------

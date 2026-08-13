@@ -11,7 +11,33 @@ whole message, and it is what `crr doctor` prints.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# C0 control range (0x00-0x1F) plus DEL (0x7F): newlines, carriage
+# returns, and the ESC (0x1B) that introduces every ANSI escape sequence
+# are all in here. Stripping ESC alone is enough to neutralize an escape
+# sequence -- what's left behind is just visible text (e.g. "[31m"), not
+# something a terminal or a doctor-style `[ok  ] label` line parser will
+# ever treat as structure.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize(text: str) -> str:
+    """Strip control characters from an untrusted string before it is
+    trusted enough to print (fix round 3, 2026-08-13).
+
+    ``reason`` and every ``held`` item cross a process boundary through a
+    JSON file `crr power`/`crr doctor` do not control the contents of --
+    type-checking them (str) is not the same as content-checking them.
+    An embedded newline followed by a fake ``"[ok  ] some other check"``
+    line would forge doctor's checklist output; a raw ANSI escape would
+    corrupt whatever terminal is reading it. Both are the same failure
+    family as the rest of this module (an untrusted claim standing in for
+    a real one), just aimed at OUTPUT STRUCTURE instead of the verdict.
+    """
+    return _CONTROL_CHARS_RE.sub("", text)
+
 
 # What each config mode asks for. "sleep" means AUTOMATIC/idle sleep only:
 # lid close is never in scope on any platform (see the spec — logind
@@ -237,4 +263,12 @@ def interpret(
     age = now - data["updated"]
     if age > max_age_seconds:
         return Report(frozenset(), None, f"last report is {int(age)}s old")
-    return Report(frozenset(data["held"]), data.get("reason") or None, None)
+    # Sanitized HERE, not left to every render call site: `_cmd_power`'s
+    # plain prints and `crr doctor`'s `_check(...)` lines are two
+    # different render paths, and requiring both to remember to sanitize
+    # is how this kind of gap reappears. Every consumer of a `Report`
+    # gets a `held`/`reason` that is already safe to print verbatim.
+    held = frozenset(_sanitize(h) for h in data["held"])
+    raw_reason = data.get("reason")
+    reason = _sanitize(raw_reason) if isinstance(raw_reason, str) else None
+    return Report(held, reason or None, None)

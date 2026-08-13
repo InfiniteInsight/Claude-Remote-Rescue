@@ -864,14 +864,45 @@ def _cmd_power(args: argparse.Namespace) -> int:
         else:
             cmds = [systemd.stop_awake_command()]
         ok = _run_commands(cmds, "power")
-        # Cleared regardless of the stop command's own exit code (fix
-        # round 2). Measured: a unit that isn't loaded (a loop that
-        # already crashed) makes `_run_commands` fail with rc=1, and the
-        # state file survived — leaving `crr doctor` stuck at [WARN]
-        # forever with no path back to green even after the user did
-        # exactly the right recovery action. A crashed loop is exactly
-        # when this file is stale and the user is trying to clear it.
-        power_state.clear(state_dir.state_dir())
+        sd = state_dir.state_dir()
+        # Read/interpret the CURRENT state BEFORE deciding whether to
+        # clear (fix round 3, 2026-08-13). Round 2's "clear
+        # unconditionally" was itself a bug: fix round 2 measured a
+        # crashed loop's stale file surviving a failed `--release` and
+        # leaving `crr doctor` stuck at [WARN] forever -- but clearing
+        # UNCONDITIONALLY, including when the stop failed and the loop is
+        # actually still alive and current, measured worse. A wedged
+        # loop (SIGSTOPped, the hold's child still alive) fails to stop,
+        # and its state file's STALE TIMESTAMP was the only evidence of
+        # the wedge (`unknown — last report is 43s old`); clearing it
+        # anyway fabricated a fresh "holding: nothing — no keep-awake
+        # loop has reported" while the hold was still genuinely active --
+        # a false KNOWN-nothing standing in for a live claim, the exact
+        # class this whole feature exists to end. So: clear when the stop
+        # SUCCEEDED (the loop really did stop, so the file is now stale
+        # by definition), OR when the file's own claim was ALREADY
+        # untrustworthy (unreadable / dead writer / stale) -- but NEVER
+        # to erase a fresh, currently-trustworthy claim just because the
+        # stop command itself failed.
+        report = _power_report(sd, config)
+        # `report.never_reported` (no file ever existed) is grouped with
+        # the "already untrustworthy" cases: there is no live claim there
+        # to protect, and clearing is a harmless no-op either way -- but
+        # keeping it out of the "declined" branch matters for the stderr
+        # message below, which would otherwise misdescribe a file that
+        # never existed as "a currently live report".
+        already_untrustworthy = report.unknown is not None or report.never_reported
+        if ok or already_untrustworthy:
+            power_state.clear(sd)
+        else:
+            print(
+                "crr power: did NOT clear power.json -- it still describes "
+                "a currently live report, and the stop command failed, so "
+                "clearing it now would hide a hold that may still be "
+                "active. Re-run `crr power --release` once the loop "
+                "actually stops (or investigate why it hasn't).",
+                file=sys.stderr,
+            )
         return 0 if ok else 1
 
     try:

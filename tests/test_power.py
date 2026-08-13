@@ -220,6 +220,27 @@ def test_interpret_rejects_a_wrong_snapshot_version():
     r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
     assert "version" in r.unknown
+
+
+def test_interpret_version_mismatch_message_cannot_be_forged_by_a_malicious_v():
+    # The ONE `unknown` message built from untrusted content instead of an
+    # internal literal: it embeds `data.get("v")!r`. `v` is untrusted
+    # JSON and can be ANY type (not just an int) -- verified here, rather
+    # than assumed from "repr() escapes control characters", that a
+    # deeply nested control-character payload still comes out escaped as
+    # literal backslash-sequences, never a raw newline or ESC that could
+    # forge a second output line.
+    for malicious_v in (
+        ["\n  [ok  ] forged", "\x1b[31m"],
+        {"x": "\n[ok  ] forged\x1b[0m"},
+        "\n[ok  ] forged\x1b[0m",
+    ):
+        data = {"v": malicious_v, "held": ["sleep"], "reason": "r",
+                "pid": 4242, "updated": 1000.0}
+        r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+        assert r.unknown is not None
+        assert "\n" not in r.unknown, malicious_v
+        assert "\x1b" not in r.unknown, malicious_v
     assert r.held == frozenset()
 
 
@@ -305,3 +326,58 @@ def test_interpret_never_raises_on_a_non_dict_json_value():
     r = interpret([1, 2, 3], now=1005.0, pid_alive=True, max_age_seconds=90)
     assert r.unknown is not None
     assert r.held == frozenset()
+
+
+# --- content, not just type: control characters can't forge output -------
+# --- structure (fix round 3, 2026-08-13) -----------------------------------
+#
+# `held` items and `reason` were type-checked (str) but never content-
+# checked. A held item or reason containing a newline followed by a fake
+# "[ok  ] some other check" line would forge doctor's checklist output;
+# a raw ANSI escape would corrupt whatever terminal renders it. Same
+# failure family as the rest of this module -- an untrusted claim from
+# across a process boundary standing in for something crr actually
+# verified -- aimed at output STRUCTURE instead of the verdict.
+
+def test_interpret_strips_a_newline_and_fake_line_from_reason():
+    # Stripping the newline is what matters -- the REST of the text is
+    # not crr's business to censor, and stays visible (harmless once it
+    # can no longer start a new line of its own). What must be true is
+    # that the whole thing renders as exactly one line, never a second
+    # forged one.
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+            "reason": "crr: 1 Claude session live\n  [ok  ] forged check — nothing to see",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is None
+    assert "\n" not in r.reason
+    assert len(r.reason.splitlines()) <= 1
+
+
+def test_interpret_strips_ansi_escapes_from_reason():
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+            "reason": "crr: 1 Claude session live\x1b[31mRED\x1b[0m",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is None
+    assert "\x1b" not in r.reason
+
+
+def test_interpret_strips_control_characters_from_held_items():
+    data = {"v": POWER_SNAPSHOT_VERSION,
+            "held": ["sleep\n  [ok  ] forged\x1b[31m"],
+            "reason": "r", "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert r.unknown is None
+    for item in r.held:
+        assert "\n" not in item
+        assert "\x1b" not in item
+        assert "\r" not in item
+
+
+def test_interpret_strips_carriage_returns_too():
+    data = {"v": POWER_SNAPSHOT_VERSION, "held": ["sleep"],
+            "reason": "crr: 1 Claude session live\r  [WARN] forged",
+            "pid": 4242, "updated": 1000.0}
+    r = interpret(data, now=1005.0, pid_alive=True, max_age_seconds=90)
+    assert "\r" not in r.reason
