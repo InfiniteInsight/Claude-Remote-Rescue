@@ -92,3 +92,17 @@ def test_unmet_names_what_this_platform_cannot_deliver():
 def test_unmet_is_sorted_so_output_is_stable():
     assert unmet(frozenset(), frozenset({"shutdown", "sleep"})) == (
         "shutdown", "sleep")
+
+
+def test_ports_declare_the_power_protocols():
+    # The adapters in later tasks are checked against these signatures;
+    # a rename here without a rename there is a silent breakage, because
+    # Protocols are structural and nothing fails at import time.
+    import inspect
+    from crr.core import ports
+    assert hasattr(ports, "PowerSource")
+    assert hasattr(ports, "PowerHolder")
+    assert list(inspect.signature(ports.PowerHolder.hold).parameters) == [
+        "self", "want", "reason"]
+    assert list(inspect.signature(ports.PowerSource.on_ac).parameters) == [
+        "self"]

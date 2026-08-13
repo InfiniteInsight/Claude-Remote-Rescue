@@ -236,3 +236,40 @@ class DiagnosticsSource(Protocol):
     def available(self) -> bool: ...
 
     def collect(self, config: Any) -> tuple[list, list, list, list]: ...
+
+
+@runtime_checkable
+class PowerSource(Protocol):
+    """Is this machine on mains power?
+
+    Tri-state ON PURPOSE. A machine with no battery device is a desktop —
+    that is a known ``True``, not an unknown. ``None`` means the probe
+    failed, and per the spine principle that must never be turned into
+    either answer by a consumer.
+    """
+
+    def on_ac(self) -> bool | None: ...
+
+
+@runtime_checkable
+class PowerHolder(Protocol):
+    """Keep the machine awake / un-restartable while held.
+
+    Implementations hold via a CHILD PROCESS whose lifetime is the hold,
+    so the hold cannot outlive crr. Same reasoning as
+    ``crr.adapters.locking``: crr's whole purpose is surviving processes
+    that die badly, and a hold that leaks would block restarts with
+    nothing left running to explain why.
+    """
+
+    def capabilities(self) -> frozenset[str]:
+        """Which of {"sleep", "shutdown"} this platform can actually do."""
+
+    def hold(self, want: frozenset[str], reason: str) -> None:
+        """Start (or update) the hold. Idempotent for an unchanged want."""
+
+    def release(self) -> None:
+        """Drop the hold. Safe to call when nothing is held."""
+
+    def held(self) -> frozenset[str]:
+        """What is currently held."""
