@@ -29,6 +29,16 @@ from crr.adapters.power_hold_macos import MacPowerHolder as _M
 from crr.adapters.power_hold_windows import WindowsPowerHolder as _W
 
 
+# These tests deny access with `chmod 000`, which needs POSIX permission
+# semantics: on Windows chmod only toggles the read-only bit, so the file
+# stays readable and the assertion would be measuring nothing. They also
+# call os.geteuid(), which does not exist there at all.
+_needs_posix_permissions = pytest.mark.skipif(
+    os.name != "posix",
+    reason="needs POSIX permission semantics (chmod 000 denies; Windows read-only bit does not)",
+)
+
+
 def _supply(root: Path, name: str, **files: str) -> None:
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
@@ -70,6 +80,7 @@ def test_a_missing_root_is_unknown(tmp_path):
     assert SysfsPowerSource(tmp_path / "nope").on_ac() is None
 
 
+@_needs_posix_permissions
 def test_a_device_whose_type_is_unreadable_is_unknown_not_mains(tmp_path):
     import os
     # Skip if running as root (root ignores chmod 000)
@@ -241,6 +252,7 @@ def test_no_config_source_at_all_is_the_compiled_in_default_not_unknown(tmp_path
     assert lid_exemption(tmp_path) is True
 
 
+@_needs_posix_permissions
 def test_a_source_that_exists_but_cannot_be_read_is_unknown_not_safe(tmp_path):
     if os.geteuid() == 0:
         pytest.skip("running as root; chmod 000 is ignored")
@@ -253,6 +265,7 @@ def test_a_source_that_exists_but_cannot_be_read_is_unknown_not_safe(tmp_path):
         conf.chmod(0o644)
 
 
+@_needs_posix_permissions
 def test_a_dropin_dir_that_cannot_be_listed_is_unknown_not_empty(tmp_path):
     if os.geteuid() == 0:
         pytest.skip("running as root; chmod 000 is ignored")
@@ -268,6 +281,7 @@ def test_a_dropin_dir_that_cannot_be_listed_is_unknown_not_empty(tmp_path):
         d.chmod(0o755)
 
 
+@_needs_posix_permissions
 def test_a_definite_no_beats_an_unreadable_sibling(tmp_path):
     # Precedence-proof by construction: ANY source saying no wins, so the
     # answer never depends on implementing logind's precedence rules.
@@ -309,6 +323,7 @@ def test_the_real_host_config_is_exempt_so_crr_is_not_over_corrected(tmp_path):
     assert lid_exemption(Path("/")) is True
 
 
+@_needs_posix_permissions
 def test_the_withheld_reason_does_not_claim_a_setting_it_never_read(tmp_path):
     # Two different withholdings with two different reasons. Reporting
     # "this host sets LidSwitchIgnoreInhibited=no" when the config could
