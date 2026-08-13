@@ -54,6 +54,21 @@ def test_a_missing_root_is_unknown(tmp_path):
     assert SysfsPowerSource(tmp_path / "nope").on_ac() is None
 
 
+def test_a_device_whose_type_is_unreadable_is_unknown_not_mains(tmp_path):
+    import os
+    # Skip if running as root (root ignores chmod 000)
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 is ignored")
+    # Create a device directory with an unreadable type file
+    d = tmp_path / "AC1"
+    d.mkdir(parents=True, exist_ok=True)
+    type_file = d / "type"
+    type_file.write_text("Mains\n", encoding="utf-8")
+    type_file.chmod(0o000)
+    # Should return None (unknown), not True (guessing mains)
+    assert SysfsPowerSource(tmp_path).on_ac() is None
+
+
 @pytest.mark.parametrize("text,expected", [
     ("Now drawing from 'AC Power'\n -InternalBattery-0 100%; charged", True),
     ("Now drawing from 'Battery Power'\n -InternalBattery-0 82%", False),

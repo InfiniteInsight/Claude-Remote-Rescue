@@ -616,6 +616,9 @@ class SysfsPowerSource:
             entries = sorted(self._root.iterdir())
         except OSError:
             return None
+        # No entries at all: it's a desktop (always on mains)
+        if not entries:
+            return True
         mains: list[str] = []
         batteries: list[str] = []
         for entry in entries:
@@ -634,11 +637,7 @@ class SysfsPowerSource:
             # No mains device exposed (some laptops, some VMs): the
             # battery's own status still answers the question.
             return any(s in _CHARGING for s in batteries)
-        # No power-supply devices at all. That is a desktop or a server —
-        # a KNOWN mains machine, not an unknown one. Returning None here
-        # would withhold the hold on every non-laptop.
-        if not any(_read(e / "type") for e in entries):
-            return True
+        # Entries exist but we couldn't read their state (e.g., unreadable files)
         return None
 
 
