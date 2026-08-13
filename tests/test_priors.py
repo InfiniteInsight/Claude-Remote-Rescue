@@ -12,7 +12,7 @@ reintroduce.
 import inspect
 import re
 
-from crr.adapters import transcript_source
+from crr.adapters import power_hold_windows, transcript_source
 from crr.core import context_pressure as cp
 from crr.core import web
 from crr.core.config import DEFAULTS
@@ -32,6 +32,35 @@ def test_assemble_sessions_defaults_come_from_config():
         ("context_bytes_per_token", "context_bytes_per_token"),
     ):
         assert params[name].default == DEFAULTS[key], name
+
+
+# --- the Windows holder's self-release cap ---------------------------------
+# `power_block_max_hours` is a versioned config key AND a hardcoded `12` in
+# two signatures. Nothing threads config into the holder yet, so a user
+# setting power_block_max_hours=2 would silently get 12 the moment a
+# consumer arrives -- the duplicate prior is the bug, not the missing wiring.
+
+def test_windows_holder_cap_defaults_come_from_config():
+    for target in (power_hold_windows.holder_script,
+                   power_hold_windows.WindowsPowerHolder):
+        params = inspect.signature(target).parameters
+        assert params["max_hours"].default == DEFAULTS["power_block_max_hours"], (
+            f"{target.__name__} duplicates the power_block_max_hours prior")
+
+
+def test_windows_holder_cap_is_not_a_bare_literal():
+    """The equality pin above passes on the BROKEN version too.
+
+    Both sides are 12 today, so `== DEFAULTS[...]` only catches the drift
+    after someone changes the config key. This is the guard that fails on
+    the duplicated literal itself -- same role the page-timer guard plays
+    below.
+    """
+    src = inspect.getsource(power_hold_windows)
+    bare = re.findall(r"max_hours\s*:\s*(?:int|float)\s*=\s*([\d.]+)", src)
+    assert bare == [], (
+        f"bare max_hours default(s) {bare} in power_hold_windows -- write "
+        'max_hours: float = DEFAULTS["power_block_max_hours"] instead')
 
 
 # --- scan/display bounds that had config-keyed siblings --------------------

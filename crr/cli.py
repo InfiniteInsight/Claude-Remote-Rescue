@@ -39,6 +39,8 @@ from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
 from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
+from crr.adapters import (power_hold_linux, power_hold_macos,
+                          power_hold_windows, power_source)
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import deploy
@@ -551,6 +553,37 @@ def _resolve_service_bin(explicit: str | None) -> str:
     if deployed.exists():
         return str(deployed)
     return _resolve_crr_bin(None)
+
+
+def _power_holder(system: str, wsl: bool):
+    """The PowerHolder for this host.
+
+    WSL is checked FIRST and deliberately. `platform.system()` returns
+    "Linux" there, so the obvious detect()-shaped selection would pick
+    systemd-inhibit — which runs inside the VM and cannot touch the
+    Windows host's power state. It would hold successfully, report
+    success, and protect nothing.
+    """
+    if wsl:
+        return power_hold_windows.WindowsPowerHolder()
+    if system == "Linux":
+        return power_hold_linux.LinuxPowerHolder()
+    if system == "Darwin":
+        return power_hold_macos.MacPowerHolder()
+    if system == "Windows":
+        return power_hold_windows.WindowsPowerHolder()
+    raise NotImplementedError(f"no power-hold adapter for {system!r} yet")
+
+
+def _power_source(system: str, timeout: float):
+    """The PowerSource for this host.
+
+    Unlike the HOLD, WSL needs no interop here: WSL2 passes the Windows
+    host's battery through sysfs, measured 2026-08-12.
+    """
+    if system == "Darwin":
+        return power_source.MacPowerSource(timeout)
+    return power_source.SysfsPowerSource()
 
 
 def _resolve_crr_bin(explicit: str | None) -> str:

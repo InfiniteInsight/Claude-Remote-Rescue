@@ -84,7 +84,7 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    assert cfg.CONFIG_DEFAULTS_VERSION == 15
+    assert cfg.CONFIG_DEFAULTS_VERSION == 16
 
 
 def test_context_pressure_fraction_defaults():
@@ -227,3 +227,16 @@ def test_load_toml_overrides_reads_a_file(tmp_path):
 
 def test_load_toml_overrides_missing_file_is_empty(tmp_path):
     assert cfg.load_toml_overrides(tmp_path / "nope.toml") == {}
+
+
+def test_power_block_keys_exist_with_safe_defaults():
+    # Off by default: a tool that silently stops your laptop sleeping is a
+    # trust hazard, so it must be opted into.
+    assert cfg.DEFAULTS["power_block"] == "off"
+    assert cfg.DEFAULTS["power_block_requires_ac"] is True
+    assert cfg.DEFAULTS["power_block_max_hours"] == 12
+    assert cfg.DEFAULTS["power_poll_seconds"] == 30
+
+
+def test_config_defaults_version_covers_the_power_keys():
+    assert cfg.CONFIG_DEFAULTS_VERSION >= 16

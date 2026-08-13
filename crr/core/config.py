@@ -71,7 +71,11 @@ from typing import Any, Mapping
 # and the two bridge_kick_* guards survive — only the thresholds of the
 # deleted detector went. The v12 entry above still names them: it is
 # history, and history is not edited.
-CONFIG_DEFAULTS_VERSION = 15
+# v16: added power_block / power_block_requires_ac / power_block_max_hours /
+# power_poll_seconds (spec 2026-08-12 — keep the machine up while a session
+# is live; see crr.core.power). Off by default: a tool that silently stops a
+# laptop sleeping is a trust hazard, so it is opted into, not out of.
+CONFIG_DEFAULTS_VERSION = 16
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -229,6 +233,16 @@ DEFAULTS: dict[str, Any] = {
     # crr.core.bridge_kicks for the per-sid history this reads/writes.
     "bridge_kick_cooldown_seconds": 600,  # never re-kick the same sid within this many seconds
     "bridge_kick_max_attempts": 3,        # consecutive attempts before giving up; resets only on a confirmed "ok"
+    # Power blocking (spec 2026-08-12). "off" | "sleep" | "sleep+shutdown".
+    # "sleep" means AUTOMATIC/idle sleep only — lid close is never blocked
+    # on any platform, which is a hard requirement, not a default.
+    "power_block": "off",
+    # A forgotten session must not flatten an unplugged laptop.
+    "power_block_requires_ac": True,
+    # Belt-and-braces against a holder that outlives crr and blocks
+    # restarts with nothing left to explain why.
+    "power_block_max_hours": 12,
+    "power_poll_seconds": 30,        # how often crr-awake re-decides
 }
 
 
