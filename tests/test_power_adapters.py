@@ -13,6 +13,7 @@ from crr.adapters.power_source import (MacPowerSource, SysfsPowerSource,
                                        _parse_pmset)
 from crr.adapters.power_hold_linux import (LinuxPowerHolder, inhibit_argv,
                                            lid_is_exempt)
+from crr.adapters.power_hold_macos import MacPowerHolder, caffeinate_argv
 
 
 def _supply(root: Path, name: str, **files: str) -> None:
@@ -159,3 +160,31 @@ def test_holder_still_blocks_shutdown_when_the_lid_is_not_exempt(tmp_path):
 def test_capabilities_are_both_on_linux(tmp_path):
     holder = LinuxPowerHolder(logind_conf=tmp_path / "absent.conf")
     assert holder.capabilities() == frozenset({"sleep", "shutdown"})
+
+
+def test_macos_can_hold_sleep_but_not_shutdown():
+    # Not an omission. A launch daemon cannot block a macOS shutdown at
+    # all: the cancellable notifications do not reach daemons, and only a
+    # GUI app in the login session can delay one. Deferred by the spec.
+    assert MacPowerHolder().capabilities() == frozenset({"sleep"})
+
+
+def test_caffeinate_holds_idle_only_so_the_lid_still_sleeps():
+    argv = caffeinate_argv()
+    assert argv[0] == "caffeinate"
+    assert "-i" in argv
+    assert "-s" not in argv, "-s would fight the lid; idle only"
+
+
+def test_macos_holder_ignores_a_shutdown_request_it_cannot_serve():
+    spawned = []
+
+    class _P:
+        def poll(self): return None
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+
+    holder = MacPowerHolder(spawn=lambda argv, **kw: spawned.append(argv) or _P())
+    holder.hold(frozenset({"sleep", "shutdown"}), "r")
+    assert holder.held() == frozenset({"sleep"})
+    assert len(spawned) == 1
