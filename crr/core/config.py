@@ -87,7 +87,10 @@ from typing import Any, Mapping
 # v18: added harden_active_hours_start / harden_active_hours_end /
 # harden_restart_lookback_days (spec 2026-08-12 — Windows Update hardening:
 # the active-hours window widens to cover overnight work; see crr.core.harden).
-CONFIG_DEFAULTS_VERSION = 18
+# v19: added boot_headless_window_seconds / boot_preferred_tailnet (spec
+# 2026-08-14 — reachable-at-boot, making the dashboard come up at boot
+# without a login so a reboot is survivable; see crr.core.reachable_at_boot).
+CONFIG_DEFAULTS_VERSION = 19
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -271,6 +274,14 @@ DEFAULTS: dict[str, Any] = {
     "harden_active_hours_end": 2,
     # How far back to look for restarts when reporting whether hardening held.
     "harden_restart_lookback_days": 14,
+    # reachable-at-boot (spec 2026-08-14). The window, in seconds, within which
+    # the control surface coming up after MACHINE boot counts as "headless"
+    # rather than "only at login". Generous slack for a slow cold boot; the
+    # measured real gap on the reference host was 39s.
+    "boot_headless_window_seconds": 300,
+    # Which Tailscale account the boot task re-selects. Empty means "whatever
+    # is active at install time" — crr never silently picks a tailnet.
+    "boot_preferred_tailnet": "",
 }
 
 
