@@ -19,6 +19,30 @@ from crr.core import power
 from crr.core.config import DEFAULTS
 
 
+# These tests deliver a real OS signal and check the receiving process's
+# own handler runs in response. On Windows that channel does not exist:
+# neither `os.kill(pid, SIGTERM)` nor `Popen.send_signal(SIGTERM)` deliver
+# a signal at all -- CPython routes them through `TerminateProcess`, which
+# kills the target outright instead of invoking its handler (and
+# `Popen.send_signal(SIGINT)` isn't even reachable there -- it isn't
+# `CTRL_C_EVENT`/`CTRL_BREAK_EVENT`, so it hits Python's own
+# `raise ValueError("Unsupported signal")` before anything is sent). This
+# is the exact mechanism in #74 (`PsProcessProbe.is_alive`'s
+# `os.kill(pid, 0)` was measured killing the process it probed), at a new
+# call site: self-signalling the pytest process itself killed the CI run
+# outright (no summary line, exit 1, dead mid-suite). The next person to
+# see this skip should not "fix" it by swapping in CTRL_BREAK_EVENT or
+# similar -- there is no real-signal equivalent to translate to.
+_needs_real_signal_delivery = pytest.mark.skipif(
+    os.name != "posix",
+    reason=(
+        "delivers a real signal; on Windows os.kill/Popen.send_signal is "
+        "TerminateProcess (not a signal), so it would kill the target "
+        "outright instead of invoking its handler -- see #74"
+    ),
+)
+
+
 def test_live_claude_count_counts_only_sessions_with_a_live_owner():
     # A journal entry with a claude field is not proof the agent is alive;
     # only the process snapshot is. Counting entries instead of owners
@@ -244,6 +268,7 @@ def test_awake_rereads_config_each_poll_so_turning_it_off_takes_effect(tmp_path,
     assert kinds[0] == "hold" and "release" in kinds[1:]
 
 
+@_needs_real_signal_delivery
 def test_awake_releases_on_a_real_sigterm_not_just_simulated_keyboardinterrupt(
     tmp_path, monkeypatch
 ):
@@ -467,6 +492,7 @@ def _run_awake_and_signal_twice(tmp_path, sig, poll_seconds=30, ladder=1.0, gap=
     return rc, output_lines
 
 
+@_needs_real_signal_delivery
 def test_awake_finishes_release_even_when_a_second_sigterm_lands_mid_release(tmp_path):
     # A second SIGTERM landing WHILE release() is running (`systemctl
     # restart` re-sending SIGTERM mid-teardown) must not abort the
@@ -482,6 +508,7 @@ def test_awake_finishes_release_even_when_a_second_sigterm_lands_mid_release(tmp
     assert "release-done" in output, output
 
 
+@_needs_real_signal_delivery
 def test_awake_finishes_release_even_when_a_second_sigint_lands_mid_release(tmp_path):
     # The double-Ctrl-C half of the same finding. SIGINT already raises
     # KeyboardInterrupt via Python's own default handler -- with no guard,
