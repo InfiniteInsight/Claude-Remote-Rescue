@@ -40,6 +40,7 @@ def _stamp() -> str:
 SERVICE_NAME = "crr-revive.service"
 TIMER_NAME = "crr-revive.timer"
 WEB_SERVICE_NAME = "crr-web.service"
+AWAKE_SERVICE_NAME = "crr-awake.service"
 
 # Binaries `crr revive` shells out to (directly or via the revived command).
 SERVICE_BINARIES = ("tmux", "ps", "claude")
@@ -166,6 +167,42 @@ def web_service_unit(
     )
 
 
+def awake_service_unit(
+    crr_bin: str, path: str, state_home: str,
+    *, restart_seconds: int = DEFAULTS["web_restart_seconds"],
+) -> str:
+    """The loop that holds the machine awake while a session is live.
+
+    Its own unit rather than a job inside crr-web: the hold is a child of
+    whatever process owns it, and tying that to the dashboard would couple
+    "am I serving a page" to "may this machine sleep".
+
+    No ``KillSignal=`` override — the default SIGTERM is what lets the loop
+    release the hold in its ``finally`` before exiting.
+    """
+    return (
+        _stamp()
+        + "[Unit]\n"
+        "Description=Claude-Remote-Rescue keep-awake\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"Environment=PATH={path}\n"
+        f"Environment=XDG_STATE_HOME={state_home}\n"
+        f"ExecStart={crr_bin} awake\n"
+        "Restart=on-failure\n"
+        f"RestartSec={restart_seconds}\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def stop_awake_command() -> list[str]:
+    """Stop the keep-awake loop, which IS how the hold is released."""
+    return ["systemctl", "--user", "stop", AWAKE_SERVICE_NAME]
+
+
 def unit_dir(home: Path) -> Path:
     return home / ".config" / "systemd" / "user"
 
@@ -188,13 +225,15 @@ def critical_enable_commands() -> list[list[str]]:
     Split from linger ([Task 7], live evidence 2026-07-31): on WSL2,
     `loginctl enable-linger` reliably exits 1 (a benign dbus quirk) even
     though the services run fine — the user manager starts with the
-    session regardless. Only these three (data-writing, real service
-    activation) are load-bearing for "is the watchdog/dashboard running".
+    session regardless. Only these four (data-writing, real service
+    activation) are load-bearing for "is the watchdog/dashboard/keep-awake
+    running".
     """
     return [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", TIMER_NAME],
         ["systemctl", "--user", "enable", "--now", WEB_SERVICE_NAME],
+        ["systemctl", "--user", "enable", "--now", AWAKE_SERVICE_NAME],
     ]
 
 
@@ -212,14 +251,16 @@ def linger_command() -> list[str]:
 def enable_commands() -> list[list[str]]:
     """The full activation sequence (data, not run) — print-mode output.
 
-    Unchanged by the critical/linger split: still all four commands, in the
-    same order, for `crr systemd` (no --install) to display verbatim.
+    Unchanged by the critical/linger split: still critical_enable_commands()
+    plus linger, in the same order, for `crr systemd` (no --install) to
+    display verbatim.
     """
     return critical_enable_commands() + [linger_command()]
 
 
 def disable_commands() -> list[list[str]]:
-    """The commands that deactivate the watchdog + dashboard (data, not run).
+    """The commands that deactivate the watchdog + dashboard + keep-awake
+    (data, not run).
 
     Mirror of enable_commands; linger is left alone (other services may
     rely on it — enabling it was additive, so removal is the user's call).
@@ -227,5 +268,6 @@ def disable_commands() -> list[list[str]]:
     return [
         ["systemctl", "--user", "disable", "--now", TIMER_NAME],
         ["systemctl", "--user", "disable", "--now", WEB_SERVICE_NAME],
+        ["systemctl", "--user", "disable", "--now", AWAKE_SERVICE_NAME],
         ["systemctl", "--user", "daemon-reload"],
     ]

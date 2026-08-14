@@ -86,24 +86,64 @@ echo 'source ~/.crr-shim.zsh' >> ~/.zshrc     # or ~/.bashrc for bash
 After they confirm and you run it, tell them: **open a new terminal** for the
 shim to take effect. (fish needs no rc edit — just a new shell.)
 
-## Step 3 — Background agents: watchdog + dashboard (NEEDS confirmation)
+## Step 3 — Background agents: watchdog + dashboard + keep-awake (NEEDS confirmation)
 
-First **print** the service definition for review (safe, changes nothing):
+First **print** the service definitions for review (safe, changes nothing):
 
 ```sh
-crr launchd        # macOS: prints two launchd user-agent plists
-# crr systemd      # Linux: prints the watchdog timer + dashboard unit
+crr launchd        # macOS: prints three launchd user-agent plists
+# crr systemd      # Linux: prints the watchdog timer + dashboard unit + crr-awake
 ```
 
-Summarize for the user what it installs: a ~1-minute **watchdog** that revives
-crashed sessions, and the **dashboard** on `127.0.0.1:8377`. On macOS these are
-*user* agents — they run only while the user is logged in (that's expected).
-On their **yes**:
+Summarize for the user what it installs — **three** things, not two:
+
+- a ~1-minute **watchdog** that revives crashed sessions,
+- the **dashboard** on `127.0.0.1:8377`,
+- **`crr-awake`**, the keep-awake loop. Say plainly that it **does nothing
+  until they turn it on**: `power_block` defaults to `"off"`, so the unit
+  runs, decides "nothing to hold", and holds nothing. It never blocks
+  closing the lid.
+
+On macOS these are *user* agents — they run only while the user is logged in
+(that's expected). On their **yes**:
 
 ```sh
 crr launchd --install                              # macOS   (Linux: crr systemd --install)
-launchctl list | grep claude-remote-rescue         # macOS: expect .revive and .web loaded
+launchctl list | grep claude-remote-rescue         # macOS: expect .revive, .web and .awake loaded
 ```
+
+**Windows/WSL is different.** `crr schtasks` installs the watchdog and
+dashboard **only** — there is no keep-awake Scheduled Task, and the command
+prints a note saying so. On such a host, either run `crr awake` directly or
+install the systemd units inside the distro.
+
+### If the user wants the machine held awake
+
+Only if they ask. Add to `config.toml` in the state dir:
+
+```toml
+power_block = "sleep"            # or "sleep+shutdown"; default "off"
+power_block_requires_ac = true   # default: don't drain a battery
+```
+
+Then confirm it is real and visible, from a **separate** shell:
+
+```sh
+crr power       # expect: holding: sleep — crr: N Claude sessions live
+crr doctor      # the "power hold" line must agree with the above
+```
+
+Tell them the escape hatch **before** they need it, and check it prints:
+
+```sh
+crr power --release      # stops the crr-awake loop; that IS the release
+```
+
+Read `crr power` literally when you report back. `holding: unknown — ...`
+is **not** "nothing is held" — it means crr cannot currently prove what is
+held (the loop died, its report is stale, or a hold was asked for and not
+obtained). `crr doctor` shows those as `[WARN]`. Paste the line verbatim
+rather than paraphrasing it as "fine".
 
 ## Step 4 — Hand off to the user (they drive the actual test)
 
@@ -146,6 +186,7 @@ check**. Hand this summary to the user to send back to crr's author.
 ## Uninstall (clean — leaves the machine as it was)
 
 ```sh
+crr power --release                     # release any keep-awake hold first
 crr launchd --uninstall                 # macOS (Linux: crr systemd --uninstall)
 # remove the 'source ~/.crr-shim.zsh' line from ~/.zshrc, then:
 rm -f ~/.crr-shim.zsh

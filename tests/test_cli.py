@@ -193,7 +193,7 @@ def test_web_server_serves_sessions_and_enforces_host(tmp_path):
         server.server_close()
 
 
-def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_systemd_print_emits_all_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
     rc = cli.main(["systemd"])  # default: print, no --install
@@ -201,6 +201,11 @@ def test_systemd_print_emits_both_units_and_writes_nothing(tmp_path, monkeypatch
     assert rc == 0
     assert "crr-revive.service" in out and "crr-revive.timer" in out
     assert "ExecStart=/opt/crr/bin/crr revive" in out
+    # crr-web.service and crr-awake.service (own unit, own lifetime — see
+    # systemd.awake_service_unit's docstring) round out the four units.
+    assert cli.systemd.WEB_SERVICE_NAME in out
+    assert cli.systemd.AWAKE_SERVICE_NAME in out
+    assert "ExecStart=/opt/crr/bin/crr awake" in out
     # XDG_STATE_HOME baked as the parent of the resolved state dir.
     assert f"Environment=XDG_STATE_HOME={tmp_path / 'state'}" in out
     # [Task 7] print mode must still list linger (enable_commands(), not the
@@ -359,7 +364,7 @@ def test_systemd_print_omits_wsl_distro_name_when_not_wsl(tmp_path, monkeypatch,
     assert "WSL_DISTRO_NAME" not in out
 
 
-def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_launchd_print_emits_all_agents_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
     rc = cli.main(["launchd"])  # default: print, no --install
@@ -367,6 +372,9 @@ def test_launchd_print_emits_both_agents_and_writes_nothing(tmp_path, monkeypatc
     assert rc == 0
     assert "com.claude-remote-rescue.revive.plist" in out
     assert "com.claude-remote-rescue.web.plist" in out
+    # crr-awake (own agent, own lifetime — see launchd.awake_agent_plist's
+    # docstring) rounds out the three agents.
+    assert "com.claude-remote-rescue.awake.plist" in out
     assert "/opt/crr/bin/crr" in out  # baked ProgramArguments
     assert "launchctl" in out and "load" in out  # printed enable guidance
     # Print mode must not touch the user's LaunchAgents dir.
@@ -667,7 +675,11 @@ def test_systemd_uninstall_disables_and_removes_units(tmp_path, monkeypatch, cap
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     ud = tmp_path / ".config" / "systemd" / "user"
     ud.mkdir(parents=True)
-    for name in (cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME, cli.systemd.WEB_SERVICE_NAME):
+    unit_names = (
+        cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME,
+        cli.systemd.WEB_SERVICE_NAME, cli.systemd.AWAKE_SERVICE_NAME,
+    )
+    for name in unit_names:
         (ud / name).write_text("x")
     ran = []
     monkeypatch.setattr(cli.subprocess, "run",
@@ -675,8 +687,8 @@ def test_systemd_uninstall_disables_and_removes_units(tmp_path, monkeypatch, cap
     rc = cli.main(["systemd", "--uninstall", "--crr-bin", "/usr/bin/crr"])
     assert rc == 0
     assert ["systemctl", "--user", "disable", "--now", cli.systemd.TIMER_NAME] in ran
-    assert not any((ud / n).exists() for n in
-                   (cli.systemd.SERVICE_NAME, cli.systemd.TIMER_NAME, cli.systemd.WEB_SERVICE_NAME))
+    assert ["systemctl", "--user", "disable", "--now", cli.systemd.AWAKE_SERVICE_NAME] in ran
+    assert not any((ud / n).exists() for n in unit_names)
 
 
 def test_systemd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):
@@ -700,6 +712,7 @@ def test_launchd_uninstall_unloads_before_removing_plists(tmp_path, monkeypatch,
     ad.mkdir(parents=True)
     (ad / cli.launchd.REVIVE_PLIST).write_text("x")
     (ad / cli.launchd.WEB_PLIST).write_text("x")
+    (ad / cli.launchd.AWAKE_PLIST).write_text("x")
     seen_at_unload = {}
 
     def fake_run(cmd, **k):
@@ -715,8 +728,10 @@ def test_launchd_uninstall_unloads_before_removing_plists(tmp_path, monkeypatch,
     assert rc == 0
     assert seen_at_unload[str(ad / cli.launchd.REVIVE_PLIST)] is True
     assert seen_at_unload[str(ad / cli.launchd.WEB_PLIST)] is True
+    assert seen_at_unload[str(ad / cli.launchd.AWAKE_PLIST)] is True
     assert not (ad / cli.launchd.REVIVE_PLIST).exists()
     assert not (ad / cli.launchd.WEB_PLIST).exists()
+    assert not (ad / cli.launchd.AWAKE_PLIST).exists()
 
 
 def test_launchd_uninstall_failure_propagates(tmp_path, monkeypatch, capsys):

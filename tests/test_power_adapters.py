@@ -16,7 +16,8 @@ import pytest
 
 from crr.adapters.power_source import (MacPowerSource, SysfsPowerSource,
                                        _parse_pmset)
-from crr.adapters.power_hold_linux import (LinuxPowerHolder, inhibit_argv,
+from crr.adapters.power_hold_linux import (SPAWN_SETTLE_SECONDS,
+                                           LinuxPowerHolder, inhibit_argv,
                                            lid_exemption, lid_is_exempt,
                                            logind_sources)
 from crr.adapters.power_hold_macos import MacPowerHolder, caffeinate_argv
@@ -374,6 +375,77 @@ def test_a_systemd_inhibit_that_fails_is_not_reported_as_a_hold(tmp_path):
     assert "Access denied" in reason, (
         f"the stderr that explains the failure must survive: {reason!r}")
     holder.release()
+
+
+def test_hold_does_not_report_a_hold_the_very_next_call_would_call_dead(tmp_path):
+    # The test above polls for up to 10s for `held()` to settle -- which
+    # is exactly the leniency that let this through. The awake loop does
+    # NOT poll: `_power_poll_once` calls `hold()` and `_stamp_power_state`
+    # reads `held()` MICROSECONDS later, once, and writes the answer to
+    # the state file that `crr power` and `crr doctor` believe.
+    #
+    # Measured on this host (WSL, no logind session), 2026-08-13, 5/5
+    # runs: the immediate `poll()` after `Popen` returns None every time,
+    # and the denied `systemd-inhibit` exits 1 about 11ms later. So the
+    # single post-spawn reap NEVER caught the denial, `held()` returned
+    # {"sleep"} for a hold that lasted 11ms, and crr stamped, printed and
+    # doctored a green "holding: sleep" forever -- re-losing the same race
+    # on every subsequent poll, because `hold()` respawns each time.
+    #
+    # This is the reason Critical 1's `want and not held` rule could never
+    # have fired on this host class: `held` was never empty.
+    fail = [_sys.executable, "-c",
+            "import sys; sys.stderr.write('Failed to inhibit: Access denied\\n');"
+            " sys.exit(1)"]
+
+    def _spawn(argv, **kw):
+        return _sp.Popen(fail, **kw)   # a REAL process, with a real exit latency
+
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
+    holder.hold(frozenset({"sleep"}), "r")
+    # NO polling loop, NO sleep: the FIRST answer must already be honest.
+    assert holder.held() == frozenset(), (
+        "the first held() after hold() reported a hold whose child was "
+        "already exiting -- the value the awake loop stamps to disk")
+    assert "Access denied" in (holder.withheld() or "")
+    holder.release()
+
+
+def test_a_successful_hold_is_not_blocked_past_the_settle_budget(tmp_path):
+    # The settle wait is BOUNDED, and a child that genuinely holds
+    # (systemd-inhibit's `sleep infinity`) must not stall the poll path
+    # any longer than that bound -- `proc.wait(timeout=...)` would be
+    # equivalent here, but a `poll()` loop is what lets the FAILING case
+    # above return in ~11ms instead of paying the whole budget too.
+    def _spawn(argv, **kw):
+        return _sp.Popen([_sys.executable, "-c", "import time; time.sleep(30)"], **kw)
+
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
+    start = time.monotonic()
+    holder.hold(frozenset({"sleep"}), "r")
+    elapsed = time.monotonic() - start
+    assert holder.held() == frozenset({"sleep"})
+    holder.release()
+    assert elapsed < SPAWN_SETTLE_SECONDS * 4, (
+        f"a live hold blocked the poll path for {elapsed:.3f}s")
+
+
+def test_a_failing_hold_settles_far_faster_than_the_whole_budget(tmp_path):
+    # The bound is a CEILING, not a fixed cost on the path that matters:
+    # a denied inhibit exits in ~11ms measured, and the loop must return
+    # then rather than sleeping out the remaining budget.
+    fail = [_sys.executable, "-c", "import sys; sys.exit(1)"]
+
+    def _spawn(argv, **kw):
+        return _sp.Popen(fail, **kw)
+
+    holder = LinuxPowerHolder(conf_root=tmp_path, spawn=_spawn)
+    start = time.monotonic()
+    holder.hold(frozenset({"sleep"}), "r")
+    elapsed = time.monotonic() - start
+    assert holder.held() == frozenset()
+    assert elapsed < SPAWN_SETTLE_SECONDS, (
+        f"paid the whole settle budget for a child that exited: {elapsed:.3f}s")
 
 
 def test_release_never_reads_stderr_from_a_child_it_could_not_reap(tmp_path):

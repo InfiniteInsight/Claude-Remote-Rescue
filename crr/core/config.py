@@ -75,7 +75,16 @@ from typing import Any, Mapping
 # power_poll_seconds (spec 2026-08-12 — keep the machine up while a session
 # is live; see crr.core.power). Off by default: a tool that silently stops a
 # laptop sleeping is a trust hazard, so it is opted into, not out of.
-CONFIG_DEFAULTS_VERSION = 16
+# v17: added power_state_max_age_multiplier (fix round 1, 2026-08-13 —
+# `crr power`/`crr doctor` read the awake loop's cross-process state file
+# instead of asking a freshly-constructed holder to `held()`, which could
+# only ever answer about its own unrelated child; see
+# crr.core.power.interpret / crr.adapters.power_state). The multiplier
+# turns `power_poll_seconds` into a staleness threshold for that file: a
+# report older than this many polls is read as UNKNOWN, not as "nothing
+# held" — a wedged or crashed loop's last snapshot must not be trusted
+# forever.
+CONFIG_DEFAULTS_VERSION = 17
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -243,6 +252,12 @@ DEFAULTS: dict[str, Any] = {
     # restarts with nothing left to explain why.
     "power_block_max_hours": 12,
     "power_poll_seconds": 30,        # how often crr-awake re-decides
+    # How many missed polls before the awake loop's cross-process state
+    # file (fix round 1, 2026-08-13) is read as UNKNOWN rather than
+    # trusted. A judgment call, not a measurement: 3 misses tolerates one
+    # slow poll without flapping to "unknown" on every run of `crr power`,
+    # while still catching a genuinely wedged loop within a few intervals.
+    "power_state_max_age_multiplier": 3,
 }
 
 
