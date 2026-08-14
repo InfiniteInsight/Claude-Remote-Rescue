@@ -84,7 +84,10 @@ from typing import Any, Mapping
 # report older than this many polls is read as UNKNOWN, not as "nothing
 # held" — a wedged or crashed loop's last snapshot must not be trusted
 # forever.
-CONFIG_DEFAULTS_VERSION = 17
+# v18: added harden_active_hours_start / harden_active_hours_end /
+# harden_restart_lookback_days (spec 2026-08-12 — Windows Update hardening:
+# the active-hours window widens to cover overnight work; see crr.core.harden).
+CONFIG_DEFAULTS_VERSION = 18
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -258,6 +261,16 @@ DEFAULTS: dict[str, Any] = {
     # slow poll without flapping to "unknown" on every run of `crr power`,
     # while still catching a genuinely wedged loop within a few intervals.
     "power_state_max_age_multiplier": 3,
+    # Windows Update hardening (spec 2026-08-12). Active hours are the window
+    # in which Windows will NOT auto-restart; it may wrap midnight and
+    # Windows caps the span at 18 hours (crr.core.harden.MAX_ACTIVE_HOURS_SPAN).
+    # 08:00-02:00 is the maximum span anchored on a late working day, chosen
+    # because sessions that run past midnight are exactly the ones a forced
+    # restart destroys.
+    "harden_active_hours_start": 8,
+    "harden_active_hours_end": 2,
+    # How far back to look for restarts when reporting whether hardening held.
+    "harden_restart_lookback_days": 14,
 }
 
 
