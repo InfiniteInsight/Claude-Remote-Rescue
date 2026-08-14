@@ -1,4 +1,4 @@
-# Boot-at-startup — make the control surface survive a reboot, headless
+# reachable-at-boot — make the control surface survive a reboot, headless
 
 **Status:** design · 2026-08-14
 **Issues:** new work. Supersedes the "rolling active-hours" idea (rejected — see Why).
@@ -47,7 +47,7 @@ idea to the other platforms.
 
 ## The feature
 
-`crr boot-at-startup` (name provisional), two halves, the same shape as
+`crr reachable-at-boot` (name provisional), two halves, the same shape as
 `crr harden`: it **reports** by default, **installs** only with a flag and
 confirmation, and — the honest half — **measures** whether a real reboot
 actually came up headless.
@@ -92,7 +92,7 @@ hardware (#43).
 
 ### Verify — the honest half
 
-`crr doctor` (and `crr boot-at-startup` with no flag) runs the exact forensic
+`crr doctor` (and `crr reachable-at-boot` with no flag) runs the exact forensic
 that was run by hand, and reports a verdict, never a hopeful "task installed":
 
 - **WSL:** compare Windows boot time (`Win32_OperatingSystem.LastBootUpTime`),
@@ -124,7 +124,7 @@ crr/adapters/boot_windows.py  generate + register the two Scheduled Tasks; read
                               Windows/WSL boot + login timestamps (interop)
 crr/adapters/boot_linux.py    linger state; crr-web ActiveEnterTimestamp; boot +
                               login times
-crr/cli.py                    crr boot-at-startup [--install|--uninstall], doctor
+crr/cli.py                    crr reachable-at-boot [--install|--uninstall], doctor
 ```
 
 Core stays pure (timestamp arithmetic, verdict logic — exhaustively testable
@@ -153,7 +153,7 @@ before `platform.system()`, as the power feature does, because WSL reports
   exact wsl argument). **No test registers a real task or reboots** — generation
   is asserted as text; registration is exercised with an injected runner, the
   same rule the harden plan held.
-- **On-host verify** — `crr boot-at-startup` read-only against this machine must
+- **On-host verify** — `crr reachable-at-boot` read-only against this machine must
   report **headless: confirmed** (it just was), and must never render an
   unreadable timestamp as a pass.
 - **Linux adapter** — linger detection and the ActiveEnterTimestamp read tested
