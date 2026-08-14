@@ -91,6 +91,14 @@ _INTEROP_TIMEOUT_SECONDS = 10.0
 class BootFacts:
     machine_boot: float | None
     surface_boot: float | None
+    # earliest session/explorer.exe start -- NOT a proven interactive
+    # unlock. On an ARSO (Automatic Restart Sign-On) host, Windows
+    # establishes a LOCKED session at boot, so explorer.exe starts at
+    # ~boot with no human present. This field is therefore INFORMATIONAL
+    # only; it is deliberately NOT a gate on the "headless" verdict (see
+    # crr.core.boot_survival.interpret_boot's fix-round-1 docstring). A
+    # proven unlock (Security 4624 type-2 / 4801) would need elevation,
+    # above crr's read-only ceiling.
     first_login: float | None
     locked: bool | None
     autologin: bool | None
@@ -109,9 +117,15 @@ def facts_command() -> list[str]:
     """Unelevated, READ-ONLY PowerShell that prints four lines:
 
     1. Windows boot epoch (``-`` if unreadable)
-    2. earliest interactive-login epoch, taken from the oldest running
-       ``explorer.exe`` process -- a login always spawns one, and unlike the
-       Security event log this needs no elevation to read (``-`` if none)
+    2. earliest session/explorer start epoch, taken from the oldest running
+       ``explorer.exe`` process -- NOT a proven interactive unlock. On an
+       ARSO (Automatic Restart Sign-On) host, Windows brings up a LOCKED
+       session at boot and its ``explorer.exe`` starts at ~boot with no
+       human present, so this is informational context only, never a gate
+       on the headless verdict (a real unlock -- Security 4624 type-2 /
+       4801 -- needs elevation, above crr's read-only ceiling). Read from
+       ``explorer.exe`` rather than the Security event log because that
+       log needs no elevation (``-`` if none)
     3. ``1``/``0`` -- whether ``LogonUI`` (the lock-screen process) is
        running, i.e. whether the desktop is locked
     4. ``1``/``0`` -- whether ``AutoAdminLogon`` is set in the Winlogon key
