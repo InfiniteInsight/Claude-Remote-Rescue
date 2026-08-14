@@ -20,6 +20,24 @@ def test_winevent_command_filters_the_shutdown_ids():
     assert "50" in joined  # MaxEvents cap
 
 
+def test_winevent_command_formats_the_timestamp_locale_invariant():
+    # Fix round 1, Important 3: PowerShell's default TimeCreated.ToString()
+    # is culture-dependent -- a DD/MM host renders "09/08/2026" for the 9th
+    # of August, which a MM/DD reader (crr.core.harden's timestamp parser)
+    # would silently misread as September 8th. Formatting explicitly here
+    # removes the ambiguity at the source instead of guessing cultures in
+    # the parser.
+    #
+    # Fix round 2: field order alone wasn't enough -- ":" is .NET's
+    # TimeSeparator custom-format character and is ITSELF culture-dependent
+    # (a "."-separator culture would render "08.44.39"). Passing
+    # InvariantCulture explicitly is what makes "invariant" literally true.
+    cmd = dw.winevent_command((1074, 6008, 41), cap=50)
+    joined = " ".join(cmd)
+    assert "yyyy-MM-dd HH:mm:ss" in joined
+    assert "InvariantCulture" in joined
+
+
 def test_parse_winevents_keeps_nonblank_lines():
     text = "2026-07-20 [6008] The previous system shutdown was unexpected.\n\n  \n2026-07-21 [41] Kernel-Power\n"
     assert dw.parse_winevents(text) == [

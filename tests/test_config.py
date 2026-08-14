@@ -84,8 +84,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    # v17 (fix round 1, 2026-08-13): power_state_max_age_multiplier.
-    assert cfg.CONFIG_DEFAULTS_VERSION == 17
+    # v18 (2026-08-14): harden_active_hours_start/end + harden_restart_lookback_days.
+    assert cfg.CONFIG_DEFAULTS_VERSION == 18
 
 
 def test_context_pressure_fraction_defaults():
@@ -248,3 +248,18 @@ def test_power_state_max_age_multiplier_default():
 
 def test_config_defaults_version_covers_the_power_keys():
     assert cfg.CONFIG_DEFAULTS_VERSION >= 17
+
+
+def test_harden_keys_exist_with_a_legal_default_window():
+    from crr.core.harden import valid_span
+    start = cfg.DEFAULTS["harden_active_hours_start"]
+    end = cfg.DEFAULTS["harden_active_hours_end"]
+    assert (start, end) == (8, 2)
+    # The default must itself be a window Windows would accept — a default
+    # that fails validation would make `crr harden` unusable out of the box.
+    assert valid_span(start, end) is None
+    assert cfg.DEFAULTS["harden_restart_lookback_days"] == 14
+
+
+def test_config_defaults_version_covers_the_harden_keys():
+    assert cfg.CONFIG_DEFAULTS_VERSION >= 18

@@ -37,12 +37,36 @@ _FORENSIC_FIELDS = ("MemTotal", "MemAvailable", "Shmem", "Inactive(anon)")
 
 
 def winevent_command(ids: tuple[int, ...], cap: int) -> list[str]:
-    """PowerShell to pull the shutdown events, one formatted line each."""
+    """PowerShell to pull the shutdown events, one formatted line each.
+
+    ``TimeCreated`` is formatted explicitly as ``yyyy-MM-dd HH:mm:ss``
+    (invariant, 24h) rather than left to ``ToString()``'s default -- that
+    default is CULTURE-dependent (a DD/MM host would render "09/08/2026"
+    for the 9th of August and a MM/DD reader would silently take it as
+    September 8th). ``crr.core.harden.restarts_outside`` parses this
+    leading timestamp to decide whether a restart landed outside active
+    hours; a misread date doesn't change the parsed hour (so that verdict
+    stays safe) but can put the event on the wrong day, which
+    ``within_lookback`` uses to decide whether the restart is even recent
+    enough to matter (spec 2026-08-14, Task 6 fix round 1, Important 3).
+    Fixing the format at the source removes the ambiguity instead of
+    trying to out-guess every .NET culture in the parser.
+
+    Fix round 2: the field order alone was not enough. ``:`` is .NET's
+    TimeSeparator custom-format character, itself culture-dependent -- a
+    culture whose time separator is ``.`` renders ``08.44.39``, which the
+    parser's regex rejects outright (an honest "unknown", not a false
+    "ok", but still not what "invariant" claimed). Passing
+    ``InvariantCulture`` explicitly makes that claim literally true rather
+    than true only for the cultures tested against.
+    """
     id_list = ",".join(str(i) for i in ids)
     script = (
         f"Get-WinEvent -FilterHashtable @{{LogName='System';Id={id_list}}} "
         f"-MaxEvents {cap} -ErrorAction SilentlyContinue | "
-        "ForEach-Object { \"$($_.TimeCreated) [$($_.Id)] $($_.Message)\" }"
+        "ForEach-Object { \"$($_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss', "
+        "[Globalization.CultureInfo]::InvariantCulture)) [$($_.Id)] "
+        "$($_.Message)\" }"
     )
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
 
