@@ -1204,7 +1204,7 @@ def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
         print("  fix with: crr harden --apply (not yet available)")
 
 
-def _cmd_harden(args: argparse.Namespace) -> int:
+def _cmd_harden(_args: argparse.Namespace) -> int:
     """Report Windows Update hardening gaps. READ ONLY — there is no
     ``--apply`` yet (a later task); this command never writes the
     registry.
