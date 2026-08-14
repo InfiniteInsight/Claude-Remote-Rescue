@@ -1602,6 +1602,32 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         )
         _print_harden_findings(harden_findings)
 
+    # Reachable at boot (spec 2026-08-14, Task 8): the same
+    # headless/login_only/unknown verdict `crr reachable-at-boot` reports,
+    # folded into doctor so a boot task that stopped firing surfaces in the
+    # standard health check instead of only showing up after a reboot that
+    # didn't come back. Guarded the same way boot-identity above is: a
+    # platform with no boot adapter (`_boot_facts` raises
+    # ``NotImplementedError``) is silently skipped, not a crash — the
+    # platform gate lives in `_boot_facts`/`_harden_supported`, not here.
+    try:
+        boot_facts = _boot_facts(power_system, power_wsl, config)
+    except NotImplementedError:
+        pass
+    else:
+        boot_verdict = boot_survival.interpret_boot(
+            boot_facts.machine_boot, boot_facts.surface_boot,
+            boot_facts.first_login, config.get("boot_headless_window_seconds"),
+        )
+        if boot_verdict.status == "headless":
+            boot_ok: bool | None = True
+        elif boot_verdict.status == "login_only":
+            boot_ok = False
+        else:
+            boot_ok = None
+        _check("reachable at boot", boot_ok,
+               f"{boot_verdict.status} — {boot_verdict.detail}")
+
     # The reachability detector's own falsifiability (plan 2026-08-10, Task
     # 7). Claude Code never persists `replBridgeError`, so a bridge that
     # errors without running teardown leaves a stale session id and the

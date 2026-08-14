@@ -342,3 +342,27 @@ def test_macos_install_refuses_under_filevault(monkeypatch, capsys):
     rc = cli.main(["reachable-at-boot", "--install"])
     assert rc != 0
     assert "filevault" in capsys.readouterr().err.lower()
+
+
+def test_doctor_reports_the_boot_verdict(monkeypatch, capsys):
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: BootFacts(0.0, 39.0, None, True, False))
+    monkeypatch.setattr(cli.state_dir, "state_dir",
+                        lambda: __import__("pathlib").Path("/tmp"))
+    cli.main(["doctor"])
+    out = capsys.readouterr().out.lower()
+    assert "reachable at boot" in out and "headless" in out
+
+
+def test_doctor_shows_login_only_as_a_warning_not_ok(monkeypatch, capsys):
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: BootFacts(0.0, 28800.0, 28795.0, True, False))
+    monkeypatch.setattr(cli.state_dir, "state_dir",
+                        lambda: __import__("pathlib").Path("/tmp"))
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "WARN" in out and "reachable at boot" in out.lower()
