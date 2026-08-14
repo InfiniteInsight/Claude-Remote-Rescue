@@ -272,3 +272,73 @@ def test_filevault_parsing():
         run=lambda a, timeout: "FileVault is Off.\n") is False
     assert boot_macos.filevault_enabled(
         run=lambda a, timeout: "???\n") is None
+
+
+# ---------------------------------------------------------------------------
+# CLI wiring: `crr reachable-at-boot` -- report, --install, --uninstall
+# (spec 2026-08-14, Task 7)
+# ---------------------------------------------------------------------------
+
+from crr import cli
+from crr.adapters.boot_windows import BootFacts
+
+
+def _cfg():
+    return {"boot_headless_window_seconds": 300, "boot_preferred_tailnet": "",
+            "interop_timeout_seconds": 5, "dashboard_port": 8765}
+
+
+def test_report_says_headless_when_the_facts_show_it(monkeypatch, capsys):
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: BootFacts(0.0, 39.0, None, True, False))
+    assert cli.main(["reachable-at-boot"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "headless" in out and "survivable" in out
+
+
+def test_report_never_claims_headless_on_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: BootFacts(None, None, None, None, None))
+    cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out.lower()
+    assert "headless" not in out
+    assert "unknown" in out or "could not" in out
+
+
+def test_install_refuses_without_a_tty(monkeypatch, capsys):
+    ran = []
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    assert cli.main(["reachable-at-boot", "--install"]) != 0
+    assert ran == []
+
+
+def test_install_runs_the_generated_script_once_confirmed(monkeypatch, capsys):
+    ran = []
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert cli.main(["reachable-at-boot", "--install"]) == 0
+    assert ran, "confirmed but ran nothing"
+    # the elevated register goes through powershell RunAs (mirrors harden)
+    assert any("RunAs" in " ".join(c) for c in ran)
+
+
+def test_macos_install_refuses_under_filevault(monkeypatch, capsys):
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli.boot_macos, "filevault_enabled", lambda **k: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    rc = cli.main(["reachable-at-boot", "--install"])
+    assert rc != 0
+    assert "filevault" in capsys.readouterr().err.lower()

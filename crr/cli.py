@@ -25,6 +25,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ from crr.adapters import boot_identity  # composition root may import adapters
 from crr.adapters import deploy as deploy_io
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
+from crr.adapters import boot_linux, boot_macos, boot_windows
 from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters import (power_hold_linux, power_hold_macos,
@@ -49,7 +51,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
+from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -458,6 +460,23 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="dashboard port to bake into the web task "
                           "(default: config dashboard_port = 8377)")
     sch.set_defaults(func=_cmd_schtasks)
+
+    rab = sub.add_parser(
+        "reachable-at-boot",
+        help="report (or --install/--uninstall) whether crr's control "
+             "surface survives a reboot headless, before any login",
+    )
+    rab.add_argument(
+        "--install", action="store_true",
+        help="register the boot task/daemon/linger for this platform "
+             "(elevated on Windows/WSL and macOS; refuses without a tty, "
+             "then asks to confirm)",
+    )
+    rab.add_argument(
+        "--uninstall", action="store_true",
+        help="remove what --install registered",
+    )
+    rab.set_defaults(func=_cmd_reachable_at_boot)
 
     rec = sub.add_parser(
         "recall",
@@ -4395,6 +4414,360 @@ def _run_commands(cmds: list[list[str]], label: str) -> bool:
             print(f"crr {label}: {shown} exited {result.returncode}", file=sys.stderr)
             ok = False
     return ok
+
+
+# ---------------------------------------------------------------------------
+# `crr reachable-at-boot` (spec 2026-08-14, Task 7): report by default,
+# --install/--uninstall the per-platform boot mechanism. The pure verdict
+# lives in crr.core.boot_survival; the facts it judges come from
+# boot_windows/boot_linux/boot_macos. This section is wiring only.
+# ---------------------------------------------------------------------------
+
+
+def _boot_facts(system: str, wsl: bool, config: cfg.Config) -> boot_windows.BootFacts:
+    """The BootFacts for this host. WSL is checked FIRST and deliberately —
+    same reasoning as ``_power_holder``/``_harden_supported``:
+    ``platform.system()`` reports "Linux" inside WSL, but the facts this
+    feature needs (Windows boot time, lock-screen/autologin state) live on
+    the Windows host, not the Linux userland.
+    """
+    if wsl:
+        return boot_windows.read_facts()
+    if system == "Linux":
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+        return boot_linux.read_facts(user)
+    if system == "Darwin":
+        # boot_macos.py states plainly it is UNVERIFIED (#43 — no macOS
+        # hardware). Reporting an honest all-None here, rather than
+        # inventing a read, is the floor the null-results rule requires:
+        # `interpret_boot` renders this as "unknown", never a guessed
+        # headless/login_only.
+        return boot_windows.BootFacts(None, None, None, None, None)
+    raise NotImplementedError(f"no reachable-at-boot facts for {system!r} yet")
+
+
+def _print_bool_fact(label: str, value: bool | None) -> None:
+    """Print one WSL-only boot fact, tri-state. Exists so the report names
+    the locked/autologin facts honestly — "reachable" must never be
+    confused with "an unlocked desktop" (spec 2026-08-14, Task 7)."""
+    shown = "unknown" if value is None else ("yes" if value else "no")
+    print(f"  {label}: {shown}")
+
+
+def _reachable_at_boot_report(system: str, wsl: bool, config: cfg.Config) -> int:
+    try:
+        facts = _boot_facts(system, wsl, config)
+    except NotImplementedError as exc:
+        print(f"crr reachable-at-boot: {exc}", file=sys.stderr)
+        return 2
+    verdict = boot_survival.interpret_boot(
+        facts.machine_boot, facts.surface_boot, facts.first_login,
+        config.get("boot_headless_window_seconds"),
+    )
+    print(f"reachable-at-boot: {verdict.status} — {verdict.detail}")
+    if wsl:
+        # An honest "reachable != unlocked desktop": these say nothing
+        # about whether the verdict above is good news for a REMOTE
+        # operator specifically, only what was actually read.
+        _print_bool_fact("desktop locked", facts.locked)
+        _print_bool_fact("autologin enabled", facts.autologin)
+    return 0
+
+
+def _windows_unc_path(distro: str, posix_path: Path) -> str:
+    """A Windows-visible path for a file inside THIS WSL distro's
+    filesystem, via the ``\\\\wsl.localhost\\<distro>\\...`` UNC form
+    (``host.py``'s ``_UNC_ROOTS``, inverted) — so the elevated
+    ``powershell.exe`` that runs the generated install script (spawned on
+    the WINDOWS side) can ``-File`` a script this Linux-side code just
+    wrote, with no interop round trip (no ``wslpath`` call) needed to find
+    out where.
+
+    NEEDS REAL-HOST VERIFICATION: an ELEVATED (admin) Windows process is a
+    different logon session than the one the ``\\wsl.localhost`` network
+    provider is normally mounted under, and there are reports of elevated
+    processes failing to resolve that UNC root even though the same path
+    works fine unelevated. This whole ``--install`` path is exercised only
+    with ``_run_commands`` mocked (deliberately — the harness forbids a
+    real elevated run here), so whether ``-File`` on this UNC path actually
+    works under ``-Verb RunAs`` is UNVERIFIED. If a later task can test on
+    real Windows/WSL hardware, confirm this before relying on it.
+    """
+    rel = str(posix_path).lstrip("/").replace("/", "\\")
+    return f"\\\\wsl.localhost\\{distro}\\{rel}"
+
+
+def _elevated_powershell(argument: str) -> list[str]:
+    """One argv: an unelevated ``powershell.exe`` that re-launches a CHILD
+    ``powershell.exe <argument>`` elevated via ``Start-Process -Verb
+    RunAs``, so Windows shows a UAC prompt. Mirrors
+    ``harden_windows._elevated_reg_add``'s Start-Process/-PassThru/
+    exit-code-forwarding wrapper VERBATIM — see that function's docstring
+    for the two fix rounds this shape survived (a declined UAC prompt or a
+    ``Start-Process`` failure must not silently exit 0).
+    """
+    escaped = argument.replace("'", "''")
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$p = Start-Process powershell -ArgumentList '{escaped}' -Verb RunAs "
+        "-Wait -PassThru; "
+        "if (-not $p) { exit 1 }; "
+        "exit $p.ExitCode"
+    )
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def _wsl_distro_and_user() -> tuple[str, str]:
+    """The distro/user pair ``boot_windows.install_script`` needs: this
+    distro's currently REGISTERED name (``host.distro_name`` — survives a
+    rename better than the baked ``WSL_DISTRO_NAME`` env var, #54) and the
+    Linux user crr should boot the task as (``whoami``, not ``$USER`` — a
+    service/cron context can lack the shell env ``$USER`` depends on).
+    """
+    distro = host.distro_name(os.environ) or os.environ.get("WSL_DISTRO_NAME", "")
+    try:
+        user = run_capture(["whoami"], 5).strip()
+    except Exception:
+        user = os.environ.get("USER", "") or os.environ.get("LOGNAME", "")
+    return distro, user
+
+
+def _current_tailnet_account(timeout: float) -> str | None:
+    """Which Tailscale account is active on the Windows host right now, via
+    ``tailscale.exe status --json``'s ``CurrentTailnet.Name`` — consulted
+    ONLY when ``boot_preferred_tailnet`` is unset in config.
+    ``status`` never mutates anything; this exists to satisfy
+    ``boot_preferred_tailnet``'s own doc comment ("empty means whatever is
+    active at install time — crr never silently picks a tailnet"), by
+    reading what is already selected rather than guessing.
+    """
+    if shutil.which("tailscale.exe") is None:
+        return None
+    try:
+        text = run_capture(["tailscale.exe", "status", "--json"], timeout)
+        data = json.loads(text)
+    except Exception:
+        return None
+    tailnet = data.get("CurrentTailnet")
+    if not isinstance(tailnet, dict):
+        return None
+    name = tailnet.get("Name")
+    return name if isinstance(name, str) and name else None
+
+
+
+# Where the elevated install script writes the tailnet-reselect helper it
+# generates (Windows side); a fixed, well-known path, not a temp one — the
+# Scheduled Task it registers re-invokes this same file on every boot.
+_TAILNET_SCRIPT_WINDOWS_PATH = r"C:\ProgramData\crr\tailnet-select.ps1"
+
+
+def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
+    distro, user = _wsl_distro_and_user()
+    if not distro or not user:
+        print(
+            "crr reachable-at-boot --install: could not determine the WSL "
+            "distro/user to register the boot task for", file=sys.stderr)
+        return 2
+    tailnet = config.get("boot_preferred_tailnet") or _current_tailnet_account(
+        config.get("interop_timeout_seconds"))
+    script_text = boot_windows.install_script(
+        distro, user, tailnet, _TAILNET_SCRIPT_WINDOWS_PATH)
+    tmp = Path(tempfile.gettempdir()) / "crr-reachable-at-boot-install.ps1"
+    tmp.write_text(script_text, encoding="utf-8")
+    win_script = _windows_unc_path(distro, tmp)
+    tasks = boot_windows.WSL_BOOT_TASK + (
+        f", {boot_windows.TAILNET_TASK}" if tailnet else "")
+    print(
+        f"crr reachable-at-boot --install will register {tasks} — a "
+        "Windows Scheduled Task that starts this WSL distro at boot, "
+        "before any login. Windows will show a UAC prompt."
+    )
+    try:
+        answer = input("Install? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\ncrr reachable-at-boot --install: aborted — nothing was "
+              "registered.", file=sys.stderr)
+        return 3
+    if answer not in ("y", "yes"):
+        print("crr reachable-at-boot --install: aborted — nothing was "
+              "registered.", file=sys.stderr)
+        return 3
+    cmds = [_elevated_powershell(f'-NoProfile -NonInteractive -File "{win_script}"')]
+    if not _run_commands(cmds, "reachable-at-boot"):
+        print("crr reachable-at-boot --install: the elevated registration "
+              "FAILED (see above)", file=sys.stderr)
+        return 1
+    print(f"registered {tasks} — run `crr reachable-at-boot` after the next "
+          "reboot to confirm it actually fired")
+    return 0
+
+
+def _reachable_at_boot_uninstall_wsl(config: cfg.Config) -> int:
+    inner = (
+        f"Unregister-ScheduledTask -TaskName {boot_windows.WSL_BOOT_TASK},"
+        f"{boot_windows.TAILNET_TASK} -Confirm:$false -ErrorAction "
+        "SilentlyContinue"
+    )
+    cmds = [_elevated_powershell(f'-NoProfile -NonInteractive -Command "{inner}"')]
+    if not _run_commands(cmds, "reachable-at-boot"):
+        print("crr reachable-at-boot --uninstall: the elevated removal "
+              "FAILED (see above)", file=sys.stderr)
+        return 1
+    print(f"removed {boot_windows.WSL_BOOT_TASK} and {boot_windows.TAILNET_TASK} "
+          "(if they existed)")
+    return 0
+
+
+def _reachable_at_boot_install_linux(config: cfg.Config) -> int:
+    if not _run_commands([systemd.linger_command()], "reachable-at-boot"):
+        print("crr reachable-at-boot --install: enabling linger FAILED "
+              "(see above)", file=sys.stderr)
+        return 1
+    print("linger enabled — the systemd user units (crr-web.service and "
+          "the rest) will run at boot without a login")
+    return 0
+
+
+def _reachable_at_boot_uninstall_linux(config: cfg.Config) -> int:
+    print(
+        "crr reachable-at-boot --uninstall: leaving linger enabled on this "
+        "account — other systemd user services may depend on it; disable "
+        "manually with `loginctl disable-linger` if you want it gone")
+    return 0
+
+
+def _macos_daemon_plist_path() -> str:
+    return f"/Library/LaunchDaemons/{boot_macos.DAEMON_LABEL}.plist"
+
+
+def _refuse_macos_filevault() -> int:
+    print(
+        "crr reachable-at-boot --install: refusing — FileVault is "
+        "enabled, which blocks ALL execution until the disk is "
+        "unlocked at the pre-boot screen; a boot daemon cannot survive "
+        "a reboot headless on this machine while FileVault stays on",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _reachable_at_boot_install_macos(config: cfg.Config) -> int:
+    if boot_macos.filevault_enabled() is True:
+        return _refuse_macos_filevault()
+    crr_bin = _resolve_service_bin(None)
+    port = config.get("dashboard_port")
+    plist_text = boot_macos.web_daemon_plist(crr_bin, os.environ.get("PATH", ""), port)
+    print(
+        f"crr reachable-at-boot --install will install a root LaunchDaemon "
+        f"({boot_macos.DAEMON_LABEL}) that runs `crr web` at boot, before "
+        "login. macOS will prompt for your password. UNVERIFIED — no macOS "
+        "hardware to test this path on (#43)."
+    )
+    try:
+        answer = input("Install? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\ncrr reachable-at-boot --install: aborted — nothing was "
+              "installed.", file=sys.stderr)
+        return 3
+    if answer not in ("y", "yes"):
+        print("crr reachable-at-boot --install: aborted — nothing was "
+              "installed.", file=sys.stderr)
+        return 3
+    dest = _macos_daemon_plist_path()
+    tmp = Path(tempfile.gettempdir()) / f"{boot_macos.DAEMON_LABEL}.plist"
+    tmp.write_text(plist_text, encoding="utf-8")
+    cmds = [
+        ["sudo", "cp", str(tmp), dest],
+        ["sudo", "chown", "root:wheel", dest],
+        ["sudo", "launchctl", "bootstrap", "system", dest],
+    ]
+    if not _run_commands(cmds, "reachable-at-boot"):
+        print("crr reachable-at-boot --install: installing the LaunchDaemon "
+              "FAILED (see above)", file=sys.stderr)
+        return 1
+    print(f"installed the boot LaunchDaemon ({boot_macos.DAEMON_LABEL})")
+    return 0
+
+
+def _reachable_at_boot_uninstall_macos(config: cfg.Config) -> int:
+    dest = _macos_daemon_plist_path()
+    cmds = [
+        ["sudo", "launchctl", "bootout", "system", dest],
+        ["sudo", "rm", "-f", dest],
+    ]
+    if not _run_commands(cmds, "reachable-at-boot"):
+        print("crr reachable-at-boot --uninstall: removing the "
+              "LaunchDaemon FAILED (see above)", file=sys.stderr)
+        return 1
+    print(f"removed the boot LaunchDaemon ({boot_macos.DAEMON_LABEL})")
+    return 0
+
+
+def _reachable_at_boot_install(system: str, wsl: bool, config: cfg.Config) -> int:
+    """Refuse without a tty (spec 2026-08-14, Task 7) — unattended must
+    never be the path that registers a boot task, writes a LaunchDaemon,
+    or enables linger, mirroring ``_cmd_harden_apply``'s gate exactly.
+
+    FileVault is checked BEFORE the tty gate, macOS-only: it is a
+    permanent "this can never work on this machine" fact, not a missing
+    confirmation, and a non-interactive ``--install`` on a FileVault Mac
+    should read that (exit 2) rather than "rerun interactively" (exit 3),
+    which would wrongly suggest a tty is all that stands in the way.
+    """
+    if system == "Darwin" and not wsl and boot_macos.filevault_enabled() is True:
+        return _refuse_macos_filevault()
+    if not sys.stdin.isatty():
+        print(
+            "crr reachable-at-boot --install: refusing to install without "
+            "a terminal to confirm — rerun this interactively.",
+            file=sys.stderr,
+        )
+        return 3
+    if wsl:
+        return _reachable_at_boot_install_wsl(config)
+    if system == "Linux":
+        return _reachable_at_boot_install_linux(config)
+    if system == "Darwin":
+        return _reachable_at_boot_install_macos(config)
+    print(f"crr reachable-at-boot --install: no install path for {system!r} "
+          "yet", file=sys.stderr)
+    return 2
+
+
+def _reachable_at_boot_uninstall(system: str, wsl: bool, config: cfg.Config) -> int:
+    if wsl:
+        return _reachable_at_boot_uninstall_wsl(config)
+    if system == "Linux":
+        return _reachable_at_boot_uninstall_linux(config)
+    if system == "Darwin":
+        return _reachable_at_boot_uninstall_macos(config)
+    print(f"crr reachable-at-boot --uninstall: no uninstall path for "
+          f"{system!r} yet", file=sys.stderr)
+    return 2
+
+
+def _cmd_reachable_at_boot(args: argparse.Namespace) -> int:
+    """Report (default), or --install/--uninstall, whether crr's control
+    surface comes back up headless after a reboot. The pure verdict lives
+    in ``crr.core.boot_survival``; this only wires facts to it and, on
+    --install/--uninstall, the per-platform mechanism that makes the
+    verdict trend "headless" — never both flags at once, and never a
+    write on the plain report path.
+    """
+    if getattr(args, "install", False) and getattr(args, "uninstall", False):
+        print("crr reachable-at-boot: --install and --uninstall are "
+              "mutually exclusive", file=sys.stderr)
+        return 2
+    system = platform.system()
+    wsl = host.is_wsl()
+    config = _load_config()
+
+    if getattr(args, "uninstall", False):
+        return _reachable_at_boot_uninstall(system, wsl, config)
+    if getattr(args, "install", False):
+        return _reachable_at_boot_install(system, wsl, config)
+    return _reachable_at_boot_report(system, wsl, config)
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
