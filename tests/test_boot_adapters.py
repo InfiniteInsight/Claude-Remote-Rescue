@@ -243,3 +243,32 @@ def test_linux_read_facts_excludes_logins_before_machine_boot():
     f = boot_linux.read_facts("evan", run=fake)
     expected = datetime.fromisoformat("2026-08-14T09:20:10-04:00").timestamp()
     assert f.first_login == expected
+
+
+# ---------------------------------------------------------------------------
+# macOS: LaunchDaemon boot daemon + FileVault detection (spec 2026-08-14, Task 6)
+# ---------------------------------------------------------------------------
+
+import plistlib
+
+from crr.adapters import boot_macos
+
+
+def test_web_daemon_is_a_boot_daemon_not_a_login_agent():
+    parsed = plistlib.loads(
+        boot_macos.web_daemon_plist("/opt/crr/bin/crr", "/usr/bin", 8765).encode())
+    assert parsed["Label"] == boot_macos.DAEMON_LABEL
+    # RunAtLoad + KeepAlive so it starts at boot, before login — the whole
+    # point vs. crr's existing LaunchAgents which need a GUI session.
+    assert parsed["RunAtLoad"] is True
+    assert parsed["KeepAlive"] is True
+    assert parsed["ProgramArguments"][:2] == ["/opt/crr/bin/crr", "web"]
+
+
+def test_filevault_parsing():
+    assert boot_macos.filevault_enabled(
+        run=lambda a, timeout: "FileVault is On.\n") is True
+    assert boot_macos.filevault_enabled(
+        run=lambda a, timeout: "FileVault is Off.\n") is False
+    assert boot_macos.filevault_enabled(
+        run=lambda a, timeout: "???\n") is None
