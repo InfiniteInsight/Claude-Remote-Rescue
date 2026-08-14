@@ -96,12 +96,85 @@ def test_smart_active_hours_is_reported_because_it_overrides_the_manual_window()
     assert "smart" in found["active_hours"].detail.lower()
 
 
-def test_a_wider_window_than_asked_for_is_not_a_finding():
-    # If the user already covers more than crr would set, leave it alone.
+def test_a_same_span_window_shifted_earlier_still_leaves_a_gap():
+    # Fix round 1: this used to assert ok is True on the theory that a
+    # window starting earlier "already covers more than crr would set."
+    # It doesn't. 6:00-00:00 covers hours 06..23; 00:00-02:00 is NOT in
+    # it. want=(8,2) is 18h, the Windows cap, so no legal window strictly
+    # contains it except itself -- no containment predicate can ever
+    # return True here, and none should: 00:00-02:00 is genuinely
+    # unprotected and the finding must say so, by name.
     state = HardenState(policy_set=True, active_start=6, active_end=0,
                         smart_hours=False)
     found = _by_key(assess(state, want_start=8, want_end=2))
+    assert found["active_hours"].ok is False
+    assert "00:00-02:00" in found["active_hours"].detail
+
+
+def test_a_window_that_genuinely_contains_the_wanted_one_is_clean():
+    # want=(9,1) is narrower than the Windows 18h cap, so an existing
+    # window can actually strictly contain it: 8:00-02:00 covers
+    # 09:00-01:00 in full.
+    state = HardenState(policy_set=True, active_start=8, active_end=2,
+                        smart_hours=False)
+    found = _by_key(assess(state, want_start=9, want_end=1))
     assert found["active_hours"].ok is True
+
+
+@pytest.mark.parametrize("active_start,active_end,expected_ok,expected_gap_hours", [
+    (0, 18, False, 6),    # 18:00-00:00 uncovered = 6h (daily recurrence covers 00-01 too)
+    (2, 20, False, 6),    # 20:00-02:00 uncovered = 6h
+    (20, 14, False, 6),   # 14:00-20:00 uncovered = 6h
+    (9, 3, False, 1),     # 08:00-09:00 uncovered = 1h
+])
+def test_the_verdict_tracks_actual_exposure_not_window_shape(
+        active_start, active_end, expected_ok, expected_gap_hours):
+    # The whole point of the fix round: a containment predicate can be
+    # non-monotonic in the real gap (the review's example: green over a
+    # 6-hour uncovered window, red over a 1-hour one). This pins that
+    # more uncovered hours is never "greener" than fewer, by checking the
+    # actual gap size against want=(8,2).
+    state = HardenState(policy_set=True, active_start=active_start,
+                        active_end=active_end, smart_hours=False)
+    found = _by_key(assess(state, want_start=8, want_end=2))
+    assert found["active_hours"].ok is expected_ok
+    from crr.core.harden import _uncovered_ranges, span_hours
+    gaps = _uncovered_ranges(active_start, active_end, 8, 2)
+    total_gap = sum(span_hours(s, e) for s, e in gaps)
+    assert total_gap == expected_gap_hours
+
+
+@pytest.mark.parametrize("want_start,want_end", [(8, 2), (9, 1), (7, 19)])
+def test_ok_is_true_exactly_when_nothing_is_uncovered(want_start, want_end):
+    # Exhaustive version of the monotonicity check: for every legal
+    # (start, end) pair, ok must be True precisely when there are zero
+    # uncovered hours -- never green over any real gap, never red when
+    # the window is genuinely clean. This makes the earlier bug (a
+    # containment predicate that was True over a 6h gap and False over a
+    # 1h one) structurally impossible rather than checked at a few points.
+    from crr.core.harden import _uncovered_ranges
+    for active_start in range(24):
+        for active_end in range(24):
+            state = HardenState(policy_set=True, active_start=active_start,
+                                active_end=active_end, smart_hours=False)
+            found = _by_key(assess(state, want_start=want_start, want_end=want_end))
+            gaps = _uncovered_ranges(active_start, active_end, want_start, want_end)
+            assert found["active_hours"].ok is (not gaps), (
+                f"active=({active_start},{active_end}) want=({want_start},"
+                f"{want_end}) gaps={gaps} ok={found['active_hours'].ok}")
+
+
+def test_two_separate_gaps_are_both_named():
+    # The only nontrivial branch of _uncovered_ranges: a middle chunk of
+    # the wanted window is covered, leaving a gap at each end. Both must
+    # be named, not just the first.
+    state = HardenState(policy_set=True, active_start=10, active_end=14,
+                        smart_hours=False)
+    found = _by_key(assess(state, want_start=8, want_end=2))
+    assert found["active_hours"].ok is False
+    detail = found["active_hours"].detail
+    assert "08:00-10:00" in detail
+    assert "14:00-02:00" in detail
 
 
 def test_unknown_smart_hours_flag_keeps_active_hours_unknown_too():

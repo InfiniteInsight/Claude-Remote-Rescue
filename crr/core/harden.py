@@ -58,24 +58,41 @@ class Finding:
     detail: str
 
 
-def _covers_all_of(outer_start, outer_end, inner_start, inner_end) -> bool:
-    """True when the outer window is at least as wide as the inner one and
-    contains the inner window's start hour.
+def _uncovered_ranges(existing_start, existing_end, want_start, want_end):
+    """Which hour ranges inside the wanted window the existing window does
+    NOT cover, as a list of (start, end) tuples (start inclusive, end
+    exclusive, same convention as ``covers``).
 
-    This is deliberately anchored on the start hour rather than a full
-    end-to-end containment check. A precise containment check (projecting
-    ``inner_end`` onto ``outer_start``'s frame via ``span_hours``) breaks
-    down whenever both windows sit at the same span: any nonzero shift
-    between two equal-span windows makes the projected end wrap past the
-    outer span, so it reports "not contained" even for windows that a
-    human would call equivalent (e.g. two different 18-hour, the Windows
-    maximum, windows a couple of hours apart). Anchoring on the start hour
-    plus a span comparison avoids that false negative and matches this
-    module's test table.
+    This asks the only question that matters: "are any wanted hours
+    actually unprotected?" -- not "is the wanted window a subset of the
+    existing one" (a containment predicate is non-monotonic in the actual
+    gap: it can call an 8-hour gap "fine" and a 1-hour gap "not fine"
+    depending on where the windows start, which is a green light over a
+    real hole). Every hour is checked individually via ``covers``, so the
+    verdict tracks the real amount of exposure, not the shape of the
+    windows.
     """
-    if span_hours(outer_start, outer_end) < span_hours(inner_start, inner_end):
-        return False
-    return covers(outer_start, outer_end, inner_start)
+    span = span_hours(want_start, want_end)
+    hours = [(want_start + i) % 24 for i in range(span)]
+    covered = [covers(existing_start, existing_end, h) for h in hours]
+
+    ranges = []
+    i = 0
+    n = len(hours)
+    while i < n:
+        if covered[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not covered[j]:
+            j += 1
+        ranges.append((hours[i], (hours[j - 1] + 1) % 24))
+        i = j
+    return ranges
+
+
+def _format_ranges(ranges) -> str:
+    return ", ".join(f"{start:02d}:00-{end:02d}:00" for start, end in ranges)
 
 
 def assess(state: HardenState, want_start: int, want_end: int) -> tuple[Finding, ...]:
@@ -107,15 +124,18 @@ def assess(state: HardenState, want_start: int, want_end: int) -> tuple[Finding,
                         "smart active hours is on, so Windows chooses the "
                         "window itself and the configured values are not "
                         "what is in force")
-    elif _covers_all_of(state.active_start, state.active_end, want_start, want_end):
-        hours = Finding("active_hours", True,
-                        f"active hours {state.active_start}:00-{state.active_end}:00 "
-                        f"are at least as wide as {want_start}:00-{want_end}:00 and "
-                        f"include its start")
     else:
-        hours = Finding("active_hours", False,
-                        f"active hours are {state.active_start}:00-"
-                        f"{state.active_end}:00; sessions outside that window "
-                        f"are unprotected (crr would set {want_start}:00-"
-                        f"{want_end}:00)")
+        gaps = _uncovered_ranges(state.active_start, state.active_end,
+                                 want_start, want_end)
+        if not gaps:
+            hours = Finding("active_hours", True,
+                            f"active hours {state.active_start}:00-"
+                            f"{state.active_end}:00 cover all of "
+                            f"{want_start}:00-{want_end}:00")
+        else:
+            hours = Finding("active_hours", False,
+                            f"active hours are {state.active_start}:00-"
+                            f"{state.active_end}:00; unprotected hours: "
+                            f"{_format_ranges(gaps)} "
+                            f"(crr would set {want_start}:00-{want_end}:00)")
     return (policy, hours)
