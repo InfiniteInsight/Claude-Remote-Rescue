@@ -62,3 +62,54 @@ def test_smart_hours_absent_value_is_known_off_not_unknown():
 def test_smart_hours_line_missing_entirely_is_unknown():
     text = "policy=absent\nActiveHoursStart=7\nActiveHoursEnd=19\n"
     assert parse_state(text).smart_hours is None
+
+
+from crr import cli
+from crr.core.harden import HardenState as _HS
+
+
+def _patch_state(monkeypatch, state):
+    monkeypatch.setattr(cli.harden_windows, "read_state", lambda **k: state)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+
+
+def test_harden_reports_the_gaps_and_the_command_that_fixes_them(monkeypatch, capsys):
+    _patch_state(monkeypatch, _HS(False, 7, 19, False))
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out
+    assert "NoAutoRebootWithLoggedOnUsers" in out
+    assert "crr harden --apply" in out
+
+
+def test_harden_says_applied_never_protected(monkeypatch, capsys):
+    # Microsoft filed these under "Legacy Policies" and they are reported
+    # ignored in the wild. crr may claim it applied a setting; it may never
+    # claim the machine is safe.
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
+    cli.main(["harden"])
+    out = capsys.readouterr().out.lower()
+    assert "protected" not in out
+    assert "guarantee" not in out
+
+
+def test_harden_reports_unknown_rather_than_unprotected(monkeypatch, capsys):
+    _patch_state(monkeypatch, _HS(None, None, None, None))
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "unknown" in out or "could not" in out
+
+
+def test_harden_refuses_on_a_host_with_no_windows_to_harden(monkeypatch, capsys):
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    rc = cli.main(["harden"])
+    assert rc != 0
+    assert "windows" in capsys.readouterr().err.lower()
+
+
+def test_doctor_carries_the_same_finding(monkeypatch, capsys):
+    _patch_state(monkeypatch, _HS(False, 7, 19, False))
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: __import__("pathlib").Path("/tmp"))
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "windows update" in out.lower()

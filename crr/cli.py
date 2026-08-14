@@ -42,9 +42,11 @@ from crr.adapters import launchd, process_probe, session_state, state_dir, syste
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters import (power_hold_linux, power_hold_macos,
                           power_hold_windows, power_source, power_state)
+from crr.adapters import harden_windows
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import deploy
+from crr.core import harden
 from crr.core import power
 from crr.core import bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
 from crr.core import diagnostics as diag_core
@@ -397,6 +399,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "stopping the unit IS the release",
     )
     pwr.set_defaults(func=_cmd_power)
+
+    hrd = sub.add_parser(
+        "harden",
+        help="report Windows Update hardening gaps (read-only; no --apply yet)",
+    )
+    hrd.set_defaults(func=_cmd_harden)
 
     sysd = sub.add_parser(
         "systemd",
@@ -1138,9 +1146,85 @@ def _cmd_shim(args: argparse.Namespace) -> int:
     return 0
 
 
-def _check(label: str, ok: bool, detail: str = "") -> None:
-    mark = "ok  " if ok else "WARN"
+def _check(label: str, ok: bool | None, detail: str = "") -> None:
+    """Print one doctor-style line. ``ok`` is tri-state: ``None`` renders as
+    its own mark (``unkn``), never coerced into ``ok`` or ``WARN`` — a read
+    crr could not perform is neither a pass nor a failure (spec
+    2026-08-14, Task 5: harden's ``Finding.ok`` is ``bool | None`` and
+    ``crr harden``/``crr doctor`` share this one renderer so they always
+    agree)."""
+    if ok is None:
+        mark = "unkn"
+    else:
+        mark = "ok  " if ok else "WARN"
     print(f"  [{mark}] {label}" + (f" — {detail}" if detail else ""))
+
+
+# Human labels for harden.assess()'s Finding.key values, shared by `crr
+# harden` and the doctor section below so the two commands read identically.
+_HARDEN_LABELS = {
+    "no_auto_reboot": "Windows Update: NoAutoRebootWithLoggedOnUsers",
+    "active_hours": "Windows Update: active hours",
+}
+
+
+def _harden_supported(system: str, wsl: bool) -> None:
+    """Raise, naming the platform, when there is no Windows Update to
+    harden here — the same refuse-loudly shape as ``boot_identity.detect()``
+    (an unsupported platform is a loud error, never a silently-wrong
+    answer). WSL is checked first and deliberately, same reasoning as
+    ``_power_holder``: ``platform.system()`` reports "Linux" inside WSL,
+    but the Windows Update policy this command reads lives on the Windows
+    host, not the Linux userland.
+    """
+    if wsl or system == "Windows":
+        return
+    raise NotImplementedError(
+        f"no Windows Update to harden on {system!r} (not WSL, not Windows)")
+
+
+def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
+    """Render harden.assess()'s Findings through `_check`, doctor's exact
+    shape, so `crr harden` and `crr doctor` never disagree about what they
+    found.
+
+    Prints the remediation command when anything is a known gap
+    (``Finding.ok is False``) — never when it's merely unknown, and never
+    a claim about the *other* findings. `--apply` does not exist yet (a
+    later task); crr may say it will apply a setting, never that the
+    machine is protected — see crr/core/harden.py's module docstring.
+    """
+    any_gap = False
+    for finding in findings:
+        label = _HARDEN_LABELS.get(finding.key, finding.key)
+        _check(label, finding.ok, finding.detail)
+        if finding.ok is False:
+            any_gap = True
+    if any_gap:
+        print("  fix with: crr harden --apply (not yet available)")
+
+
+def _cmd_harden(args: argparse.Namespace) -> int:
+    """Report Windows Update hardening gaps. READ ONLY — there is no
+    ``--apply`` yet (a later task); this command never writes the
+    registry.
+    """
+    system = platform.system()
+    wsl = host.is_wsl()
+    try:
+        _harden_supported(system, wsl)
+    except NotImplementedError as exc:
+        print(f"crr harden: {exc}", file=sys.stderr)
+        return 2
+    config = _load_config()
+    state = harden_windows.read_state(timeout=config.get("interop_timeout_seconds"))
+    findings = harden.assess(
+        state,
+        config.get("harden_active_hours_start"),
+        config.get("harden_active_hours_end"),
+    )
+    _print_harden_findings(findings)
+    return 0
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
@@ -1272,6 +1356,23 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         if power_missing:
             _check("power hold capabilities", False,
                    f"unavailable on this platform: {', '.join(power_missing)}")
+
+    # Windows Update hardening gaps (spec 2026-08-14, Task 5). Same
+    # `harden.assess`/`Finding` shape and `_check` rendering `crr harden`
+    # uses on its own — doctor must never omit a gap `crr harden` would
+    # report. `power_wsl` was already resolved above (same is_wsl() fact);
+    # reusing it avoids a second interop call. Silent (no section) on a
+    # host with no Windows Update to harden at all, same as the
+    # boot-identity/power sections degrade per-platform elsewhere here.
+    if power_wsl or power_system == "Windows":
+        harden_state = harden_windows.read_state(
+            timeout=config.get("interop_timeout_seconds"))
+        harden_findings = harden.assess(
+            harden_state,
+            config.get("harden_active_hours_start"),
+            config.get("harden_active_hours_end"),
+        )
+        _print_harden_findings(harden_findings)
 
     # The reachability detector's own falsifiability (plan 2026-08-10, Task
     # 7). Claude Code never persists `replBridgeError`, so a bridge that
