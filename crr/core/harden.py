@@ -143,18 +143,19 @@ def assess(state: HardenState, want_start: int, want_end: int) -> tuple[Finding,
     return (policy, hours)
 
 
-# ``diagnostics_windows.winevent_command``/``parse_winevents`` produce lines
-# shaped "<TimeCreated> [<id>] <message>". TimeCreated is PowerShell's
-# default DateTime.ToString(), which is CULTURE-dependent, not a fixed
-# format -- measured on a real WSL/Windows host (2026-08-13) it comes out
-# "08/09/2026 08:44:39" (en-US, 24h clock), not the ISO shape a first read
-# of the diagnostics adapter's docstring would suggest. Trusting only ISO
-# here would parse zero timestamps on that real host and print a false
-# "no restarts outside the window" -- succeeding loudly while measuring
-# nothing. So this tries the formats actually seen, plus ISO for whatever
-# produces it (these tests' fixtures, and any culture that does), plus a
-# 12h/AM-PM variant defensively. This is still not exhaustive of every
-# .NET culture; an unrecognized shape correctly falls through to "no
+# ``diagnostics_windows.winevent_command`` now formats TimeCreated itself
+# as invariant ``yyyy-MM-dd HH:mm:ss`` (fix round 1, Important 3), so ISO is
+# the authoritative, locale-safe shape for anything that actually came from
+# that command. The other formats below are kept only as a FALLBACK for
+# lines that didn't -- e.g. a real host measured 2026-08-13, before that
+# fix, rendering PowerShell's culture-dependent default as
+# "08/09/2026 08:44:39" (en-US, 24h). Trusting only ISO there would have
+# parsed zero timestamps and printed a false "no restarts outside the
+# window" -- succeeding loudly while measuring nothing. This is still not
+# exhaustive of every .NET culture (a DD/MM host's "08/09/2026" would still
+# misparse as Aug 9 rather than Sep 8 under the en-US fallback -- fixing
+# the source removes that ambiguity for lines that use it, not for these
+# fallback formats); an unrecognized shape correctly falls through to "no
 # parseable timestamp" rather than a guess.
 _TIMESTAMP_RE = re.compile(
     r"^(\d{1,4}[-/]\d{1,2}[-/]\d{1,4} \d{1,2}:\d{2}:\d{2}(?:\s*[AaPp][Mm])?)")

@@ -138,9 +138,29 @@ def _elevated_reg_add(path: str, name: str, value: int) -> list[str]:
     shows a UAC prompt for the HKLM write. HKLM writes silently no-op
     without elevation -- without ``RunAs`` here, crr would report the
     write as run and the registry would be untouched.
+
+    Fix round 1: ``Start-Process ... -Wait`` alone does NOT propagate the
+    child's exit code -- the outer ``powershell.exe`` exits 0 regardless of
+    whether ``reg.exe`` succeeded, and a declined UAC prompt raises a
+    non-terminating ``InvalidOperationException`` that ``powershell.exe``
+    also swallows into exit 0. Measured read-only on a real host: a failing
+    ``reg.exe`` invocation exits 1, but the un-fixed wrapper still exited 0.
+    ``_run_commands`` only inspects ``returncode``, so that shape is this
+    feature's signature defect (succeeds loudly, protects nothing) landing
+    in the one path that changes the machine. ``-PassThru`` captures the
+    child process object so its real ``ExitCode`` can be read;
+    ``$ErrorActionPreference = 'Stop'`` turns the declined-UAC exception
+    terminating, which gives the outer process a nonzero exit on its own;
+    ``exit $p.ExitCode`` is what actually forwards a failing ``reg.exe``
+    exit code outward when ``Start-Process`` itself succeeded.
     """
     reg_args = f'add "{path}" /v {name} /t REG_DWORD /d {value} /f'
-    script = f"Start-Process reg.exe -ArgumentList '{reg_args}' -Verb RunAs -Wait"
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$p = Start-Process reg.exe -ArgumentList '{reg_args}' -Verb RunAs "
+        "-Wait -PassThru; "
+        "exit $p.ExitCode"
+    )
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
 
 

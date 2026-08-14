@@ -1258,12 +1258,20 @@ def _print_restart_measurement(config, want_start: int, want_end: int) -> None:
                f"{want_start}:00-{want_end}:00")
 
 
-def _cmd_harden_apply(want_start: int, want_end: int) -> int:
+def _cmd_harden_apply(config, want_start: int, want_end: int) -> int:
     """Write the hardening policy to HKLM — the only path in this command
     that changes the machine. Confirmation semantics (spec 2026-08-14,
     Task 6): no tty -> refuse and write nothing (unattended must never be
     the path that changes machine policy); tty + declined -> refuse and
     write nothing; tty + confirmed -> run the commands.
+
+    Fix round 1, Important 2: ``_run_commands`` reporting every argv exited
+    0 is not proof the registry now holds what was requested (that is
+    exactly the shape the Critical fix closed one layer down — a write
+    that silently no-ops but still exits 0). So a successful run is
+    followed by a real readback through the same ``read_state``/
+    ``harden.assess`` the plain report uses, and the readback's verdict —
+    not the mere fact that the commands ran — is what gets printed.
     """
     msg = harden.valid_span(want_start, want_end)
     if msg:
@@ -1293,14 +1301,30 @@ def _cmd_harden_apply(want_start: int, want_end: int) -> int:
         print("crr harden --apply: one or more writes FAILED (see above)",
               file=sys.stderr)
         return 1
-    # "applied" is the only claim this may make. Whether it actually held
-    # is what the next plain `crr harden` measures from restart events —
-    # never assert that here, there's been no time for a restart yet.
-    print("crr harden --apply: settings applied. This is not a guarantee "
-          "the machine is protected — Windows has been known to ignore "
-          "these policies. Run `crr harden` again later; it reports any "
-          "restart that lands outside the active-hours window as evidence "
-          "the policy did not hold.")
+
+    readback = harden_windows.read_state(timeout=config.get("interop_timeout_seconds"))
+    findings = harden.assess(readback, want_start, want_end)
+    if all(finding.ok is True for finding in findings):
+        print("crr harden --apply: wrote the settings; a readback of the "
+              "registry confirms both levers now match what was requested.")
+    else:
+        # The exact case the Critical fix was closing one layer down: the
+        # write commands exiting 0 is not proof the registry holds what
+        # was asked for. Say so plainly, with the same per-lever detail
+        # the plain report uses, rather than let "the commands ran"
+        # stand in for "it stuck".
+        print("crr harden --apply: wrote the settings, but a readback of "
+              "the registry shows they did not fully take:")
+        _print_harden_findings(findings)
+    # "applied" (and, above, what the readback actually shows) is the only
+    # claim this may make. Whether it holds under real Windows Update
+    # pressure is what the next plain `crr harden` measures from restart
+    # events — never assert that here, there's been no time for a
+    # restart yet.
+    print("This is not a guarantee the machine is protected — Windows has "
+          "been known to ignore these policies. Run `crr harden` again "
+          "later; it reports any restart that lands outside the "
+          "active-hours window as evidence the policy did not hold.")
     return 0
 
 
@@ -1321,7 +1345,7 @@ def _cmd_harden(args: argparse.Namespace) -> int:
     want_end = config.get("harden_active_hours_end")
 
     if getattr(args, "apply", False):
-        return _cmd_harden_apply(want_start, want_end)
+        return _cmd_harden_apply(config, want_start, want_end)
 
     state = harden_windows.read_state(timeout=config.get("interop_timeout_seconds"))
     findings = harden.assess(state, want_start, want_end)
