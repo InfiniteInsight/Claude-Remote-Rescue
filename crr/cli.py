@@ -1217,12 +1217,23 @@ def _print_harden_findings(
         print("  fix with: crr harden --apply")
 
 
-def _print_restart_measurement(config, want_start: int, want_end: int) -> None:
+def _print_restart_measurement(config, state) -> None:
     """The half that keeps `--apply` honest: read Windows shutdown/restart
     events (crr.adapters.diagnostics_windows, the same reader `crr
     diagnose` uses) bounded to the last ``harden_restart_lookback_days``
     days, and report any that landed OUTSIDE the active-hours window —
     evidence the policy did not hold, even after it was applied.
+
+    Measured against ``state.active_start``/``state.active_end`` -- the
+    hours actually IN FORCE on the machine, read from the registry -- not
+    the configured want-window. Efficacy is about what really governs
+    Windows' behavior; a restart that lands inside the configured window
+    but outside what is really in force is exactly the failure this
+    measurement exists to catch, and measuring against the want-window
+    would print a green checkmark over it (fix round 3, Critical 1). When
+    the in-force hours are not knowable -- unreadable, or smart active
+    hours means Windows chose the window itself -- this degrades to
+    unknown rather than guessing which window to measure against.
 
     Never prints "protected" or "guarantee": Microsoft filed these
     policies under "Legacy Policies" on Windows 11 and there are credible
@@ -1230,6 +1241,27 @@ def _print_restart_measurement(config, want_start: int, want_end: int) -> None:
     "no counterevidence yet", not "safe".
     """
     label = "Windows Update: restarts outside active hours"
+    if state.active_start is None or state.active_end is None:
+        _check(label, None,
+               "cannot check restarts against active hours — they are "
+               "unreadable")
+        return
+    if state.smart_hours is None:
+        # Same unknown harden.assess() already renders for this state's
+        # active_hours finding (harden.py): if crr cannot tell whether
+        # smart hours overrides the configured window, it cannot vouch
+        # that active_start/active_end are what is really in force.
+        _check(label, None,
+               "cannot check restarts against active hours — whether "
+               "smart active hours is enabled could not be read, so which "
+               "window is actually in force is unknown")
+        return
+    if state.smart_hours:
+        _check(label, None,
+               "cannot check restarts against active hours — smart active "
+               "hours is on, so the window is Windows' choice")
+        return
+    start, end = state.active_start, state.active_end
     cmd = diagnostics_windows.winevent_command(
         diagnostics_windows.SHUTDOWN_EVENT_IDS, config.get("diagnose_event_cap"))
     try:
@@ -1238,30 +1270,36 @@ def _print_restart_measurement(config, want_start: int, want_end: int) -> None:
         _check(label, None, "could not read Windows restart history")
         return
     events = diagnostics_windows.parse_winevents(text)
-    if events and harden.parsed_count(events) == 0:
-        # Every line came back unparseable -- a format this module does not
-        # recognize, not a clean read. "no hits" here would be a green
-        # checkmark manufactured from zero understood events; report the
-        # honest unknown instead.
-        _check(label, None,
-               f"read {len(events)} restart-history line(s) but could not "
-               "parse any of their timestamps")
-        return
-    recent = harden.within_lookback(
-        events, config.get("harden_restart_lookback_days"), datetime.now())
-    hits = harden.restarts_outside(recent, want_start, want_end)
     days = config.get("harden_restart_lookback_days")
+    now = datetime.now()
+    # Gate on lines that could plausibly be within the lookback window --
+    # not the full, pre-lookback list (fix round 3, Minor 2: one ancient
+    # but parseable line there was enough to disable the gate while the
+    # actually-recent lines were entirely unparseable). within_lookback()
+    # itself can't be reused for this check: it unconditionally drops
+    # unparseable lines (correctly, for deciding what counts as evidence),
+    # which would make its own parsed_count() trivially non-zero-or-empty
+    # and blind to exactly the failure this gate exists to catch.
+    gate_candidates = harden.within_lookback_or_unparseable(events, days, now)
+    if gate_candidates and harden.parsed_count(gate_candidates) == 0:
+        _check(label, None,
+               f"read {len(gate_candidates)} restart-history line(s) in "
+               f"the last {days} day(s) but could not parse any of their "
+               "timestamps")
+        return
+    recent = harden.within_lookback(events, days, now)
+    hits = harden.restarts_outside(recent, start, end)
     if hits:
         _check(label, False,
                f"{len(hits)} restart(s) in the last {days} day(s) landed "
-               f"outside {want_start}:00-{want_end}:00 — the policy did not "
-               "hold then")
+               f"outside {start}:00-{end}:00 (the active hours in force) "
+               "— the policy did not hold then")
         for line in hits:
             print(f"    {line}")
     else:
         _check(label, True,
                f"no restarts in the last {days} day(s) landed outside "
-               f"{want_start}:00-{want_end}:00")
+               f"{start}:00-{end}:00 (the active hours in force)")
 
 
 # Exact wording, pinned by tests (fix round 2, Important 4: a whole-stdout
@@ -1394,7 +1432,7 @@ def _cmd_harden(args: argparse.Namespace) -> int:
     state = harden_windows.read_state(timeout=config.get("interop_timeout_seconds"))
     findings = harden.assess(state, want_start, want_end)
     _print_harden_findings(findings)
-    _print_restart_measurement(config, want_start, want_end)
+    _print_restart_measurement(config, state)
     return 0
 
 

@@ -256,3 +256,31 @@ def test_parsed_count_distinguishes_no_events_from_unparseable_events():
     assert parsed_count([]) == 0
     assert parsed_count(["garbage", "Reason Code: 0x0"]) == 0
     assert parsed_count(["2026-08-10 14:03:11 [1074] restart", "garbage"]) == 1
+
+
+from crr.core.harden import within_lookback_or_unparseable
+
+
+def test_not_provably_stale_keeps_unparseable_lines_the_plain_lookback_would_drop():
+    # cli.py's honesty gate (Minor 2, fix round 3) cannot use within_lookback's
+    # own output to decide "did the recent window fail to parse" -- that
+    # function drops every unparseable line unconditionally (correctly, for
+    # deciding what counts as evidence), which makes its own parsed_count()
+    # trivially non-zero-or-empty and blind to the exact failure the gate
+    # exists to catch. This sibling keeps a line whenever it cannot be RULED
+    # OUT as recent: unparseable, or parseable-and-within-the-window.
+    now = datetime(2026, 8, 13, 12, 0, 0)
+    events = ["no timestamp here"]
+    assert within_lookback_or_unparseable(events, days=14, now=now) == tuple(events)
+
+
+def test_not_provably_stale_drops_only_lines_provably_older_than_the_window():
+    now = datetime(2026, 8, 13, 12, 0, 0)
+    events = ["2026-07-01 14:03:11 [1074] stale"]
+    assert within_lookback_or_unparseable(events, days=14, now=now) == ()
+
+
+def test_not_provably_stale_keeps_recent_parseable_lines_too():
+    now = datetime(2026, 8, 13, 12, 0, 0)
+    events = ["2026-08-10 14:03:11 [1074] recent"]
+    assert within_lookback_or_unparseable(events, days=14, now=now) == tuple(events)

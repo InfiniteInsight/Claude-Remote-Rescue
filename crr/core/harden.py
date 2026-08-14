@@ -137,7 +137,7 @@ def assess(state: HardenState, want_start: int, want_end: int) -> tuple[Finding,
         else:
             hours = Finding("active_hours", False,
                             f"active hours are {state.active_start}:00-"
-                            f"{state.active_end}:00; unprotected hours: "
+                            f"{state.active_end}:00; hours not covered: "
                             f"{_format_ranges(gaps)} "
                             f"(crr would set {want_start}:00-{want_end}:00)")
     return (policy, hours)
@@ -226,5 +226,29 @@ def within_lookback(events, days: int, now: datetime) -> tuple[str, ...]:
         if ts is None:
             continue
         if ts >= cutoff:
+            hits.append(line)
+    return tuple(hits)
+
+
+def within_lookback_or_unparseable(events, days: int, now: datetime) -> tuple[str, ...]:
+    """Event lines that cannot be RULED OUT as being within the last
+    ``days`` days -- every line ``within_lookback`` would keep, plus every
+    line with no parseable timestamp.
+
+    ``within_lookback`` drops unparseable lines unconditionally, which is
+    correct for deciding what counts as restart evidence, but makes its
+    own output useless for the "did the recent window actually parse"
+    honesty gate: a gate built on ``within_lookback``'s result can never
+    see a recent-but-unparseable line, because that function already threw
+    it away. This is the caller-side check that needs to see it: kept
+    whenever the line has no timestamp this module recognizes (so it might
+    be recent) or a timestamp inside the window; dropped only when a
+    parseable timestamp proves the line is older than the window.
+    """
+    cutoff = now - timedelta(days=days)
+    hits = []
+    for line in events:
+        ts = _parse_timestamp(line)
+        if ts is None or ts >= cutoff:
             hits.append(line)
     return tuple(hits)

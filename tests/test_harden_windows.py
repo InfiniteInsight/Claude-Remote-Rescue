@@ -73,6 +73,20 @@ def _patch_state(monkeypatch, state):
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
 
 
+def _no_safety_claim(out_lower: str) -> bool:
+    """True when no "is protected"/"are protected" SAFETY CLAIM appears.
+
+    A blunt ``"protected" not in out`` (fix rounds 1-2) only ever passed
+    because its fixtures happened to avoid the gap/unknown path -- it
+    never actually distinguished an honest gap sentence from a dishonest
+    claim, and would keep passing even if crr started printing "you are
+    now protected" right next to an honest "hours not covered" gap. This
+    checks the actual rule: crr may say "applied", never that the machine
+    "is protected" or "are protected".
+    """
+    return "is protected" not in out_lower and "are protected" not in out_lower
+
+
 def test_harden_reports_the_gaps_and_the_command_that_fixes_them(monkeypatch, capsys):
     _patch_state(monkeypatch, _HS(False, 7, 19, False))
     assert cli.main(["harden"]) == 0
@@ -88,7 +102,7 @@ def test_harden_says_applied_never_protected(monkeypatch, capsys):
     _patch_state(monkeypatch, _HS(True, 8, 2, False))
     cli.main(["harden"])
     out = capsys.readouterr().out.lower()
-    assert "protected" not in out
+    assert _no_safety_claim(out)
     assert "guarantee" not in out
 
 
@@ -150,7 +164,118 @@ def test_harden_reports_unknown_when_events_exist_but_none_parse(monkeypatch, ca
     assert cli.main(["harden"]) == 0
     out = capsys.readouterr().out.lower()
     assert "unkn" in out
-    assert "protected" not in out and "guarantee" not in out
+    assert _no_safety_claim(out)
+
+
+# --- Critical 1 (fix round 3): efficacy must be measured against the hours
+# actually IN FORCE (state.active_start/active_end, read from the
+# registry), never the configured want-window -- a restart that lands
+# inside the configured window but outside what is really in force is
+# exactly the failure this measurement exists to catch, and measuring
+# against the want-window greens it. crr's config here defaults to 8-2;
+# these fixtures deliberately give the in-force window a DIFFERENT value
+# (7-19) so a test that silently kept reading want_start/want_end would
+# fail loudly instead of passing by coincidence.
+
+def test_restart_measurement_uses_in_force_hours_not_the_configured_window(monkeypatch, capsys):
+    # 01:14 is INSIDE the configured want-window (8-2) but OUTSIDE the
+    # in-force window (7-19) -- the exact shape that motivated this fix.
+    _patch_state(monkeypatch, _HS(True, 7, 19, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out
+    assert "restarts outside active hours" in out.lower()
+    assert "WARN" in out
+    assert "01:14:24" in out
+    assert "7:00-19:00" in out or "07:00-19:00" in out
+
+
+def test_restart_measurement_same_restart_not_outside_a_different_in_force_window(monkeypatch, capsys):
+    # Same 01:14 restart, but here the in-force window IS 8-2 -- 01:14 is
+    # inside it, so this is not evidence of failure.
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out
+    assert "restarts outside active hours" in out.lower()
+    assert "ok" in out.lower()
+    assert "WARN" not in out
+
+
+def test_restart_measurement_is_unknown_when_in_force_hours_are_unreadable(monkeypatch, capsys):
+    _patch_state(monkeypatch, _HS(True, None, None, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if "restarts outside active hours" in l.lower())
+    assert "unkn" in line.lower()
+    assert "[ok" not in line.lower() and "warn" not in line.lower()
+
+
+def test_restart_measurement_is_unknown_when_smart_hours_is_on(monkeypatch, capsys):
+    # smart_hours True means Windows picks the window itself -- crr does
+    # not know what is actually in force, so it cannot measure against it.
+    _patch_state(monkeypatch, _HS(True, 8, 2, True))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "restarts outside active hours" in out
+    assert "unkn" in out
+    assert "smart active hours" in out
+
+
+def test_restart_measurement_is_unknown_when_smart_hours_is_unreadable(monkeypatch, capsys):
+    # Deliberate consistency extension beyond the literal ruling text: when
+    # crr cannot tell whether smart hours overrides the configured window
+    # (smart_hours is None), it cannot vouch that active_start/active_end
+    # are what is really in force either -- the identical unknown
+    # harden.assess() already renders for this same state (harden.py's
+    # active_hours finding). Measuring restarts against a window crr
+    # cannot confirm is live would contradict that unknown on the very
+    # same report.
+    _patch_state(monkeypatch, _HS(True, 8, 2, None))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "restarts outside active hours" in out
+    assert "unkn" in out
+
+
+# --- Minor 2 (fix round 3): the parsed_count honesty gate must look at
+# whether the RECENT window parsed, not whether anything in the whole,
+# pre-lookback event list happened to parse -- an old parseable line must
+# not paper over an entirely-unparseable recent window.
+
+def test_restart_measurement_unknown_when_only_an_ancient_line_parses(monkeypatch, capsys):
+    # One very old, perfectly parseable restart, plus lines this module
+    # cannot read at all. The old naive gate (parsed_count over the full,
+    # pre-lookback list) saw the one parseable line and let the report
+    # through to a manufactured "no restarts outside the window" -- the
+    # unparseable lines, which within_lookback() also silently drops
+    # (correctly -- it cannot vouch for their recency), simply vanished.
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: (
+            "2020-01-01 00:00:00 [1074] a restart from years ago\n"
+            "some unrecognized recent event shape\n"
+            "another unrecognized recent event shape\n"
+        ))
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "restarts outside active hours" in out
+    assert "unkn" in out
+    assert "no restarts" not in out
 
 
 def test_apply_commands_target_both_levers_and_are_elevated():
