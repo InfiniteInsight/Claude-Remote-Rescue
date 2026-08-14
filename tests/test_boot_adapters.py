@@ -100,3 +100,146 @@ def test_facts_command_is_read_only():
     assert "reg add" not in script
     assert "Register-" not in script
     assert "Get-" in script
+
+
+# ---------------------------------------------------------------------------
+# Linux: linger + surface-boot facts (spec 2026-08-14, Task 5)
+# ---------------------------------------------------------------------------
+
+from crr.adapters import boot_linux
+
+
+def test_linger_enabled_reads_loginctl():
+    def fake(argv, timeout):
+        assert "show-user" in argv
+        return "Linger=yes\n"
+    assert boot_linux.linger_enabled("evan", run=fake) is True
+
+    assert boot_linux.linger_enabled(
+        "evan", run=lambda a, timeout: "Linger=no\n") is False
+
+
+def test_linger_unknown_when_loginctl_fails():
+    def boom(argv, timeout):
+        raise OSError("no loginctl")
+    assert boot_linux.linger_enabled("evan", run=boom) is None
+
+
+def test_linger_unknown_on_garbled_output():
+    # Neither "yes" nor "no" -- must not be guessed either way.
+    assert boot_linux.linger_enabled(
+        "evan", run=lambda a, timeout: "garbage\n") is None
+
+
+def test_linux_read_facts_all_none_on_failure():
+    def boom(argv, timeout):
+        raise OSError("x")
+    f = boot_linux.read_facts("evan", run=boom)
+    assert f.machine_boot is None and f.surface_boot is None
+    assert f == BootFacts(None, None, None, None, None)
+
+
+def test_linux_read_facts_composes_all_three_timestamps():
+    # A known-good triple: /proc/stat btime, crr-web.service
+    # ActiveEnterTimestamp (converted via `date -d`, never guessed), and
+    # two `last -F --time-format iso` login lines (earliest wins). The
+    # ActiveEnterTimestamp line is deliberately a bare LOCAL string with a
+    # tz abbreviation `date -d` alone can resolve -- this module must not
+    # attempt its own UTC-assuming conversion of it (regression coverage
+    # for the boot_windows-style local/UTC mixup).
+    def fake(argv, timeout):
+        if argv[:2] == ["cat", "/proc/stat"]:
+            return "cpu  0 0 0 0 0 0 0 0 0 0\nbtime 1723668188\nprocesses 1\n"
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            assert "crr-web.service" in argv
+            assert "ActiveEnterTimestamp" in " ".join(argv)
+            return "ActiveEnterTimestamp=Thu 2026-08-14 09:16:27 EDT\n"
+        if argv[:4] == ["last", "-F", "--time-format", "iso"]:
+            # `last` is scoped to the requested user, not left to filter
+            # client-side.
+            assert argv[-1] == "evan"
+            return (
+                "evan  pts/1  10.0.0.6  2026-08-14T09:20:10-04:00   still logged in\n"
+                "evan  pts/0  10.0.0.5  2026-08-14T09:16:49-04:00   still logged in\n"
+                "\n"
+                "wtmp begins 2026-08-14T09:16:49-04:00\n"
+            )
+        if argv[:2] == ["date", "-d"]:
+            # The RAW value from systemctl must be passed through
+            # unmodified -- this fake proves that, then returns a
+            # distinguishable epoch to prove the caller actually consumed
+            # `date`'s answer rather than computing its own.
+            assert argv[2] == "Thu 2026-08-14 09:16:27 EDT"
+            return "1723641387\n"
+        raise AssertionError(f"unexpected argv {argv}")
+
+    f = boot_linux.read_facts("evan", run=fake)
+    assert f.machine_boot == 1723668188.0
+    assert f.surface_boot == 1723641387.0
+    # The earlier of the two ISO login lines wins, not the first line seen.
+    from datetime import datetime
+    expected_first_login = datetime.fromisoformat(
+        "2026-08-14T09:16:49-04:00"
+    ).timestamp()
+    assert f.first_login == expected_first_login
+    # Not meaningful on Linux; the verdict does not require them.
+    assert f.locked is None and f.autologin is None
+
+
+def test_linux_read_facts_falls_back_to_stat_and_who():
+    # `cat /proc/stat` and `last -F` both fail; the fallbacks (`stat
+    # /proc/1`, `who`) still produce an answer. `who`'s bare local
+    # timestamp is converted via `date -d` too, and a different user's
+    # login line is excluded.
+    def fake(argv, timeout):
+        if argv[:2] == ["cat", "/proc/stat"]:
+            raise OSError("no /proc/stat")
+        if argv[:2] == ["stat", "-c"]:
+            return "1723668188\n"
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            return "ActiveEnterTimestamp=\n"  # never activated
+        if argv[:4] == ["last", "-F", "--time-format"]:
+            raise OSError("no last binary")
+        if argv == ["who"]:
+            return (
+                "evan     pts/0        2026-08-14 09:16 (10.0.0.5)\n"
+                "root     pts/1        2026-08-14 09:10 (10.0.0.9)\n"
+            )
+        if argv[:2] == ["date", "-d"]:
+            assert argv[2] == "2026-08-14 09:16"   # evan's line, not root's
+            return "1723668960\n"
+        raise AssertionError(f"unexpected argv {argv}")
+
+    f = boot_linux.read_facts("evan", run=fake)
+    assert f.machine_boot == 1723668188.0
+    assert f.surface_boot is None    # "never activated" is an honest unknown
+    assert f.first_login == 1723668960.0
+    assert f.locked is None and f.autologin is None
+
+
+def test_linux_read_facts_excludes_logins_before_machine_boot():
+    # `last` walks wtmp across EVERY previous boot; a login from a prior
+    # boot must not be reported as "first login this boot". machine_boot
+    # is computed to fall strictly between the two login lines below, so
+    # this pins the floor filter rather than an accidental ordering.
+    from datetime import datetime
+    machine_boot_epoch = datetime.fromisoformat("2026-08-14T09:16:00-04:00").timestamp()
+
+    def fake(argv, timeout):
+        if argv[:2] == ["cat", "/proc/stat"]:
+            return f"btime {int(machine_boot_epoch)}\n"
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            return "ActiveEnterTimestamp=\n"
+        if argv[:4] == ["last", "-F", "--time-format", "iso"]:
+            return (
+                # Stale: before machine_boot -- a previous boot's login,
+                # must be filtered out.
+                "evan  pts/0  -  2026-08-14T05:00:00-04:00   still logged in\n"
+                # Genuine: after machine_boot.
+                "evan  pts/1  -  2026-08-14T09:20:10-04:00   still logged in\n"
+            )
+        raise AssertionError(f"unexpected argv {argv}")
+
+    f = boot_linux.read_facts("evan", run=fake)
+    expected = datetime.fromisoformat("2026-08-14T09:20:10-04:00").timestamp()
+    assert f.first_login == expected
