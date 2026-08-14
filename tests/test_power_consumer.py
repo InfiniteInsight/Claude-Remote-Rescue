@@ -5,10 +5,11 @@ wiring that finally calls them.
 """
 
 import os
-import select
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -434,28 +435,90 @@ sys.exit(rc)
 '''
 
 
+def _line_reader_queue(proc):
+    """Start (once) a background thread draining ``proc.stdout`` into a
+    queue, and return that queue.
+
+    ``readline()`` has no native timeout, and unlike POSIX, Windows
+    ``select`` accepts only sockets -- never pipes or file objects, which
+    is exactly what a subprocess's ``stdout`` is (``OSError: [WinError
+    10038] An operation was attempted on something that is not a
+    socket``). A thread + queue is the portable way to bound what would
+    otherwise be an unbounded blocking read on either platform.
+
+    The thread (and its queue) is cached on ``proc`` itself so repeated
+    calls for the same process reuse it -- a second wait for a later
+    marker on the same ``proc.stdout`` must read from the SAME queue,
+    never spawn a second reader thread racing the first for the next
+    line off the pipe (whichever thread wins a given ``readline()`` would
+    silently steal a line the other call was waiting on).
+    """
+    q = getattr(proc, "_marker_queue", None)
+    if q is not None:
+        return q
+    q = queue.Queue()
+    proc._marker_queue = q
+
+    def _drain():
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                q.put(line)
+        finally:
+            q.put(None)  # sentinel: EOF
+
+    threading.Thread(target=_drain, daemon=True).start()
+    return q
+
+
 def _wait_for_marker(proc, marker, output_lines, timeout):
     """Read lines from ``proc.stdout`` until one contains ``marker``.
 
-    Bounded by ``timeout`` via ``select`` so a hung/misbehaving child
-    cannot block the test suite forever. Returns False on timeout or EOF
-    (process exited without ever printing the marker) instead of raising,
-    so callers get a normal assertion failure with the captured output.
+    Bounded by ``timeout`` via the shared reader queue (see
+    ``_line_reader_queue``) so a hung/misbehaving child cannot block the
+    test suite forever. Returns False on timeout or EOF (process exited
+    without ever printing the marker) instead of raising, so callers get
+    a normal assertion failure with the captured output.
     """
+    q = _line_reader_queue(proc)
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        ready, _, _ = select.select([proc.stdout], [], [], remaining)
-        if not ready:
+        try:
+            line = q.get(timeout=remaining)
+        except queue.Empty:
             return False
-        line = proc.stdout.readline()
-        if line == "":
+        if line is None:
             return False  # EOF: the child exited before printing it
         output_lines.append(line.rstrip("\n"))
         if marker in line:
             return True
+
+
+def _drain_remaining_output(proc, output_lines, timeout):
+    """Collect whatever else the background reader thread (already
+    started by an earlier ``_wait_for_marker`` call for this ``proc``)
+    puts on the queue, until EOF or ``timeout``.
+
+    Must be used instead of a raw ``proc.stdout.read()`` once
+    ``_wait_for_marker`` has run for this ``proc`` -- the reader thread
+    already owns all further reads off the pipe, so a second, direct read
+    from the main thread would race it instead of seeing the same bytes.
+    """
+    q = _line_reader_queue(proc)
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            line = q.get(timeout=remaining)
+        except queue.Empty:
+            return
+        if line is None:
+            return
+        output_lines.append(line.rstrip("\n"))
 
 
 def _run_awake_and_signal_twice(tmp_path, sig, poll_seconds=30, ladder=1.0, gap=0.4):
@@ -481,9 +544,7 @@ def _run_awake_and_signal_twice(tmp_path, sig, poll_seconds=30, ladder=1.0, gap=
             f"child never entered release(); output so far: {output_lines}")
         time.sleep(gap)   # let release() get partway through its ladder
         proc.send_signal(sig)   # second stop signal, mid-release
-        remaining = proc.stdout.read()
-        if remaining:
-            output_lines.extend(remaining.splitlines())
+        _drain_remaining_output(proc, output_lines, timeout=5)
         rc = proc.wait(timeout=5)
     finally:
         if proc.poll() is None:
