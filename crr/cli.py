@@ -43,6 +43,7 @@ from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_li
 from crr.adapters import (power_hold_linux, power_hold_macos,
                           power_hold_windows, power_source, power_state)
 from crr.adapters import harden_windows
+from crr.adapters._proc import run_capture
 from crr.adapters.locking import mutation_lock
 from crr.core import config as cfg  # ...and core
 from crr.core import deploy
@@ -402,7 +403,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     hrd = sub.add_parser(
         "harden",
-        help="report Windows Update hardening gaps (read-only; no --apply yet)",
+        help="report Windows Update hardening gaps and restart evidence; "
+             "--apply writes the policy after confirmation",
+    )
+    hrd.add_argument(
+        "--apply", action="store_true",
+        help="write the hardening policy to HKLM (elevated, UAC prompt); "
+             "refuses without a tty, then asks to confirm",
     )
     hrd.set_defaults(func=_cmd_harden)
 
@@ -1190,9 +1197,9 @@ def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
 
     Prints the remediation command when anything is a known gap
     (``Finding.ok is False``) — never when it's merely unknown, and never
-    a claim about the *other* findings. `--apply` does not exist yet (a
-    later task); crr may say it will apply a setting, never that the
-    machine is protected — see crr/core/harden.py's module docstring.
+    a claim about the *other* findings. crr may say it will apply a
+    setting, never that the machine is protected — see
+    crr/core/harden.py's module docstring.
     """
     any_gap = False
     for finding in findings:
@@ -1201,13 +1208,106 @@ def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
         if finding.ok is False:
             any_gap = True
     if any_gap:
-        print("  fix with: crr harden --apply (not yet available)")
+        print("  fix with: crr harden --apply")
 
 
-def _cmd_harden(_args: argparse.Namespace) -> int:
-    """Report Windows Update hardening gaps. READ ONLY — there is no
-    ``--apply`` yet (a later task); this command never writes the
-    registry.
+def _print_restart_measurement(config, want_start: int, want_end: int) -> None:
+    """The half that keeps `--apply` honest: read Windows shutdown/restart
+    events (crr.adapters.diagnostics_windows, the same reader `crr
+    diagnose` uses) bounded to the last ``harden_restart_lookback_days``
+    days, and report any that landed OUTSIDE the active-hours window —
+    evidence the policy did not hold, even after it was applied.
+
+    Never prints "protected" or "guarantee": Microsoft filed these
+    policies under "Legacy Policies" on Windows 11 and there are credible
+    reports of them being ignored, so a clean measurement here means only
+    "no counterevidence yet", not "safe".
+    """
+    label = "Windows Update: restarts outside active hours"
+    cmd = diagnostics_windows.winevent_command(
+        diagnostics_windows.SHUTDOWN_EVENT_IDS, config.get("diagnose_event_cap"))
+    try:
+        text = run_capture(cmd, config.get("interop_timeout_seconds"))
+    except Exception:
+        _check(label, None, "could not read Windows restart history")
+        return
+    events = diagnostics_windows.parse_winevents(text)
+    if events and harden.parsed_count(events) == 0:
+        # Every line came back unparseable -- a format this module does not
+        # recognize, not a clean read. "no hits" here would be a green
+        # checkmark manufactured from zero understood events; report the
+        # honest unknown instead.
+        _check(label, None,
+               f"read {len(events)} restart-history line(s) but could not "
+               "parse any of their timestamps")
+        return
+    recent = harden.within_lookback(
+        events, config.get("harden_restart_lookback_days"), datetime.now())
+    hits = harden.restarts_outside(recent, want_start, want_end)
+    days = config.get("harden_restart_lookback_days")
+    if hits:
+        _check(label, False,
+               f"{len(hits)} restart(s) in the last {days} day(s) landed "
+               f"outside {want_start}:00-{want_end}:00 — the policy did not "
+               "hold then")
+        for line in hits:
+            print(f"    {line}")
+    else:
+        _check(label, True,
+               f"no restarts in the last {days} day(s) landed outside "
+               f"{want_start}:00-{want_end}:00")
+
+
+def _cmd_harden_apply(want_start: int, want_end: int) -> int:
+    """Write the hardening policy to HKLM — the only path in this command
+    that changes the machine. Confirmation semantics (spec 2026-08-14,
+    Task 6): no tty -> refuse and write nothing (unattended must never be
+    the path that changes machine policy); tty + declined -> refuse and
+    write nothing; tty + confirmed -> run the commands.
+    """
+    msg = harden.valid_span(want_start, want_end)
+    if msg:
+        print(f"crr harden --apply: {msg}", file=sys.stderr)
+        return 2
+    if not sys.stdin.isatty():
+        print("crr harden --apply: refusing to write the registry without a "
+              "terminal to confirm — rerun this interactively.",
+              file=sys.stderr)
+        return 3
+    print("crr harden --apply will write to HKLM: "
+          "NoAutoRebootWithLoggedOnUsers=1 and active hours "
+          f"{want_start}:00-{want_end}:00. Windows will show a UAC prompt "
+          "for each write.")
+    try:
+        answer = input("Apply? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\ncrr harden --apply: aborted — nothing was written.",
+              file=sys.stderr)
+        return 3
+    if answer not in ("y", "yes"):
+        print("crr harden --apply: aborted — nothing was written.",
+              file=sys.stderr)
+        return 3
+    cmds = harden_windows.apply_commands(want_start, want_end)
+    if not _run_commands(cmds, "harden"):
+        print("crr harden --apply: one or more writes FAILED (see above)",
+              file=sys.stderr)
+        return 1
+    # "applied" is the only claim this may make. Whether it actually held
+    # is what the next plain `crr harden` measures from restart events —
+    # never assert that here, there's been no time for a restart yet.
+    print("crr harden --apply: settings applied. This is not a guarantee "
+          "the machine is protected — Windows has been known to ignore "
+          "these policies. Run `crr harden` again later; it reports any "
+          "restart that lands outside the active-hours window as evidence "
+          "the policy did not hold.")
+    return 0
+
+
+def _cmd_harden(args: argparse.Namespace) -> int:
+    """Report Windows Update hardening gaps and restart evidence, or (with
+    ``--apply``) write the policy after explicit confirmation. The report
+    path never writes the registry.
     """
     system = platform.system()
     wsl = host.is_wsl()
@@ -1217,13 +1317,16 @@ def _cmd_harden(_args: argparse.Namespace) -> int:
         print(f"crr harden: {exc}", file=sys.stderr)
         return 2
     config = _load_config()
+    want_start = config.get("harden_active_hours_start")
+    want_end = config.get("harden_active_hours_end")
+
+    if getattr(args, "apply", False):
+        return _cmd_harden_apply(want_start, want_end)
+
     state = harden_windows.read_state(timeout=config.get("interop_timeout_seconds"))
-    findings = harden.assess(
-        state,
-        config.get("harden_active_hours_start"),
-        config.get("harden_active_hours_end"),
-    )
+    findings = harden.assess(state, want_start, want_end)
     _print_harden_findings(findings)
+    _print_restart_measurement(config, want_start, want_end)
     return 0
 
 

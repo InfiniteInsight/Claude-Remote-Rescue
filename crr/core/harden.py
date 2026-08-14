@@ -12,7 +12,9 @@ being ignored, so the honest vocabulary is "applied" plus evidence.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 # Windows refuses an active-hours range longer than this.
 MAX_ACTIVE_HOURS_SPAN = 18
@@ -139,3 +141,89 @@ def assess(state: HardenState, want_start: int, want_end: int) -> tuple[Finding,
                             f"{_format_ranges(gaps)} "
                             f"(crr would set {want_start}:00-{want_end}:00)")
     return (policy, hours)
+
+
+# ``diagnostics_windows.winevent_command``/``parse_winevents`` produce lines
+# shaped "<TimeCreated> [<id>] <message>". TimeCreated is PowerShell's
+# default DateTime.ToString(), which is CULTURE-dependent, not a fixed
+# format -- measured on a real WSL/Windows host (2026-08-13) it comes out
+# "08/09/2026 08:44:39" (en-US, 24h clock), not the ISO shape a first read
+# of the diagnostics adapter's docstring would suggest. Trusting only ISO
+# here would parse zero timestamps on that real host and print a false
+# "no restarts outside the window" -- succeeding loudly while measuring
+# nothing. So this tries the formats actually seen, plus ISO for whatever
+# produces it (these tests' fixtures, and any culture that does), plus a
+# 12h/AM-PM variant defensively. This is still not exhaustive of every
+# .NET culture; an unrecognized shape correctly falls through to "no
+# parseable timestamp" rather than a guess.
+_TIMESTAMP_RE = re.compile(
+    r"^(\d{1,4}[-/]\d{1,2}[-/]\d{1,4} \d{1,2}:\d{2}:\d{2}(?:\s*[AaPp][Mm])?)")
+_TIMESTAMP_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",     # ISO 24h
+    "%m/%d/%Y %H:%M:%S",     # en-US, 24h -- observed on a real host
+    "%m/%d/%Y %I:%M:%S %p",  # en-US, 12h + AM/PM
+)
+
+
+def _parse_timestamp(line: str) -> datetime | None:
+    match = _TIMESTAMP_RE.match(line.strip())
+    if match is None:
+        return None
+    raw = re.sub(r"\s+", " ", match.group(1)).strip()
+    for fmt in _TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parsed_count(events) -> int:
+    """How many of these lines had a parseable leading timestamp.
+
+    Lets a caller tell "no events" apart from "events, but none of them
+    had a timestamp this module recognizes" -- the second is a format
+    this module doesn't know yet, not a clean measurement, and must not
+    render the same as one.
+    """
+    return sum(1 for line in events if _parse_timestamp(line) is not None)
+
+
+def restarts_outside(events, start: int, end: int) -> tuple[str, ...]:
+    """Which of these boot/shutdown event lines fall outside the
+    ``start``-``end`` active-hours window -- evidence the hardening policy
+    did not hold, even after it was applied.
+
+    A line with no parseable leading timestamp cannot support a claim in
+    either direction, so it is skipped -- never counted as inside the
+    window (which would hide a real failure) or outside it (which would
+    invent one).
+    """
+    hits = []
+    for line in events:
+        ts = _parse_timestamp(line)
+        if ts is None:
+            continue
+        if not covers(start, end, ts.hour):
+            hits.append(line)
+    return tuple(hits)
+
+
+def within_lookback(events, days: int, now: datetime) -> tuple[str, ...]:
+    """Event lines timestamped within the last ``days`` days of ``now``.
+
+    Bounds the restart measurement to a recent, meaningful window (an old
+    restart from before the policy was ever applied is not evidence about
+    whether it holds today). A line with no parseable timestamp cannot
+    support a claim about its recency either, so it is skipped -- never
+    assumed recent, never assumed stale.
+    """
+    cutoff = now - timedelta(days=days)
+    hits = []
+    for line in events:
+        ts = _parse_timestamp(line)
+        if ts is None:
+            continue
+        if ts >= cutoff:
+            hits.append(line)
+    return tuple(hits)

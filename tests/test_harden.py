@@ -194,3 +194,65 @@ def test_findings_are_frozen():
     f = Finding(key="k", ok=True, detail="d")
     with pytest.raises(dataclasses.FrozenInstanceError):
         f.ok = False
+
+
+from crr.core.harden import restarts_outside
+
+
+def test_a_restart_inside_the_window_is_not_evidence_of_failure():
+    events = ["2026-08-10 14:03:11 [1074] The process ... initiated the restart"]
+    assert restarts_outside(events, start=8, end=2) == ()
+
+
+def test_a_restart_outside_the_window_is_reported():
+    # 03:12 with an 08:00-02:00 window: the hardening did not hold.
+    events = ["2026-08-11 03:12:45 [6008] The previous system shutdown was unexpected"]
+    out = restarts_outside(events, start=8, end=2)
+    assert len(out) == 1 and "03:12" in out[0]
+
+
+def test_an_unparseable_event_line_is_skipped_not_counted_either_way():
+    # Cannot tell when it happened -> cannot claim it broke the window, and
+    # cannot claim it did not.
+    assert restarts_outside(["no timestamp here"], start=8, end=2) == ()
+
+
+from datetime import datetime
+
+from crr.core.harden import within_lookback
+
+
+def test_within_lookback_keeps_events_inside_the_window():
+    now = datetime(2026, 8, 13, 12, 0, 0)
+    events = ["2026-08-10 14:03:11 [1074] recent"]
+    assert within_lookback(events, days=14, now=now) == tuple(events)
+
+
+def test_within_lookback_drops_events_older_than_the_window():
+    now = datetime(2026, 8, 13, 12, 0, 0)
+    events = ["2026-07-01 14:03:11 [1074] stale"]
+    assert within_lookback(events, days=14, now=now) == ()
+
+
+def test_within_lookback_skips_unparseable_lines_rather_than_guessing_recency():
+    now = datetime(2026, 8, 13, 12, 0, 0)
+    assert within_lookback(["no timestamp here"], days=14, now=now) == ()
+
+
+def test_a_restart_outside_the_window_is_reported_in_us_date_format():
+    # PowerShell's default TimeCreated.ToString() is culture-dependent.
+    # Measured on a real WSL/Windows host: "MM/dd/yyyy HH:mm:ss", not ISO.
+    # Trusting only ISO would parse zero timestamps there and print a
+    # false-clean "no restarts outside the window".
+    events = ["08/09/2026 03:12:45 [6008] The previous system shutdown was unexpected"]
+    out = restarts_outside(events, start=8, end=2)
+    assert len(out) == 1 and "03:12" in out[0]
+
+
+from crr.core.harden import parsed_count
+
+
+def test_parsed_count_distinguishes_no_events_from_unparseable_events():
+    assert parsed_count([]) == 0
+    assert parsed_count(["garbage", "Reason Code: 0x0"]) == 0
+    assert parsed_count(["2026-08-10 14:03:11 [1074] restart", "garbage"]) == 1

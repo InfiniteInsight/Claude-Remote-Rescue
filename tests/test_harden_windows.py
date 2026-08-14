@@ -113,3 +113,81 @@ def test_doctor_carries_the_same_finding(monkeypatch, capsys):
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "windows update" in out.lower()
+
+
+def test_harden_reports_a_restart_that_landed_outside_the_window(monkeypatch, capsys):
+    # A clean policy state so the restart-measurement line is the thing
+    # under test, not the policy gaps.
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-11 03:12:45 [6008] unexpected shutdown\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out
+    assert "restarts outside active hours" in out.lower()
+    assert "WARN" in out
+    assert "03:12:45" in out
+
+
+def test_harden_reports_clean_when_no_restart_landed_outside_the_window(monkeypatch, capsys):
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "2026-08-10 14:03:11 [1074] restart\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out
+    assert "restarts outside active hours" in out.lower()
+    assert "ok" in out.lower()
+
+
+def test_harden_reports_unknown_when_events_exist_but_none_parse(monkeypatch, capsys):
+    # A format this module does not recognize must render as unknown, not
+    # as a manufactured "no restarts outside the window" clean bill.
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
+    monkeypatch.setattr(
+        cli, "run_capture",
+        lambda cmd, timeout: "some unrecognized event shape entirely\n")
+    assert cli.main(["harden"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "unkn" in out
+    assert "protected" not in out and "guarantee" not in out
+
+
+def test_apply_commands_target_both_levers_and_are_elevated():
+    cmds = __import__("crr.adapters.harden_windows", fromlist=["x"]).apply_commands(8, 2)
+    joined = " ".join(" ".join(c) for c in cmds)
+    assert "NoAutoRebootWithLoggedOnUsers" in joined
+    assert "ActiveHoursStart" in joined and "ActiveHoursEnd" in joined
+    # HKLM writes need elevation; without it the write silently fails and
+    # crr would report success for a policy it never set.
+    assert "RunAs" in joined
+
+
+def test_apply_requires_confirmation_and_runs_nothing_when_declined(monkeypatch, capsys):
+    ran = []
+    _patch_state(monkeypatch, _HS(False, 7, 19, False))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    rc = cli.main(["harden", "--apply"])
+    assert rc != 0
+    assert ran == [], "wrote to the registry without consent"
+
+
+def test_apply_refuses_without_a_tty_rather_than_writing_unattended(monkeypatch, capsys):
+    ran = []
+    _patch_state(monkeypatch, _HS(False, 7, 19, False))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    assert cli.main(["harden", "--apply"]) != 0
+    assert ran == []
+
+
+def test_apply_runs_the_commands_once_confirmed(monkeypatch, capsys):
+    ran = []
+    _patch_state(monkeypatch, _HS(False, 7, 19, False))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert cli.main(["harden", "--apply"]) == 0
+    assert ran, "confirmed but wrote nothing"

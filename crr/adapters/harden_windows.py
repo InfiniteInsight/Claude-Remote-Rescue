@@ -1,10 +1,15 @@
-"""Windows Update hardening adapter — reads the registry, nothing else.
+"""Windows Update hardening adapter — reads the registry, plus the WRITE
+half's command builder.
 
 crr's hardening assessment (``crr.core.harden``) needs to know whether the
 "do not auto-reboot while logged on" policy and active hours are set. This
 module is the READ half: a pure parser plus a thin unelevated PowerShell
-runner, matching the shape of ``diagnostics_windows.py``. The WRITE half
-(``--apply``) is a separate task and is never invoked here.
+runner, matching the shape of ``diagnostics_windows.py``.
+
+``apply_commands`` is the WRITE half's command BUILDER only -- it returns
+argv, it never runs anything. Only ``crr.cli._run_commands`` may execute
+those commands, and only after the user has confirmed at a terminal (spec
+2026-08-14, Task 6).
 
 Three states, not two, per field:
 - the registry key/value does not exist -> a KNOWN answer (False for the
@@ -117,3 +122,37 @@ def read_state(timeout: float, run=None) -> HardenState:
     except Exception:
         return HardenState(None, None, None, None)
     return parse_state(text)
+
+
+# Same HKLM paths ``read_command``'s script reads, deliberately kept
+# identical -- a write to a different key would parse_state() forever after
+# as "not set", the exact "succeeds loudly, protects nothing" shape this
+# module's read half exists to catch.
+_AU_PATH = "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU"
+_UX_PATH = "HKLM\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings"
+
+
+def _elevated_reg_add(path: str, name: str, value: int) -> list[str]:
+    """One argv: an unelevated ``powershell.exe`` that re-launches
+    ``reg.exe`` elevated via ``Start-Process -Verb RunAs``, so Windows
+    shows a UAC prompt for the HKLM write. HKLM writes silently no-op
+    without elevation -- without ``RunAs`` here, crr would report the
+    write as run and the registry would be untouched.
+    """
+    reg_args = f'add "{path}" /v {name} /t REG_DWORD /d {value} /f'
+    script = f"Start-Process reg.exe -ArgumentList '{reg_args}' -Verb RunAs -Wait"
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def apply_commands(want_start: int, want_end: int) -> list[list[str]]:
+    """Build (never run) the elevated writes for both hardening levers:
+    ``NoAutoRebootWithLoggedOnUsers`` and the active-hours start/end.
+
+    Returns argv lists only. Executing them is ``crr.cli``'s job, and only
+    after the user confirms at a terminal -- see the module docstring.
+    """
+    return [
+        _elevated_reg_add(_AU_PATH, "NoAutoRebootWithLoggedOnUsers", 1),
+        _elevated_reg_add(_UX_PATH, "ActiveHoursStart", want_start),
+        _elevated_reg_add(_UX_PATH, "ActiveHoursEnd", want_end),
+    ]
