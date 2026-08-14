@@ -47,7 +47,7 @@ idea to the other platforms.
 
 ## The feature
 
-`crr reachable-at-boot` (name provisional), two halves, the same shape as
+`crr reachable-at-boot`, two halves, the same shape as
 `crr harden`: it **reports** by default, **installs** only with a flag and
 confirmation, and — the honest half — **measures** whether a real reboot
 actually came up headless.
