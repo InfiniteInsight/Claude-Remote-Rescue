@@ -1190,7 +1190,8 @@ def _harden_supported(system: str, wsl: bool) -> None:
         f"no Windows Update to harden on {system!r} (not WSL, not Windows)")
 
 
-def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
+def _print_harden_findings(
+        findings: tuple[harden.Finding, ...], *, suggest_apply: bool = True) -> None:
     """Render harden.assess()'s Findings through `_check`, doctor's exact
     shape, so `crr harden` and `crr doctor` never disagree about what they
     found.
@@ -1200,6 +1201,11 @@ def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
     a claim about the *other* findings. crr may say it will apply a
     setting, never that the machine is protected — see
     crr/core/harden.py's module docstring.
+
+    ``suggest_apply=False`` (fix round 2): when this renders a POST-apply
+    readback, "fix with: crr harden --apply" is telling the user to rerun
+    the exact command that just ran and did not stick — not a fix, just
+    noise. Only the plain report path suggests it.
     """
     any_gap = False
     for finding in findings:
@@ -1207,7 +1213,7 @@ def _print_harden_findings(findings: tuple[harden.Finding, ...]) -> None:
         _check(label, finding.ok, finding.detail)
         if finding.ok is False:
             any_gap = True
-    if any_gap:
+    if any_gap and suggest_apply:
         print("  fix with: crr harden --apply")
 
 
@@ -1258,6 +1264,25 @@ def _print_restart_measurement(config, want_start: int, want_end: int) -> None:
                f"{want_start}:00-{want_end}:00")
 
 
+# Exact wording, pinned by tests (fix round 2, Important 4: a whole-stdout
+# substring check let a mutated, "protected"-claiming success line pass —
+# assert against these exact sentences, not the surrounding output).
+_APPLY_CONFIRMED_LINE = (
+    "crr harden --apply: wrote the settings; a readback of the registry "
+    "confirms both levers now match what was requested.")
+_APPLY_DISAGREE_HEADLINE = (
+    "crr harden --apply: wrote the settings, but a readback of the "
+    "registry shows they did NOT take:")
+_APPLY_UNKNOWN_HEADLINE = (
+    "crr harden --apply: wrote the settings, but the registry could not "
+    "be read back afterward to confirm they took:")
+_APPLY_TRAILER = (
+    "This is not a guarantee the machine is protected — Windows has "
+    "been known to ignore these policies. Run `crr harden` again later; "
+    "it reports any restart that lands outside the active-hours window "
+    "as evidence the policy did not hold.")
+
+
 def _cmd_harden_apply(config, want_start: int, want_end: int) -> int:
     """Write the hardening policy to HKLM — the only path in this command
     that changes the machine. Confirmation semantics (spec 2026-08-14,
@@ -1272,6 +1297,19 @@ def _cmd_harden_apply(config, want_start: int, want_end: int) -> int:
     followed by a real readback through the same ``read_state``/
     ``harden.assess`` the plain report uses, and the readback's verdict —
     not the mere fact that the commands ran — is what gets printed.
+
+    Fix round 2: the readback verdict is now three-way, not two, and the
+    return code follows it. ``ok is False`` on any lever is a KNOWN
+    disagreement (the registry demonstrably does not hold what was
+    requested) and returns nonzero, same failure class as
+    ``_run_commands`` returning False. ``ok is None`` with no ``False``
+    (the readback itself could not be performed) is a separate, weaker
+    claim -- unknown, not "confirmed broken" -- and gets its own headline
+    and its own nonzero code, never the disagreement branch's language.
+    Collapsing "the readback says it did not take" and "the readback
+    could not be read" into one branch would print a known-negative
+    headline over data crr never actually saw -- the null-results rule,
+    applied to crr's own write path.
     """
     msg = harden.valid_span(want_start, want_end)
     if msg:
@@ -1304,28 +1342,34 @@ def _cmd_harden_apply(config, want_start: int, want_end: int) -> int:
 
     readback = harden_windows.read_state(timeout=config.get("interop_timeout_seconds"))
     findings = harden.assess(readback, want_start, want_end)
-    if all(finding.ok is True for finding in findings):
-        print("crr harden --apply: wrote the settings; a readback of the "
-              "registry confirms both levers now match what was requested.")
-    else:
+    any_disagrees = any(finding.ok is False for finding in findings)
+    any_unknown = any(finding.ok is None for finding in findings)
+
+    if not any_disagrees and not any_unknown:
+        # "applied" (confirmed) is the only positive claim this may make.
+        # Whether it holds under real Windows Update pressure is what the
+        # next plain `crr harden` measures from restart events — never
+        # assert that here, there's been no time for a restart yet.
+        print(_APPLY_CONFIRMED_LINE)
+        print(_APPLY_TRAILER)
+        return 0
+
+    if any_disagrees:
         # The exact case the Critical fix was closing one layer down: the
         # write commands exiting 0 is not proof the registry holds what
         # was asked for. Say so plainly, with the same per-lever detail
-        # the plain report uses, rather than let "the commands ran"
-        # stand in for "it stuck".
-        print("crr harden --apply: wrote the settings, but a readback of "
-              "the registry shows they did not fully take:")
-        _print_harden_findings(findings)
-    # "applied" (and, above, what the readback actually shows) is the only
-    # claim this may make. Whether it holds under real Windows Update
-    # pressure is what the next plain `crr harden` measures from restart
-    # events — never assert that here, there's been no time for a
-    # restart yet.
-    print("This is not a guarantee the machine is protected — Windows has "
-          "been known to ignore these policies. Run `crr harden` again "
-          "later; it reports any restart that lands outside the "
-          "active-hours window as evidence the policy did not hold.")
-    return 0
+        # the plain report uses -- and don't suggest re-running the exact
+        # command that just ran and did not stick.
+        print(_APPLY_DISAGREE_HEADLINE)
+        _print_harden_findings(findings, suggest_apply=False)
+        return 1
+
+    # Every finding came back unknown -- the readback itself could not be
+    # performed. This must not share the disagreement branch's headline:
+    # "could not read it" is not "confirmed it didn't take".
+    print(_APPLY_UNKNOWN_HEADLINE)
+    _print_harden_findings(findings, suggest_apply=False)
+    return 4
 
 
 def _cmd_harden(args: argparse.Namespace) -> int:

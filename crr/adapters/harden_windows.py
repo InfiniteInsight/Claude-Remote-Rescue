@@ -149,16 +149,25 @@ def _elevated_reg_add(path: str, name: str, value: int) -> list[str]:
     feature's signature defect (succeeds loudly, protects nothing) landing
     in the one path that changes the machine. ``-PassThru`` captures the
     child process object so its real ``ExitCode`` can be read;
-    ``$ErrorActionPreference = 'Stop'`` turns the declined-UAC exception
-    terminating, which gives the outer process a nonzero exit on its own;
     ``exit $p.ExitCode`` is what actually forwards a failing ``reg.exe``
     exit code outward when ``Start-Process`` itself succeeded.
+
+    Fix round 2: ``$ErrorActionPreference = 'Stop'`` is meant to turn a
+    declined-UAC prompt's non-terminating exception into a terminating one
+    (which would exit nonzero on its own, before ``exit $p.ExitCode`` is
+    ever reached) -- but whether ``Start-Process``'s exception actually
+    honours ``Stop`` is untestable without a real UAC prompt, and getting
+    it wrong would leave ``$p`` as ``$null``: ``exit $null`` is ``exit 0``,
+    the exact bug this function exists to close. So the null case is
+    guarded explicitly rather than trusted to ``Stop`` -- correct whether
+    or not the promotion happens, with no untested dependency either way.
     """
     reg_args = f'add "{path}" /v {name} /t REG_DWORD /d {value} /f'
     script = (
         "$ErrorActionPreference = 'Stop'; "
         f"$p = Start-Process reg.exe -ArgumentList '{reg_args}' -Verb RunAs "
         "-Wait -PassThru; "
+        "if (-not $p) { exit 1 }; "
         "exit $p.ExitCode"
     )
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]

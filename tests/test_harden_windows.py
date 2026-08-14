@@ -179,6 +179,23 @@ def test_apply_commands_propagate_the_elevated_writes_exit_code():
         assert "ErrorActionPreference" in script and "Stop" in script
 
 
+def test_apply_commands_guard_a_null_process_handle_before_reading_exitcode():
+    # Fix round 2, residual: whether `ErrorActionPreference = 'Stop'`
+    # actually promotes a declined-UAC prompt's non-terminating exception
+    # into a terminating one is untestable without a real UAC prompt --
+    # and if it does not, `$p` is `$null` and `exit $p.ExitCode` is
+    # `exit $null`, which PowerShell treats as `exit 0`: the exact bug
+    # the exit-code fix exists to close, reappearing one branch over.
+    # Guard the null case explicitly so correctness does not depend on
+    # that untested promotion.
+    cmds = __import__("crr.adapters.harden_windows", fromlist=["x"]).apply_commands(8, 2)
+    for cmd in cmds:
+        script = " ".join(cmd)
+        assert "if (-not $p) { exit 1 }" in script
+        # the guard must run before the unconditional exit, or it can't help
+        assert script.index("if (-not $p)") < script.index("exit $p.ExitCode")
+
+
 def test_apply_requires_confirmation_and_runs_nothing_when_declined(monkeypatch, capsys):
     ran = []
     _patch_state(monkeypatch, _HS(False, 7, 19, False))
@@ -200,8 +217,14 @@ def test_apply_refuses_without_a_tty_rather_than_writing_unattended(monkeypatch,
 
 
 def test_apply_runs_the_commands_once_confirmed(monkeypatch, capsys):
+    # State matches what --apply requests (8-2, policy set), so the
+    # post-apply readback (Important 2, fix round 1) confirms it stuck and
+    # rc stays 0 -- this test is about the confirmation gate letting the
+    # commands run at all, not about the readback verdict, so the fixture
+    # state must not itself be a disagreement (see fix round 2: a mismatched
+    # readback is now a nonzero rc, covered separately below).
     ran = []
-    _patch_state(monkeypatch, _HS(False, 7, 19, False))
+    _patch_state(monkeypatch, _HS(True, 8, 2, False))
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
@@ -209,33 +232,81 @@ def test_apply_runs_the_commands_once_confirmed(monkeypatch, capsys):
     assert ran, "confirmed but wrote nothing"
 
 
+# Hardcoded literals, deliberately NOT read back from `cli._APPLY_*` --
+# fix round 2, Important 4 note on the first attempt at this test: asserting
+# `cli._APPLY_CONFIRMED_LINE in out` is not a pin at all, because the
+# printed text and the expected text are the same mutable reference. If
+# someone mutates the constant in crr/cli.py to a dishonest sentence, that
+# assertion mutates right along with it and still passes. Pinning the exact
+# wording here, independent of the source, is what makes a dishonest edit
+# to the success line actually fail a test. (Self-verified: temporarily
+# mutating _APPLY_CONFIRMED_LINE in crr/cli.py to a "your machine is now
+# protected ..." sentence and rerunning this file's apply tests reproduced
+# exactly one failure, here, before the constant was reverted.)
+_APPLY_CONFIRMED_LINE = (
+    "crr harden --apply: wrote the settings; a readback of the registry "
+    "confirms both levers now match what was requested.")
+_APPLY_DISAGREE_HEADLINE = (
+    "crr harden --apply: wrote the settings, but a readback of the "
+    "registry shows they did NOT take:")
+_APPLY_UNKNOWN_HEADLINE = (
+    "crr harden --apply: wrote the settings, but the registry could not "
+    "be read back afterward to confirm they took:")
+
+
 def test_apply_success_wording_is_pinned_and_backed_by_a_readback(monkeypatch, capsys):
-    # Fix round 1, Important 4: nothing pinned the success message's
-    # wording. The state here matches what --apply requests (8-2, policy
-    # set), so the post-apply readback (Important 2) confirms it stuck.
+    # Fix round 1, Important 4 (NOT addressed the first time: the original
+    # version of this test only checked keywords over whole stdout, which
+    # a mutated, "your machine is now protected" success line still
+    # passed). Assert the exact success sentence itself, hardcoded above
+    # rather than imported from crr.cli. The state here matches what
+    # --apply requests (8-2, policy set), so the post-apply readback
+    # (Important 2) confirms it stuck.
     _patch_state(monkeypatch, _HS(True, 8, 2, False))
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     assert cli.main(["harden", "--apply"]) == 0
-    out = capsys.readouterr().out.lower()
-    assert "readback" in out and "confirms" in out
+    out = capsys.readouterr().out
+    assert _APPLY_CONFIRMED_LINE in out
     # "protected"/"guarantee" may appear only in the explicit, negated
     # non-claim -- pin that it's the negated form, not a bare claim.
-    assert "not a guarantee" in out
+    assert "This is not a guarantee the machine is protected" in out
 
 
-def test_apply_reports_plainly_when_the_readback_disagrees(monkeypatch, capsys):
-    # Fix round 1, Important 2's whole point: `_run_commands` reporting
-    # every argv exited 0 is not proof the registry holds what was
-    # requested. Here the (mocked) post-apply readback still shows the
-    # pre-apply state, 7-19 with no policy set -- crr must say so plainly,
-    # not print an unbacked "applied".
+def test_apply_returns_nonzero_and_says_so_plainly_when_the_readback_disagrees(monkeypatch, capsys):
+    # Fix round 2, NEW IMPORTANT: `_run_commands` reporting every argv
+    # exited 0 is not proof the registry holds what was requested. Here
+    # the (mocked) post-apply readback still shows the pre-apply state,
+    # 7-19 with no policy set -- crr must say so plainly AND return
+    # nonzero, not print an unbacked "applied" over `&& echo ok`.
     _patch_state(monkeypatch, _HS(False, 7, 19, False))
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
-    assert cli.main(["harden", "--apply"]) == 0
-    out = capsys.readouterr().out.lower()
-    assert "did not fully take" in out
-    assert "readback" in out
+    rc = cli.main(["harden", "--apply"])
+    assert rc != 0, "readback disagreed but exit code still claimed success"
+    out = capsys.readouterr().out
+    assert _APPLY_DISAGREE_HEADLINE in out
+    assert _APPLY_CONFIRMED_LINE not in out
+    # Rerunning --apply is not a fix for a write that already ran and
+    # didn't stick -- must not suggest it here.
+    assert "fix with: crr harden --apply" not in out
+
+
+def test_apply_readback_unknown_is_not_the_same_headline_as_disagree(monkeypatch, capsys):
+    # Fix round 2, NEW IMPORTANT sub-clause: when read_state fails
+    # entirely, both findings are ok=None -- "could not read it back" is a
+    # weaker, different claim than "confirmed it did not take", and must
+    # not share the disagreement branch's headline (null-results rule
+    # applied to crr's own write path).
+    _patch_state(monkeypatch, _HS(None, None, None, None))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    rc = cli.main(["harden", "--apply"])
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert _APPLY_UNKNOWN_HEADLINE in out
+    assert _APPLY_DISAGREE_HEADLINE not in out
+    assert _APPLY_CONFIRMED_LINE not in out
