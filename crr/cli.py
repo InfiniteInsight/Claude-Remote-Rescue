@@ -1751,36 +1751,55 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _status_line(card: dict) -> str:
+    if card["duplicate_group"]:
+        # A guessed duplicate is a weaker claim than a verified/injected
+        # one — collapsing both into the same [dup] tag would hide that
+        # difference (audit P3: confidence travels with the data).
+        dup = " [dup? guessed]" if card["sid_source"] == "guessed" else " [dup]"
+    else:
+        dup = ""
+    # injected is the certain norm; only a non-injected sid_source is
+    # worth the extra characters on an otherwise compact line.
+    sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
+    model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
+    # `parked` is the contract value; "restored" is what it means to a
+    # reader, and it is the word the dashboard already shows. Printing the
+    # raw enum here would describe one session with two different words
+    # depending on which surface you looked at.
+    # A parked session the user has already reopened reads "attached"
+    # (#32) — the same distinction the dashboard badge draws — so the
+    # restore list doesn't show "restored" against a session you are
+    # already sitting in.
+    if card["state"] == "parked":
+        shown = "attached" if card.get("attached") else "restored"
+    else:
+        shown = card["state"]
+    return f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}"
+
+
 def _print_status_human(payload: dict) -> None:
     sessions = payload["sessions"]
     if not sessions:
         print("no journaled sessions")
         return
+    # (#31) Keep the main threads on top; demote worktree checkouts into a
+    # section grouped under the repo they branch from, so a side-branch or
+    # subagent session doesn't drown the top-level conversation.
+    mains, worktrees = [], []
     for card in sessions:
-        if card["duplicate_group"]:
-            # A guessed duplicate is a weaker claim than a verified/injected
-            # one — collapsing both into the same [dup] tag would hide that
-            # difference (audit P3: confidence travels with the data).
-            dup = " [dup? guessed]" if card["sid_source"] == "guessed" else " [dup]"
-        else:
-            dup = ""
-        # injected is the certain norm; only a non-injected sid_source is
-        # worth the extra characters on an otherwise compact line.
-        sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
-        model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
-        # `parked` is the contract value; "restored" is what it means to a
-        # reader, and it is the word the dashboard already shows. Printing the
-        # raw enum here would describe one session with two different words
-        # depending on which surface you looked at.
-        # A parked session the user has already reopened reads "attached"
-        # (#32) — the same distinction the dashboard badge draws — so the
-        # restore list doesn't show "restored" against a session you are
-        # already sitting in.
-        if card["state"] == "parked":
-            shown = "attached" if card.get("attached") else "restored"
-        else:
-            shown = card["state"]
-        print(f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}")
+        (worktrees if discovery.worktree_repo_and_name(card["cwd"]) else mains).append(card)
+    for card in mains:
+        print(_status_line(card))
+    by_repo: dict[str, list[dict]] = {}
+    for card in worktrees:
+        repo, _name = discovery.worktree_repo_and_name(card["cwd"])
+        by_repo.setdefault(repo, []).append(card)
+    for repo, cards in by_repo.items():
+        print(f"\n{repo} · worktrees ({len(cards)})")
+        for card in cards:
+            _repo, name = discovery.worktree_repo_and_name(card["cwd"])
+            print(f"  {_status_line(card)} [worktree:{name}]")
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:

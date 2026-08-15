@@ -40,6 +40,21 @@ def _c(sid, cwd, mtime):
     return {"session_id": sid, "cwd": cwd, "mtime": mtime}
 
 
+def test_worktree_repo_and_name_splits_an_authoritative_cwd():
+    assert discovery.worktree_repo_and_name(
+        "/home/u/proj/.claude/worktrees/feature-x"
+    ) == ("/home/u/proj", "feature-x")
+    # A nested cwd under the worktree still names the worktree, not the subdir.
+    assert discovery.worktree_repo_and_name(
+        "/home/u/proj/.claude/worktrees/feature-x/src/app"
+    ) == ("/home/u/proj", "feature-x")
+
+
+def test_worktree_repo_and_name_is_none_for_a_normal_cwd():
+    assert discovery.worktree_repo_and_name("/home/u/proj/scripts") is None
+    assert discovery.worktree_repo_and_name("/home/u/proj") is None
+
+
 def test_is_worktree_cwd_matches_authoritative_and_lossy_paths():
     assert discovery.is_worktree_cwd(_WT)
     assert discovery.is_worktree_cwd(_WT_LOSSY)

@@ -180,6 +180,26 @@ def is_worktree_cwd(cwd: str) -> bool:
     return "/worktrees/" in _norm_sep(cwd)
 
 
+_WORKTREE_MARKER = "/.claude/worktrees/"
+
+
+def worktree_repo_and_name(cwd: str) -> tuple[str, str] | None:
+    """Split an authoritative worktree cwd into ``(parent_repo, worktree_name)``.
+
+    A worktree checkout's cwd is ``<repo>/.claude/worktrees/<name>[/...]``.
+    Returns None when ``cwd`` is not a worktree. Uses the exact marker (not
+    the lossy ``is_worktree_cwd`` normalization) because the session list's
+    cwd is the value Claude Code stamped — precise — so the repo path and
+    name come back verbatim, fit to print or group on.
+    """
+    idx = cwd.find(_WORKTREE_MARKER)
+    if idx < 0:
+        return None
+    repo = cwd[:idx]
+    name = cwd[idx + len(_WORKTREE_MARKER):].split("/", 1)[0]
+    return (repo, name)
+
+
 def collapse_worktree_candidates(
     candidates: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:

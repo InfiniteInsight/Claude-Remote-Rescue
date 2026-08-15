@@ -1175,6 +1175,22 @@ def _human_card(model, duplicate_group=None, sid_source="injected"):
     }
 
 
+def test_status_human_groups_worktrees_under_their_repo(capsys):
+    # #31: a worktree session is demoted below the main threads into a
+    # per-repo section and tagged with its worktree name.
+    main = _human_card("", )
+    main["cwd"] = "/home/u/proj"
+    wt = _human_card("")
+    wt["pid"] = 99
+    wt["cwd"] = "/home/u/proj/.claude/worktrees/feature-x"
+    cli._print_status_human({"sessions": [wt, main]})  # worktree first on input
+    out = capsys.readouterr().out
+    # Main thread prints before the worktree section.
+    assert out.index("#42") < out.index("/home/u/proj · worktrees (1)")
+    assert out.index("/home/u/proj · worktrees (1)") < out.index("#99")
+    assert "[worktree:feature-x]" in out
+
+
 def test_status_human_shows_model_when_known(capsys):
     cli._print_status_human({"sessions": [_human_card("claude-opus-5")]})
     assert "claude-opus-5" in capsys.readouterr().out

@@ -904,8 +904,19 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_51():
-    """v51: discoverable worktree rows collapse into one expandable row (#34)
+def test_worktree_sessions_group_under_their_parent_repo():
+    # #31: a worktree checkout is a side branch — tagged with its name and
+    # demoted into a per-repo group below the main threads in the flat view.
+    page = web.load_page()
+    assert "function worktreeInfo(cwd)" in page
+    assert "worktrees/" in page  # the marker the split keys on
+    assert "worktree-badge" in page
+    assert "worktree-head" in page
+
+
+def test_page_version_is_52():
+    """v52: worktree sessions grouped under their parent repo (#31)
+    (v51: discoverable worktree rows collapse into one expandable row (#34)
     (v50: an "attached" badge distinguishes a reopened parked card from one
     still merely restored (#32)
     (v49: conflict warning forces a choice (#48)
@@ -913,7 +924,7 @@ def test_page_version_is_51():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 51
+    assert web.PAGE_VERSION == 52
 
 
 def test_page_renders_the_parked_state():
