@@ -84,8 +84,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    # v18 (2026-08-14): harden_active_hours_start/end + harden_restart_lookback_days.
-    assert cfg.CONFIG_DEFAULTS_VERSION == 18
+    # v19 (2026-08-14): reachable-at-boot keys (boot_headless_window_seconds + boot_preferred_tailnet).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 19
 
 
 def test_context_pressure_fraction_defaults():
@@ -263,3 +263,16 @@ def test_harden_keys_exist_with_a_legal_default_window():
 
 def test_config_defaults_version_covers_the_harden_keys():
     assert cfg.CONFIG_DEFAULTS_VERSION >= 18
+
+
+def test_reachable_at_boot_keys_exist():
+    # A restart-came-up-headless window: WSL/systemd started within this many
+    # seconds of MACHINE boot counts as headless (vs. only at login). 5 min is
+    # generous slack for a slow cold boot; measured real gap was 39s.
+    assert cfg.DEFAULTS["boot_headless_window_seconds"] == 300
+    # Empty = "the tailnet active at install time"; crr never silently picks.
+    assert cfg.DEFAULTS["boot_preferred_tailnet"] == ""
+
+
+def test_config_defaults_version_covers_the_boot_keys():
+    assert cfg.CONFIG_DEFAULTS_VERSION >= 19
