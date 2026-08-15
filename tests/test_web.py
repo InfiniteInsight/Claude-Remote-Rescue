@@ -914,8 +914,21 @@ def test_worktree_sessions_group_under_their_parent_repo():
     assert "worktree-head" in page
 
 
-def test_page_version_is_52():
-    """v52: worktree sessions grouped under their parent repo (#31)
+def test_notice_can_be_dismissed_and_copies_the_attach_command():
+    # A degraded "no tab" reopen returns a sticky notice carrying
+    # `tmux attach -t <name>`; it must be dismissable (×) and offer a Copy
+    # button beside the command, not sit forever as unselectable text.
+    page = web.load_page()
+    assert "notice-close" in page
+    assert "notice-copy" in page
+    assert 'x.textContent = "×"' in page
+    assert "/tmux attach -t [\\w-]+/" in page  # the command it lifts out to copy
+    assert "navigator.clipboard" in page
+
+
+def test_page_version_is_53():
+    """v53: notices are dismissable (×) and copy their attach command
+    (v52: worktree sessions grouped under their parent repo (#31)
     (v51: discoverable worktree rows collapse into one expandable row (#34)
     (v50: an "attached" badge distinguishes a reopened parked card from one
     still merely restored (#32)
@@ -924,7 +937,7 @@ def test_page_version_is_52():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 52
+    assert web.PAGE_VERSION == 53
 
 
 def test_page_renders_the_parked_state():

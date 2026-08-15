@@ -183,6 +183,25 @@
     font: inherit; opacity: 0.85;
   }
   #notice .notice-retry:hover { opacity: 1; }
+  /* A sticky notice (in-flight / degraded "no tab") otherwise has no way to
+     go away; the × dismisses any notice. The command it hands you gets its
+     own monospace chip and a Copy button so you don't hand-select it. */
+  #notice .notice-close {
+    float: right; margin-left: 12px; padding: 0 7px; border-radius: 4px;
+    cursor: pointer; background: transparent; color: inherit;
+    border: 1px solid currentColor; font: inherit; line-height: 1.4; opacity: 0.7;
+  }
+  #notice .notice-close:hover { opacity: 1; }
+  #notice .notice-cmd {
+    margin: 0 4px; padding: 1px 6px; border-radius: 4px; background: rgba(0,0,0,0.28);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  }
+  #notice .notice-copy {
+    margin-left: 4px; padding: 1px 8px; border-radius: 4px; cursor: pointer;
+    background: transparent; color: inherit; border: 1px solid currentColor;
+    font: inherit; opacity: 0.85;
+  }
+  #notice .notice-copy:hover { opacity: 1; }
   @keyframes notice-in {
     from { opacity: 0; transform: translate(-50%, -10px); }
     to   { opacity: 1; transform: translate(-50%, 0); }
@@ -918,26 +937,87 @@ function noticeText(j, okFallback) {
   var msg = j.message || (j.ok ? okFallback : "action failed");
   return j.ok && j.degraded ? "NO TAB — " + msg : msg;
 }
+// Copy `text` to the clipboard, flashing the button that triggered it.
+// navigator.clipboard needs a secure context (localhost counts); the
+// textarea+execCommand path is the fallback for anything that lacks it.
+function copyText(text, btn) {
+  var flash = function () {
+    if (!btn) return;
+    var prev = btn.textContent;
+    btn.textContent = "Copied";
+    // Reuse the card-flash duration — both are the same "brief confirmation"
+    // beat, and page timers must be named, config-injected constants (a bare
+    // literal here trips the timing-prior guard).
+    setTimeout(function () { btn.textContent = prev; }, FLASH_MS);
+  };
+  var fallback = function () {
+    var ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try { document.execCommand("copy"); } catch (e) { /* best effort */ }
+    document.body.removeChild(ta);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(flash, function () { fallback(); flash(); });
+  } else {
+    fallback(); flash();
+  }
+}
+
 function showNotice(text, kind, opts) {
   opts = opts || {};
   var n = document.getElementById("notice");
-  n.textContent = text;
-  n.className = "";
-  void n.offsetWidth;  // force reflow so the animation restarts on repeat calls
-  n.className = (kind || "warn") + " show";
   clearTimeout(n._t);
+  n.className = "";
+  n.textContent = "";
+  void n.offsetWidth;  // force reflow so the animation restarts on repeat calls
+
+  // Message body. Any `tmux attach -t <name>` command the server handed back
+  // (a degraded "no tab" reopen) is lifted into a monospace chip with a Copy
+  // button beside it, so the user can grab it without hand-selecting text.
+  var body = el("span", "notice-body");
+  var m = /tmux attach -t [\w-]+/.exec(text);
+  if (m) {
+    body.appendChild(document.createTextNode(text.slice(0, m.index)));
+    var code = el("code", "notice-cmd");
+    code.textContent = m[0];
+    body.appendChild(code);
+    var copy = el("button", "notice-copy");
+    copy.type = "button";
+    copy.textContent = "Copy";
+    copy.title = "Copy the tmux attach command";
+    copy.addEventListener("click", function () { copyText(m[0], copy); });
+    body.appendChild(copy);
+    body.appendChild(document.createTextNode(text.slice(m.index + m[0].length)));
+  } else {
+    body.appendChild(document.createTextNode(text));
+  }
+  n.appendChild(body);
+
   if (opts.retry) {
     // Manual, never automatic. A tab spawn is not idempotent: retrying after
     // a slow-but-successful spawn opens a SECOND tab. The user can look at
     // their screen and decide whether one appeared; the code cannot (#53).
-    var b = document.createElement("button");
-    b.className = "notice-retry";
+    var b = el("button", "notice-retry");
+    b.type = "button";
     b.textContent = "Retry";
-    b.onclick = function () { n.className = ""; opts.retry(); };
+    b.onclick = function () { clearTimeout(n._t); n.className = ""; opts.retry(); };
     n.appendChild(b);
   }
-  // A sticky notice stays until the next one replaces it — used while an
-  // action is in flight, and for degraded results that carry a Retry.
+
+  // Always dismissable. A sticky notice (in-flight, or a degraded result that
+  // carries the attach command) otherwise sits forever with no way to clear
+  // it — the × closes any notice on demand.
+  var x = el("button", "notice-close");
+  x.type = "button";
+  x.setAttribute("aria-label", "Dismiss");
+  x.textContent = "×";
+  x.addEventListener("click", function () { clearTimeout(n._t); n.className = ""; });
+  n.appendChild(x);
+
+  n.className = (kind || "warn") + " show";
+  // A sticky notice stays until dismissed or replaced — used while an action
+  // is in flight, and for degraded results that carry a Retry / attach command.
   if (!opts.sticky) n._t = setTimeout(function () { n.className = ""; }, NOTICE_MS);
 }
 
