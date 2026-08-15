@@ -473,9 +473,11 @@ def untmux(
          session (the shell's own registration).
        - Failure: the entry is already archived, which drops the sid out of
          the active journal and back into Discoverable (that list is keyed on
-         journaled sids, not the archive) — ``retrack`` brings it back. The
+         journaled sids, not the archive) — ``crr discover --adopt`` brings it
+         back. NOT ``retrack``: that only undoes an ``"untracked"``/
+         ``"detmuxed"`` archival and refuses an ``"untmuxed"`` one. The
          reviver cannot re-park it (it is delisted), which is exactly the
-         race we closed; the honest recovery is the retrack, so say so.
+         race we closed; the honest recovery is the adopt, so say so.
     """
     try:
         entry = store.read(pid)
@@ -525,14 +527,14 @@ def untmux(
         return OpResult(
             True,
             f"un-tmuxed {pid}: opened a terminal but could not confirm it — if it "
-            "did not appear, the conversation is in Discoverable; retrack it",
+            "did not appear, the conversation is in Discoverable; adopt it there",
             degraded=True,
         )
     except Exception as exc:  # adapter subprocess/osascript failure
         return OpResult(
             False,
             f"untmux {pid}: tmux killed but the window failed to open: {exc}; "
-            "the conversation is in Discoverable — retrack it to bring it back",
+            "the conversation is in Discoverable — adopt it there to bring it back",
         )
     return OpResult(
         True,

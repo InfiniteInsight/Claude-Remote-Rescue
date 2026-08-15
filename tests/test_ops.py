@@ -791,7 +791,8 @@ def test_untmux_spawn_failure_after_kill_delists_to_discoverable(tmp_path):
     # reviver pass can't re-park it mid-spawn). If open_tab then fails, the
     # conversation is already archived "untmuxed" — which drops it out of the
     # active journal and back into Discoverable (keyed on journaled sids, not
-    # the archive), where `retrack` brings it back. Say so in the message.
+    # the archive), where `discover --adopt` brings it back. NOT retrack, which
+    # refuses an "untmuxed"-reason record — so the message must not say retrack.
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
@@ -799,11 +800,15 @@ def test_untmux_spawn_failure_after_kill_delists_to_discoverable(tmp_path):
     res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
     assert not res.ok
     assert tmux.killed == ["crr-8a1b2c3d"]
-    assert "retrack" in res.message.lower() or "discoverable" in res.message.lower()
+    assert "discoverable" in res.message.lower() and "adopt" in res.message.lower()
+    assert "retrack" not in res.message.lower()
     with pytest.raises(KeyError):
         store.read(42)
     records = archive.scan().records
     assert len(records) == 1 and records[0]["reason"] == "untmuxed"
+    # And the guidance is truthful: retrack genuinely refuses this record, so
+    # the message correctly points at adopt instead.
+    assert not ops.retrack(store, archive, _SID, _NOW).ok
 
 
 # --- retrack ------------------------------------------------------------------
