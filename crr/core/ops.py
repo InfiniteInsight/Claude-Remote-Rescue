@@ -514,7 +514,13 @@ def untmux(
     except Exception as exc:  # adapter subprocess failure
         return OpResult(False, f"untmux {pid} failed to kill tmux session {name}: {exc}")
     # Delist BEFORE the spawn — see docstring step 2 (closes the reviver
-    # re-park race across the multi-second terminal cold-start).
+    # re-park race across the multi-second terminal cold-start). This also
+    # keeps the shimmed shell's own `conflict-check --sid` (run on resume)
+    # from tripping: that check scans the JOURNAL (`store.scan()`) for a live
+    # owner of the sid, so once this entry is delisted there is nothing for it
+    # to collide with. The safety of this ordering depends on conflict-check
+    # staying journal-scoped — if it ever consulted the archive, an
+    # "untmuxed" record here would make the resume flash-and-abort.
     if entry.get("claude") is not None:
         archive.archive(entry, "untmuxed", now)
     store.remove(pid)
