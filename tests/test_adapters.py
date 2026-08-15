@@ -243,6 +243,60 @@ def test_realtmux_creates_word_form_detached_session(tmp_path, monkeypatch):
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
 
+# --- attached_sessions: which parked sessions have a client (#32) ---------
+#
+# The dashboard shows every tmux-parked session as "restored". A session
+# the user has already reopened has a client attached, and tmux knows it
+# (#{session_attached}). attached_sessions() reads exactly those, so the
+# card can say "attached" instead of "restored". It mirrors list_sessions'
+# tri-state: unknown stays None and never a fabricated "nothing attached".
+
+def test_attached_sessions_cmd_filters_on_session_attached():
+    # -f keeps only sessions whose #{session_attached} is truthy (a client
+    # is attached); -F prints just the name.
+    assert tmux._attached_sessions_cmd() == [
+        "tmux", "list-sessions", "-f", "#{session_attached}", "-F", "#{session_name}",
+    ]
+
+
+def test_attached_sessions_parses_names(monkeypatch):
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda *a, **k: _Result(0, stdout="crr-abc\ncrr-def\n"),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).attached_sessions() == {"crr-abc", "crr-def"}
+
+
+def test_attached_sessions_empty_when_none_attached(monkeypatch):
+    # Live server, sessions exist, none attached -> exit 0, empty stdout.
+    monkeypatch.setattr(
+        tmux.subprocess, "run", lambda *a, **k: _Result(0, stdout=""),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).attached_sessions() == set()
+
+
+def test_attached_sessions_empty_when_no_server(monkeypatch):
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda *a, **k: _Result(1, stderr="no server running on /tmp/tmux-1000/default\n"),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).attached_sessions() == set()
+
+
+def test_attached_sessions_none_on_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="tmux", timeout=5)
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    assert tmux.RealTmux(timeout_seconds=5).attached_sessions() is None
+
+
+def test_attached_sessions_none_on_unrecognized_nonzero(monkeypatch):
+    monkeypatch.setattr(
+        tmux.subprocess, "run", lambda *a, **k: _Result(1, stderr="permission denied\n"),
+    )
+    assert tmux.RealTmux(timeout_seconds=5).attached_sessions() is None
+
+
 # --- process controller pure builders (pure) ------------------------------
 
 def test_parse_ps_rows_reads_pid_ppid_pgid_argv0():

@@ -218,6 +218,19 @@ def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
     return t.list_sessions()
 
 
+def _attached_tmux_sessions(config: cfg.Config) -> set[str] | None:
+    """Tmux session names with a client attached, or None when tmux cannot
+    say (#32). Same per-build, never-cached, F16-tri-state contract as
+    `_live_tmux_sessions`: a host without tmux is a confident `set()`, an
+    unreadable query is None so `assemble_sessions` declines to mark any card
+    attached rather than fabricating "nothing is attached".
+    """
+    t = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not t.available():
+        return set()
+    return t.attached_sessions()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crr",
@@ -1711,6 +1724,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
+        attached_tmux_sessions=_attached_tmux_sessions(config),
         reachability_by_sid=_reachability_by_sid(
             scan.entries, probe, config, owners=_owners),
         claude_owners=_owners,
@@ -1758,7 +1772,14 @@ def _print_status_human(payload: dict) -> None:
         # reader, and it is the word the dashboard already shows. Printing the
         # raw enum here would describe one session with two different words
         # depending on which surface you looked at.
-        shown = "restored" if card["state"] == "parked" else card["state"]
+        # A parked session the user has already reopened reads "attached"
+        # (#32) — the same distinction the dashboard badge draws — so the
+        # restore list doesn't show "restored" against a session you are
+        # already sitting in.
+        if card["state"] == "parked":
+            shown = "attached" if card.get("attached") else "restored"
+        else:
+            shown = card["state"]
         print(f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}")
 
 
@@ -3282,6 +3303,7 @@ def _whoami_card(config=None) -> dict | None:
         mine, boot, probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
+        attached_tmux_sessions=_attached_tmux_sessions(config),
         # Exercised by NO test (`crr whoami` reads the card it builds here),
         # so a missing injection would show up only on the real machine, as
         # a card that permanently reads "unknown".
@@ -3908,6 +3930,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             # Inside provider(), NOT hoisted beside `extract`: tmux liveness
             # is a live property re-asked each poll, not a startup fact.
             live_tmux_sessions=_live_tmux_sessions(config),
+            attached_tmux_sessions=_attached_tmux_sessions(config),
             # Likewise re-asked each poll, and likewise ONE probe pair for
             # the whole page rather than one per card (see its docstring).
             reachability_by_sid=_reachability_by_sid(entries, probe, config),

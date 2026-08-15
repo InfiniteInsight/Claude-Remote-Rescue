@@ -383,6 +383,67 @@ def test_unknown_tmux_state_never_promotes_to_parked():
     assert payload["sessions"][0]["state"] == "crashed"
 
 
+def _parked_entry(pid=42, sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                  name="crr-8a1b2c3d"):
+    entry = _entry(pid, sid)
+    entry["boot_id"] = "an-old-boot"
+    entry["tmux_session"] = name
+    return entry
+
+
+# --- attached: which parked sessions the user has already reopened (#32) ---
+
+def test_parked_and_attached_card_is_marked_attached():
+    entry = _parked_entry()
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(),
+        live_tmux_sessions={"crr-8a1b2c3d"},
+        attached_tmux_sessions={"crr-8a1b2c3d"},
+    )
+    card = payload["sessions"][0]
+    assert card["state"] == "parked"
+    assert card["attached"] is True
+
+
+def test_parked_but_detached_card_is_not_attached():
+    entry = _parked_entry()
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(),
+        live_tmux_sessions={"crr-8a1b2c3d"},
+        attached_tmux_sessions=set(),
+    )
+    card = payload["sessions"][0]
+    assert card["state"] == "parked"
+    assert card["attached"] is False
+
+
+def test_unknown_attached_state_never_claims_attached():
+    # F16 tri-state: None means "could not determine". Never render a card
+    # as attached on the strength of a failed query — fall back to restored.
+    entry = _parked_entry()
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(),
+        live_tmux_sessions={"crr-8a1b2c3d"},
+        attached_tmux_sessions=None,
+    )
+    assert payload["sessions"][0]["attached"] is False
+
+
+def test_a_non_parked_card_is_never_attached():
+    # A live/crashed card is not "restored", so "attached" is meaningless
+    # for it — never set even if some tmux session shares the name.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)  # LIVE (current boot, has tty), host=tmux
+    payload = assemble_sessions(
+        [entry], FakeBoot(), FakeProbe(),
+        live_tmux_sessions=set(),
+        attached_tmux_sessions={"crr-8a1b2c3d"},
+    )
+    card = payload["sessions"][0]
+    assert card["state"] != "parked"
+    assert card["attached"] is False
+
+
 def test_an_entry_with_no_tmux_session_is_unaffected():
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
     entry = _entry(42, sid)

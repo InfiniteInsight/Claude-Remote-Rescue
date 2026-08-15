@@ -904,12 +904,15 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_49():
-    """v48: header reachability summary + a "not connected" filter
+def test_page_version_is_50():
+    """v50: an "attached" badge distinguishes a reopened parked card from one
+    still merely restored (#32)
+    (v49: conflict warning forces a choice (#48)
+    (v48: header reachability summary + a "not connected" filter
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 49
+    assert web.PAGE_VERSION == 50
 
 
 def test_page_renders_the_parked_state():
@@ -940,7 +943,21 @@ def test_parked_cards_get_their_own_action_set():
 
 def test_parked_renders_as_restored_not_as_the_raw_enum():
     page = web.load_page()
-    assert 's.state === "parked" ? "restored" : s.state' in page
+    # A detached parked card still reads "restored"; the raw "parked" enum is
+    # never shown. (An attached one reads "attached" — see the #32 test below.)
+    assert '(s.attached ? "attached" : "restored")' in page
+    assert '"parked"' in page  # still keyed on the contract value
+
+
+def test_an_attached_parked_card_reads_attached_with_its_own_badge():
+    # #32: a restored session the user has already reopened (a tmux client is
+    # attached) must render "attached", get the .badge.attached colour, and
+    # be explained in the legend — so a long restore list shows which are back.
+    page = web.load_page()
+    assert 'var parkedAttached = s.state === "parked" && s.attached;' in page
+    assert ".badge.attached" in page
+    assert "k-attached" in page
+    assert "#key .k-attached::before" in page
 
 
 def test_the_state_sort_ranks_parked():

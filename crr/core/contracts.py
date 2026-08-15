@@ -44,7 +44,11 @@ JOURNAL_SCHEMA_VERSION = 1
 # gives way to reachable/unreachable sourced from Claude Code's own
 # bridgeSessionId — and adds `waiting_for` (spec 2026-08-09, Phases 1-3)
 # v13 adds `conflict` (#48) — two live claudes on one conversation
-SESSIONS_CONTRACT_VERSION = 13
+# v14 adds `attached` (#32) — a restored (parked) card the user has already
+# reopened, i.e. a tmux client is attached. False (not nullable) when
+# detached or when the attached query could not be read, so an unreadable
+# tmux state never claims "you are already in this session".
+SESSIONS_CONTRACT_VERSION = 14
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -196,6 +200,11 @@ SESSION_CARD_KEYS = (
     "model",
     "duplicate_group",
     "tmux_session",
+    # A restored (parked) session the user has already reopened — a tmux
+    # client is attached (#32). False rather than nullable on purpose: an
+    # unreadable tmux query (None attached set) must not become a positive
+    # "you are already in this" claim. Only ever True on a parked card.
+    "attached",
     "updated",
     "last_active",
     "context_pressure",
@@ -393,6 +402,7 @@ def validate_session_card(card: Any) -> None:
     if card["duplicate_group"] is not None:
         _require_type(card["duplicate_group"], str, "session 'duplicate_group'")
     _require_type(card["conflict"], bool, "session 'conflict'")
+    _require_type(card["attached"], bool, "session 'attached'")
     if card["tmux_session"] is not None:
         _require_type(card["tmux_session"], str, "session 'tmux_session'")
     # last_active (T-A): a possibly-empty ISO timestamp string — "" is an

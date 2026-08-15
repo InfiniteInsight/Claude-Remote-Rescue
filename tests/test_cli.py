@@ -1605,6 +1605,9 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
         def list_sessions(self):
             return set()  # nothing live -> the crashed entry is revived
 
+        def attached_sessions(self):
+            return set()  # nothing attached (#32)
+
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -3901,11 +3904,13 @@ def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkey
     class FakeTmux:
         def available(self): return True
         def list_sessions(self): return {"crr-8a1b2c3d"}
+        def attached_sessions(self): return set()  # parked, not yet reopened
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
     assert cli.main(["status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["sessions"][0]["state"] == "parked"
+    assert payload["sessions"][0]["attached"] is False
 
 
 def test_status_json_declines_to_park_when_tmux_cannot_say(tmp_path, monkeypatch, capsys):
@@ -3924,6 +3929,7 @@ def test_status_json_declines_to_park_when_tmux_cannot_say(tmp_path, monkeypatch
     class UnknownTmux:
         def available(self): return True
         def list_sessions(self): return None
+        def attached_sessions(self): return None
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: UnknownTmux())
     assert cli.main(["status", "--json"]) == 0
@@ -3966,6 +3972,7 @@ def test_the_web_provider_reports_parked_for_a_tmux_restored_session(tmp_path, m
     class FakeTmux:
         def available(self): return True
         def list_sessions(self): return set(live["names"])
+        def attached_sessions(self): return set()
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
     captured = {}
@@ -4018,6 +4025,7 @@ def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatc
     class FakeTmux:
         def available(self): return True
         def list_sessions(self): return {"crr-8a1b2c3d"}
+        def attached_sessions(self): return set()  # parked, not reopened
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
     assert cli.main(["status"]) == 0
