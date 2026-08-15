@@ -24,6 +24,72 @@ def _t(sid, **extra):
     return row
 
 
+# --- worktree collapse (#34) ------------------------------------------
+#
+# A subagent fan-out writes dozens of sibling transcripts into ONE worktree
+# checkout, all sharing that worktree's cwd. Listed one-per-row they bury
+# every other conversation. collapse_worktree_candidates folds each worktree
+# cwd into a single representative (the newest), carrying a count + the other
+# members' sids for the UI to expand. Only worktree cwds collapse.
+
+_WT = "/home/u/proj/.claude/worktrees/feature-x"
+_WT_LOSSY = "/home/u/proj//claude/worktrees/feature/x"  # project-dir decode
+
+
+def _c(sid, cwd, mtime):
+    return {"session_id": sid, "cwd": cwd, "mtime": mtime}
+
+
+def test_is_worktree_cwd_matches_authoritative_and_lossy_paths():
+    assert discovery.is_worktree_cwd(_WT)
+    assert discovery.is_worktree_cwd(_WT_LOSSY)
+    assert not discovery.is_worktree_cwd("/home/u/proj/scripts")
+    assert not discovery.is_worktree_cwd("/home/u/proj")
+
+
+def test_collapse_folds_a_worktree_into_one_representative():
+    # Newest-first input (the candidate list is already recency-sorted).
+    cands = [
+        _c(_SID_A, _WT, 300),
+        _c(_SID_B, _WT, 200),
+        _c(_SID_C, _WT, 100),
+    ]
+    out = discovery.collapse_worktree_candidates(cands)
+    assert len(out) == 1
+    rep = out[0]
+    assert rep["session_id"] == _SID_A  # newest is the representative
+    assert rep["dup_count"] == 3
+    assert rep["dup_members"] == [
+        {"session_id": _SID_B, "sid8": _SID_B[:8]},
+        {"session_id": _SID_C, "sid8": _SID_C[:8]},
+    ]
+
+
+def test_collapse_leaves_non_worktree_rows_alone():
+    cands = [_c(_SID_A, "/home/u/proj/scripts", 300),
+             _c(_SID_B, "/home/u/other", 200)]
+    out = discovery.collapse_worktree_candidates(cands)
+    assert [r["session_id"] for r in out] == [_SID_A, _SID_B]
+    assert all(r["dup_count"] == 1 and r["dup_members"] == [] for r in out)
+
+
+def test_collapse_preserves_order_and_separates_distinct_worktrees():
+    wt2 = "/home/u/proj/.claude/worktrees/feature-y"
+    cands = [
+        _c(_SID_A, _WT, 500),
+        _c(_SID_B, "/home/u/proj/scripts", 400),  # non-worktree between
+        _c(_SID_C, wt2, 300),
+        _c("dddddddd-4444-4444-8444-444444444444", _WT, 200),  # older sibling of _WT
+    ]
+    out = discovery.collapse_worktree_candidates(cands)
+    # _WT representative stays at its newest position; scripts row untouched;
+    # wt2 is its own group. Three rows out of four candidates.
+    assert [r["session_id"] for r in out] == [_SID_A, _SID_B, _SID_C]
+    assert out[0]["dup_count"] == 2  # _SID_A + the ddd sibling
+    assert out[1]["dup_count"] == 1
+    assert out[2]["dup_count"] == 1
+
+
 # --- untracked --------------------------------------------------------
 
 

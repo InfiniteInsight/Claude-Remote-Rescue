@@ -168,6 +168,57 @@ def _norm_sep(text: str) -> str:
     return text.lower().replace("-", "/").replace(".", "/")
 
 
+def is_worktree_cwd(cwd: str) -> bool:
+    """True if ``cwd`` is (or sits under) a ``.claude/worktrees/`` checkout.
+
+    Robust to the lossy project-dir decode the discovery scan works with:
+    ``/home/u/proj/.claude/worktrees/feature-x`` and its decoded twin
+    ``/home/u/proj//claude/worktrees/feature/x`` both normalize (see
+    ``_norm_sep``) to a string containing ``/worktrees/``. The bounding
+    slashes keep a directory merely *named* ``worktreesfoo`` from matching.
+    """
+    return "/worktrees/" in _norm_sep(cwd)
+
+
+def collapse_worktree_candidates(
+    candidates: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fold each worktree checkout's untracked transcripts into ONE row (#34).
+
+    A subagent fan-out drops dozens of sibling transcripts into a single
+    worktree cwd; listed one-per-row they bury every other conversation. All
+    candidates whose cwd ``is_worktree_cwd`` and share that cwd collapse into
+    a representative — the newest, i.e. the FIRST seen since the candidate
+    list is already recency-sorted — carrying:
+
+    - ``dup_count``: the group size (1 for an uncollapsed row),
+    - ``dup_members``: the OTHER members' ``{session_id, sid8}`` (cheap — no
+      transcript read — so the dashboard can expand and adopt one directly).
+
+    Non-worktree candidates pass through untouched (``dup_count`` 1, empty
+    ``dup_members``). Relative order is preserved: a group keeps its newest
+    member's position. Runs BEFORE the page cap so a worktree costs one slot,
+    not dozens — the whole point is to stop it crowding the first page out.
+    """
+    result: list[dict[str, Any]] = []
+    rep_at: dict[str, int] = {}  # worktree cwd -> its representative's index
+    for c in candidates:
+        cwd = c.get("cwd", "")
+        if not is_worktree_cwd(cwd):
+            result.append({**c, "dup_count": 1, "dup_members": []})
+            continue
+        if cwd not in rep_at:
+            rep_at[cwd] = len(result)
+            result.append({**c, "dup_count": 1, "dup_members": []})
+        else:
+            rep = result[rep_at[cwd]]
+            rep["dup_count"] += 1
+            rep["dup_members"].append(
+                {"session_id": c["session_id"], "sid8": c["session_id"][:8]}
+            )
+    return result
+
+
 def filter_and_page(
     rows: Sequence[Mapping[str, Any]], *, query: str, offset: int, limit: int,
     contract: int,

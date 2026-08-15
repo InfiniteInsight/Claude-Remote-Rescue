@@ -904,15 +904,16 @@ def test_page_stacks_duplicate_cards_with_a_fan_out_toggle():
     assert "function stackTop(" in page    # the actionable card sits on top
 
 
-def test_page_version_is_50():
-    """v50: an "attached" badge distinguishes a reopened parked card from one
+def test_page_version_is_51():
+    """v51: discoverable worktree rows collapse into one expandable row (#34)
+    (v50: an "attached" badge distinguishes a reopened parked card from one
     still merely restored (#32)
     (v49: conflict warning forces a choice (#48)
     (v48: header reachability summary + a "not connected" filter
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 50
+    assert web.PAGE_VERSION == 51
 
 
 def test_page_renders_the_parked_state():
@@ -947,6 +948,18 @@ def test_parked_renders_as_restored_not_as_the_raw_enum():
     # never shown. (An attached one reads "attached" — see the #32 test below.)
     assert '(s.attached ? "attached" : "restored")' in page
     assert '"parked"' in page  # still keyed on the contract value
+
+
+def test_a_collapsed_worktree_row_shows_a_count_and_an_expander():
+    # #34: a discoverable worktree row folds its subagent fan-out. The row
+    # must show the count (dup_count) and an expander over dup_members, each
+    # sibling adoptable by sid — the discoverable echo of the main page stacks.
+    page = web.load_page()
+    assert "if (r.dup_count > 1)" in page
+    assert "r.dup_members" in page
+    assert "more in this worktree" in page
+    assert 'sidAction("adopt", m.session_id' in page
+    assert ".dup-members" in page
 
 
 def test_an_attached_parked_card_reads_attached_with_its_own_badge():

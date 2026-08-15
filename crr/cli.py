@@ -2933,6 +2933,11 @@ def _enrich_discoverable(candidates, config) -> list[dict]:
             "transcript_bytes": facts["transcript_bytes"],
             "last_prompt": facts["last_prompt"],
             "mtime": t["mtime"],
+            # (#34) Carried through the rebuild, not re-derived: worktree
+            # collapse already ran on the cheap candidates. Absent -> a plain,
+            # uncollapsed row (the shape before this feature).
+            "dup_count": t.get("dup_count", 1),
+            "dup_members": t.get("dup_members", []),
         })
     return enriched
 
@@ -3256,6 +3261,9 @@ def _cmd_discover(args: argparse.Namespace) -> int:
     if not candidates:
         print("no discoverable (untracked) transcripts")
         return 0
+    # (#34) Fold each worktree's subagent fan-out into one row BEFORE the cap,
+    # so a single worktree can't crowd out every other conversation on page 1.
+    candidates = discovery.collapse_worktree_candidates(candidates)
     total = len(candidates)
     shown = candidates if args.all else candidates[: args.limit]
     rows = _enrich_discoverable(shown, config)
@@ -3264,7 +3272,9 @@ def _cmd_discover(args: argparse.Namespace) -> int:
         age = _relative_age(r["last_active"], now_iso)
         age_tag = f" {age}" if age else ""
         prompt = f" — {r['last_prompt']}" if r["last_prompt"] else ""
-        print(f"{r['session_id'][:8]} {r['cwd']}{age_tag}{prompt}")
+        # A collapsed worktree row says how many siblings it folded in.
+        dup = f" (+{r['dup_count'] - 1} more in this worktree)" if r["dup_count"] > 1 else ""
+        print(f"{r['session_id'][:8]} {r['cwd']}{age_tag}{dup}{prompt}")
     # No silent caps: say what was withheld and how to see it.
     if len(rows) < total:
         print(f"\n… showing the {len(rows)} most recent of {total} "
@@ -4005,6 +4015,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # thousand of them. Scan problems are dropped here (a web handler
         # can't print to stderr); `crr discover` is where they're surfaced.
         candidates, _journaled, _problems = _discoverable_candidates(store)
+        # (#34) Collapse each worktree's fan-out to one row BEFORE paging, so a
+        # worktree costs one slot on the page instead of dozens.
+        candidates = discovery.collapse_worktree_candidates(candidates)
         page = discovery.filter_and_page(
             candidates, query=query, offset=offset, limit=limit,
             contract=contracts.DISCOVERABLE_CONTRACT_VERSION)

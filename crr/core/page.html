@@ -284,6 +284,11 @@
   .u-row { padding: 8px 0; border-bottom: 1px solid #1e232c; }
   .u-row:last-child { border-bottom: none; }
   .u-row .actions { margin-top: 8px; }
+  /* (#34) The worktree-collapse expander and its revealed sibling rows. */
+  .dup-toggle { margin-top: 6px; background: none; border: none; color: #9fb0f5;
+    cursor: pointer; padding: 0; font: inherit; }
+  .dup-members { margin: 6px 0 0 16px; border-left: 2px solid #1e232c; padding-left: 10px; }
+  .dup-member { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
   #diag-panel .verdict { color: #f0d886; margin: 6px 0; line-height: 1.4; border-left: 3px solid #6b5d2f; padding-left: 8px; }
 </style>
 </head>
@@ -1199,6 +1204,13 @@ function renderSidRow(r, ageIso, actions, onDone) {
   var cwd = el("div", "cwd");
   cwd.appendChild(fieldLabel("dir"));
   cwd.appendChild(document.createTextNode(r.cwd));
+  // (#34) A worktree checkout's subagent fan-out is folded into this one row;
+  // say how many so the count isn't hidden, echoing the main page's stacks.
+  if (r.dup_count > 1) {
+    var wt = el("span", "badge dup-badge");
+    wt.textContent = "worktree · " + r.dup_count + " sessions";
+    cwd.appendChild(wt);
+  }
   row.appendChild(cwd);
   var rel = relTime(ageIso);
   if (rel) {
@@ -1239,6 +1251,41 @@ function renderSidRow(r, ageIso, actions, onDone) {
     actionsDiv.appendChild(btn);
   });
   row.appendChild(actionsDiv);
+  // (#34) The folded siblings, revealed on demand — each adoptable by sid
+  // (they share this row's worktree cwd, so only the sid distinguishes them).
+  if (r.dup_count > 1 && r.dup_members && r.dup_members.length) {
+    var members = el("div", "dup-members");
+    members.style.display = "none";
+    var toggle = el("button", "dup-toggle");
+    var label = function (open) {
+      return (open ? "▾ hide " : "▸ show ") + r.dup_members.length + " more in this worktree";
+    };
+    toggle.textContent = label(false);
+    toggle.addEventListener("click", function () {
+      var open = members.style.display === "none";
+      members.style.display = open ? "block" : "none";
+      toggle.textContent = label(open);
+      if (open && !members.childElementCount) {
+        r.dup_members.forEach(function (m) {
+          var mrow = el("div", "dup-member");
+          var msid = el("span", "id");
+          msid.appendChild(fieldLabel("sid "));
+          msid.appendChild(document.createTextNode(m.sid8));
+          mrow.appendChild(msid);
+          var adopt = el("button", "");
+          adopt.textContent = "Adopt";
+          adopt.title = BUTTON_HELP["Adopt"] || "";
+          adopt.addEventListener("click", function () {
+            sidAction("adopt", m.session_id, adopt, onDone);
+          });
+          mrow.appendChild(adopt);
+          members.appendChild(mrow);
+        });
+      }
+    });
+    row.appendChild(toggle);
+    row.appendChild(members);
+  }
   return row;
 }
 

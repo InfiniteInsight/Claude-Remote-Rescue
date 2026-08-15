@@ -40,7 +40,7 @@ from crr.core import contracts
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 50  # v50: "attached" badge distinguishes reopened parked cards (#32)
+PAGE_VERSION = 51  # v51: discoverable worktree rows collapse with an expander (#34)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

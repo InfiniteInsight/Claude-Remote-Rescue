@@ -2309,6 +2309,32 @@ def test_discover_lists_untracked_transcripts(tmp_path, monkeypatch, capsys):
     assert "a prompt" in out
 
 
+def test_discover_collapses_a_worktrees_fan_out_into_one_row(tmp_path, monkeypatch, capsys):
+    # #34: two untracked transcripts in one .claude/worktrees checkout fold
+    # into a single row (with a "+N more" note); a normal-cwd transcript
+    # beside them stays its own row.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    wt = "/home/u/proj/.claude/worktrees/feat"
+    wt_sids = ["aaaaaaaa-1111-4111-8111-111111111111",
+               "bbbbbbbb-2222-4222-8222-222222222222"]
+    for sid in wt_sids:
+        _write_discover_transcript(tmp_path / "home", wt, sid,
+                                   [_discover_user_rec("subagent run", cwd=wt)])
+    normal_sid = "cccccccc-3333-4333-8333-333333333333"
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj/scripts", normal_sid,
+                               [_discover_user_rec("a real conversation", cwd="/home/u/proj/scripts")])
+    rc = cli.main(["discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The two worktree transcripts collapsed: exactly ONE representative sid
+    # shows, and it announces the folded sibling.
+    assert sum(sid[:8] in out for sid in wt_sids) == 1
+    assert "(+1 more in this worktree)" in out
+    # The non-worktree conversation is untouched.
+    assert normal_sid[:8] in out
+
+
 def test_discover_excludes_journaled_sessions(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
     set_home(monkeypatch, str(tmp_path / "home"))

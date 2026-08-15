@@ -64,7 +64,10 @@ ARCHIVE_CONTRACT_VERSION = 1
 # --------------------------------------------------------------------------
 # v2 adds `cwd_source` (#34) — whether the row's cwd was read from the
 # transcript's own records or reconstructed by the lossy project-dir decode
-DISCOVERABLE_CONTRACT_VERSION = 2
+# v3 adds `dup_count` + `dup_members` (#34) — a worktree checkout's untracked
+# transcripts collapse into one row (dup_count>1); dup_members carries the
+# folded siblings' {session_id, sid8} so the modal can expand and adopt one.
+DISCOVERABLE_CONTRACT_VERSION = 3
 UNTRACKED_CONTRACT_VERSION = 1
 RECALL_CONTRACT_VERSION = 1
 EXCLUSIONS_CONTRACT_VERSION = 1
@@ -514,6 +517,9 @@ def validate_archive_record(record: Any) -> None:
 DISCOVERABLE_ROW_KEYS = (
     "session_id", "sid8", "cwd", "cwd_source", "last_active",
     "transcript_bytes", "last_prompt", "mtime", "running",
+    # (#34) Worktree collapse: dup_count is the group size (1 when this row
+    # stands alone); dup_members lists the folded siblings' {session_id, sid8}.
+    "dup_count", "dup_members",
 )
 UNTRACKED_ROW_KEYS = ("session_id", "sid8", "cwd", "archived_at", "last_prompt")
 PAGED_PAYLOAD_KEYS = ("contract", "rows", "total", "filtered", "offset", "limit")
@@ -564,6 +570,11 @@ def _validate_paged(payload: Any, expected: int, row_keys: tuple[str, ...], what
         if "cwd_source" in row_keys:
             _require_enum(row["cwd_source"], CWD_SOURCES, f"{what} row 'cwd_source'")
         _require_type(row["last_prompt"], str, f"{what} row 'last_prompt'")
+        if "dup_count" in row_keys:
+            count = row["dup_count"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ContractError(f"{what} row 'dup_count' must be an int >= 1")
+            _require_type(row["dup_members"], list, f"{what} row 'dup_members'")
 
 
 def validate_discoverable_payload(payload: Any) -> None:

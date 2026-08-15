@@ -24,7 +24,8 @@ def _rows_payload(version, rows=None):
 def _disc_row():
     return {"session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "sid8": "8a1b2c3d",
             "cwd": "/home/u/p", "cwd_source": "verified", "last_active": "",
-            "transcript_bytes": 0, "last_prompt": "", "mtime": 0.0, "running": False}
+            "transcript_bytes": 0, "last_prompt": "", "mtime": 0.0, "running": False,
+            "dup_count": 1, "dup_members": []}
 
 
 def _untracked_row():
@@ -36,8 +37,9 @@ def test_every_lazy_payload_has_a_version_constant():
     for name in ("UNTRACKED_CONTRACT_VERSION", "RECALL_CONTRACT_VERSION",
                  "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION"):
         assert getattr(contracts, name) == 1, name
-    # discoverable moved to v2 when #34 added `cwd_source` to its rows.
-    assert contracts.DISCOVERABLE_CONTRACT_VERSION == 2
+    # discoverable moved to v2 when #34 added `cwd_source` to its rows, then
+    # v3 when the same issue added worktree collapse (`dup_count`/`dup_members`).
+    assert contracts.DISCOVERABLE_CONTRACT_VERSION == 3
 
 
 def test_discoverable_payload_roundtrips():
