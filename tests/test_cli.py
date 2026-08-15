@@ -2080,12 +2080,14 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
         def kill_session(self, session_name):
             pass
 
+    opened = []
+
     class _FakeTab:
         def available(self):
             return True
 
         def open_tab(self, argv, cwd=None):
-            pass
+            opened.append((list(argv), cwd))
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
@@ -2103,9 +2105,13 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
     assert rc == 0
     with pytest.raises(KeyError):
         store.read(42)
+    # Relaunched through a shimmed interactive shell (#33), not bare claude —
+    # so the new window self-registers and crr keeps tracking it.
+    assert opened == [(["zsh", "-i", "-c", f"claude --resume {_SID}"], str(tmp_path))]
     out = capsys.readouterr().out
     assert "un-tmuxed" in out
-    assert "crr no longer manages it" in out
+    assert "crr still manages it" in out
+    assert "crr no longer manages it" not in out
 
 
 def test_untracked_view_reads_last_prompt_from_the_transcript(tmp_path, monkeypatch):

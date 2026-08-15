@@ -2732,7 +2732,6 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
         res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
-                         remote_control=config.get("remote_control"),
                          tab_spawner=_tab_spawner(config)[0])
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
@@ -3970,7 +3969,6 @@ def _cmd_web(args: argparse.Namespace) -> int:
                                   tab_spawner=_tab_spawner(config)[0])
             elif op == "untmux":
                 res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
-                                  remote_control=config.get("remote_control"),
                                   tab_spawner=_tab_spawner(config)[0])
             else:
                 return False, f"unknown op {op}", False

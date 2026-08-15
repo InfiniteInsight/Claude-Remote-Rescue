@@ -630,22 +630,61 @@ def test_detmux_spawn_failure_keeps_bookkeeping(tmp_path):
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
 
 
+# --- tracked_resume_argv (pure) ----------------------------------------------
+#
+# untmux relaunches through a crr-shimmed INTERACTIVE shell so the shell
+# self-registers and the conversation is tracked again as a plain (non-tmux)
+# window (#33). The command is `claude --resume <sid>` run as the shim's own
+# `claude` function (which fires claude-resume + injects the rc args), NOT
+# `command claude` — so no --remote-control is baked in here.
+
+def test_tracked_resume_argv_fish_stays_interactive_after_the_command():
+    e = {"claude": {"session_id": _SID}, "shell": "fish"}
+    assert ops.tracked_resume_argv(e) == ["fish", "-i", "-C", f"claude --resume {_SID}"]
+
+
+def test_tracked_resume_argv_bash_runs_in_an_interactive_shell():
+    e = {"claude": {"session_id": _SID}, "shell": "bash"}
+    assert ops.tracked_resume_argv(e) == ["bash", "-i", "-c", f"claude --resume {_SID}"]
+
+
+def test_tracked_resume_argv_zsh_runs_in_an_interactive_shell():
+    e = {"claude": {"session_id": _SID}, "shell": "zsh"}
+    assert ops.tracked_resume_argv(e) == ["zsh", "-i", "-c", f"claude --resume {_SID}"]
+
+
+def test_tracked_resume_argv_defaults_to_bash_for_an_unknown_shell():
+    # An adopted/filler shell must still produce a runnable, shim-sourcing
+    # shell rather than exec a shell named "" or "tab".
+    for shell in ("", "tab", None):
+        e = {"claude": {"session_id": _SID}, "shell": shell}
+        assert ops.tracked_resume_argv(e)[0] == "bash"
+
+
 # --- untmux ------------------------------------------------------------------
 #
-# Real un-tmux: kill the parked tmux session, relaunch `claude --resume <sid>`
-# directly in a visible tab (no wrapper). Same classifier/parked/live/spawner
-# gates as detmux, same order — spawner-availability refusal BEFORE the kill,
-# so a missing spawner never destroys the tmux session.
+# Real un-tmux: kill the parked tmux session and relaunch the conversation in
+# a crr-shimmed interactive shell (a plain, tracked, non-tmux window — #33).
+# Same classifier/parked/live/spawner gates as detmux, same order — spawner-
+# availability refusal BEFORE the kill, so a missing spawner never destroys
+# the tmux session. The old (now-dead) parked entry is archived+delisted
+# BEFORE the spawn: leaving it journaled across the multi-second cold-terminal
+# spawn would let a reviver pass re-park it into a fresh tmux session — a real
+# duplicate claude on the conversation — so the delist must precede open_tab.
 
-def test_untmux_kills_spawns_archives_and_delists(tmp_path):
+def test_untmux_kills_spawns_a_tracked_shell_and_delists_the_old_entry(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
-    _seed_parked(store, 42, "crr-8a1b2c3d")
+    _seed_parked(store, 42, "crr-8a1b2c3d")  # _seed writes shell="zsh"
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     tab = FakeTabSpawner()
-    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=True)
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
     assert res.ok, res.message
     assert tmux.killed == ["crr-8a1b2c3d"]
-    assert tab.opened == [(["claude", "--resume", _SID, "--remote-control", "p42"], f"/p42")]
+    # The tab runs a shimmed interactive shell resuming the sid — the new
+    # shell self-registers, so crr tracks it again as a plain window.
+    assert tab.opened == [(["zsh", "-i", "-c", f"claude --resume {_SID}"], "/p42")]
+    # The dead parked entry is archived + delisted (the new tracked entry
+    # arrives independently when the shimmed shell registers).
     with pytest.raises(KeyError):
         store.read(42)
     records = archive.scan().records
@@ -653,30 +692,32 @@ def test_untmux_kills_spawns_archives_and_delists(tmp_path):
     assert records[0]["reason"] == "untmuxed"
     assert records[0]["entry"]["pid"] == 42
     assert "un-tmuxed 42" in res.message
+    assert "crr no longer manages it" not in res.message  # it DOES, now
 
 
-def test_untmux_omits_remote_control_when_disabled(tmp_path):
+def test_untmux_delists_before_it_spawns(tmp_path):
+    # Ordering is load-bearing (#33): the old entry must be gone from the
+    # journal BEFORE open_tab, or a reviver pass firing during the multi-
+    # second terminal spawn would re-park it and create a duplicate claude.
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
-    tab = FakeTabSpawner()
-    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=False)
+
+    class _AssertDelistedTab(FakeTabSpawner):
+        def open_tab(self, argv, cwd=None):
+            with pytest.raises(KeyError):
+                store.read(42)  # already delisted by the time we spawn
+            super().open_tab(argv, cwd)
+
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=_AssertDelistedTab())
     assert res.ok, res.message
-    assert tab.opened == [(["claude", "--resume", _SID], f"/p42")]
-    with pytest.raises(KeyError):
-        store.read(42)
-    records = archive.scan().records
-    assert len(records) == 1
-    assert records[0]["reason"] == "untmuxed"
-    assert records[0]["entry"]["pid"] == 42
-    assert "un-tmuxed 42" in res.message
-    assert "crr no longer manages it" in res.message
 
 
 def test_untmux_refuses_missing_entry(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     res = ops.untmux(store, archive, FakeTmux(), FakeBoot(), FakeProbe(), 999, _NOW,
-                      tab_spawner=FakeTabSpawner(), remote_control=True)
+                      tab_spawner=FakeTabSpawner())
     assert not res.ok and "no session" in res.message
 
 
@@ -685,7 +726,7 @@ def test_untmux_refuses_a_live_shell_wearing_an_inherited_tmux_name(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d", boot="same-boot")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     res = ops.untmux(store, archive, tmux, FakeBoot("same-boot"),
-                      FakeProbe(alive=True, tty=True), 42, _NOW, tab_spawner=FakeTabSpawner(), remote_control=True)
+                      FakeProbe(alive=True, tty=True), 42, _NOW, tab_spawner=FakeTabSpawner())
     assert not res.ok
     assert "not parked" in res.message
     assert tmux.killed == []
@@ -696,7 +737,7 @@ def test_untmux_refuses_unparked_session(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=_claude())
     res = ops.untmux(store, archive, FakeTmux(), FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner(), remote_control=True)
+                      tab_spawner=FakeTabSpawner())
     assert not res.ok and "not tmux-parked" in res.message
 
 
@@ -704,7 +745,7 @@ def test_untmux_refuses_when_tmux_session_is_gone(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     res = ops.untmux(store, archive, FakeTmux(live=set()), FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner(), remote_control=True)
+                      tab_spawner=FakeTabSpawner())
     assert not res.ok and "gone" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
 
@@ -714,7 +755,7 @@ def test_untmux_refuses_when_tmux_liveness_is_unknown(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live=None)
     res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner(), remote_control=True)
+                      tab_spawner=FakeTabSpawner())
     assert not res.ok
     assert "cannot determine" in res.message.lower()
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
@@ -727,7 +768,7 @@ def test_untmux_requires_a_tab_spawner_before_killing(tmp_path):
     for tab in (None, FakeTabSpawner(available=False)):
         _seed_parked(store, 42, "crr-8a1b2c3d")
         tmux = FakeTmux(live={"crr-8a1b2c3d"})
-        res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=True)
+        res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
         assert not res.ok and "no terminal tab spawner" in res.message
         assert tmux.killed == []
         assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
@@ -738,27 +779,31 @@ def test_untmux_kill_failure_leaves_entry_untouched(tmp_path):
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"}, fail_kill=True)
     res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
-                      tab_spawner=FakeTabSpawner(), remote_control=True)
+                      tab_spawner=FakeTabSpawner())
     assert not res.ok
     assert "failed to kill" in res.message
     assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
     assert archive.scan().records == []
 
 
-def test_untmux_spawn_failure_after_kill_leaves_entry_for_the_watchdog(tmp_path):
-    # Decided design: on spawn failure AFTER the kill, the journal entry is
-    # left untouched (tmux_session field intact) so the next revive pass
-    # re-parks the conversation in tmux — say so in the message.
+def test_untmux_spawn_failure_after_kill_delists_to_discoverable(tmp_path):
+    # New design (#33): the entry is archived+delisted BEFORE the spawn (so a
+    # reviver pass can't re-park it mid-spawn). If open_tab then fails, the
+    # conversation is already archived "untmuxed" — which drops it out of the
+    # active journal and back into Discoverable (keyed on journaled sids, not
+    # the archive), where `retrack` brings it back. Say so in the message.
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed_parked(store, 42, "crr-8a1b2c3d")
     tmux = FakeTmux(live={"crr-8a1b2c3d"})
     tab = FakeTabSpawner(fail=True)
-    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab, remote_control=True)
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW, tab_spawner=tab)
     assert not res.ok
     assert tmux.killed == ["crr-8a1b2c3d"]
-    assert "watchdog" in res.message
-    assert store.read(42)["tmux_session"] == "crr-8a1b2c3d"
-    assert archive.scan().records == []
+    assert "retrack" in res.message.lower() or "discoverable" in res.message.lower()
+    with pytest.raises(KeyError):
+        store.read(42)
+    records = archive.scan().records
+    assert len(records) == 1 and records[0]["reason"] == "untmuxed"
 
 
 # --- retrack ------------------------------------------------------------------
@@ -1143,7 +1188,7 @@ def test_untmux_accepts_a_live_entry_parked_in_tmux(tmp_path):
     boot, probe = _parked(store, 2016, name)
     tmux = FakeTmux(live={name}, session_pids={name: 2016})
     res = ops.untmux(store, archive, tmux, boot, probe, 2016, _NOW,
-                     remote_control=True, tab_spawner=FakeTabSpawner())
+                     tab_spawner=FakeTabSpawner())
     assert res.ok, res.message
 
 
