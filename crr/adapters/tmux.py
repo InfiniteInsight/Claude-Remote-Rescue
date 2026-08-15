@@ -22,6 +22,13 @@ def _list_sessions_cmd() -> list[str]:
     return ["tmux", "list-sessions", "-F", "#{session_name}"]
 
 
+def _attached_sessions_cmd() -> list[str]:
+    # -f keeps only sessions whose #{session_attached} is truthy (a client is
+    # attached — the user has reopened it); -F prints just the name. A parked
+    # (detached) session has session_attached == 0 and is filtered out.
+    return ["tmux", "list-sessions", "-f", "#{session_attached}", "-F", "#{session_name}"]
+
+
 def _new_session_cmd(name: str, cwd: str, argv: Sequence[str]) -> list[str]:
     # `--` terminates option parsing; the rest is exec'd word-form.
     return ["tmux", "new-session", "-d", "-s", name, "-c", cwd, "--", *argv]
@@ -37,6 +44,20 @@ def _kill_session_cmd(name: str) -> list[str]:
 
 def _parse_sessions(stdout: str) -> set[str]:
     return {line for line in stdout.splitlines() if line}
+
+
+def _empty_or_unknown(stderr: str) -> set[str] | None:
+    """A nonzero tmux list-sessions exit: genuinely empty (``set()``) only
+    when tmux's own stderr says there is no server, else unknown (``None``).
+
+    Shared by ``list_sessions`` and ``attached_sessions`` so the tri-state
+    boundary (audit F16 — never collapse "can't tell" into "confirmed
+    empty") stays identical for both queries.
+    """
+    s = (stderr or "").lower()
+    if "no server running" in s or "error connecting to" in s:
+        return set()
+    return None
 
 
 class RealTmux:
@@ -96,10 +117,29 @@ class RealTmux:
         except (subprocess.TimeoutExpired, OSError):
             return None
         if result.returncode != 0:
-            stderr = (result.stderr or "").lower()
-            if "no server running" in stderr or "error connecting to" in stderr:
-                return set()
+            return _empty_or_unknown(result.stderr)
+        return _parse_sessions(result.stdout)
+
+    def attached_sessions(self) -> set[str] | None:
+        """The subset of live sessions that have a client attached, or None
+        if that could not be determined (#32).
+
+        Display-only: a card reads "attached" (the user already reopened it)
+        instead of "restored" when its tmux session is in this set. Mirrors
+        ``list_sessions``' tri-state exactly — a timeout, an OSError, or an
+        unrecognized nonzero exit is None, never a fabricated "nothing is
+        attached", so the badge falls back to "restored" rather than making
+        a false claim about a session the user may in fact be sitting in.
+        """
+        try:
+            result = subprocess.run(
+                _attached_sessions_cmd(),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
             return None
+        if result.returncode != 0:
+            return _empty_or_unknown(result.stderr)
         return _parse_sessions(result.stdout)
 
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:

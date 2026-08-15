@@ -218,6 +218,19 @@ def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
     return t.list_sessions()
 
 
+def _attached_tmux_sessions(config: cfg.Config) -> set[str] | None:
+    """Tmux session names with a client attached, or None when tmux cannot
+    say (#32). Same per-build, never-cached, F16-tri-state contract as
+    `_live_tmux_sessions`: a host without tmux is a confident `set()`, an
+    unreadable query is None so `assemble_sessions` declines to mark any card
+    attached rather than fabricating "nothing is attached".
+    """
+    t = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    if not t.available():
+        return set()
+    return t.attached_sessions()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crr",
@@ -1711,6 +1724,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
+        attached_tmux_sessions=_attached_tmux_sessions(config),
         reachability_by_sid=_reachability_by_sid(
             scan.entries, probe, config, owners=_owners),
         claude_owners=_owners,
@@ -1737,29 +1751,55 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _status_line(card: dict) -> str:
+    if card["duplicate_group"]:
+        # A guessed duplicate is a weaker claim than a verified/injected
+        # one — collapsing both into the same [dup] tag would hide that
+        # difference (audit P3: confidence travels with the data).
+        dup = " [dup? guessed]" if card["sid_source"] == "guessed" else " [dup]"
+    else:
+        dup = ""
+    # injected is the certain norm; only a non-injected sid_source is
+    # worth the extra characters on an otherwise compact line.
+    sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
+    model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
+    # `parked` is the contract value; "restored" is what it means to a
+    # reader, and it is the word the dashboard already shows. Printing the
+    # raw enum here would describe one session with two different words
+    # depending on which surface you looked at.
+    # A parked session the user has already reopened reads "attached"
+    # (#32) — the same distinction the dashboard badge draws — so the
+    # restore list doesn't show "restored" against a session you are
+    # already sitting in.
+    if card["state"] == "parked":
+        shown = "attached" if card.get("attached") else "restored"
+    else:
+        shown = card["state"]
+    return f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}"
+
+
 def _print_status_human(payload: dict) -> None:
     sessions = payload["sessions"]
     if not sessions:
         print("no journaled sessions")
         return
+    # (#31) Keep the main threads on top; demote worktree checkouts into a
+    # section grouped under the repo they branch from, so a side-branch or
+    # subagent session doesn't drown the top-level conversation.
+    mains, worktrees = [], []
     for card in sessions:
-        if card["duplicate_group"]:
-            # A guessed duplicate is a weaker claim than a verified/injected
-            # one — collapsing both into the same [dup] tag would hide that
-            # difference (audit P3: confidence travels with the data).
-            dup = " [dup? guessed]" if card["sid_source"] == "guessed" else " [dup]"
-        else:
-            dup = ""
-        # injected is the certain norm; only a non-injected sid_source is
-        # worth the extra characters on an otherwise compact line.
-        sid_tag = f" sid:{card['sid_source']}" if card["sid_source"] != "injected" else ""
-        model = f" {card['model']}" if card["model"] else ""  # omitted when unknown
-        # `parked` is the contract value; "restored" is what it means to a
-        # reader, and it is the word the dashboard already shows. Printing the
-        # raw enum here would describe one session with two different words
-        # depending on which surface you looked at.
-        shown = "restored" if card["state"] == "parked" else card["state"]
-        print(f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}")
+        (worktrees if discovery.worktree_repo_and_name(card["cwd"]) else mains).append(card)
+    for card in mains:
+        print(_status_line(card))
+    by_repo: dict[str, list[dict]] = {}
+    for card in worktrees:
+        repo, _name = discovery.worktree_repo_and_name(card["cwd"])
+        by_repo.setdefault(repo, []).append(card)
+    for repo, cards in by_repo.items():
+        print(f"\n{repo} · worktrees ({len(cards)})")
+        for card in cards:
+            _repo, name = discovery.worktree_repo_and_name(card["cwd"])
+            print(f"  {_status_line(card)} [worktree:{name}]")
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
@@ -2711,7 +2751,6 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
         res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
-                         remote_control=config.get("remote_control"),
                          tab_spawner=_tab_spawner(config)[0])
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
@@ -2913,6 +2952,11 @@ def _enrich_discoverable(candidates, config) -> list[dict]:
             "transcript_bytes": facts["transcript_bytes"],
             "last_prompt": facts["last_prompt"],
             "mtime": t["mtime"],
+            # (#34) Carried through the rebuild, not re-derived: worktree
+            # collapse already ran on the cheap candidates. Absent -> a plain,
+            # uncollapsed row (the shape before this feature).
+            "dup_count": t.get("dup_count", 1),
+            "dup_members": t.get("dup_members", []),
         })
     return enriched
 
@@ -3236,6 +3280,9 @@ def _cmd_discover(args: argparse.Namespace) -> int:
     if not candidates:
         print("no discoverable (untracked) transcripts")
         return 0
+    # (#34) Fold each worktree's subagent fan-out into one row BEFORE the cap,
+    # so a single worktree can't crowd out every other conversation on page 1.
+    candidates = discovery.collapse_worktree_candidates(candidates)
     total = len(candidates)
     shown = candidates if args.all else candidates[: args.limit]
     rows = _enrich_discoverable(shown, config)
@@ -3244,7 +3291,9 @@ def _cmd_discover(args: argparse.Namespace) -> int:
         age = _relative_age(r["last_active"], now_iso)
         age_tag = f" {age}" if age else ""
         prompt = f" — {r['last_prompt']}" if r["last_prompt"] else ""
-        print(f"{r['session_id'][:8]} {r['cwd']}{age_tag}{prompt}")
+        # A collapsed worktree row says how many siblings it folded in.
+        dup = f" (+{r['dup_count'] - 1} more in this worktree)" if r["dup_count"] > 1 else ""
+        print(f"{r['session_id'][:8]} {r['cwd']}{age_tag}{dup}{prompt}")
     # No silent caps: say what was withheld and how to see it.
     if len(rows) < total:
         print(f"\n… showing the {len(rows)} most recent of {total} "
@@ -3282,6 +3331,7 @@ def _whoami_card(config=None) -> dict | None:
         mine, boot, probe,
         tail_facts=_tail_facts_extractor(config),
         live_tmux_sessions=_live_tmux_sessions(config),
+        attached_tmux_sessions=_attached_tmux_sessions(config),
         # Exercised by NO test (`crr whoami` reads the card it builds here),
         # so a missing injection would show up only on the real machine, as
         # a card that permanently reads "unknown".
@@ -3908,6 +3958,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             # Inside provider(), NOT hoisted beside `extract`: tmux liveness
             # is a live property re-asked each poll, not a startup fact.
             live_tmux_sessions=_live_tmux_sessions(config),
+            attached_tmux_sessions=_attached_tmux_sessions(config),
             # Likewise re-asked each poll, and likewise ONE probe pair for
             # the whole page rather than one per card (see its docstring).
             reachability_by_sid=_reachability_by_sid(entries, probe, config),
@@ -3947,7 +3998,6 @@ def _cmd_web(args: argparse.Namespace) -> int:
                                   tab_spawner=_tab_spawner(config)[0])
             elif op == "untmux":
                 res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
-                                  remote_control=config.get("remote_control"),
                                   tab_spawner=_tab_spawner(config)[0])
             else:
                 return False, f"unknown op {op}", False
@@ -3984,6 +4034,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # thousand of them. Scan problems are dropped here (a web handler
         # can't print to stderr); `crr discover` is where they're surfaced.
         candidates, _journaled, _problems = _discoverable_candidates(store)
+        # (#34) Collapse each worktree's fan-out to one row BEFORE paging, so a
+        # worktree costs one slot on the page instead of dozens.
+        candidates = discovery.collapse_worktree_candidates(candidates)
         page = discovery.filter_and_page(
             candidates, query=query, offset=offset, limit=limit,
             contract=contracts.DISCOVERABLE_CONTRACT_VERSION)

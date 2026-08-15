@@ -172,6 +172,15 @@ class TmuxSpawner(Protocol):
         """
         ...
 
+    def attached_sessions(self) -> set[str] | None:
+        """The subset of live sessions with a client attached, or None if
+        undeterminable (#32). Display-only: distinguishes a session the user
+        has already reopened (attached) from a merely parked one. None is the
+        same F16 "could not tell" as ``list_sessions`` and must not be read
+        as "nothing attached" — the badge falls back to "restored".
+        """
+        ...
+
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:
         """Create a detached session ``name`` in ``cwd`` running ``argv``."""
         ...

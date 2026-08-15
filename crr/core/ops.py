@@ -13,7 +13,7 @@ kick/close (which signal live processes) live here too, gated the same way.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
 from crr.core import contracts
 from crr.core.archive import ArchiveStore
@@ -401,6 +401,36 @@ def detmux(
     return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab; crr no longer manages it")
 
 
+def tracked_resume_argv(entry: Mapping[str, Any]) -> list[str]:
+    """Argv that resumes this conversation inside a crr-shimmed INTERACTIVE
+    shell, so the new shell self-registers and crr tracks the session again
+    as a plain (non-tmux) window (#33).
+
+    It runs ``claude --resume <sid>`` as the shim's own ``claude`` *function*
+    — defined when the interactive shell sources the shim from its rc — NOT
+    ``command claude``. That is what makes the difference: the function fires
+    ``claude-resume`` (which journals the sid onto the freshly-registered
+    shell pid) and injects the remote-control args itself, so nothing needs
+    to be baked in here. Contrast ``revival_argv``, which is a *bare* claude
+    for a tmux pane that has no shim to register it.
+
+    Per shell, only the window's afterlife differs (the tracking is
+    identical): fish stays interactive after the command (``-i -C``);
+    bash/zsh run it in an interactive shell (``-i -c``) that sources their rc
+    — the shim — but exits when claude does. fish is the supported host; an
+    unknown/filler shell falls back to bash rather than exec a shell named
+    ``""``.
+    """
+    sid = entry["claude"]["session_id"]
+    shell = entry.get("shell") or "bash"
+    command = f"claude --resume {sid}"
+    if shell == "fish":
+        return ["fish", "-i", "-C", command]
+    if shell not in ("bash", "zsh"):
+        shell = "bash"
+    return [shell, "-i", "-c", command]
+
+
 def untmux(
     store: JournalStore,
     archive: ArchiveStore,
@@ -410,11 +440,11 @@ def untmux(
     pid: int,
     now: str,
     *,
-    remote_control: bool,
     tab_spawner: TabSpawner | None,
 ) -> OpResult:
-    """Genuinely un-tmux a parked session: kill the tmux wrapper, relaunch
-    ``claude --resume <sid>`` directly in a visible tab.
+    """Un-tmux a parked session: kill the tmux wrapper and relaunch the
+    conversation in a crr-shimmed interactive shell — a plain window that
+    crr STILL tracks (#33), because the shell self-registers on start.
 
     The honest counterpart to ``detmux`` (which only re-homes into a tab
     that still runs tmux underneath — see its docstring). Same gates, same
@@ -429,17 +459,25 @@ def untmux(
        ``tmux kill-session`` erroring) leaves the entry untouched and fails
        the op — nothing destructive has landed, so there is nothing to
        recover.
-    2. Spawn the visible tab running ``claude --resume <sid>`` word-form
-       with ``cwd=entry["cwd"]``.
-    3. On spawn success: archive reason ``"untmuxed"`` (terminal — see
-       ``reviver``'s skip tuple), delist the entry. The conversation is now
-       a bare ``claude --resume`` in a tab; crr no longer manages it.
-    4. On spawn failure AFTER the kill: the tmux session is already gone,
-       so leave the journal entry untouched (its ``tmux_session`` field
-       remains) — the next revive pass finds no live session under that
-       name and re-parks the conversation in a fresh detached tmux
-       session, exactly like any other crashed candidate. Say so in the
-       failure message.
+    2. Archive the (now-dead) parked entry as ``"untmuxed"`` and delist it —
+       BEFORE the spawn. This is not bookkeeping tidiness, it is a
+       correctness gate: ``open_tab`` can take multiple seconds to cold-start
+       a terminal, and if the entry were still journaled (CRASHED, ``claude``
+       set) a reviver pass firing in that window would re-park it into a
+       *fresh* tmux session — a second, live claude on the same conversation.
+       Delisting first is the only thing that closes that race. The new
+       tracked entry does not come from here at all: the shimmed shell
+       registers itself once it starts.
+    3. Spawn the tracked window (``tracked_resume_argv``, ``cwd=entry["cwd"]``).
+       - Success: crr manages the conversation again as a new, non-tmux
+         session (the shell's own registration).
+       - Failure: the entry is already archived, which drops the sid out of
+         the active journal and back into Discoverable (that list is keyed on
+         journaled sids, not the archive) — ``crr discover --adopt`` brings it
+         back. NOT ``retrack``: that only undoes an ``"untracked"``/
+         ``"detmuxed"`` archival and refuses an ``"untmuxed"`` one. The
+         reviver cannot re-park it (it is delisted), which is exactly the
+         race we closed; the honest recovery is the adopt, so say so.
     """
     try:
         entry = store.read(pid)
@@ -475,20 +513,40 @@ def untmux(
         tmux.kill_session(name)
     except Exception as exc:  # adapter subprocess failure
         return OpResult(False, f"untmux {pid} failed to kill tmux session {name}: {exc}")
+    # Delist BEFORE the spawn — see docstring step 2 (closes the reviver
+    # re-park race across the multi-second terminal cold-start). This also
+    # keeps the shimmed shell's own `conflict-check --sid` (run on resume)
+    # from tripping: that check scans the JOURNAL (`store.scan()`) for a live
+    # owner of the sid, so once this entry is delisted there is nothing for it
+    # to collide with. The safety of this ordering depends on conflict-check
+    # staying journal-scoped — if it ever consulted the archive, an
+    # "untmuxed" record here would make the resume flash-and-abort.
+    if entry.get("claude") is not None:
+        archive.archive(entry, "untmuxed", now)
+    store.remove(pid)
     try:
-        tab_spawner.open_tab(
-            revival_argv(entry, remote_control=remote_control), cwd=entry["cwd"]
+        tab_spawner.open_tab(tracked_resume_argv(entry), cwd=entry["cwd"])
+    except TabSpawnTimeout:
+        # "Could not confirm", not "failed" (#53): a cold terminal can open
+        # the tab and still outrun the budget. If it did open, the shell is
+        # registering; if it did not, the conversation is in Discoverable.
+        return OpResult(
+            True,
+            f"un-tmuxed {pid}: opened a terminal but could not confirm it — if it "
+            "did not appear, the conversation is in Discoverable; adopt it there",
+            degraded=True,
         )
     except Exception as exc:  # adapter subprocess/osascript failure
         return OpResult(
             False,
-            f"untmux {pid}: tmux session killed, but the tab failed to open: {exc}; "
-            "the watchdog will re-park it in tmux within a minute",
+            f"untmux {pid}: tmux killed but the window failed to open: {exc}; "
+            "the conversation is in Discoverable — adopt it there to bring it back",
         )
-    if entry.get("claude") is not None:
-        archive.archive(entry, "untmuxed", now)
-    store.remove(pid)
-    return OpResult(True, f"un-tmuxed {pid}: claude --resume in a new tab; crr no longer manages it")
+    return OpResult(
+        True,
+        f"un-tmuxed {pid}: resumed in a tracked terminal window; "
+        "crr still manages it as a new (non-tmux) session",
+    )
 
 
 def retrack(store: JournalStore, archive: ArchiveStore, sid: str, now: str) -> OpResult:

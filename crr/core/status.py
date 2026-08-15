@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v13).
+"""Status assembler — journal entries -> /api/sessions payload (contract v14).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -149,6 +149,12 @@ def assemble_sessions(
     autokick_session_overrides: Mapping[str, bool] | None = None,
     autokick_degraded: bool = False,
     live_tmux_sessions: set[str] | None = None,
+    # (#32) The subset of live tmux sessions with a client attached — the
+    # ones the user has already reopened. None is F16's "could not tell" and
+    # never marks a card attached (a failed query must not claim the user is
+    # sitting in a session). Resolved ONCE per poll by the caller, like
+    # live_tmux_sessions; core does no I/O.
+    attached_tmux_sessions: set[str] | None = None,
     reachability_by_sid: Mapping[str, tuple[str, str]] | None = None,
     # (#48) pid -> claude process groups it owns, from the composition
     # root's single per-poll snapshot. None means the probe was not run or
@@ -229,12 +235,23 @@ def assemble_sessions(
         reach, waiting_for = reachability_by_sid.get(
             sid, (_reachability.UNKNOWN, "")
         )
+        state = _display_state(entry, boot_identity, probe, live_tmux_sessions)
+        # (#32) "attached" is only meaningful for a restored (PARKED) card:
+        # it separates a session the user has already reopened (a client is
+        # attached) from one still merely parked. A None attached set is
+        # F16's "could not tell" and never claims attached.
+        tmux_name = entry.get("tmux_session")
+        attached = bool(
+            state == PARKED
+            and tmux_name
+            and attached_tmux_sessions
+            and tmux_name in attached_tmux_sessions
+        )
         cards.append(
             {
                 "pid": entry["pid"],
-                "state": _display_state(
-                    entry, boot_identity, probe, live_tmux_sessions
-                ),
+                "state": state,
+                "attached": attached,
                 "cwd": entry["cwd"],
                 # (#40) An ADOPTED entry never observed a shell registration
                 # — `build_adopted_entry` writes host="tab"/shell="bash"

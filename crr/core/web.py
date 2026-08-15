@@ -40,7 +40,7 @@ from crr.core import contracts
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 49  # v49: conflict warning forces a choice (#48)
+PAGE_VERSION = 53  # v53: notices are dismissable (×) and copy their attach command
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

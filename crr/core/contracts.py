@@ -44,7 +44,11 @@ JOURNAL_SCHEMA_VERSION = 1
 # gives way to reachable/unreachable sourced from Claude Code's own
 # bridgeSessionId — and adds `waiting_for` (spec 2026-08-09, Phases 1-3)
 # v13 adds `conflict` (#48) — two live claudes on one conversation
-SESSIONS_CONTRACT_VERSION = 13
+# v14 adds `attached` (#32) — a restored (parked) card the user has already
+# reopened, i.e. a tmux client is attached. False (not nullable) when
+# detached or when the attached query could not be read, so an unreadable
+# tmux state never claims "you are already in this session".
+SESSIONS_CONTRACT_VERSION = 14
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -60,7 +64,10 @@ ARCHIVE_CONTRACT_VERSION = 1
 # --------------------------------------------------------------------------
 # v2 adds `cwd_source` (#34) — whether the row's cwd was read from the
 # transcript's own records or reconstructed by the lossy project-dir decode
-DISCOVERABLE_CONTRACT_VERSION = 2
+# v3 adds `dup_count` + `dup_members` (#34) — a worktree checkout's untracked
+# transcripts collapse into one row (dup_count>1); dup_members carries the
+# folded siblings' {session_id, sid8} so the modal can expand and adopt one.
+DISCOVERABLE_CONTRACT_VERSION = 3
 UNTRACKED_CONTRACT_VERSION = 1
 RECALL_CONTRACT_VERSION = 1
 EXCLUSIONS_CONTRACT_VERSION = 1
@@ -196,6 +203,11 @@ SESSION_CARD_KEYS = (
     "model",
     "duplicate_group",
     "tmux_session",
+    # A restored (parked) session the user has already reopened — a tmux
+    # client is attached (#32). False rather than nullable on purpose: an
+    # unreadable tmux query (None attached set) must not become a positive
+    # "you are already in this" claim. Only ever True on a parked card.
+    "attached",
     "updated",
     "last_active",
     "context_pressure",
@@ -393,6 +405,7 @@ def validate_session_card(card: Any) -> None:
     if card["duplicate_group"] is not None:
         _require_type(card["duplicate_group"], str, "session 'duplicate_group'")
     _require_type(card["conflict"], bool, "session 'conflict'")
+    _require_type(card["attached"], bool, "session 'attached'")
     if card["tmux_session"] is not None:
         _require_type(card["tmux_session"], str, "session 'tmux_session'")
     # last_active (T-A): a possibly-empty ISO timestamp string — "" is an
@@ -504,6 +517,9 @@ def validate_archive_record(record: Any) -> None:
 DISCOVERABLE_ROW_KEYS = (
     "session_id", "sid8", "cwd", "cwd_source", "last_active",
     "transcript_bytes", "last_prompt", "mtime", "running",
+    # (#34) Worktree collapse: dup_count is the group size (1 when this row
+    # stands alone); dup_members lists the folded siblings' {session_id, sid8}.
+    "dup_count", "dup_members",
 )
 UNTRACKED_ROW_KEYS = ("session_id", "sid8", "cwd", "archived_at", "last_prompt")
 PAGED_PAYLOAD_KEYS = ("contract", "rows", "total", "filtered", "offset", "limit")
@@ -554,6 +570,11 @@ def _validate_paged(payload: Any, expected: int, row_keys: tuple[str, ...], what
         if "cwd_source" in row_keys:
             _require_enum(row["cwd_source"], CWD_SOURCES, f"{what} row 'cwd_source'")
         _require_type(row["last_prompt"], str, f"{what} row 'last_prompt'")
+        if "dup_count" in row_keys:
+            count = row["dup_count"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ContractError(f"{what} row 'dup_count' must be an int >= 1")
+            _require_type(row["dup_members"], list, f"{what} row 'dup_members'")
 
 
 def validate_discoverable_payload(payload: Any) -> None:

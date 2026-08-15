@@ -1175,6 +1175,22 @@ def _human_card(model, duplicate_group=None, sid_source="injected"):
     }
 
 
+def test_status_human_groups_worktrees_under_their_repo(capsys):
+    # #31: a worktree session is demoted below the main threads into a
+    # per-repo section and tagged with its worktree name.
+    main = _human_card("", )
+    main["cwd"] = "/home/u/proj"
+    wt = _human_card("")
+    wt["pid"] = 99
+    wt["cwd"] = "/home/u/proj/.claude/worktrees/feature-x"
+    cli._print_status_human({"sessions": [wt, main]})  # worktree first on input
+    out = capsys.readouterr().out
+    # Main thread prints before the worktree section.
+    assert out.index("#42") < out.index("/home/u/proj · worktrees (1)")
+    assert out.index("/home/u/proj · worktrees (1)") < out.index("#99")
+    assert "[worktree:feature-x]" in out
+
+
 def test_status_human_shows_model_when_known(capsys):
     cli._print_status_human({"sessions": [_human_card("claude-opus-5")]})
     assert "claude-opus-5" in capsys.readouterr().out
@@ -1604,6 +1620,9 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
 
         def list_sessions(self):
             return set()  # nothing live -> the crashed entry is revived
+
+        def attached_sessions(self):
+            return set()  # nothing attached (#32)
 
         def new_detached_session(self, name, cwd, argv):
             pass
@@ -2077,12 +2096,14 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
         def kill_session(self, session_name):
             pass
 
+    opened = []
+
     class _FakeTab:
         def available(self):
             return True
 
         def open_tab(self, argv, cwd=None):
-            pass
+            opened.append((list(argv), cwd))
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
@@ -2100,9 +2121,13 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
     assert rc == 0
     with pytest.raises(KeyError):
         store.read(42)
+    # Relaunched through a shimmed interactive shell (#33), not bare claude —
+    # so the new window self-registers and crr keeps tracking it.
+    assert opened == [(["zsh", "-i", "-c", f"claude --resume {_SID}"], str(tmp_path))]
     out = capsys.readouterr().out
     assert "un-tmuxed" in out
-    assert "crr no longer manages it" in out
+    assert "crr still manages it" in out
+    assert "crr no longer manages it" not in out
 
 
 def test_untracked_view_reads_last_prompt_from_the_transcript(tmp_path, monkeypatch):
@@ -2298,6 +2323,32 @@ def test_discover_lists_untracked_transcripts(tmp_path, monkeypatch, capsys):
     assert _DISCOVER_SID[:8] in out
     assert "/home/u/proj" in out
     assert "a prompt" in out
+
+
+def test_discover_collapses_a_worktrees_fan_out_into_one_row(tmp_path, monkeypatch, capsys):
+    # #34: two untracked transcripts in one .claude/worktrees checkout fold
+    # into a single row (with a "+N more" note); a normal-cwd transcript
+    # beside them stays its own row.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    wt = "/home/u/proj/.claude/worktrees/feat"
+    wt_sids = ["aaaaaaaa-1111-4111-8111-111111111111",
+               "bbbbbbbb-2222-4222-8222-222222222222"]
+    for sid in wt_sids:
+        _write_discover_transcript(tmp_path / "home", wt, sid,
+                                   [_discover_user_rec("subagent run", cwd=wt)])
+    normal_sid = "cccccccc-3333-4333-8333-333333333333"
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj/scripts", normal_sid,
+                               [_discover_user_rec("a real conversation", cwd="/home/u/proj/scripts")])
+    rc = cli.main(["discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The two worktree transcripts collapsed: exactly ONE representative sid
+    # shows, and it announces the folded sibling.
+    assert sum(sid[:8] in out for sid in wt_sids) == 1
+    assert "(+1 more in this worktree)" in out
+    # The non-worktree conversation is untouched.
+    assert normal_sid[:8] in out
 
 
 def test_discover_excludes_journaled_sessions(tmp_path, monkeypatch, capsys):
@@ -3901,11 +3952,13 @@ def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkey
     class FakeTmux:
         def available(self): return True
         def list_sessions(self): return {"crr-8a1b2c3d"}
+        def attached_sessions(self): return set()  # parked, not yet reopened
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
     assert cli.main(["status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["sessions"][0]["state"] == "parked"
+    assert payload["sessions"][0]["attached"] is False
 
 
 def test_status_json_declines_to_park_when_tmux_cannot_say(tmp_path, monkeypatch, capsys):
@@ -3924,6 +3977,7 @@ def test_status_json_declines_to_park_when_tmux_cannot_say(tmp_path, monkeypatch
     class UnknownTmux:
         def available(self): return True
         def list_sessions(self): return None
+        def attached_sessions(self): return None
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: UnknownTmux())
     assert cli.main(["status", "--json"]) == 0
@@ -3966,6 +4020,7 @@ def test_the_web_provider_reports_parked_for_a_tmux_restored_session(tmp_path, m
     class FakeTmux:
         def available(self): return True
         def list_sessions(self): return set(live["names"])
+        def attached_sessions(self): return set()
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
     captured = {}
@@ -4018,6 +4073,7 @@ def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatc
     class FakeTmux:
         def available(self): return True
         def list_sessions(self): return {"crr-8a1b2c3d"}
+        def attached_sessions(self): return set()  # parked, not reopened
 
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
     assert cli.main(["status"]) == 0
