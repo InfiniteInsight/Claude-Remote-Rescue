@@ -52,6 +52,7 @@ from crr.core import deploy
 from crr.core import harden
 from crr.core import power
 from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
+from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
@@ -3515,54 +3516,45 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     n = len(found)
     tab, tabs_expected = _tab_spawner(config)
+
+    if not tabs_expected:
+        # Genuinely headless (no GUI tabs on this host); we have a tty (this
+        # function is tty-gated up top). Offer the tmux-window path (#headless).
+        if not _rescue_prompt_yes(config, n):
+            print("not now — 'crr rescued' lists them")
+            return 0
+        sessions = [(e["tmux_session"], _win_label(e["cwd"])) for e in found]
+        _terminal_reopen(sessions, config, sd)  # may exec (replaces this process)
+        return 0
+
     if tab is None or not tab.available():
+        # Host HAS a concept of tabs but none is available right now (e.g. a
+        # WSL host with a dead interop handler) — keep the honest notice.
         print(f"crr: {n} conversation(s) restored after the last reboot — "
               "'crr rescued' lists them; attach with: tmux attach -t <name>")
         return 0
 
-    print(f"crr: {n} conversation(s) restored after the last reboot. "
-          "Open them in terminal tabs? [Y/n] ", end="", flush=True)
-    timeout = config.get("rescue_prompt_timeout_seconds")
-    try:
-        ready, _, _ = select.select([sys.stdin], [], [], timeout)
-        line = sys.stdin.readline() if ready else ""  # "" on timeout, or EOF with stdin closed
-    except KeyboardInterrupt:
-        # Ctrl-C at an unattended-or-not prompt must decline like a
-        # timeout, not propagate (outer `except Exception` in
-        # _cmd_rescue_check doesn't catch KeyboardInterrupt — a bare
-        # widen there would silence the traceback). The claim above
-        # already happened before this prompt was printed, so there is
-        # no marker write left to skip here.
-        print()
+    if not _rescue_prompt_yes(config, n):
         print("not now — 'crr rescued' lists them")
         return 0
-    if not line:
-        print()  # nothing was typed/echoed by a terminal -> start the decline on its own line
-    answer = line.strip().lower() if line else None
-
-    if answer in ("", "y"):
-        probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
-        controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
-        flags = FlagStore(sd)
-        with mutation_lock(sd):
-            for e in found:
-                # reopen (NOT detmux): attach a tab AND keep the conversation
-                # tracked, so it stays on the dashboard and is rescued again
-                # after the next reboot (#30). Same op as the dashboard Reopen.
-                res = ops.reopen(
-                    JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
-                    boot, probe, e["pid"], _now(),
-                    grace=config.get("close_grace_seconds"),
-                    remote_control=config.get("remote_control"),
-                    tab_spawner=tab, tabs_expected=tabs_expected,
-                )
-                # All three shims invoke `crr rescue-check 2>/dev/null`, so
-                # stderr is silenced here — the user already consented (typed
-                # Y) and must see failures, not just successes. Both outcomes
-                # go to stdout unconditionally.
-                print(res.message)
-    else:  # 'n'/'N', any other input, timeout, or EOF -> decline
-        print("not now — 'crr rescued' lists them")
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+    flags = FlagStore(sd)
+    with mutation_lock(sd):
+        for e in found:
+            # reopen (NOT detmux): attach a tab AND keep the conversation
+            # tracked, so it stays on the dashboard and is rescued again after
+            # the next reboot (#30). Same op as the dashboard Reopen.
+            res = ops.reopen(
+                JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
+                boot, probe, e["pid"], _now(),
+                grace=config.get("close_grace_seconds"),
+                remote_control=config.get("remote_control"),
+                tab_spawner=tab, tabs_expected=tabs_expected,
+            )
+            # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
+            # and must see failures too, so both outcomes go to stdout.
+            print(res.message)
     return 0
 
 
@@ -4506,6 +4498,63 @@ def _run_commands(cmds: list[list[str]], label: str) -> bool:
             print(f"crr {label}: {shown} exited {result.returncode}", file=sys.stderr)
             ok = False
     return ok
+
+
+# Injected seam (like _run_commands): the ONLY place crr replaces its own
+# process. Tests monkeypatch cli._exec to a recorder — an un-patched exec here
+# would replace the pytest process.
+_exec = os.execvp
+
+
+def _win_label(cwd: str) -> str:
+    """A legible tmux window name for a conversation: its cwd basename."""
+    return os.path.basename(cwd.rstrip("/")) or cwd
+
+
+def _terminal_reopen(sessions: list[tuple[str, str]], config: cfg.Config, sd) -> None:
+    """Reopen the given (tmux_session, label) conversations into THIS terminal
+    on a headless host: link them into the current tmux session, or build and
+    attach the aggregate. May replace this process via `exec tmux attach`.
+
+    Runs the plan's tmux commands under the mutation lock, then RELEASES the
+    lock before exec — an exec inherits open fds, so execing while holding the
+    lock fd would keep the journal mutation lock held for the whole attach.
+    """
+    has_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    in_tmux = bool(os.environ.get("TMUX"))
+    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    current = tmux_spawner.current_session_name() if in_tmux else None
+    live = tmux_spawner.list_sessions() or set()  # None -> set(): aggregate-exists check
+    plan = terminal_reopen.plan_terminal_reopen(
+        sessions, in_tmux=in_tmux, has_tty=has_tty, current_session=current,
+        aggregate_exists=(terminal_reopen.AGGREGATE_NAME in live),
+    )
+    if plan.commands:
+        with mutation_lock(sd):
+            _run_commands([list(c) for c in plan.commands], "reopen")
+    if plan.message:
+        print(plan.message)
+    if plan.exec_argv:
+        _exec(plan.exec_argv[0], list(plan.exec_argv))  # replaces this process
+
+
+def _rescue_prompt_yes(config: cfg.Config, n: int) -> bool:
+    """Print the restore [Y/n] prompt and read the answer. True = open them.
+    Empty line (Enter) -> True; 'n', any other input, timeout, EOF, Ctrl-C ->
+    False. Shared by the GUI and headless branches of _rescue_check."""
+    print(f"crr: {n} conversation(s) restored after the last reboot. "
+          "Open them in terminal tabs? [Y/n] ", end="", flush=True)
+    timeout = config.get("rescue_prompt_timeout_seconds")
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        line = sys.stdin.readline() if ready else ""
+    except KeyboardInterrupt:
+        print()
+        return False
+    if not line:
+        print()
+    answer = line.strip().lower() if line else None
+    return answer in ("", "y")
 
 
 # ---------------------------------------------------------------------------
