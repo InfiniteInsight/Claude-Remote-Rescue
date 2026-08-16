@@ -1,9 +1,9 @@
 """Rescued-session selection + the per-boot restore-prompt marker.
 
-A "rescued" session is a journal entry from a PREVIOUS boot whose
-conversation the reviver parked in a currently-live tmux session: crashed
-shell, revived claude, awaiting re-homing. The restore prompt (Phase 3 UX)
-offers exactly that set once per boot.
+A "rescued" session is a conversation the reviver parked in a live tmux
+session that the user has not opened in a tab yet — parked-and-unattached
+(#32's attached signal). The restore prompt (Phase 3 UX) offers exactly
+that set once per boot.
 
 The marker is an opaque per-boot file (like the relaunch flags — no
 versioned contract): its existence means "this boot's prompt was already
@@ -33,15 +33,27 @@ _MARKER_PREFIX = "rescue-prompted-"
 
 def rescued_sessions(
     entries: Iterable[Mapping[str, Any]],
-    current_boot: str,
     live_tmux: set[str],
+    attached_tmux: set[str],
 ) -> list[dict]:
+    """Conversations the reviver restored and the user has NOT opened yet:
+    parked in a live tmux session (``tmux_session in live_tmux``) with no
+    client attached (``tmux_session not in attached_tmux``).
+
+    boot_id is intentionally not a factor. The reviver re-keys a restored
+    entry onto its live tmux pane and stamps the current boot (#58), so an
+    earlier ``boot_id != current_boot`` predicate excluded exactly the
+    conversations this prompt exists to offer. "Not attached" — the same
+    signal the dashboard's ``attached`` badge uses (#32) — is what actually
+    distinguishes a restored-but-unopened conversation from one the user is
+    already sitting in.
+    """
     out = [
         dict(e) for e in entries
         if e.get("claude") is not None
-        and e["boot_id"] != current_boot
         and e.get("tmux_session")
         and e["tmux_session"] in live_tmux
+        and e["tmux_session"] not in attached_tmux
     ]
     return sorted(out, key=lambda e: e["pid"])
 

@@ -2540,6 +2540,9 @@ class _FakeTmuxRescued:
     def list_sessions(self):
         return {"crr-8a1b2c3d"}
 
+    def attached_sessions(self):
+        return set()  # nothing opened yet -> the parked session is offered
+
 
 def test_rescued_lists_prior_boot_parked_sessions(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
@@ -2580,6 +2583,9 @@ class _FakeTmuxUnknown:
         return True
 
     def list_sessions(self):
+        return None
+
+    def attached_sessions(self):
         return None
 
 

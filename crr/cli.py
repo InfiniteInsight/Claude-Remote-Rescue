@@ -3405,20 +3405,20 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
         return 2
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
-    if live is None:
-        # F16 tri-state: an unconfirmed tmux state must never be read as
-        # "definitely rescued" — degrade to the same "no rescued sessions"
-        # an unavailable tmux already produces above, never a guess. Say so
-        # on stderr (mirrors the sibling journal-problems pattern below) so
-        # the degrade isn't silent undercounting.
+    attached = tmux_spawner.attached_sessions() if tmux_spawner.available() else set()
+    if live is None or attached is None:
+        # F16 tri-state: an unconfirmed live OR attached state must never be
+        # read as "definitely rescued" — degrade to the same "no rescued
+        # sessions" an unavailable tmux produces, never a guess. Say so on
+        # stderr (mirrors the sibling journal-problems pattern below).
         print(
             "crr rescued: tmux state unknown — rescued sessions may be undercounted",
             file=sys.stderr,
         )
-        live = set()
+        live, attached = set(), set()
     store = JournalStore(state_dir.state_dir())
     scan = store.scan()
-    found = rescue.rescued_sessions(scan.entries, boot.current(), live)
+    found = rescue.rescued_sessions(scan.entries, live, attached)
     # Corrupt files are surfaced on stderr, never silently dropped (mirrors
     # _cmd_status/_cmd_revive/_cmd_gc).
     for name, reason in scan.problems:
@@ -3487,19 +3487,19 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
-    if live is None:
+    attached = tmux_spawner.attached_sessions() if tmux_spawner.available() else set()
+    if live is None or attached is None:
         # F16 tri-state: never prompt on an unconfirmed tmux state. Same
-        # stderr note as `crr rescued`'s sibling degrade: the interactive
-        # shims redirect this command's stderr to /dev/null on shell
-        # startup, so this stays quiet there; a manual `crr rescue-check`
-        # still sees it.
+        # stderr note as `crr rescued`; the interactive shims redirect this
+        # command's stderr to /dev/null on shell startup, so it stays quiet
+        # there — a manual `crr rescue-check` still sees it.
         print(
             "crr rescue-check: tmux state unknown — rescued sessions may be undercounted",
             file=sys.stderr,
         )
-        live = set()
+        live, attached = set(), set()
     store = JournalStore(sd)
-    found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
+    found = rescue.rescued_sessions(store.scan().entries, live, attached)
     if not found:
         return 0
 
