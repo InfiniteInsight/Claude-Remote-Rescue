@@ -3395,8 +3395,9 @@ def _cmd_hook(args: argparse.Namespace) -> int:
 
 
 def _cmd_rescued(_args: argparse.Namespace) -> int:
-    """List prior-boot conversations the reviver parked in live tmux,
-    awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
+    """List conversations the reviver restored into a live tmux session that
+    you have not opened in a tab yet — parked-and-unattached (Phase-3
+    restore-prompt UX; see crr.core.rescue)."""
     config = _load_config()
     try:
         boot = boot_identity.detect()
@@ -3435,9 +3436,11 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
 
 def _cmd_rescue_check(args: argparse.Namespace) -> int:
     """[shim] Once per boot, on an interactive shell's first start, offer
-    to re-home conversations `crr.core.rescue` found parked from a
-    previous boot's crash into visible terminal tabs (Phase-3
-    restore-prompt UX). Silent when there's nothing to offer, when this
+    to open into visible terminal tabs the conversations the reviver
+    restored into live tmux sessions that you have not opened yet —
+    parked-and-unattached (`crr.core.rescue`; Phase-3 restore-prompt UX).
+    On [Y] each is reopened (a tab, and it STAYS tracked — not untracked).
+    Silent when there's nothing to offer, when this
     boot's marker already exists, or when stdin/stdout aren't a tty (the
     marker is deliberately NOT written in that case, so a later
     interactive shell in the same boot still gets offered). A timeout —
