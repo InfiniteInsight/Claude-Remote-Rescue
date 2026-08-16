@@ -3395,8 +3395,9 @@ def _cmd_hook(args: argparse.Namespace) -> int:
 
 
 def _cmd_rescued(_args: argparse.Namespace) -> int:
-    """List prior-boot conversations the reviver parked in live tmux,
-    awaiting re-homing (Phase-3 restore-prompt UX; see crr.core.rescue)."""
+    """List conversations the reviver restored into a live tmux session that
+    you have not opened in a tab yet — parked-and-unattached (Phase-3
+    restore-prompt UX; see crr.core.rescue)."""
     config = _load_config()
     try:
         boot = boot_identity.detect()
@@ -3405,20 +3406,20 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
         return 2
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
-    if live is None:
-        # F16 tri-state: an unconfirmed tmux state must never be read as
-        # "definitely rescued" — degrade to the same "no rescued sessions"
-        # an unavailable tmux already produces above, never a guess. Say so
-        # on stderr (mirrors the sibling journal-problems pattern below) so
-        # the degrade isn't silent undercounting.
+    attached = tmux_spawner.attached_sessions() if tmux_spawner.available() else set()
+    if live is None or attached is None:
+        # F16 tri-state: an unconfirmed live OR attached state must never be
+        # read as "definitely rescued" — degrade to the same "no rescued
+        # sessions" an unavailable tmux produces, never a guess. Say so on
+        # stderr (mirrors the sibling journal-problems pattern below).
         print(
             "crr rescued: tmux state unknown — rescued sessions may be undercounted",
             file=sys.stderr,
         )
-        live = set()
+        live, attached = set(), set()
     store = JournalStore(state_dir.state_dir())
     scan = store.scan()
-    found = rescue.rescued_sessions(scan.entries, boot.current(), live)
+    found = rescue.rescued_sessions(scan.entries, live, attached)
     # Corrupt files are surfaced on stderr, never silently dropped (mirrors
     # _cmd_status/_cmd_revive/_cmd_gc).
     for name, reason in scan.problems:
@@ -3435,9 +3436,11 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
 
 def _cmd_rescue_check(args: argparse.Namespace) -> int:
     """[shim] Once per boot, on an interactive shell's first start, offer
-    to re-home conversations `crr.core.rescue` found parked from a
-    previous boot's crash into visible terminal tabs (Phase-3
-    restore-prompt UX). Silent when there's nothing to offer, when this
+    to open into visible terminal tabs the conversations the reviver
+    restored into live tmux sessions that you have not opened yet —
+    parked-and-unattached (`crr.core.rescue`; Phase-3 restore-prompt UX).
+    On [Y] each is reopened (a tab, and it STAYS tracked — not untracked).
+    Silent when there's nothing to offer, when this
     boot's marker already exists, or when stdin/stdout aren't a tty (the
     marker is deliberately NOT written in that case, so a later
     interactive shell in the same boot still gets offered). A timeout —
@@ -3487,19 +3490,19 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
-    if live is None:
+    attached = tmux_spawner.attached_sessions() if tmux_spawner.available() else set()
+    if live is None or attached is None:
         # F16 tri-state: never prompt on an unconfirmed tmux state. Same
-        # stderr note as `crr rescued`'s sibling degrade: the interactive
-        # shims redirect this command's stderr to /dev/null on shell
-        # startup, so this stays quiet there; a manual `crr rescue-check`
-        # still sees it.
+        # stderr note as `crr rescued`; the interactive shims redirect this
+        # command's stderr to /dev/null on shell startup, so it stays quiet
+        # there — a manual `crr rescue-check` still sees it.
         print(
             "crr rescue-check: tmux state unknown — rescued sessions may be undercounted",
             file=sys.stderr,
         )
-        live = set()
+        live, attached = set(), set()
     store = JournalStore(sd)
-    found = rescue.rescued_sessions(store.scan().entries, boot_id, live)
+    found = rescue.rescued_sessions(store.scan().entries, live, attached)
     if not found:
         return 0
 
@@ -3511,13 +3514,13 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         return 0
 
     n = len(found)
-    tab, _tabs_expected = _tab_spawner(config)
+    tab, tabs_expected = _tab_spawner(config)
     if tab is None or not tab.available():
-        print(f"crr: {n} conversation(s) rescued from the last reboot — "
+        print(f"crr: {n} conversation(s) restored after the last reboot — "
               "'crr rescued' lists them; attach with: tmux attach -t <name>")
         return 0
 
-    print(f"crr: {n} conversation(s) rescued from the last reboot. "
+    print(f"crr: {n} conversation(s) restored after the last reboot. "
           "Open them in terminal tabs? [Y/n] ", end="", flush=True)
     timeout = config.get("rescue_prompt_timeout_seconds")
     try:
@@ -3539,10 +3542,20 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     if answer in ("", "y"):
         probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+        controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+        flags = FlagStore(sd)
         with mutation_lock(sd):
             for e in found:
-                res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe,
-                                 e["pid"], _now(), tab_spawner=tab)
+                # reopen (NOT detmux): attach a tab AND keep the conversation
+                # tracked, so it stays on the dashboard and is rescued again
+                # after the next reboot (#30). Same op as the dashboard Reopen.
+                res = ops.reopen(
+                    JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
+                    boot, probe, e["pid"], _now(),
+                    grace=config.get("close_grace_seconds"),
+                    remote_control=config.get("remote_control"),
+                    tab_spawner=tab, tabs_expected=tabs_expected,
+                )
                 # All three shims invoke `crr rescue-check 2>/dev/null`, so
                 # stderr is silenced here — the user already consented (typed
                 # Y) and must see failures, not just successes. Both outcomes
