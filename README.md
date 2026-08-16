@@ -90,6 +90,30 @@ verdict — out-of-memory, kernel panic, unexpected shutdown, clean reboot, or
 
 Requires Python ≥ 3.11 and `tmux`. Zero runtime dependencies otherwise.
 
+### One-shot bootstrap (Linux, macOS, WSL)
+
+The fastest path on a supported OS. It detects the platform, checks the
+prerequisites (offering to install any that are missing — it never
+force-installs a system package), installs crr with pipx, drops the shell shim
+into the right rc file, installs the platform services, then sets up
+Tailscale — the way you reach the dashboard from your phone: it offers to
+install tailscale if it's missing, walks you through the one-time tailnet
+sign-up (waiting for you to finish it in the browser), and offers to expose the
+dashboard on your tailnet, explained in full and only after an explicit yes.
+Idempotent: safe to re-run to refresh an install.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InfiniteInsight/Claude-Remote-Rescue/main/bootstrap.sh | bash
+# or, from a checkout (installs that checkout):
+./bootstrap.sh
+```
+
+Flags: `-y` (unattended), `--dry-run` (show, don't change),
+`--shell bash|zsh|fish`, `--tailscale` / `--no-tailscale`,
+`--from-local` / `--from-git`.
+
+### Manual install
+
 > **Not on PyPI yet** (still pre-release). Install from source until the first
 > published release:
 > ```sh
