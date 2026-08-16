@@ -121,6 +121,19 @@
 <section id="install">
   <h2>Install (headless Linux)</h2>
   <p>Requires Python &ge; 3.11 and <code>tmux</code>. Zero runtime dependencies otherwise.</p>
+  <p>
+    <strong>One-shot bootstrap (Linux, macOS, WSL):</strong> detects the
+    platform, checks prerequisites (offering to install any that are missing —
+    never force-installing), installs crr with pipx, drops the shell shim into
+    your rc file, installs the platform services, then sets up Tailscale — the
+    way you reach the dashboard from your phone: it offers to install tailscale
+    if it's missing, walks you through the one-time tailnet sign-up, and offers
+    to expose the dashboard on your tailnet (explained, and only after a yes).
+    Idempotent — safe to re-run.
+  </p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/InfiniteInsight/Claude-Remote-Rescue/main/bootstrap.sh | bash
+# or, from a checkout (installs that checkout):
+./bootstrap.sh</code></pre>
   <pre><code>pipx install claude-remote-rescue      # or: pip install --user .</code></pre>
   <ol>
     <li>
