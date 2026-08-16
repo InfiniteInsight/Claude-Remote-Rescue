@@ -1976,6 +1976,65 @@ def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
     assert cli.main(["reopen", "--pid", "42"]) != 0  # nothing to resume
 
 
+def test_reopen_headless_drops_you_into_tmux(tmp_path, monkeypatch, capsys):
+    # On a headless host, `crr reopen <pid>` reopens the parked session AND
+    # runs the terminal primitive on it (attach if not in tmux) rather than
+    # just printing a message.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)  # available(), list_sessions()
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.delenv("TMUX", raising=False)  # not in tmux
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/home/u/alpha", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d"))
+
+    # ops.reopen succeeds (parked entry stays tracked); stub it to avoid real tmux.
+    monkeypatch.setattr(cli.ops, "reopen",
+                        lambda *a, **k: SimpleNamespace(ok=True, degraded=False,
+                                                        message="reopened 42 as crr-8a1b2c3d"))
+    execed = []
+    monkeypatch.setattr(cli, "_exec", lambda file, argv: execed.append((file, argv)))
+
+    rc = cli.main(["reopen", "--pid", "42"])
+    assert rc == 0
+    assert execed == [("tmux", ["tmux", "attach", "-t", "crr-8a1b2c3d"])]
+
+
+def test_reopen_headless_ghost_still_drops_you_in(tmp_path, monkeypatch, capsys):
+    # A GHOST reopen delists the entry (store.remove) before returning ok.
+    # The drop-in must still fire — the name is captured BEFORE reopen.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/home/u/alpha", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d"))
+
+    def fake_reopen(*a, **k):
+        JournalStore(tmp_path).remove(42)  # ghost delist
+        return SimpleNamespace(ok=True, degraded=False,
+                               message="ghost-restored 42 as crr-8a1b2c3d")
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+    execed = []
+    monkeypatch.setattr(cli, "_exec", lambda file, argv: execed.append((file, argv)))
+
+    rc = cli.main(["reopen", "--pid", "42"])
+    assert rc == 0
+    assert execed == [("tmux", ["tmux", "attach", "-t", "crr-8a1b2c3d"])]
+
+
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="boot adapter")
 def test_kick_refuses_a_crashed_session(tmp_path, monkeypatch, capsys):
     # A crashed entry is refused BEFORE any signalling (classifier gate),
@@ -2685,18 +2744,24 @@ def test_rescue_check_silent_when_tmux_liveness_is_unknown(tmp_path, monkeypatch
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is False  # nothing claimed
 
 
-def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys):
+def test_rescue_check_headless_prompts_and_declines_once(tmp_path, monkeypatch, capsys):
+    # Superseded by #headless: a genuinely headless host (tabs_expected
+    # False) now PROMPTS like the GUI path instead of degrading straight to
+    # a notice (that notice remains, but only for the "tab concept exists
+    # but unavailable" branch — see test_rescue_check_prints_notice_when_
+    # tab_unavailable below). This still proves the once-per-boot claim
+    # applies on the headless path too.
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))  # timeout -> decline
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "2 conversation(s) restored after the last reboot" in out
-    assert "'crr rescued' lists them" in out
-    assert "tmux attach -t <name>" in out
+    assert "not now — 'crr rescued' lists them" in out
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
     rc2 = cli.main(["rescue-check"])
@@ -2722,6 +2787,31 @@ def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypat
     out, err = capsys.readouterr()
     assert rc == 0
     assert out == "" and err == ""
+
+
+def test_rescue_check_prints_notice_when_tab_unavailable(tmp_path, monkeypatch, capsys):
+    # tabs_expected True (host HAS a concept of tabs, e.g. WSL) but the
+    # spawner itself is unavailable right now (e.g. a dead interop handler)
+    # -> the honest notice, never a prompt. This is the one remaining
+    # notice-only outcome after #headless moved the tabs_expected-False
+    # branch onto the prompt+tmux path.
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return False
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 conversation(s) restored after the last reboot" in out
+    assert "'crr rescued' lists them" in out
+    assert "tmux attach -t <name>" in out
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
 def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, monkeypatch, capsys):
@@ -2956,6 +3046,78 @@ def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monke
     rc = cli.main(["rescue-check"])
     assert rc == 0
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_headless_in_tmux_links_windows_no_exec(tmp_path, monkeypatch, capsys):
+    # Headless (tabs_expected False) + inside tmux + [Y] -> link each restored
+    # session into the current tmux session; never exec.
+    _rescue_check_setup(monkeypatch, tmp_path, [
+        {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
+        {"pid": 43, "tmux_session": "crr-b", "cwd": "/home/u/beta"},
+    ])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setenv("TMUX", "sock,1,0")  # inside tmux
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
+
+    ran = []
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli, "_exec", lambda *a: (_ for _ in ()).throw(
+        AssertionError("must not exec when inside tmux")))
+
+    class _T(_FakeTmuxRescued):
+        def current_session_name(self): return "work"
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: _T())
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert ["tmux", "link-window", "-s", "crr-a", "-t", "work"] in ran
+    assert ["tmux", "link-window", "-s", "crr-b", "-t", "work"] in ran
+    assert "Ctrl-b w" in out
+
+
+def test_rescue_check_headless_not_in_tmux_execs_attach(tmp_path, monkeypatch, capsys):
+    # Headless + NOT in tmux + [Y], single restored -> exec `tmux attach`.
+    _rescue_check_setup(monkeypatch, tmp_path, [
+        {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
+    ])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.delenv("TMUX", raising=False)  # not in tmux
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+
+    execed = []
+    monkeypatch.setattr(cli, "_exec", lambda file, argv: execed.append((file, argv)))
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    assert execed == [("tmux", ["tmux", "attach", "-t", "crr-a"])]
+
+
+def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsys):
+    _rescue_check_setup(monkeypatch, tmp_path, [
+        {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
+    ])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
+    monkeypatch.setattr(sys.stdin, "readline", lambda: "n\n")
+    monkeypatch.setattr(cli, "_exec", lambda *a: (_ for _ in ()).throw(
+        AssertionError("decline must not exec")))
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not now" in out
 
 
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
