@@ -191,6 +191,11 @@ class TmuxSpawner(Protocol):
         must not lose bookkeeping on a failed kill catch this themselves."""
         ...
 
+    def current_session_name(self) -> str | None:
+        """The tmux session the calling process is in, or None if not in tmux
+        / undeterminable. Used to target link-window at the current session."""
+        ...
+
 
 class TabSpawnTimeout(Exception):
     """The spawn command did not finish in time — NOT proof no tab opened.

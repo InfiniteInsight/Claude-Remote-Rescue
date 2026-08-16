@@ -42,6 +42,10 @@ def _kill_session_cmd(name: str) -> list[str]:
     return ["tmux", "kill-session", "-t", name]
 
 
+def _current_session_cmd() -> list[str]:
+    return ["tmux", "display-message", "-p", "#S"]
+
+
 def _parse_sessions(stdout: str) -> set[str]:
     return {line for line in stdout.splitlines() if line}
 
@@ -153,3 +157,22 @@ class RealTmux:
             _kill_session_cmd(name),
             capture_output=True, text=True, timeout=self._timeout, check=True,
         )
+
+    def current_session_name(self) -> str | None:
+        """The name of the tmux session this process is in, or None.
+
+        Used only to target ``link-window`` at the caller's current session
+        when they run crr from inside tmux. None (not in tmux, or unreadable)
+        is not guessed at — the caller falls back to the aggregate path.
+        """
+        try:
+            result = subprocess.run(
+                _current_session_cmd(),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        name = result.stdout.strip()
+        return name or None

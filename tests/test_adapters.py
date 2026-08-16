@@ -169,6 +169,30 @@ class _Result:
         self.stderr = stderr
 
 
+def test_current_session_cmd_asks_tmux_for_the_session_name():
+    assert tmux._current_session_cmd() == ["tmux", "display-message", "-p", "#S"]
+
+
+def test_current_session_name_parses_the_name(monkeypatch):
+    monkeypatch.setattr(tmux.subprocess, "run",
+                        lambda *a, **k: _Result(0, stdout="work\n"))
+    assert tmux.RealTmux(timeout_seconds=5).current_session_name() == "work"
+
+
+def test_current_session_name_is_none_when_not_in_tmux(monkeypatch):
+    # `display-message` outside tmux exits nonzero ("no server"/"no current...").
+    monkeypatch.setattr(tmux.subprocess, "run",
+                        lambda *a, **k: _Result(1, stderr="no server running\n"))
+    assert tmux.RealTmux(timeout_seconds=5).current_session_name() is None
+
+
+def test_current_session_name_is_none_on_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="tmux", timeout=5)
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    assert tmux.RealTmux(timeout_seconds=5).current_session_name() is None
+
+
 def test_list_sessions_returns_none_on_timeout(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="tmux", timeout=5)
