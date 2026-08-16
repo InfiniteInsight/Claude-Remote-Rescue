@@ -2632,7 +2632,7 @@ def test_rescue_check_silent_when_marker_exists(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     cli.rescue.claim_prompt(tmp_path, "current-boot")  # already prompted this boot
     calls = []
-    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(cli.ops, "reopen", lambda *a, **k: calls.append(a))
 
     rc = cli.main(["rescue-check"])
     out, err = capsys.readouterr()
@@ -2694,7 +2694,7 @@ def test_rescue_check_headless_prints_notice_once(tmp_path, monkeypatch, capsys)
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "2 conversation(s) rescued from the last reboot" in out
+    assert "2 conversation(s) restored after the last reboot" in out
     assert "'crr rescued' lists them" in out
     assert "tmux attach -t <name>" in out
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
@@ -2724,7 +2724,10 @@ def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypat
     assert out == "" and err == ""
 
 
-def test_rescue_check_yes_opens_tabs_and_marks(tmp_path, monkeypatch, capsys):
+def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, monkeypatch, capsys):
+    # [Y] must REOPEN each restored conversation (attach a tab, keep it
+    # tracked) — NOT detmux, which untracks. So the conversations stay on
+    # the dashboard and survive the next reboot too (#30 / #33 principle).
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -2739,24 +2742,29 @@ def test_rescue_check_yes_opens_tabs_and_marks(tmp_path, monkeypatch, capsys):
 
     calls = []
 
-    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
         calls.append(pid)
-        return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
+        return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid} as crr-x")
 
-    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+    # If the old detmux path is still wired, this stays untouched and the
+    # assertion on `calls` fails — the discriminator between the two ops.
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+    monkeypatch.setattr(cli.ops, "detmux",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reopen, not detmux")))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
     assert rc == 0
     assert calls == [42, 43]
-    assert "#42 de-tmuxed" in out and "#43 de-tmuxed" in out
+    assert "reopened 42" in out and "reopened 43" in out
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
 def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch, capsys):
     """All three shims invoke `crr rescue-check 2>/dev/null`, so anything
     written to stderr from this consent path is thrown away — a user who
-    just typed 'y' would never see a detmux failure. Both success and
+    just typed 'y' would never see a reopen failure. Both success and
     failure messages from the post-consent loop must land on stdout."""
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
@@ -2770,12 +2778,13 @@ def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
-    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
         if pid == 42:
-            return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
-        return SimpleNamespace(ok=False, message=f"crr: #{pid} de-tmux failed")
+            return SimpleNamespace(ok=True, degraded=False, message=f"crr: #{pid} de-tmuxed")
+        return SimpleNamespace(ok=False, degraded=False, message=f"crr: #{pid} de-tmux failed")
 
-    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
 
     rc = cli.main(["rescue-check"])
     out, err = capsys.readouterr()
@@ -2805,11 +2814,12 @@ def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
 
     calls = []
 
-    def fake_detmux(store, archive, tmux_spawner, boot, probe, pid, now, tab_spawner=None):
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
         calls.append(pid)
-        return SimpleNamespace(ok=True, message=f"crr: #{pid} de-tmuxed")
+        return SimpleNamespace(ok=True, degraded=False, message=f"crr: #{pid} de-tmuxed")
 
-    monkeypatch.setattr(cli.ops, "detmux", fake_detmux)
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
 
     rc = cli.main(["rescue-check"])
     assert rc == 0
@@ -2834,7 +2844,7 @@ def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "readline", lambda: "")  # EOF
 
     calls = []
-    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(cli.ops, "reopen", lambda *a, **k: calls.append(1))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
@@ -2857,7 +2867,7 @@ def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))
 
     calls = []
-    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(cli.ops, "reopen", lambda *a, **k: calls.append(1))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
@@ -2891,7 +2901,7 @@ def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(cli.select, "select", _raise_keyboard_interrupt)
 
     calls = []
-    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(cli.ops, "reopen", lambda *a, **k: calls.append(1))
 
     rc = cli.main(["rescue-check"])  # must not raise
     out = capsys.readouterr().out
@@ -2913,7 +2923,7 @@ def test_rescue_check_loser_of_race_is_silent(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
 
     calls = []
-    monkeypatch.setattr(cli.ops, "detmux", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(cli.ops, "reopen", lambda *a, **k: calls.append(1))
 
     rc = cli.main(["rescue-check"])
     out, err = capsys.readouterr()

@@ -3511,13 +3511,13 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         return 0
 
     n = len(found)
-    tab, _tabs_expected = _tab_spawner(config)
+    tab, tabs_expected = _tab_spawner(config)
     if tab is None or not tab.available():
-        print(f"crr: {n} conversation(s) rescued from the last reboot — "
+        print(f"crr: {n} conversation(s) restored after the last reboot — "
               "'crr rescued' lists them; attach with: tmux attach -t <name>")
         return 0
 
-    print(f"crr: {n} conversation(s) rescued from the last reboot. "
+    print(f"crr: {n} conversation(s) restored after the last reboot. "
           "Open them in terminal tabs? [Y/n] ", end="", flush=True)
     timeout = config.get("rescue_prompt_timeout_seconds")
     try:
@@ -3539,10 +3539,20 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
     if answer in ("", "y"):
         probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+        controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
+        flags = FlagStore(sd)
         with mutation_lock(sd):
             for e in found:
-                res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe,
-                                 e["pid"], _now(), tab_spawner=tab)
+                # reopen (NOT detmux): attach a tab AND keep the conversation
+                # tracked, so it stays on the dashboard and is rescued again
+                # after the next reboot (#30). Same op as the dashboard Reopen.
+                res = ops.reopen(
+                    JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
+                    boot, probe, e["pid"], _now(),
+                    grace=config.get("close_grace_seconds"),
+                    remote_control=config.get("remote_control"),
+                    tab_spawner=tab, tabs_expected=tabs_expected,
+                )
                 # All three shims invoke `crr rescue-check 2>/dev/null`, so
                 # stderr is silenced here — the user already consented (typed
                 # Y) and must see failures, not just successes. Both outcomes
