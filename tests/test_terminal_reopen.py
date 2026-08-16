@@ -19,12 +19,19 @@ def test_in_tmux_links_each_into_the_current_session_no_exec():
         in_tmux=True, has_tty=True, current_session="work")
     assert p.exec_argv is None
     assert p.commands == (
-        ("tmux", "rename-window", "-t", "crr-a:0", "alpha"),
-        ("tmux", "link-window", "-s", "crr-a:0", "-t", "work"),
-        ("tmux", "rename-window", "-t", "crr-b:0", "beta"),
-        ("tmux", "link-window", "-s", "crr-b:0", "-t", "work"),
+        ("tmux", "rename-window", "-t", "crr-a", "alpha"),
+        ("tmux", "link-window", "-s", "crr-a", "-t", "work"),
+        ("tmux", "rename-window", "-t", "crr-b", "beta"),
+        ("tmux", "link-window", "-s", "crr-b", "-t", "work"),
     )
     assert "Ctrl-b w" in p.message
+    # Regression guard: source targets are by session name only, so they
+    # resolve to the session's single window at any tmux base-index.
+    assert all(
+        ":0" not in a
+        for cmd in p.commands if cmd[1] in ("rename-window", "link-window")
+        for a in cmd
+    )
 
 
 def test_not_in_tmux_single_attaches_directly_no_aggregate():
@@ -40,10 +47,10 @@ def test_not_in_tmux_multi_builds_aggregate_then_execs_attach():
         in_tmux=False, has_tty=True, current_session=None, aggregate_exists=False)
     assert p.commands == (
         ("tmux", "new-session", "-d", "-s", "crr-restored"),
-        ("tmux", "rename-window", "-t", "crr-a:0", "alpha"),
-        ("tmux", "link-window", "-s", "crr-a:0", "-t", "crr-restored"),
-        ("tmux", "rename-window", "-t", "crr-b:0", "beta"),
-        ("tmux", "link-window", "-s", "crr-b:0", "-t", "crr-restored"),
+        ("tmux", "rename-window", "-t", "crr-a", "alpha"),
+        ("tmux", "link-window", "-s", "crr-a", "-t", "crr-restored"),
+        ("tmux", "rename-window", "-t", "crr-b", "beta"),
+        ("tmux", "link-window", "-s", "crr-b", "-t", "crr-restored"),
         ("tmux", "kill-window", "-t", "crr-restored:0"),
     )
     assert p.exec_argv == ("tmux", "attach", "-t", "crr-restored")

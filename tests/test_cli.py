@@ -2006,6 +2006,35 @@ def test_reopen_headless_drops_you_into_tmux(tmp_path, monkeypatch, capsys):
     assert execed == [("tmux", ["tmux", "attach", "-t", "crr-8a1b2c3d"])]
 
 
+def test_reopen_headless_ghost_still_drops_you_in(tmp_path, monkeypatch, capsys):
+    # A GHOST reopen delists the entry (store.remove) before returning ok.
+    # The drop-in must still fire — the name is captured BEFORE reopen.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/home/u/alpha", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d"))
+
+    def fake_reopen(*a, **k):
+        JournalStore(tmp_path).remove(42)  # ghost delist
+        return SimpleNamespace(ok=True, degraded=False,
+                               message="ghost-restored 42 as crr-8a1b2c3d")
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+    execed = []
+    monkeypatch.setattr(cli, "_exec", lambda file, argv: execed.append((file, argv)))
+
+    rc = cli.main(["reopen", "--pid", "42"])
+    assert rc == 0
+    assert execed == [("tmux", ["tmux", "attach", "-t", "crr-8a1b2c3d"])]
+
+
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="boot adapter")
 def test_kick_refuses_a_crashed_session(tmp_path, monkeypatch, capsys):
     # A crashed entry is refused BEFORE any signalling (classifier gate),
@@ -3045,8 +3074,8 @@ def test_rescue_check_headless_in_tmux_links_windows_no_exec(tmp_path, monkeypat
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert ["tmux", "link-window", "-s", "crr-a:0", "-t", "work"] in ran
-    assert ["tmux", "link-window", "-s", "crr-b:0", "-t", "work"] in ran
+    assert ["tmux", "link-window", "-s", "crr-a", "-t", "work"] in ran
+    assert ["tmux", "link-window", "-s", "crr-b", "-t", "work"] in ran
     assert "Ctrl-b w" in out
 
 

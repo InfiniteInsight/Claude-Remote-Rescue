@@ -53,8 +53,14 @@ def plan_terminal_reopen(
         for name, label in sessions:
             # Rename the SOURCE window (shared, so the name shows everywhere it
             # is linked, and the target is unambiguous without result indices).
-            out.append(("tmux", "rename-window", "-t", f"{name}:0", label))
-            out.append(("tmux", "link-window", "-s", f"{name}:0", "-t", dst))
+            # Targeted by SESSION NAME ONLY (no ":0") — each crr-<sid> session
+            # has exactly one window, created without a forced index, so it
+            # lands wherever the user's tmux base-index puts it (crr never
+            # sets base-index). Appending ":0" would miss under a non-default
+            # base-index (e.g. `set -g base-index 1`); the bare name always
+            # resolves to that single window regardless.
+            out.append(("tmux", "rename-window", "-t", name, label))
+            out.append(("tmux", "link-window", "-s", name, "-t", dst))
         return out
 
     if in_tmux:
@@ -81,7 +87,10 @@ def plan_terminal_reopen(
     cmds.extend(rename_and_link(AGGREGATE_NAME))
     # Drop the placeholder shell new-session created at the default base-index
     # (0 for tmux's default). A non-default base-index leaves a harmless spare
-    # window; _run_commands swallows the kill-window miss.
+    # window; _run_commands swallows the kill-window miss. This can NEVER hit
+    # a real conversation window: the placeholder is created first (at the
+    # base-index), and conversation windows are only linked in AFTER, landing
+    # at higher indices.
     cmds.append(("tmux", "kill-window", "-t", f"{AGGREGATE_NAME}:0"))
     return TerminalReopenPlan(
         tuple(cmds), tuple(attach_argv(AGGREGATE_NAME)),

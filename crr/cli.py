@@ -2663,6 +2663,18 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     flags = FlagStore(sd)
     spawner, tabs_expected = _tab_spawner(config)
+    # Capture the target session name + cwd BEFORE reopen: a GHOST reopen
+    # archives + delists the entry (ops._reopen_ghost -> store.remove), so
+    # reading it back by pid afterward would miss it and skip the drop-in.
+    try:
+        _pre = JournalStore(sd).read(args.pid)
+        reopen_name = reviver.resolved_session_name(_pre)
+        reopen_cwd = _pre["cwd"]
+    except (KeyError, contracts.ContractError, TypeError):
+        # TypeError: a valid-but-claude-less, tmux_session-less entry (a
+        # freshly registered shell) has no session name to resolve yet —
+        # ops.reopen will refuse it below anyway, so no drop-in is expected.
+        reopen_name = reopen_cwd = None
     with mutation_lock(sd):
         res = ops.reopen(JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
                          boot, probe, args.pid, _now(),
@@ -2670,17 +2682,11 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
                          remote_control=config.get("remote_control"),
                          tab_spawner=spawner, tabs_expected=tabs_expected)
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
-    if res.ok and not tabs_expected:
+    if res.ok and not tabs_expected and reopen_name:
         # Headless host: no GUI tab was possible. Drop the user into the now-
         # parked conversation via tmux (attach, or link into the current
         # session) instead of leaving it merely alive-but-not-in-front-of-them.
-        try:
-            entry = JournalStore(sd).read(args.pid)
-        except (KeyError, contracts.ContractError):
-            entry = None
-        if entry and entry.get("tmux_session"):
-            _terminal_reopen(
-                [(entry["tmux_session"], _win_label(entry["cwd"]))], config, sd)
+        _terminal_reopen([(reopen_name, _win_label(reopen_cwd))], config, sd)
     elif res.degraded:
         # A tabs-capable host where the tab never appeared — the warning is
         # what a human needs (unchanged).
