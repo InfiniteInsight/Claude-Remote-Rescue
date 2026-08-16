@@ -2670,10 +2670,20 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
                          remote_control=config.get("remote_control"),
                          tab_spawner=spawner, tabs_expected=tabs_expected)
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
-    if res.degraded:
-        # Exit 0 stands: the session IS revived, and scripted callers should
-        # not start treating a live session as a failure. The warning is what
-        # a human needs — the tab they asked for never appeared.
+    if res.ok and not tabs_expected:
+        # Headless host: no GUI tab was possible. Drop the user into the now-
+        # parked conversation via tmux (attach, or link into the current
+        # session) instead of leaving it merely alive-but-not-in-front-of-them.
+        try:
+            entry = JournalStore(sd).read(args.pid)
+        except (KeyError, contracts.ContractError):
+            entry = None
+        if entry and entry.get("tmux_session"):
+            _terminal_reopen(
+                [(entry["tmux_session"], _win_label(entry["cwd"]))], config, sd)
+    elif res.degraded:
+        # A tabs-capable host where the tab never appeared — the warning is
+        # what a human needs (unchanged).
         print("crr reopen: WARNING — no tab opened; the session is running but not in front of you",
               file=sys.stderr)
     return 0 if res.ok else 2

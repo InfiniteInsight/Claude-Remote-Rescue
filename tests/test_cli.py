@@ -1976,6 +1976,36 @@ def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
     assert cli.main(["reopen", "--pid", "42"]) != 0  # nothing to resume
 
 
+def test_reopen_headless_drops_you_into_tmux(tmp_path, monkeypatch, capsys):
+    # On a headless host, `crr reopen <pid>` reopens the parked session AND
+    # runs the terminal primitive on it (attach if not in tmux) rather than
+    # just printing a message.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)  # available(), list_sessions()
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.delenv("TMUX", raising=False)  # not in tmux
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    store = JournalStore(tmp_path)
+    store.write(new_entry(
+        pid=42, cwd="/home/u/alpha", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid), tmux_session="crr-8a1b2c3d"))
+
+    # ops.reopen succeeds (parked entry stays tracked); stub it to avoid real tmux.
+    monkeypatch.setattr(cli.ops, "reopen",
+                        lambda *a, **k: SimpleNamespace(ok=True, degraded=False,
+                                                        message="reopened 42 as crr-8a1b2c3d"))
+    execed = []
+    monkeypatch.setattr(cli, "_exec", lambda file, argv: execed.append((file, argv)))
+
+    rc = cli.main(["reopen", "--pid", "42"])
+    assert rc == 0
+    assert execed == [("tmux", ["tmux", "attach", "-t", "crr-8a1b2c3d"])]
+
+
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="boot adapter")
 def test_kick_refuses_a_crashed_session(tmp_path, monkeypatch, capsys):
     # A crashed entry is refused BEFORE any signalling (classifier gate),
