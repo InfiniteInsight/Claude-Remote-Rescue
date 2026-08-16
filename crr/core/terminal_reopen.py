@@ -19,6 +19,10 @@ from typing import Sequence
 from crr.core.reviver import attach_argv
 
 AGGREGATE_NAME = "crr-restored"
+# The aggregate's throwaway first window, named so it can be killed by name
+# (index-independent — see the not-in-tmux branch). Double-underscored to not
+# collide with any conversation's cwd-basename window label.
+_PLACEHOLDER = "__crr_placeholder__"
 
 
 @dataclass(frozen=True)
@@ -83,15 +87,15 @@ def plan_terminal_reopen(
         # its windows survive in their crr-<sid> sessions (a tmux window dies
         # only when its LAST linking session drops it).
         cmds.append(("tmux", "kill-session", "-t", AGGREGATE_NAME))
-    cmds.append(("tmux", "new-session", "-d", "-s", AGGREGATE_NAME))
+    # Give the placeholder shell a unique NAME so it can be killed by name,
+    # not by index. `new-session` puts it at the user's base-index (0 by
+    # default, but `set -g base-index 1` is common), so a `:0` kill would miss
+    # under base-index 1 and leave a spare shell window (observed on real
+    # tmux). Killing by name works at any base-index and can never hit a
+    # conversation window (they carry their cwd-basename labels, not this).
+    cmds.append(("tmux", "new-session", "-d", "-s", AGGREGATE_NAME, "-n", _PLACEHOLDER))
     cmds.extend(rename_and_link(AGGREGATE_NAME))
-    # Drop the placeholder shell new-session created at the default base-index
-    # (0 for tmux's default). A non-default base-index leaves a harmless spare
-    # window; _run_commands swallows the kill-window miss. This can NEVER hit
-    # a real conversation window: the placeholder is created first (at the
-    # base-index), and conversation windows are only linked in AFTER, landing
-    # at higher indices.
-    cmds.append(("tmux", "kill-window", "-t", f"{AGGREGATE_NAME}:0"))
+    cmds.append(("tmux", "kill-window", "-t", f"{AGGREGATE_NAME}:{_PLACEHOLDER}"))
     return TerminalReopenPlan(
         tuple(cmds), tuple(attach_argv(AGGREGATE_NAME)),
         f"attaching {len(sessions)} restored conversation(s) in "
