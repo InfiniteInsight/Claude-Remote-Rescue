@@ -2820,6 +2820,7 @@ def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, 
     # tracked) — NOT detmux, which untracks. So the conversations stay on
     # the dashboard and survive the next reboot too (#30 / #33 principle).
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -2858,6 +2859,7 @@ def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch
     just typed 'y' would never see a reopen failure. Both success and
     failure messages from the post-consent loop must land on stdout."""
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -2892,6 +2894,7 @@ def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
     # implementation that only accepts a literal "y" would pass every
     # other test here but fail this one.
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -3033,6 +3036,7 @@ def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monke
     prompt for the next shell) and the blanket exception guard in
     _cmd_rescue_check must still return rc 0."""
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -3059,6 +3063,7 @@ def test_rescue_check_headless_in_tmux_links_windows_no_exec(tmp_path, monkeypat
         {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
         {"pid": 43, "tmux_session": "crr-b", "cwd": "/home/u/beta"},
     ])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
@@ -3088,6 +3093,7 @@ def test_rescue_check_headless_not_in_tmux_execs_attach(tmp_path, monkeypatch, c
     _rescue_check_setup(monkeypatch, tmp_path, [
         {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
     ])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
