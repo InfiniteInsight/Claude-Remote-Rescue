@@ -907,6 +907,8 @@ function renderCard(s, uncertain, groupColor, latest) {
   } else {                       // live or ghost: a running claude to act on
     if (s.state === "ghost") {   // orphaned shell: offer mobile rescue
       addBtn("Restore", "reopen", false);
+    } else if (s.tmux_session) { // live with tmux: offer tab attach
+      addBtn("Reopen", "reopen", false, false);
     }
     addBtn("Kick", "kick", false);
     addBtn("Close", "close", true);

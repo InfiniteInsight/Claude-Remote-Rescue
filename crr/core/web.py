@@ -41,7 +41,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 58  # v58: Machines panel — tagged-only, OS field, "Tailnet Members" label
+PAGE_VERSION = 59  # v59: Reopen button on LIVE cards with tmux_session
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

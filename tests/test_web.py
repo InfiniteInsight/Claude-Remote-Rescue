@@ -929,8 +929,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_58():
-    """v58: Machines panel — tagged-only, OS field, "Tailnet Members" label.
+def test_page_version_is_59():
+    """v59: Reopen button on LIVE cards with tmux_session.
+    (v58: Machines panel — tagged-only, OS field, "Tailnet Members" label.
     (v57: Machines panel — tag:crr peer list with on-tailnet badge.
     (v56: PWA installability — manifest link, apple-touch-icon, iOS meta
     tags, and service worker registration in page.html's head/script.
@@ -948,7 +949,7 @@ def test_page_version_is_58():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 58
+    assert web.PAGE_VERSION == 59
 
 
 def test_page_renders_the_parked_state():
@@ -975,6 +976,15 @@ def test_parked_cards_get_their_own_action_set():
     # Dismiss would only ever refuse.
     page = web.load_page()
     assert 'else if (s.state === "parked")' in page
+
+
+def test_live_cards_get_a_reopen_button_when_tmux_session_present():
+    # v59: LIVE sessions with a tmux_session can be re-attached to (Task 1
+    # extended ops.reopen to handle this server-side). The button must only
+    # appear when there is a tmux session to attach to, and must not double
+    # up with Ghost's "Restore" button (same op, different label).
+    page = web.load_page()
+    assert 'else if (s.tmux_session)' in page
 
 
 def test_parked_renders_as_restored_not_as_the_raw_enum():
