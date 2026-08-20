@@ -90,7 +90,9 @@ from typing import Any, Mapping
 # v19: added boot_headless_window_seconds / boot_preferred_tailnet (spec
 # 2026-08-14 — reachable-at-boot, making the dashboard come up at boot
 # without a login so a reboot is survivable; see crr.core.reachable_at_boot).
-CONFIG_DEFAULTS_VERSION = 19
+# v20: added launcher_tag (spec 2026-08-18 — Phase 3 Launcher: the Tailscale
+# tag used to discover peer machines for the Machines panel; default tag:crr)
+CONFIG_DEFAULTS_VERSION = 20
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -282,6 +284,8 @@ DEFAULTS: dict[str, Any] = {
     # Which Tailscale account the boot task re-selects. Empty means "whatever
     # is active at install time" — crr never silently picks a tailnet.
     "boot_preferred_tailnet": "",
+    # launcher (Phase 3)
+    "launcher_tag": "tag:crr",
 }
 
 
