@@ -2752,6 +2752,7 @@ def test_rescue_check_headless_prompts_and_declines_once(tmp_path, monkeypatch, 
     # tab_unavailable below). This still proves the once-per-boot claim
     # applies on the headless path too.
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
@@ -2922,6 +2923,7 @@ def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
     # timeout -- not an accident of "" also meaning Enter, since a real
     # EOF never reaches the strip()/lower() step that "\n" does.
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -2946,6 +2948,7 @@ def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
 
 def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -2976,6 +2979,7 @@ def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys)
     # winner claims before prompting), so the once-per-boot invariant holds
     # even though the interrupt unwinds past the detmux/decline branch.
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -3104,6 +3108,7 @@ def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsy
     _rescue_check_setup(monkeypatch, tmp_path, [
         {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
     ])
+    (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))

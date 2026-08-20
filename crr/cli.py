@@ -3559,9 +3559,10 @@ def _rescue_check(_args: argparse.Namespace) -> int:
     if not tabs_expected:
         # Genuinely headless (no GUI tabs on this host); we have a tty (this
         # function is tty-gated up top). Offer the tmux-window path (#headless).
-        if not _rescue_prompt_yes(config, n):
-            print("not now — 'crr rescued' lists them")
-            return 0
+        if not config.get("rescue_auto_open"):
+            if not _rescue_prompt_yes(config, n):
+                print("not now — 'crr rescued' lists them")
+                return 0
         sessions = [(e["tmux_session"], _win_label(e["cwd"])) for e in found]
         _terminal_reopen(sessions, config, sd)  # may exec (replaces this process)
         return 0
@@ -3573,9 +3574,10 @@ def _rescue_check(_args: argparse.Namespace) -> int:
               "'crr rescued' lists them; attach with: tmux attach -t <name>")
         return 0
 
-    if not _rescue_prompt_yes(config, n):
-        print("not now — 'crr rescued' lists them")
-        return 0
+    if not config.get("rescue_auto_open"):
+        if not _rescue_prompt_yes(config, n):
+            print("not now — 'crr rescued' lists them")
+            return 0
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     flags = FlagStore(sd)
