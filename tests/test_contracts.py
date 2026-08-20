@@ -687,3 +687,53 @@ def test_wrong_types_are_rejected():
 def test_extra_keys_are_rejected():
     with pytest.raises(contracts.ContractError):
         contracts.validate_action_result(_action_result(surprise=1))
+
+
+# --------------------------------------------------------------------------
+# /api/machines
+# --------------------------------------------------------------------------
+
+def test_machines_contract_version_is_1():
+    assert contracts.MACHINES_CONTRACT_VERSION == 1
+
+
+def test_valid_machines_payload_passes():
+    contracts.validate_machines_payload({
+        "contract": 1,
+        "machines": [
+            {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False, "os": "linux"},
+        ],
+    })
+
+
+def test_machines_payload_missing_key_rejected():
+    with pytest.raises(contracts.ContractError, match="missing key"):
+        contracts.validate_machines_payload({
+            "contract": 1,
+            "machines": [
+                {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True},
+            ],
+        })
+
+
+def test_machines_payload_unknown_key_rejected():
+    with pytest.raises(contracts.ContractError, match="unknown key"):
+        contracts.validate_machines_payload({
+            "contract": 1,
+            "machines": [
+                {"name": "Lovelace", "url": "https://lovelace.ts.net/",
+                 "online": True, "is_self": False, "os": "linux", "extra": 1},
+            ],
+        })
+
+
+def test_machines_payload_wrong_version_rejected():
+    with pytest.raises(contracts.ContractError, match="contract"):
+        contracts.validate_machines_payload({
+            "contract": 99,
+            "machines": [],
+        })
+
+
+def test_machines_payload_empty_list_passes():
+    contracts.validate_machines_payload({"contract": 1, "machines": []})

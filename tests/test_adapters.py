@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from crr.adapters import diagnostics, diagnostics_macos, diagnostics_windows
-from crr.adapters import process_probe, state_dir, tmux
+from crr.adapters import process_probe, state_dir, tailscale, tmux
 from crr.adapters import process_probe as pp  # short alias used below
 
 
@@ -559,3 +559,105 @@ def test_session_pid_is_none_when_it_cannot_be_determined(monkeypatch):
 
     monkeypatch.setattr(tmux_mod.subprocess, "run", boom)
     assert tmux_mod.RealTmux(5).session_pid("crr-abc") is None
+
+
+# --- tailscale adapter: status/serve_status tri-state JSON reader ---------
+#
+# Both commands wrap `tailscale ... --json`: missing binary, timeout,
+# OSError, nonzero exit, and unparseable output all collapse to None,
+# never a raise. Reuses this file's _Result fake rather than introducing a
+# second fake-subprocess class.
+
+def test_tailscale_status_cmd_is_json():
+    assert tailscale._status_cmd() == ["tailscale", "status", "--json"]
+
+
+def test_tailscale_serve_status_cmd_is_json():
+    assert tailscale._serve_status_cmd() == ["tailscale", "serve", "status", "--json"]
+
+
+def test_status_parses_json(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(
+        tailscale.subprocess, "run",
+        lambda *a, **k: _Result(0, stdout='{"Self": {"DNSName": "n.ts.net."}}'))
+    assert ts.status() == {"Self": {"DNSName": "n.ts.net."}}
+
+
+def test_status_none_when_binary_absent(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: None)
+    assert ts.status() is None
+
+
+def test_status_none_on_nonzero(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(tailscale.subprocess, "run", lambda *a, **k: _Result(1, stdout=""))
+    assert ts.status() is None
+
+
+def test_status_none_on_garbage(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(
+        tailscale.subprocess, "run", lambda *a, **k: _Result(0, stdout="not json"))
+    assert ts.status() is None
+
+
+def test_status_none_on_timeout(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+
+    def _boom(*a, **k):
+        raise tailscale.subprocess.TimeoutExpired(cmd="tailscale", timeout=2.0)
+
+    monkeypatch.setattr(tailscale.subprocess, "run", _boom)
+    assert ts.status() is None
+
+
+def test_status_none_on_oserror(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+
+    def _boom(*a, **k):
+        raise OSError("tailscale binary vanished mid-call")
+
+    monkeypatch.setattr(tailscale.subprocess, "run", _boom)
+    assert ts.status() is None
+
+
+def test_status_none_on_non_dict_json(monkeypatch):
+    # `json.loads` succeeds but yields a list/scalar — still not a status dict.
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(tailscale.subprocess, "run", lambda *a, **k: _Result(0, stdout="[1, 2]"))
+    assert ts.status() is None
+
+
+def test_available_reflects_which(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    assert ts.available() is True
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: None)
+    assert ts.available() is False
+
+
+def test_serve_status_parses_json(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(
+        tailscale.subprocess, "run",
+        lambda *a, **k: _Result(0, stdout='{"TCP": {"443": {"HTTPS": true}}}'))
+    assert ts.serve_status() == {"TCP": {"443": {"HTTPS": True}}}
+
+
+def test_serve_status_none_when_unconfigured_nonzero(monkeypatch):
+    # `tailscale serve status --json` exits nonzero when serve has never been
+    # configured — degrades to None, which the core layer treats as "serve
+    # not live" rather than an error state.
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(tailscale.subprocess, "run", lambda *a, **k: _Result(1, stdout=""))
+    assert ts.serve_status() is None

@@ -58,7 +58,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             body=b"", headers=None, action_provider=None,
             untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
-            settings_provider=None, settings_writer=None,
+            settings_provider=None, settings_writer=None, qr_svg_provider=None,
+            machines_provider=None,
             query=""):
     h = {"Host": host}
     if headers:
@@ -75,6 +76,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         exclusions_writer=exclusions_writer,
         settings_provider=settings_provider,
         settings_writer=settings_writer,
+        qr_svg_provider=qr_svg_provider,
+        machines_provider=machines_provider,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -926,8 +929,16 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_53():
-    """v53: notices are dismissable (×) and copy their attach command
+def test_page_version_is_58():
+    """v58: Machines panel — tagged-only, OS field, "Tailnet Members" label.
+    (v57: Machines panel — tag:crr peer list with on-tailnet badge.
+    (v56: PWA installability — manifest link, apple-touch-icon, iOS meta
+    tags, and service worker registration in page.html's head/script.
+    (v55: style #adddev-box (padding/border/background, centered QR) and
+    retry the /qr.svg fetch on every open instead of only the first click,
+    so a 404 before serve comes up isn't sticky (final review findings).
+    (v54: "Add a device" QR affordance (/qr.svg)
+    (v53: notices are dismissable (×) and copy their attach command
     (v52: worktree sessions grouped under their parent repo (#31)
     (v51: discoverable worktree rows collapse into one expandable row (#34)
     (v50: an "attached" badge distinguishes a reopened parked card from one
@@ -937,7 +948,7 @@ def test_page_version_is_53():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 53
+    assert web.PAGE_VERSION == 58
 
 
 def test_page_renders_the_parked_state():
@@ -1606,3 +1617,112 @@ def test_the_conflict_warning_is_not_a_dismissible_toast():
     # A toast scrolls away and the conflict does not. It belongs on the card.
     page = web.render_page()
     assert "conflict-warn" in page
+
+
+# --------------------------------------------------------------------------
+# /qr.svg — the "Add a device" affordance. Lazy like diagnostics/discoverable
+# (never on the poll path): the provider round-trips through real tailscale
+# subprocess calls, so a missing provider or a "serve not live yet" None both
+# degrade to a plain 404 rather than an error the <img> tag has to parse.
+# --------------------------------------------------------------------------
+
+def test_qr_svg_route_returns_svg():
+    resp = _handle(path="/qr.svg",
+                   qr_svg_provider=lambda: "<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "image/svg+xml"
+    assert b"<svg" in resp.body
+
+
+def test_qr_svg_route_404_without_provider():
+    assert _handle(path="/qr.svg").status == 404
+
+
+def test_qr_svg_route_404_when_provider_returns_none():
+    # serve isn't live: the provider has nothing to offer, not an error.
+    resp = _handle(path="/qr.svg", qr_svg_provider=lambda: None)
+    assert resp.status == 404
+
+
+def test_page_has_the_add_a_device_affordance():
+    page = web.render_page()
+    assert 'id="adddev-btn"' in page
+    assert 'id="adddev-box"' in page
+    assert 'id="adddev-qr"' in page
+    assert '/qr.svg' in page
+
+
+# --------------------------------------------------------------------------
+# /api/machines — the launcher panel's machine list. Lazy like diagnostics/
+# qr.svg (never on the poll path): the provider round-trips through real
+# tailscale status calls, so a missing provider degrades to a plain 404.
+# --------------------------------------------------------------------------
+
+def test_machines_route_returns_json():
+    payload = {"contract": 1, "machines": [
+        {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False, "os": "linux"},
+    ]}
+    r = _handle("GET", "/api/machines", machines_provider=lambda: payload)
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "application/json"
+    body = json.loads(r.body)
+    assert body["contract"] == 1
+    assert len(body["machines"]) == 1
+
+
+def test_machines_route_no_provider_returns_404():
+    r = _handle("GET", "/api/machines")
+    assert r.status == 404
+
+
+def test_machines_route_no_cache():
+    payload = {"contract": 1, "machines": []}
+    r = _handle("GET", "/api/machines", machines_provider=lambda: payload)
+    assert "no-store" in r.headers.get("Cache-Control", "")
+
+
+# --------------------------------------------------------------------------
+# PWA assets — manifest, service worker, icons (installability).
+# Backed by crr.core.pwa; these routes only wire content-type + bytes.
+# --------------------------------------------------------------------------
+
+class TestPwaRoutes:
+    """Manifest, service worker, and icon routes for PWA installability."""
+
+    def test_manifest_route(self):
+        resp = _handle(path="/manifest.webmanifest")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "application/manifest+json"
+        obj = json.loads(resp.body)
+        assert obj["name"] == "Claude-Remote-Rescue"
+        assert obj["display"] == "standalone"
+
+    def test_sw_route(self):
+        resp = _handle(path="/sw.js")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "text/javascript"
+        assert b"fetch" in resp.body
+
+    def test_icon_192_route(self):
+        resp = _handle(path="/icon-192.png")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_icon_512_route(self):
+        resp = _handle(path="/icon-512.png")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_apple_touch_icon_route(self):
+        resp = _handle(path="/apple-touch-icon.png")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_pwa_routes_are_no_store(self):
+        for path in ("/manifest.webmanifest", "/sw.js", "/icon-192.png",
+                     "/icon-512.png", "/apple-touch-icon.png"):
+            resp = _handle(path=path)
+            assert resp.headers["Cache-Control"] == "no-store"

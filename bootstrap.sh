@@ -577,6 +577,14 @@ elif [ "$TS_CONNECTED" = 1 ]; then
 else
   printf '  %sdashboard:%s loopback-only http://127.0.0.1:%s/\n' "$C_OK" "$C_R" "$PORT"
 fi
+
+if [ "$DRY_RUN" = 1 ]; then
+  note "would print a scannable QR of the dashboard URL (crr qr)"
+else
+  printf '\n'
+  crr qr || true
+fi
+
 printf '\n  %sNext steps%s\n' "$C_INFO" "$C_R"
 cat <<EOF
     1. Open a NEW shell so the shim takes effect  (or: source $RC_FILE)

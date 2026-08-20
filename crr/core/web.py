@@ -29,6 +29,7 @@ from urllib.parse import parse_qs
 
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core import pwa
 
 # Bump this whenever crr/core/page.html changes: the served page compares it
 # to /api/version every `version_check_seconds` and reloads itself when they
@@ -40,7 +41,7 @@ from crr.core import contracts
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 53  # v53: notices are dismissable (×) and copy their attach command
+PAGE_VERSION = 58  # v58: Machines panel — tagged-only, OS field, "Tailnet Members" label
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -242,6 +243,8 @@ def handle_request(
     exclusions_writer: Callable[[Any], dict[str, Any]] | None = None,
     settings_provider: Callable[[], dict[str, Any]] | None = None,
     settings_writer: Callable[[Any], dict[str, Any]] | None = None,
+    qr_svg_provider: Callable[[], str | None] | None = None,
+    machines_provider: Callable[[], dict[str, Any]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -345,6 +348,44 @@ def handle_request(
             if settings_provider is None:
                 return _plain(404, "not found")
             return _json(200, settings_provider())
+        if path == "/qr.svg":
+            # Lazy, like diagnostics: the tailscale status/serve calls are
+            # real subprocess round-trips, so this is never on the poll
+            # path — only fetched when the dashboard's "Add a device"
+            # affordance is opened. 404 (rather than an error) both when
+            # there's no provider wired (e.g. tests) and when the provider
+            # itself has nothing to offer (serve isn't live yet) — the
+            # image tag degrades the same way either case.
+            if qr_svg_provider is None:
+                return _plain(404, "not found")
+            svg = qr_svg_provider()
+            if svg is None:
+                return _plain(404, "not found")
+            return _resp(200, "image/svg+xml", svg.encode("utf-8"))
+        if path == "/api/machines":
+            # Lazy, like diagnostics/qr.svg: the tailscale status call is a
+            # real subprocess round-trip, so this only runs when the
+            # launcher panel is opened, never on the poll path.
+            if machines_provider is None:
+                return _plain(404, "not found")
+            return _json(200, machines_provider())
+        if path == "/manifest.webmanifest":
+            # Web app manifest: install prompt metadata (name, icons,
+            # standalone display). Pure/static — no provider needed.
+            return _resp(200, "application/manifest+json",
+                         pwa.manifest_json().encode("utf-8"))
+        if path == "/sw.js":
+            # Service worker: must be served as text/javascript (not
+            # application/javascript) for browsers that are strict about
+            # the SW registration content-type check.
+            return _resp(200, "text/javascript",
+                         pwa.SERVICE_WORKER_JS.encode("utf-8"))
+        if path == "/icon-192.png":
+            return _resp(200, "image/png", pwa.make_icon_png(192))
+        if path == "/icon-512.png":
+            return _resp(200, "image/png", pwa.make_icon_png(512))
+        if path == "/apple-touch-icon.png":
+            return _resp(200, "image/png", pwa.make_icon_png(180))
         return _plain(404, "not found")
 
     if method == "POST":

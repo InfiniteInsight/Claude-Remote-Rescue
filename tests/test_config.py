@@ -84,8 +84,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    # v19 (2026-08-14): reachable-at-boot keys (boot_headless_window_seconds + boot_preferred_tailnet).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 19
+    # v20 (2026-08-18): launcher_tag (spec — Phase 3 Launcher: Tailscale tag for Machines panel).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 20
 
 
 def test_context_pressure_fraction_defaults():
@@ -276,3 +276,8 @@ def test_reachable_at_boot_keys_exist():
 
 def test_config_defaults_version_covers_the_boot_keys():
     assert cfg.CONFIG_DEFAULTS_VERSION >= 19
+
+
+def test_launcher_tag_default():
+    assert cfg.DEFAULTS["launcher_tag"] == "tag:crr"
+    assert cfg.Config().get("launcher_tag") == "tag:crr"

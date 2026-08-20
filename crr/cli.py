@@ -40,7 +40,7 @@ from crr.adapters import deploy as deploy_io
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
 from crr.adapters import boot_linux, boot_macos, boot_windows
-from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
+from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tailscale, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters import (power_hold_linux, power_hold_macos,
                           power_hold_windows, power_source, power_state)
@@ -51,7 +51,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
+from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -242,6 +242,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="report scaffold/environment status")
     doctor.set_defaults(func=_cmd_doctor)
+
+    qrp = sub.add_parser("qr", help="print a scannable QR of this machine's dashboard URL")
+    qrp.set_defaults(func=_cmd_qr)
 
     st = sub.add_parser("status", help="list journaled sessions and their state")
     st.add_argument("--json", action="store_true", help="emit the /api/sessions payload")
@@ -1466,6 +1469,26 @@ def _cmd_harden(args: argparse.Namespace) -> int:
     findings = harden.assess(state, want_start, want_end)
     _print_harden_findings(findings)
     _print_restart_measurement(config, state)
+    return 0
+
+
+def _cmd_qr(_args: argparse.Namespace) -> int:
+    """Print a scannable QR of this machine's tailnet dashboard URL.
+
+    Degrades informationally (rc 0) when tailscale serve isn't live: the
+    loopback URL still works from this machine, it just isn't reachable
+    from a phone yet.
+    """
+    config = _load_config()
+    ts = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+    url = tailnet.self_dashboard_url(ts.status(), ts.serve_status())
+    if url is None:
+        port = config.get("dashboard_port")
+        print(f"http://127.0.0.1:{port}/  (loopback only)")
+        print(f"To reach it from your phone, run:  tailscale serve --bg {port}")
+        return 0
+    print(qr.to_terminal(url))
+    print(url)
     return 0
 
 
@@ -3588,6 +3611,8 @@ def make_web_handler(
     exclusions_writer: Callable[[object], dict] | None = None,
     settings_provider: Callable[[], dict] | None = None,
     settings_writer: Callable[[object], dict] | None = None,
+    qr_svg_provider: Callable[[], str | None] | None = None,
+    machines_provider: Callable[[], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -3621,6 +3646,8 @@ def make_web_handler(
                 exclusions_writer=exclusions_writer,
                 settings_provider=settings_provider,
                 settings_writer=settings_writer,
+                qr_svg_provider=qr_svg_provider,
+                machines_provider=machines_provider,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -3961,6 +3988,30 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # which can be missing at boot and repaired minutes later — a spawner
     # cached at startup would keep answering "no tab" for the life of the
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
+    ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+
+    def qr_svg_provider() -> str | None:
+        # Lazy, like diagnostics/discoverable: tailscale status + serve
+        # status are real subprocess calls, so this only runs when the
+        # dashboard's "Add a device" affordance is opened, never on the
+        # poll path. None (serve not live, or no tailnet) degrades to a
+        # 404 in web.handle_request — the <img> just fails to load.
+        url = tailnet.self_dashboard_url(ts_adapter.status(), ts_adapter.serve_status())
+        return qr.to_svg(url) if url else None
+
+    def machines_provider() -> dict:
+        # Lazy, like qr_svg_provider: a real tailscale status round-trip,
+        # so this only runs when the launcher panel is opened, never on
+        # the poll path.
+        status = ts_adapter.status()
+        self_dns = ((status or {}).get("Self") or {}).get("DNSName")
+        rows = tailnet.plan_launcher(status, tag=config.get("launcher_tag"), self_dnsname=self_dns)
+        payload = {
+            "contract": contracts.MACHINES_CONTRACT_VERSION,
+            "machines": [row._asdict() for row in rows],
+        }
+        contracts.validate_machines_payload(payload)
+        return payload
 
     extract = _tail_facts_extractor(config)
 
@@ -4196,6 +4247,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         exclusions_writer=exclusions_writer,
         settings_provider=settings_provider,
         settings_writer=settings_writer,
+        qr_svg_provider=qr_svg_provider,
+        machines_provider=machines_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),

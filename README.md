@@ -1,7 +1,13 @@
 # Claude-Remote-Rescue
 
-Keep your Claude Code sessions alive — and rescue them from your phone —
-when terminals, shells, or whole machines die.
+If you are like me, you are often checking your Claude Code sessions from the Claude Mobile app. 
+If, like me, you are tired of discovering that your Remote Control sessions have disconnected
+for some reason. There goes being productive while out and about. 
+
+I created Claude Remote Rescue to fix that little annoyance, and then some.  
+
+Keep your Claude Code Remote Control sessions alive — and rescue them from your phone —
+when terminals or shells die, and even when machines reboot.
 
 When a terminal window closes, a laptop reboots, or a VM runs out of
 memory mid-conversation, Claude-Remote-Rescue notices, revives each
@@ -25,7 +31,7 @@ See [DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md).
 
 Honest calibration — what is and isn't verified:
 
-- **Verified on Linux/WSL, in production.** crr is the author's daily-driver
+- **Verified on Linux/WSL, in production.** crr is my daily-driver
   on a WSL2 machine: it owns the watchdog, the shell shim, and the tailnet
   dashboard, and tracks live sessions day to day. The **end-to-end hardware
   acceptance has been run** — a real reboot, after which the watchdog revived
@@ -35,17 +41,13 @@ Honest calibration — what is and isn't verified:
   matrix (Python 3.11/3.12), the `node --check` page-JS gate, and the
   import-linter layering contract pass; business logic is unit-tested with
   fakes.
-- **NOT yet verified on real macOS or Windows.** Those platform adapters
+- **NOT yet verified on real macOS.** Those platform adapters
   (launchd/`plutil`, `osacompile`/Terminal-tab spawn, `log show`/`pmset`, mac
   boot-identity; `wt.exe`, Scheduled Tasks, WinEvent/WSL-OOM) are unit-tested
   but have never run on the hardware. **macOS first-run testing is in
   progress** — see [docs/TESTING-macos.md](docs/TESTING-macos.md). Windows is
   next.
 
-This is a ground-up OSS rewrite of a private Windows/WSL tool that
-survived two real outages in production (a Windows-Update reboot and a WSL
-OOM crash) with zero lost conversations; every decision marked **[lesson]**
-in DESIGN.md was paid for the honest way.
 
 ## Dashboard
 
@@ -151,6 +153,55 @@ Flags: `-y` (unattended), `--dry-run` (show, don't change),
 
 macOS is unit-tested but not yet hardware-verified — if you're trying it there,
 [docs/TESTING-macos.md](docs/TESTING-macos.md) is the first-run guide.
+Additionally if your mac is using FileVault it will not be able to automatically 
+rescue your sessions from a reboot.
+
+### Reaching the dashboard on your tailnet
+
+crr binds the dashboard to **loopback only** (`127.0.0.1:8377`); it is never
+exposed to the network directly. You reach it from your phone or another
+machine through Tailscale, which is the **auth boundary** — anyone on your
+tailnet who can reach the node can reach its dashboard (crr has no accounts or
+passwords of its own).
+
+`tailscale serve --bg 8377` (manual-install step 3, or set up by the
+bootstrap) proxies HTTPS 443 → the local `8377`, so each machine's dashboard
+lives at its own MagicDNS name, **with no port in the URL**:
+
+```
+https://<node-name>.<tailnet-name>.ts.net/
+```
+
+crr is **per-host** — no central server, no cross-machine view. Each computer
+runs its own crr and gets its own tailnet URL; you bookmark one per machine.
+
+#### Making the URL friendlier (optional, one-time)
+
+The default name (e.g. `desktop-8f3kq2.tail3af2d9.ts.net`) is hard to
+remember. Two Tailscale-side tweaks fix most of it — **neither is exposed in
+the Tailscale API**, so both are done by hand:
+
+1. **Rename the node** (the `<node-name>` part). On the device itself:
+   ```sh
+   tailscale set --hostname=lovelace
+   ```
+   or rename it in the [admin console](https://login.tailscale.com/admin/machines)
+   (Machines → the device → **Edit machine name**). MagicDNS regenerates the
+   name. (There is no API for this — see Tailscale
+   [issue #4121](https://github.com/tailscale/tailscale/issues/4121).)
+
+2. **Rename the tailnet** (the `<tailnet-name>.ts.net` suffix). Admin console
+   only: **[DNS page](https://login.tailscale.com/admin/dns) → Rename tailnet
+   → confirm → pick one of the offered names** (Re-roll for more). Requires
+   Owner/Admin/Network-admin. Tailscale only offers *randomized* names
+   (e.g. `yak-bebop.ts.net`), not a free-text vanity name; a fully custom
+   domain requires [contacting Tailscale support](https://tailscale.com/contact/support).
+
+   ⚠️ **Renaming the tailnet breaks the old URL and its HTTPS cert** (MagicDNS
+   names, certs, and shares all depend on the tailnet name). After renaming,
+   re-run `tailscale serve --bg 8377` on **each** node to re-issue the cert for
+   the new name, and update your bookmarks. crr itself needs no change — its
+   host allowlist matches any `*.ts.net` name automatically.
 
 ## Commands
 
@@ -174,6 +225,7 @@ macOS is unit-tested but not yet hardware-verified — if you're trying it there
 | `crr archive --list` | List archived (revival-preserved) sessions: reason, archived-at, sid8, cwd |
 | `crr recall <query> [--pid N \| --sid ID \| --all] [--cwd DIR] [-n N]` | Search a session's transcript for earlier conversation (print-only, never re-injects) |
 | `crr web [--port N]` | Serve the dashboard (loopback only) |
+| `crr qr` | Print a scannable QR code of this machine's tailnet dashboard URL (scan it to open the dashboard on your phone) |
 | `crr awake [--once]` | [service] Hold the machine awake while a Claude session is live. The loop, not a durable OS reservation: the hold is a child process of this command, so stopping it releases the hold. Off unless `power_block` is set. Lid close is never blocked |
 | `crr power [--release]` | Report what crr is holding awake and why — or why not. `--release` stops the keep-awake loop (that *is* the release; there is no other handle) |
 | `crr systemd [--install\|--uninstall]` | Print (or install/uninstall) the Linux user units: watchdog timer + dashboard + keep-awake (`crr-awake.service`) |
@@ -193,6 +245,9 @@ Shells: zsh, bash, fish.
 A remote Claude session dies when the machine it runs on sleeps. `crr awake`
 is a loop that holds the machine up **only while a Claude session is
 actually live**, and drops the hold the moment the last one ends.
+It will not stop Windows Update from installing updates and restarting.
+Instead it will rescue your sessions and restart them as soon as the computer
+boots again, even without you unlocking it and logging in.
 
 **It is off by default.** A tool that silently stops your laptop from
 sleeping is not a tool you asked for, so nothing happens until you set
