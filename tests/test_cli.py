@@ -4581,3 +4581,46 @@ def test_conflict_check_needs_something_to_check(capsys):
     rc = cli.main(["conflict-check"])
     assert rc != 0
     assert "--sid" in capsys.readouterr().err
+
+
+def test_qr_prints_code_and_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTS:
+        def __init__(self, *_a):
+            pass
+
+        def status(self):
+            return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
+
+        def serve_status(self):
+            return {"TCP": {"443": {"HTTPS": True}}}
+
+    monkeypatch.setattr(cli.tailscale, "RealTailscale", _FakeTS)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "https://lovelace.tail3af2d9.ts.net/" in out
+    # A QR was rendered above the URL, not just the URL line on its own.
+    assert out.count("\n") > 1
+
+
+def test_qr_degrades_with_hint_when_serve_not_live(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTS:
+        def __init__(self, *_a):
+            pass
+
+        def status(self):
+            return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
+
+        def serve_status(self):
+            return None  # serve not configured
+
+    monkeypatch.setattr(cli.tailscale, "RealTailscale", _FakeTS)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tailscale serve" in out           # the hint
+    assert "127.0.0.1" in out or "loopback" in out

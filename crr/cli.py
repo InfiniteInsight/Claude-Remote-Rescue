@@ -40,7 +40,7 @@ from crr.adapters import deploy as deploy_io
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
 from crr.adapters import boot_linux, boot_macos, boot_windows
-from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tmux, transcript_source
+from crr.adapters import launchd, process_probe, session_state, state_dir, systemd, tab_spawn, tailscale, tmux, transcript_source
 from crr.adapters import diagnostics_windows, host, scheduled_task, tab_spawn_linux, tab_spawn_windows
 from crr.adapters import (power_hold_linux, power_hold_macos,
                           power_hold_windows, power_source, power_state)
@@ -51,7 +51,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, reachability, rescue, resume, reviver, settings, status, takeover, transcript, web, whoami
+from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -242,6 +242,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="report scaffold/environment status")
     doctor.set_defaults(func=_cmd_doctor)
+
+    qrp = sub.add_parser("qr", help="print a scannable QR of this machine's dashboard URL")
+    qrp.set_defaults(func=_cmd_qr)
 
     st = sub.add_parser("status", help="list journaled sessions and their state")
     st.add_argument("--json", action="store_true", help="emit the /api/sessions payload")
@@ -1466,6 +1469,26 @@ def _cmd_harden(args: argparse.Namespace) -> int:
     findings = harden.assess(state, want_start, want_end)
     _print_harden_findings(findings)
     _print_restart_measurement(config, state)
+    return 0
+
+
+def _cmd_qr(_args: argparse.Namespace) -> int:
+    """Print a scannable QR of this machine's tailnet dashboard URL.
+
+    Degrades informationally (rc 0) when tailscale serve isn't live: the
+    loopback URL still works from this machine, it just isn't reachable
+    from a phone yet.
+    """
+    config = _load_config()
+    ts = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+    url = tailnet.self_dashboard_url(ts.status(), ts.serve_status())
+    if url is None:
+        port = config.get("dashboard_port")
+        print(f"http://127.0.0.1:{port}/  (loopback only)")
+        print(f"To reach it from your phone, run:  tailscale serve --bg {port}")
+        return 0
+    print(qr.to_terminal(url))
+    print(url)
     return 0
 
 
