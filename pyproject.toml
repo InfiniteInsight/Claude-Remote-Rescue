@@ -35,6 +35,7 @@ include = ["crr*"]
 [tool.setuptools.package-data]
 "crr.shims" = ["crr.bash", "crr.zsh", "crr.fish"]
 "crr.core" = ["page.html"]
+"crr.vendor.segno" = ["py.typed", "*.pyi", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
