@@ -29,6 +29,11 @@ def test_rescue_prompt_timeout_seconds_default():
     assert Config().get("rescue_prompt_timeout_seconds") == 15
 
 
+def test_rescue_auto_open_default():
+    assert cfg.DEFAULTS["rescue_auto_open"] is True
+    assert cfg.Config().get("rescue_auto_open") is True
+
+
 def test_audit_floor_priors_are_present():
     # The DESIGN "config floor" — these MUST exist as named keys.
     floor = {
@@ -84,8 +89,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         assert gone not in cfg.DEFAULTS
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
-    # v20 (2026-08-18): launcher_tag (spec — Phase 3 Launcher: Tailscale tag for Machines panel).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 20
+    # v21 (2026-08-20): rescue_auto_open (spec — reopen tab reliability: auto-open on boot).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 21
 
 
 def test_context_pressure_fraction_defaults():

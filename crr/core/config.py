@@ -92,7 +92,9 @@ from typing import Any, Mapping
 # without a login so a reboot is survivable; see crr.core.reachable_at_boot).
 # v20: added launcher_tag (spec 2026-08-18 — Phase 3 Launcher: the Tailscale
 # tag used to discover peer machines for the Machines panel; default tag:crr)
-CONFIG_DEFAULTS_VERSION = 20
+# v21: added rescue_auto_open (spec 2026-08-20 — reopen tab reliability:
+# auto-open tabs for restored sessions on boot, skipping the [Y/n] prompt)
+CONFIG_DEFAULTS_VERSION = 21
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -129,6 +131,7 @@ DEFAULTS: dict[str, Any] = {
     "wt_profile": "",  # Windows Terminal profile for a WSL reopen ("" = default)
     # restore prompt
     "rescue_prompt_timeout_seconds": 15,  # [Y/n] wait before defaulting to "not now"
+    "rescue_auto_open": True,        # skip [Y/n] and auto-open tabs for restored sessions
     # dashboard port + service restart cadence (audit 2026-07-31, P5)
     "dashboard_port": 8377,        # `crr web`'s bind port; baked into systemd/launchd/schtasks units
     "web_restart_seconds": 2,      # systemd RestartSec for crr-web.service after a crash
