@@ -1,10 +1,13 @@
 """Pure selection/URL logic over parsed `tailscale status` JSON.
 
-No subprocess, no I/O — the crr.adapters.tailscale adapter supplies the dicts.
-Phase 3 (launcher) adds plan_launcher() here alongside self_dashboard_url().
+No subprocess, no I/O — the crr.adapters.tailscale adapter supplies the
+dicts. Provides self_dashboard_url() (this machine's dashboard URL) and
+plan_launcher() (the tagged-peer machine list for the launcher panel).
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 
 def _dashboard_url(dnsname: str) -> str:
@@ -24,3 +27,54 @@ def self_dashboard_url(status: dict | None, serve_status: dict | None) -> str | 
     if not isinstance(dnsname, str) or not dnsname.strip():
         return None
     return _dashboard_url(dnsname.strip())
+
+
+class MachineRow(NamedTuple):
+    name: str
+    url: str
+    online: bool
+    is_self: bool
+
+
+def plan_launcher(
+    status: dict | None,
+    *,
+    tag: str,
+    self_dnsname: str | None,
+) -> list[MachineRow]:
+    """Select tagged peers + Self from parsed tailscale status JSON.
+
+    Returns [] when status is unavailable. Self is always included when
+    self_dnsname matches Self.DNSName (regardless of whether Self is tagged).
+    Peers are included only if tag appears in their Tags list.
+    Sort: self-first, then online-first, then by name.
+    """
+    if status is None:
+        return []
+
+    rows: list[MachineRow] = []
+
+    # Self — always included if self_dnsname matches, regardless of tags
+    self_node = status.get("Self") or {}
+    self_dns = (self_node.get("DNSName") or "").rstrip(".")
+    if self_dnsname and self_dns == self_dnsname.rstrip("."):
+        rows.append(MachineRow(
+            name=self_node.get("HostName", ""),
+            url=_dashboard_url(self_node["DNSName"]),
+            online=bool(self_node.get("Online")),
+            is_self=True,
+        ))
+
+    # Peers — only tagged ones
+    for peer in (status.get("Peer") or {}).values():
+        if tag not in peer.get("Tags", []):
+            continue
+        rows.append(MachineRow(
+            name=peer.get("HostName", ""),
+            url=_dashboard_url(peer["DNSName"]),
+            online=bool(peer.get("Online")),
+            is_self=False,
+        ))
+
+    rows.sort(key=lambda r: (not r.is_self, not r.online, r.name))
+    return rows
