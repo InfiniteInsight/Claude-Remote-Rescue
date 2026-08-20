@@ -40,7 +40,7 @@ from crr.core import contracts
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 53  # v53: notices are dismissable (×) and copy their attach command
+PAGE_VERSION = 54  # v54: "Add a device" QR affordance (/qr.svg)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -242,6 +242,7 @@ def handle_request(
     exclusions_writer: Callable[[Any], dict[str, Any]] | None = None,
     settings_provider: Callable[[], dict[str, Any]] | None = None,
     settings_writer: Callable[[Any], dict[str, Any]] | None = None,
+    qr_svg_provider: Callable[[], str | None] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -345,6 +346,20 @@ def handle_request(
             if settings_provider is None:
                 return _plain(404, "not found")
             return _json(200, settings_provider())
+        if path == "/qr.svg":
+            # Lazy, like diagnostics: the tailscale status/serve calls are
+            # real subprocess round-trips, so this is never on the poll
+            # path — only fetched when the dashboard's "Add a device"
+            # affordance is opened. 404 (rather than an error) both when
+            # there's no provider wired (e.g. tests) and when the provider
+            # itself has nothing to offer (serve isn't live yet) — the
+            # image tag degrades the same way either case.
+            if qr_svg_provider is None:
+                return _plain(404, "not found")
+            svg = qr_svg_provider()
+            if svg is None:
+                return _plain(404, "not found")
+            return _resp(200, "image/svg+xml", svg.encode("utf-8"))
         return _plain(404, "not found")
 
     if method == "POST":

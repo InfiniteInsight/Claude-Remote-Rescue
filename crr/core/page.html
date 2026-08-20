@@ -369,8 +369,13 @@
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable. Opens a searchable list.">Discoverable</button>
   <button id="admin-btn" type="button" title="Settings: directories discovery should skip, and the dropped-Remote-Control auto-kick switch.">Settings</button>
   <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
+  <button id="adddev-btn" type="button" title="Scan a QR code to open this dashboard on your phone, over your tailnet.">📱 Add a device</button>
 </div>
 <div id="diag-panel" hidden></div>
+<div id="adddev-box" hidden>
+  <p>Scan to open this dashboard on another device:</p>
+  <img id="adddev-qr" alt="dashboard QR code" width="220" height="220">
+</div>
 <div id="admin-modal" role="dialog" aria-modal="true" aria-label="Settings">
   <div id="disc-box">
     <div id="disc-head">
@@ -1278,6 +1283,12 @@ document.getElementById("diag-btn").addEventListener("click", function () {
     .then(function (r) { return r.json(); })
     .then(function (d) { renderDiag(d); diagLoaded = true; })
     .catch(function () { panel.textContent = "diagnostics unavailable"; });
+});
+document.getElementById("adddev-btn").addEventListener("click", function () {
+  var box = document.getElementById("adddev-box");
+  var img = document.getElementById("adddev-qr");
+  if (box.hidden && !img.src) { img.src = "/qr.svg"; }
+  box.hidden = !box.hidden;
 });
 
 // POST to the sid-keyed endpoint (retrack/adopt) — same CSRF posture as

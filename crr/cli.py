@@ -3611,6 +3611,7 @@ def make_web_handler(
     exclusions_writer: Callable[[object], dict] | None = None,
     settings_provider: Callable[[], dict] | None = None,
     settings_writer: Callable[[object], dict] | None = None,
+    qr_svg_provider: Callable[[], str | None] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -3644,6 +3645,7 @@ def make_web_handler(
                 exclusions_writer=exclusions_writer,
                 settings_provider=settings_provider,
                 settings_writer=settings_writer,
+                qr_svg_provider=qr_svg_provider,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -3984,6 +3986,16 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # which can be missing at boot and repaired minutes later — a spawner
     # cached at startup would keep answering "no tab" for the life of the
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
+    ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+
+    def qr_svg_provider() -> str | None:
+        # Lazy, like diagnostics/discoverable: tailscale status + serve
+        # status are real subprocess calls, so this only runs when the
+        # dashboard's "Add a device" affordance is opened, never on the
+        # poll path. None (serve not live, or no tailnet) degrades to a
+        # 404 in web.handle_request — the <img> just fails to load.
+        url = tailnet.self_dashboard_url(ts_adapter.status(), ts_adapter.serve_status())
+        return qr.to_svg(url) if url else None
 
     extract = _tail_facts_extractor(config)
 
@@ -4219,6 +4231,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         exclusions_writer=exclusions_writer,
         settings_provider=settings_provider,
         settings_writer=settings_writer,
+        qr_svg_provider=qr_svg_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),

@@ -58,7 +58,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             body=b"", headers=None, action_provider=None,
             untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
-            settings_provider=None, settings_writer=None,
+            settings_provider=None, settings_writer=None, qr_svg_provider=None,
             query=""):
     h = {"Host": host}
     if headers:
@@ -75,6 +75,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         exclusions_writer=exclusions_writer,
         settings_provider=settings_provider,
         settings_writer=settings_writer,
+        qr_svg_provider=qr_svg_provider,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -926,8 +927,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_53():
-    """v53: notices are dismissable (×) and copy their attach command
+def test_page_version_is_54():
+    """v54: "Add a device" QR affordance (/qr.svg)
+    (v53: notices are dismissable (×) and copy their attach command
     (v52: worktree sessions grouped under their parent repo (#31)
     (v51: discoverable worktree rows collapse into one expandable row (#34)
     (v50: an "attached" badge distinguishes a reopened parked card from one
@@ -937,7 +939,7 @@ def test_page_version_is_53():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 53
+    assert web.PAGE_VERSION == 54
 
 
 def test_page_renders_the_parked_state():
@@ -1606,3 +1608,36 @@ def test_the_conflict_warning_is_not_a_dismissible_toast():
     # A toast scrolls away and the conflict does not. It belongs on the card.
     page = web.render_page()
     assert "conflict-warn" in page
+
+
+# --------------------------------------------------------------------------
+# /qr.svg — the "Add a device" affordance. Lazy like diagnostics/discoverable
+# (never on the poll path): the provider round-trips through real tailscale
+# subprocess calls, so a missing provider or a "serve not live yet" None both
+# degrade to a plain 404 rather than an error the <img> tag has to parse.
+# --------------------------------------------------------------------------
+
+def test_qr_svg_route_returns_svg():
+    resp = _handle(path="/qr.svg",
+                   qr_svg_provider=lambda: "<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "image/svg+xml"
+    assert b"<svg" in resp.body
+
+
+def test_qr_svg_route_404_without_provider():
+    assert _handle(path="/qr.svg").status == 404
+
+
+def test_qr_svg_route_404_when_provider_returns_none():
+    # serve isn't live: the provider has nothing to offer, not an error.
+    resp = _handle(path="/qr.svg", qr_svg_provider=lambda: None)
+    assert resp.status == 404
+
+
+def test_page_has_the_add_a_device_affordance():
+    page = web.render_page()
+    assert 'id="adddev-btn"' in page
+    assert 'id="adddev-box"' in page
+    assert 'id="adddev-qr"' in page
+    assert '/qr.svg' in page
