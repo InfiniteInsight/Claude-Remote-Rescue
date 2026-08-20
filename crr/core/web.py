@@ -244,6 +244,7 @@ def handle_request(
     settings_provider: Callable[[], dict[str, Any]] | None = None,
     settings_writer: Callable[[Any], dict[str, Any]] | None = None,
     qr_svg_provider: Callable[[], str | None] | None = None,
+    machines_provider: Callable[[], dict[str, Any]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -361,6 +362,13 @@ def handle_request(
             if svg is None:
                 return _plain(404, "not found")
             return _resp(200, "image/svg+xml", svg.encode("utf-8"))
+        if path == "/api/machines":
+            # Lazy, like diagnostics/qr.svg: the tailscale status call is a
+            # real subprocess round-trip, so this only runs when the
+            # launcher panel is opened, never on the poll path.
+            if machines_provider is None:
+                return _plain(404, "not found")
+            return _json(200, machines_provider())
         if path == "/manifest.webmanifest":
             # Web app manifest: install prompt metadata (name, icons,
             # standalone display). Pure/static — no provider needed.

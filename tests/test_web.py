@@ -59,6 +59,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
+            machines_provider=None,
             query=""):
     h = {"Host": host}
     if headers:
@@ -76,6 +77,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         settings_provider=settings_provider,
         settings_writer=settings_writer,
         qr_svg_provider=qr_svg_provider,
+        machines_provider=machines_provider,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -1646,6 +1648,35 @@ def test_page_has_the_add_a_device_affordance():
     assert 'id="adddev-box"' in page
     assert 'id="adddev-qr"' in page
     assert '/qr.svg' in page
+
+
+# --------------------------------------------------------------------------
+# /api/machines — the launcher panel's machine list. Lazy like diagnostics/
+# qr.svg (never on the poll path): the provider round-trips through real
+# tailscale status calls, so a missing provider degrades to a plain 404.
+# --------------------------------------------------------------------------
+
+def test_machines_route_returns_json():
+    payload = {"contract": 1, "machines": [
+        {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False},
+    ]}
+    r = _handle("GET", "/api/machines", machines_provider=lambda: payload)
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "application/json"
+    body = json.loads(r.body)
+    assert body["contract"] == 1
+    assert len(body["machines"]) == 1
+
+
+def test_machines_route_no_provider_returns_404():
+    r = _handle("GET", "/api/machines")
+    assert r.status == 404
+
+
+def test_machines_route_no_cache():
+    payload = {"contract": 1, "machines": []}
+    r = _handle("GET", "/api/machines", machines_provider=lambda: payload)
+    assert "no-store" in r.headers.get("Cache-Control", "")
 
 
 # --------------------------------------------------------------------------

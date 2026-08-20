@@ -3612,6 +3612,7 @@ def make_web_handler(
     settings_provider: Callable[[], dict] | None = None,
     settings_writer: Callable[[object], dict] | None = None,
     qr_svg_provider: Callable[[], str | None] | None = None,
+    machines_provider: Callable[[], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -3646,6 +3647,7 @@ def make_web_handler(
                 settings_provider=settings_provider,
                 settings_writer=settings_writer,
                 qr_svg_provider=qr_svg_provider,
+                machines_provider=machines_provider,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -3997,6 +3999,20 @@ def _cmd_web(args: argparse.Namespace) -> int:
         url = tailnet.self_dashboard_url(ts_adapter.status(), ts_adapter.serve_status())
         return qr.to_svg(url) if url else None
 
+    def machines_provider() -> dict:
+        # Lazy, like qr_svg_provider: a real tailscale status round-trip,
+        # so this only runs when the launcher panel is opened, never on
+        # the poll path.
+        status = ts_adapter.status()
+        self_dns = ((status or {}).get("Self") or {}).get("DNSName")
+        rows = tailnet.plan_launcher(status, tag=config.get("launcher_tag"), self_dnsname=self_dns)
+        payload = {
+            "contract": contracts.MACHINES_CONTRACT_VERSION,
+            "machines": [row._asdict() for row in rows],
+        }
+        contracts.validate_machines_payload(payload)
+        return payload
+
     extract = _tail_facts_extractor(config)
 
     def provider() -> dict:
@@ -4232,6 +4248,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         settings_provider=settings_provider,
         settings_writer=settings_writer,
         qr_svg_provider=qr_svg_provider,
+        machines_provider=machines_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),
