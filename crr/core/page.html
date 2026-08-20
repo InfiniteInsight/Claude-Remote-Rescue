@@ -241,6 +241,7 @@
   #machines-panel .machine-badge { font-size: 11px; padding: 2px 6px; border-radius: 3px; }
   #machines-panel .badge-online { background: #1a3a2a; color: #6fcf97; }
   #machines-panel .badge-offline { background: #3a2a1a; color: #cf9f6f; }
+  #machines-panel .machine-os { font-size: 11px; color: #8a93a2; margin-left: 6px; }
   #machines-panel .machine-self { font-size: 11px; color: #8a93a2; margin-left: 6px; }
   #machines-panel .machines-note { color: #8a93a2; font-style: italic; }
   #recall { display: flex; gap: 8px; padding: 6px 16px 0; }
@@ -396,7 +397,7 @@
   <button id="admin-btn" type="button" title="Settings: directories discovery should skip, and the dropped-Remote-Control auto-kick switch.">Settings</button>
   <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
   <button id="adddev-btn" type="button" title="Scan a QR code to open this dashboard on your phone, over your tailnet.">📱 Add a device</button>
-  <button id="machines-btn" type="button" title="All crr dashboards on your tailnet.">Machines</button>
+  <button id="machines-btn" type="button" title="All crr dashboards on your tailnet.">Tailnet Members</button>
 </div>
 <div id="diag-panel" hidden></div>
 <div id="adddev-box" hidden>
@@ -1341,7 +1342,6 @@ function renderMachines(data) {
   var panel = document.getElementById("machines-panel");
   panel.textContent = "";
   var machines = data.machines || [];
-  var hasTaggedPeer = machines.some(function (m) { return !m.is_self; });
 
   if (machines.length === 0) {
     var note = document.createElement("div");
@@ -1361,6 +1361,12 @@ function renderMachines(data) {
     link.setAttribute("href", m.url);
     link.textContent = m.name;
     nameDiv.appendChild(link);
+    if (m.os) {
+      var osTag = document.createElement("span");
+      osTag.className = "machine-os";
+      osTag.textContent = m.os;
+      nameDiv.appendChild(osTag);
+    }
     if (m.is_self) {
       var selfTag = document.createElement("span");
       selfTag.className = "machine-self";
@@ -1376,13 +1382,6 @@ function renderMachines(data) {
 
     panel.appendChild(row);
   });
-
-  if (!hasTaggedPeer) {
-    var note = document.createElement("div");
-    note.className = "machines-note";
-    note.textContent = "no tag:crr machines found — see setup";
-    panel.appendChild(note);
-  }
 }
 
 // POST to the sid-keyed endpoint (retrack/adopt) — same CSRF posture as

@@ -34,6 +34,7 @@ class MachineRow(NamedTuple):
     url: str
     online: bool
     is_self: bool
+    os: str
 
 
 def plan_launcher(
@@ -42,11 +43,11 @@ def plan_launcher(
     tag: str,
     self_dnsname: str | None,
 ) -> list[MachineRow]:
-    """Select tagged peers + Self from parsed tailscale status JSON.
+    """Select tagged nodes from parsed tailscale status JSON.
 
-    Returns [] when status is unavailable. Self is always included when
-    self_dnsname matches Self.DNSName (regardless of whether Self is tagged).
-    Peers are included only if tag appears in their Tags list.
+    Returns [] when status is unavailable. Only nodes whose Tags list
+    contains tag are included — Self and Peers alike.
+    is_self is set when self_dnsname matches the node's DNSName.
     Sort: self-first, then online-first, then by name.
     """
     if status is None:
@@ -54,15 +55,21 @@ def plan_launcher(
 
     rows: list[MachineRow] = []
 
-    # Self — always included if self_dnsname matches, regardless of tags
+    def _is_self(node: dict) -> bool:
+        if not self_dnsname:
+            return False
+        dns = (node.get("DNSName") or "").rstrip(".")
+        return dns == self_dnsname.rstrip(".")
+
+    # Self — only if tagged
     self_node = status.get("Self") or {}
-    self_dns = (self_node.get("DNSName") or "").rstrip(".")
-    if self_dnsname and self_dns == self_dnsname.rstrip("."):
+    if tag in self_node.get("Tags", []):
         rows.append(MachineRow(
             name=self_node.get("HostName", ""),
             url=_dashboard_url(self_node["DNSName"]),
             online=bool(self_node.get("Online")),
-            is_self=True,
+            is_self=_is_self(self_node),
+            os=self_node.get("OS", ""),
         ))
 
     # Peers — only tagged ones
@@ -73,7 +80,8 @@ def plan_launcher(
             name=peer.get("HostName", ""),
             url=_dashboard_url(peer["DNSName"]),
             online=bool(peer.get("Online")),
-            is_self=False,
+            is_self=_is_self(peer),
+            os=peer.get("OS", ""),
         ))
 
     rows.sort(key=lambda r: (not r.is_self, not r.online, r.name))

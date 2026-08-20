@@ -701,7 +701,7 @@ def test_valid_machines_payload_passes():
     contracts.validate_machines_payload({
         "contract": 1,
         "machines": [
-            {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False},
+            {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False, "os": "linux"},
         ],
     })
 
@@ -722,7 +722,7 @@ def test_machines_payload_unknown_key_rejected():
             "contract": 1,
             "machines": [
                 {"name": "Lovelace", "url": "https://lovelace.ts.net/",
-                 "online": True, "is_self": False, "extra": 1},
+                 "online": True, "is_self": False, "os": "linux", "extra": 1},
             ],
         })
 

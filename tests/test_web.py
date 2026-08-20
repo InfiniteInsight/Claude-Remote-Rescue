@@ -929,8 +929,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_57():
-    """v57: Machines panel — tag:crr peer list with on-tailnet badge.
+def test_page_version_is_58():
+    """v58: Machines panel — tagged-only, OS field, "Tailnet Members" label.
+    (v57: Machines panel — tag:crr peer list with on-tailnet badge.
     (v56: PWA installability — manifest link, apple-touch-icon, iOS meta
     tags, and service worker registration in page.html's head/script.
     (v55: style #adddev-box (padding/border/background, centered QR) and
@@ -947,7 +948,7 @@ def test_page_version_is_57():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 57
+    assert web.PAGE_VERSION == 58
 
 
 def test_page_renders_the_parked_state():
@@ -1659,7 +1660,7 @@ def test_page_has_the_add_a_device_affordance():
 
 def test_machines_route_returns_json():
     payload = {"contract": 1, "machines": [
-        {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False},
+        {"name": "Lovelace", "url": "https://lovelace.ts.net/", "online": True, "is_self": False, "os": "linux"},
     ]}
     r = _handle("GET", "/api/machines", machines_provider=lambda: payload)
     assert r.status == 200

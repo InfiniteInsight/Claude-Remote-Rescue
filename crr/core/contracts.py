@@ -534,7 +534,7 @@ EXCLUSIONS_PAYLOAD_KEYS = (
 )
 SETTINGS_PAYLOAD_KEYS = ("contract", "autokick", "resolved", "config_default", "degraded")
 ACTION_RESULT_KEYS = ("contract", "ok", "message", "degraded")
-MACHINE_ROW_KEYS = ("name", "url", "online", "is_self")
+MACHINE_ROW_KEYS = ("name", "url", "online", "is_self", "os")
 MACHINES_PAYLOAD_KEYS = ("contract", "machines")
 
 
