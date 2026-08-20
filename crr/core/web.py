@@ -40,7 +40,7 @@ from crr.core import contracts
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 54  # v54: "Add a device" QR affordance (/qr.svg)
+PAGE_VERSION = 55  # v55: style #adddev-box, retry QR fetch on every open
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

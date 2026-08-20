@@ -1,7 +1,7 @@
 # Claude-Remote-Rescue
 
 If you are like me, you are often checking your Claude Code sessions from the Claude Mobile app. 
-If, like me, you are tired of discovering that youre Remote Control sessions have disconnected
+If, like me, you are tired of discovering that your Remote Control sessions have disconnected
 for some reason. There goes being productive while out and about. 
 
 I created Claude Remote Rescue to fix that little annoyance, and then some.  

@@ -217,6 +217,15 @@
   #diag-panel .ev, #disc-list .ev, #recall-panel .ev {
     font-family: ui-monospace, monospace; color: #cdd3dd; margin: 3px 0; word-break: break-word;
   }
+  #adddev-box {
+    margin: 8px 16px 0; padding: 14px 12px; border: 1px solid #262b36; border-radius: 8px;
+    background: #161a22; font-size: 12px; text-align: center;
+  }
+  #adddev-box p { margin: 0 0 10px; color: #8a93a2; }
+  #adddev-box img {
+    display: block; margin: 0 auto; background: #fff; padding: 8px; border-radius: 6px;
+    max-width: 100%; height: auto;
+  }
   #recall { display: flex; gap: 8px; padding: 6px 16px 0; }
   #recall-q {
     flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 6px 10px;
@@ -1287,7 +1296,11 @@ document.getElementById("diag-btn").addEventListener("click", function () {
 document.getElementById("adddev-btn").addEventListener("click", function () {
   var box = document.getElementById("adddev-box");
   var img = document.getElementById("adddev-qr");
-  if (box.hidden && !img.src) { img.src = "/qr.svg"; }
+  // Re-set on every open (not just the first !img.src click): if serve
+  // wasn't live yet and /qr.svg 404'd, img.src is already non-empty, so a
+  // guarded set would never retry. Re-setting a URL that already loaded is
+  // a browser no-op (cached), so this is safe on repeat opens too.
+  if (box.hidden) { img.src = "/qr.svg"; }
   box.hidden = !box.hidden;
 });
 
