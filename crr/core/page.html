@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude-Remote-Rescue</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CRR">
+<meta name="theme-color" content="#0f1115">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -432,6 +438,7 @@
 
 <script>
 "use strict";
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js');}
 // Baked at serve time; compared against /api/version to self-heal a cached page.
 var PAGE_VERSION = "@PAGE_VERSION@";
 var POLL_MS = @POLL_MS@;

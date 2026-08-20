@@ -41,7 +41,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 55  # v55: style #adddev-box, retry QR fetch on every open
+PAGE_VERSION = 56  # v56: PWA installability — manifest, icons, SW registration
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
