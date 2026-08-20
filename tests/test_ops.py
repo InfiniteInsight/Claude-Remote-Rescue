@@ -395,6 +395,27 @@ def test_reopen_live_with_tmux_opens_tab(tmp_path):
     assert tmux.created == []  # no new tmux session spawned
 
 
+def test_reopen_live_with_tmux_opens_tab_even_when_pid_mismatches(tmp_path):
+    """The pid-ownership check was dropped — a tab opens even when the tmux
+    session's pid doesn't match the journaled pid."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    name = f"crr-{_SID}"
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+    # session_pids says 999, journaled pid is 42 — mismatch
+    tmux = FakeTmux(live={name}, session_pids={name: 999})
+    tab = FakeTabSpawner()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True)
+    assert res.ok is True
+    assert tab.opened  # tab opened despite pid mismatch
+
+
 def test_reopen_live_without_tmux_still_refused(tmp_path):
     """A LIVE session with NO tmux_session is still refused (no tab target)."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
