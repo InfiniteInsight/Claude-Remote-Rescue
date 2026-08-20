@@ -79,6 +79,10 @@ SETTINGS_CONTRACT_VERSION = 1
 # which is how #49 widened them from {ok, message} to {ok, message, degraded}
 # with no version to bump and no validator to update.
 ACTION_CONTRACT_VERSION = 1
+# The launcher's machines panel (#N — Launcher/Machines Panel). Lists the
+# tailnet peers running crr, each row's reachability, and which one is this
+# machine. Brand new: no prior unversioned shape to backfill.
+MACHINES_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -530,6 +534,8 @@ EXCLUSIONS_PAYLOAD_KEYS = (
 )
 SETTINGS_PAYLOAD_KEYS = ("contract", "autokick", "resolved", "config_default", "degraded")
 ACTION_RESULT_KEYS = ("contract", "ok", "message", "degraded")
+MACHINE_ROW_KEYS = ("name", "url", "online", "is_self")
+MACHINES_PAYLOAD_KEYS = ("contract", "machines")
 
 
 def _require_contract(payload: Mapping[str, Any], expected: int, what: str) -> None:
@@ -653,3 +659,23 @@ def validate_settings_payload(payload: Any) -> None:
         _require_type(payload["autokick"], bool, "/api/settings 'autokick'")
     for field in ("resolved", "config_default", "degraded"):
         _require_type(payload[field], bool, f"/api/settings '{field}'")
+
+
+# --------------------------------------------------------------------------
+# /api/machines payload (launcher machines panel).
+# --------------------------------------------------------------------------
+
+def validate_machines_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid /api/machines body."""
+    payload = _require_mapping(payload, "/api/machines payload")
+    _require_exact_keys(payload, MACHINES_PAYLOAD_KEYS, "/api/machines payload")
+    _require_type(payload["contract"], int, "/api/machines 'contract'")
+    if payload["contract"] != MACHINES_CONTRACT_VERSION:
+        raise ContractError(
+            f"/api/machines 'contract' is {payload['contract']}, "
+            f"this build serves {MACHINES_CONTRACT_VERSION}"
+        )
+    _require_type(payload["machines"], list, "/api/machines 'machines'")
+    for row in payload["machines"]:
+        row = _require_mapping(row, "/api/machines row")
+        _require_exact_keys(row, MACHINE_ROW_KEYS, "/api/machines row")
