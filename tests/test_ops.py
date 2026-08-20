@@ -372,6 +372,85 @@ def test_opresult_defaults_to_not_degraded():
     assert ops.OpResult(True, "x").degraded is False
 
 
+# --- reopen LIVE-with-tmux (tab attach, no revival) -----------------------
+
+def test_reopen_live_with_tmux_opens_tab(tmp_path):
+    """A LIVE session with a tmux_session gets a tab, not a refusal."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    name = f"crr-{_SID}"
+    # Write tmux_session into the entry
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+    tmux = FakeTmux(live={name}, session_pids={name: 42})
+    tab = FakeTabSpawner()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True)
+    assert res.ok is True
+    assert tab.opened  # a tab was opened
+    assert tmux.created == []  # no new tmux session spawned
+
+
+def test_reopen_live_without_tmux_still_refused(tmp_path):
+    """A LIVE session with NO tmux_session is still refused (no tab target)."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    # No tmux_session field set — bare live shell
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True)
+    assert not res.ok
+    assert "is live" in res.message
+
+
+def test_reopen_live_with_tmux_degraded_when_tab_fails(tmp_path):
+    """Tab failure on a LIVE-with-tmux is degraded, not a hard failure."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    name = f"crr-{_SID}"
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+    tmux = FakeTmux(live={name}, session_pids={name: 42})
+    tab = FakeTabSpawner(fail=True)
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True)
+    assert res.ok is True
+    assert res.degraded is True
+    assert "tmux attach -t" in res.message
+
+
+def test_reopen_live_with_tmux_no_spawn_no_archive(tmp_path):
+    """LIVE-with-tmux must not spawn, kill, archive, or touch flags."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    name = f"crr-{_SID}"
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+    tmux = FakeTmux(live={name}, session_pids={name: 42})
+    tab = FakeTabSpawner()
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True)
+    assert res.ok
+    assert tmux.created == []
+    assert ctrl.terminated == []
+    assert flags.armed == {}
+    assert archive.scan().records == []
+    assert store.read(42)  # untouched
+
+
 def test_open_tab_failed_spawn_still_gives_the_attach_command():
     # [live bug, 2026-08-09] On WSL with the WSLInterop binfmt handler
     # unregistered, wt.exe is on PATH but cannot exec: the spawn raises

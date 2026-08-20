@@ -103,7 +103,11 @@ def reopen(
       the detached tmux revival. See ``_reopen_ghost`` for the full
       kill-first-then-preserve-then-spawn ordering and its safety
       rationale.
-    - LIVE: refused — kick/close are the ops for a running claude.
+    - LIVE with tmux_session: tab-attach-only (no revival, no kill, no
+      archive). Subsumes the PARKED path — any live session with a tmux
+      home gets a tab.
+    - LIVE without tmux_session: refused — kick/close are the ops for
+      a running claude with no tmux target to attach to.
 
     Revival always lands in a detached tmux session first (durable), then a
     visible tab attaches to it. The tab is part of what "reopen" means, not a
@@ -129,14 +133,12 @@ def reopen(
         return OpResult(False, f"reopen {pid}: cannot determine tmux state — is tmux responding?")
 
     if state == LIVE:
-        # A LIVE entry is normally a shell the user is working in, and
-        # reopen would race a spawn against it. A PARKED one is different:
-        # the journaled pid IS the process in the tmux session (#58), so
-        # there is nothing to race and reopen means what the user expects —
-        # attach a tab to it. Anything else live is still refused.
         name = entry.get("tmux_session")
-        if not (name and name in live and tmux.session_pid(name) == pid):
-            return OpResult(False, f"session {pid} is live — use kick or close")
+        if name and name in live:
+            suffix, landed = _open_tab(tab_spawner, name)
+            return OpResult(True, f"opened tab for {name}" + suffix,
+                            degraded=tabs_expected and not landed)
+        return OpResult(False, f"session {pid} is live — use kick or close")
 
     if state == GHOST:
         return _reopen_ghost(
