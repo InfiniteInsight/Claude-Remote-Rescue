@@ -29,6 +29,7 @@ from urllib.parse import parse_qs
 
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core import pwa
 
 # Bump this whenever crr/core/page.html changes: the served page compares it
 # to /api/version every `version_check_seconds` and reloads itself when they
@@ -360,6 +361,23 @@ def handle_request(
             if svg is None:
                 return _plain(404, "not found")
             return _resp(200, "image/svg+xml", svg.encode("utf-8"))
+        if path == "/manifest.webmanifest":
+            # Web app manifest: install prompt metadata (name, icons,
+            # standalone display). Pure/static — no provider needed.
+            return _resp(200, "application/manifest+json",
+                         pwa.manifest_json().encode("utf-8"))
+        if path == "/sw.js":
+            # Service worker: must be served as text/javascript (not
+            # application/javascript) for browsers that are strict about
+            # the SW registration content-type check.
+            return _resp(200, "text/javascript",
+                         pwa.SERVICE_WORKER_JS.encode("utf-8"))
+        if path == "/icon-192.png":
+            return _resp(200, "image/png", pwa.make_icon_png(192))
+        if path == "/icon-512.png":
+            return _resp(200, "image/png", pwa.make_icon_png(512))
+        if path == "/apple-touch-icon.png":
+            return _resp(200, "image/png", pwa.make_icon_png(180))
         return _plain(404, "not found")
 
     if method == "POST":

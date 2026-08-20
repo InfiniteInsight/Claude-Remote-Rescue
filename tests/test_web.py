@@ -1644,3 +1644,50 @@ def test_page_has_the_add_a_device_affordance():
     assert 'id="adddev-box"' in page
     assert 'id="adddev-qr"' in page
     assert '/qr.svg' in page
+
+
+# --------------------------------------------------------------------------
+# PWA assets — manifest, service worker, icons (installability).
+# Backed by crr.core.pwa; these routes only wire content-type + bytes.
+# --------------------------------------------------------------------------
+
+class TestPwaRoutes:
+    """Manifest, service worker, and icon routes for PWA installability."""
+
+    def test_manifest_route(self):
+        resp = _handle(path="/manifest.webmanifest")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "application/manifest+json"
+        obj = json.loads(resp.body)
+        assert obj["name"] == "Claude-Remote-Rescue"
+        assert obj["display"] == "standalone"
+
+    def test_sw_route(self):
+        resp = _handle(path="/sw.js")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "text/javascript"
+        assert b"fetch" in resp.body
+
+    def test_icon_192_route(self):
+        resp = _handle(path="/icon-192.png")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_icon_512_route(self):
+        resp = _handle(path="/icon-512.png")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_apple_touch_icon_route(self):
+        resp = _handle(path="/apple-touch-icon.png")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_pwa_routes_are_no_store(self):
+        for path in ("/manifest.webmanifest", "/sw.js", "/icon-192.png",
+                     "/icon-512.png", "/apple-touch-icon.png"):
+            resp = _handle(path=path)
+            assert resp.headers["Cache-Control"] == "no-store"
