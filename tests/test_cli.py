@@ -2853,6 +2853,41 @@ def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, 
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
+def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, capsys):
+    """rescue_auto_open=true (the default) must open tabs for restored
+    sessions WITHOUT prompting — select.select must never be called, and
+    ops.reopen must be called for each found session."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    # No config.toml written — rescue_auto_open defaults to True
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli.select, "select",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("select.select must not be called when auto_open is true")))
+
+    calls = []
+
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+        calls.append(pid)
+        return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid} as crr-x")
+
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [42, 43]
+    assert "reopened 42" in out and "reopened 43" in out
+    assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
 def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch, capsys):
     """All three shims invoke `crr rescue-check 2>/dev/null`, so anything
     written to stderr from this consent path is thrown away — a user who
@@ -3054,6 +3089,36 @@ def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monke
     rc = cli.main(["rescue-check"])
     assert rc == 0
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_auto_open_headless_skips_prompt(tmp_path, monkeypatch, capsys):
+    """rescue_auto_open=true on the headless path: tmux-link fires without
+    prompting.  select.select must never be called."""
+    _rescue_check_setup(monkeypatch, tmp_path, [
+        {"pid": 42, "tmux_session": "crr-a", "cwd": "/home/u/alpha"},
+    ])
+    # No config.toml — rescue_auto_open defaults to True
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setenv("TMUX", "sock,1,0")  # inside tmux
+    monkeypatch.setattr(cli.select, "select",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("select.select must not be called when auto_open is true")))
+
+    ran = []
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    monkeypatch.setattr(cli, "_exec", lambda *a: (_ for _ in ()).throw(
+        AssertionError("must not exec when inside tmux")))
+
+    class _T(_FakeTmuxRescued):
+        def current_session_name(self): return "work"
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: _T())
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert ["tmux", "link-window", "-s", "crr-a", "-t", "work"] in ran
 
 
 def test_rescue_check_headless_in_tmux_links_windows_no_exec(tmp_path, monkeypatch, capsys):
