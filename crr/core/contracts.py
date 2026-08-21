@@ -48,7 +48,9 @@ JOURNAL_SCHEMA_VERSION = 1
 # reopened, i.e. a tmux client is attached. False (not nullable) when
 # detached or when the attached query could not be read, so an unreadable
 # tmux state never claims "you are already in this session".
-SESSIONS_CONTRACT_VERSION = 14
+# v15 adds `auth_state`, `auth_expires_in_seconds`, `auth_reauth_url` to the
+# sessions PAYLOAD (not the card) — global OAuth auth state for the dashboard.
+SESSIONS_CONTRACT_VERSION = 15
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -247,7 +249,10 @@ SESSION_CARD_KEYS = (
     # would tell the reader to kill something on no evidence.
     "conflict",
 )
-SESSIONS_PAYLOAD_KEYS = ("contract", "sessions")
+SESSIONS_PAYLOAD_KEYS = (
+    "contract", "sessions",
+    "auth_state", "auth_expires_in_seconds", "auth_reauth_url",
+)
 
 DIAGNOSTICS_PAYLOAD_KEYS = (
     "contract",
@@ -452,6 +457,19 @@ def validate_sessions_payload(payload: Any) -> None:
     _require_type(payload["sessions"], list, "/api/sessions 'sessions'")
     for card in payload["sessions"]:
         validate_session_card(card)
+
+    # Auth state fields (v15) — global, not per-card.
+    _require_enum(payload["auth_state"], AUTH_STATES, "/api/sessions 'auth_state'")
+    if payload["auth_expires_in_seconds"] is not None:
+        _require_type(
+            payload["auth_expires_in_seconds"], int,
+            "/api/sessions 'auth_expires_in_seconds'",
+        )
+    if payload["auth_reauth_url"] is not None:
+        _require_type(
+            payload["auth_reauth_url"], str,
+            "/api/sessions 'auth_reauth_url'",
+        )
 
 
 # --------------------------------------------------------------------------
