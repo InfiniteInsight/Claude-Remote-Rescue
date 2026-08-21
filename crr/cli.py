@@ -2269,23 +2269,35 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
 
+    creds = _read_credentials(_credentials_path(config))
+    a_state, _ = auth.auth_state(creds, now=time.time())
+    auth_expired = a_state == "expired"
+
+    if auth_expired:
+        print("crr revive: auth expired — skipping revival pass "
+              "(strikes frozen until auth is restored)", file=sys.stderr)
+
     with mutation_lock(sd):
         _verify_guessed_sids(store, _now())  # upgrade guessed sids before reviving
-        scan = store.scan()                  # re-scan so revive sees the upgrades
-        outcome = reviver.revive_crashed(
-            scan.entries, boot, probe, tmux_spawner, store, archive,
-            max_strikes=config.get("zombie_strikes"),
-            now=_now(),
-            remote_control_enabled=config.get("remote_control"),
-            # Without this the sweep revives a conversation the user closed:
-            # `close` arms a flag the shim consumes, and a tmux-revived
-            # claude has no shim (#58).
-            flags=FlagStore(sd),
-            # And without this a KICKED conversation comes back with nothing
-            # pointing at it (#62) — the sweep, not kick, creates the
-            # replacement, so the tab can only be opened from here.
-            tab_spawner=_tab_spawner(config)[0],
-        )
+        if auth_expired:
+            scan = store.scan()
+            outcome = reviver.RevivalOutcome([], [], [])
+        else:
+            scan = store.scan()              # re-scan so revive sees the upgrades
+            outcome = reviver.revive_crashed(
+                scan.entries, boot, probe, tmux_spawner, store, archive,
+                max_strikes=config.get("zombie_strikes"),
+                now=_now(),
+                remote_control_enabled=config.get("remote_control"),
+                # Without this the sweep revives a conversation the user closed:
+                # `close` arms a flag the shim consumes, and a tmux-revived
+                # claude has no shim (#58).
+                flags=FlagStore(sd),
+                # And without this a KICKED conversation comes back with nothing
+                # pointing at it (#62) — the sweep, not kick, creates the
+                # replacement, so the tab can only be opened from here.
+                tab_spawner=_tab_spawner(config)[0],
+            )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
     if outcome.skipped:

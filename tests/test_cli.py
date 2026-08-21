@@ -1755,6 +1755,94 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
     assert "crr revive: tmux state unknown — pass skipped (no strikes accrued)" in err
 
 
+def test_revive_skips_revival_when_auth_expired(tmp_path, monkeypatch, capsys):
+    """When OAuth credentials are expired, the entire revival pass must be
+    skipped — a revived session would launch under the stale token, die
+    immediately, and burn a give-up strike it can never recover from.
+    """
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    creds_path = tmp_path / ".credentials.json"
+    now = 1_700_000_000.0
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now - 3600) * 1000),
+        "refreshTokenExpiresAt": int((now - 7200) * 1000),
+    }))
+    monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+        def session_pid(self, name):
+            return None
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    revive_called = []
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: revive_called.append(True) or cli.reviver.RevivalOutcome([], [], []),
+    )
+
+    rc = cli.main(["revive"])
+    assert rc == 0
+    assert revive_called == [], "revive_crashed must NOT be called when auth is expired"
+    err = capsys.readouterr().err
+    assert "auth expired" in err
+    assert "skipping revival" in err.lower()
+
+
+def test_revive_proceeds_when_auth_valid(tmp_path, monkeypatch, capsys):
+    """Revival must proceed normally when auth is valid."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    creds_path = tmp_path / ".credentials.json"
+    now = 1_700_000_000.0
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now + 4 * 86400) * 1000),
+        "refreshTokenExpiresAt": int((now + 30 * 86400) * 1000),
+    }))
+    monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+        def session_pid(self, name):
+            return None
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    revive_called = []
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: revive_called.append(True) or cli.reviver.RevivalOutcome([], [], []),
+    )
+
+    rc = cli.main(["revive"])
+    assert rc == 0
+    assert revive_called == [True], "revive_crashed must be called when auth is valid"
+
+
 def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, monkeypatch, capsys):
     # Slice 2 (dropped-Remote-Control watchdog): the deliverable is the
     # WIRING in `_cmd_revive`, not just the standalone `_kick_dropped_bridges`
