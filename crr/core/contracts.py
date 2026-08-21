@@ -171,6 +171,21 @@ AUTOKICK_STATES = ("on", "off", "global-off", "degraded")
 #                NOT fine to hand to a spawn — which is why `_adopt`
 #                refuses a decoded cwd that is not a real directory.
 CWD_SOURCES = ("verified", "decoded")
+# The dashboard's OAuth auth state (spec 2026-08-21), from
+# `crr.core.auth.auth_state`. "expiring" sits between "valid" and
+# "expired" so a reader can act before the refresh token is gone:
+#   "valid"    - access token (or refresh token) has more than
+#                EXPIRING_WINDOW_SECONDS left.
+#   "expiring" - the earliest of the two tokens expires within the
+#                window — includes an already-expired ACCESS token
+#                whose REFRESH token is still alive within the window,
+#                since a kick/restart triggers doRefresh in that case.
+#   "expired"  - the refresh token itself is gone; nothing left to
+#                silently recover with.
+#   "unknown"  - credentials are missing or unparseable. Same "unreadable
+#                signal must not become a positive claim" rule as
+#                REMOTE_CONTROL_STATES above.
+AUTH_STATES = ("valid", "expiring", "expired", "unknown")
 
 # --------------------------------------------------------------------------
 # Canonical key lists.
