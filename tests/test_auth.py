@@ -75,6 +75,13 @@ class TestAuthState:
         state, expires_in = auth.auth_state(creds, now=_NOW)
         assert state == "expiring"
 
+    def test_expiring_access_expired_refresh_alive_far_future(self):
+        # Access expired, refresh valid but far beyond the 3-day window
+        # — still "expiring" because access-expired is recoverable
+        creds = _creds(access_expires_s=-3600, refresh_expires_s=25 * 86400)
+        state, expires_in = auth.auth_state(creds, now=_NOW)
+        assert state == "expiring"
+
     def test_unknown_none_credentials(self):
         state, expires_in = auth.auth_state(None, now=_NOW)
         assert state == "unknown"

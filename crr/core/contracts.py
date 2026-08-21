@@ -177,9 +177,9 @@ CWD_SOURCES = ("verified", "decoded")
 #   "valid"    - access token (or refresh token) has more than
 #                EXPIRING_WINDOW_SECONDS left.
 #   "expiring" - the earliest of the two tokens expires within the
-#                window — includes an already-expired ACCESS token
-#                whose REFRESH token is still alive within the window,
-#                since a kick/restart triggers doRefresh in that case.
+#                window, OR the access token is already expired but
+#                the refresh token is still alive (a kick/restart
+#                triggers doRefresh in that case).
 #   "expired"  - the refresh token itself is gone; nothing left to
 #                silently recover with.
 #   "unknown"  - credentials are missing or unparseable. Same "unreadable
