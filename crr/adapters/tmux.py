@@ -46,6 +46,18 @@ def _current_session_cmd() -> list[str]:
     return ["tmux", "display-message", "-p", "#S"]
 
 
+def _capture_pane_cmd(name: str) -> list[str]:
+    # -J joins wrapped lines: without it, a long OAuth URL wraps at the
+    # pane's column width (the default 80 columns wraps a ~200-char URL),
+    # so the caller's regex would capture a truncated, invalid URL instead
+    # of the whole line.
+    return ["tmux", "capture-pane", "-t", name, "-p", "-J"]
+
+
+def _send_keys_cmd(name: str, text: str) -> list[str]:
+    return ["tmux", "send-keys", "-t", name, text, "Enter"]
+
+
 def _parse_sessions(stdout: str) -> set[str]:
     return {line for line in stdout.splitlines() if line}
 
@@ -176,3 +188,40 @@ class RealTmux:
             return None
         name = result.stdout.strip()
         return name or None
+
+    def capture_pane(self, name: str) -> str | None:
+        """Best-effort snapshot of ``name``'s pane text (``-J``: wrapped
+        lines joined — see ``_capture_pane_cmd``), or None on any failure.
+
+        Used by the dashboard reauth flow to scrape the OAuth URL out of
+        `claude auth login`'s output. A missing session (already exited,
+        never started) is not distinguished from a transient error — both
+        are "nothing to read" to the caller, which just tries again on the
+        next poll.
+        """
+        try:
+            result = subprocess.run(
+                _capture_pane_cmd(name),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout
+
+    def send_keys(self, name: str, text: str) -> None:
+        """Best-effort key send + Enter into ``name``'s pane.
+
+        Errors are swallowed rather than raised: the dashboard reauth POST
+        that calls this is deliberately non-blocking (it returns before
+        knowing whether the code was accepted), so a failed send surfaces
+        as "no credential refresh on the next poll", not as a 5xx here.
+        """
+        try:
+            subprocess.run(
+                _send_keys_cmd(name, text),
+                capture_output=True, text=True, timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass

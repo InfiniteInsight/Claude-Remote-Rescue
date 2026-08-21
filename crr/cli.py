@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import select
 import shutil
 import signal
@@ -26,6 +27,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -2646,6 +2648,108 @@ def _kick_dropped_bridges(
         print(f"crr revive: {outcome_word} {sid8} (unreachable): {res.message}")
 
 
+def _do_kick(
+    entry: Mapping[str, Any],
+    kick_store: "bridge_kicks.KickHistoryStore",
+    config: cfg.Config,
+    boot,
+    probe,
+    controller,
+    flags: FlagStore,
+    store: JournalStore,
+) -> None:
+    """Kick one LIVE-but-unreachable session, called from
+    ``_post_reauth_recovery`` (below) under ``mutation_lock``.
+
+    Thin wrapper pairing ``ops.kick`` with ``kick_store.record_kick`` —
+    mirrors ``_kick_dropped_bridges``'s own pairing, so a recovery kick
+    leaves the same audit trail (``crr kicks --list``) an auto-kick would.
+    """
+    pid = entry["pid"]
+    sid = entry["claude"]["session_id"]
+    grace = config.get("close_grace_seconds")
+    try:
+        ops.kick(store, controller, flags, boot, probe, pid, grace=grace)
+    finally:
+        # Record the ATTEMPT even on an exception, same reasoning as
+        # `_kick_dropped_bridges`'s own `finally`: an uncounted attempt
+        # would let a later sweep retry with no memory of this one.
+        kick_store.record_kick(sid, now=time.time())
+
+
+def _post_reauth_recovery(
+    store: JournalStore,
+    archive: ArchiveStore,
+    boot,
+    probe,
+    controller,
+    flags: FlagStore,
+    config: cfg.Config,
+    sd: Path,
+    tmux_spawner,
+) -> None:
+    """After a successful remote reauth (spec 2026-08-21, dashboard reauth):
+    reset every session's kick-attempt counters, reopen CRASHED sessions,
+    and kick LIVE-but-unreachable ones so they relaunch under the fresh
+    credentials picked up via ``loadCredentials`` at claude startup.
+
+    Called ONCE by ``provider()`` (in ``_cmd_web``) on the poll where the
+    auth state is observed to transition expired -> valid — never on a
+    timer, and never re-entered concurrently (the caller gates this behind
+    its own reauth-active flag under a lock).
+
+    Counters are reset UNCONDITIONALLY, before any reopen/kick decision:
+    every kick attempted while auth was expired would have failed to
+    reconnect (same stale token) and burned into
+    ``bridge_kick_max_attempts``'s cap — leaving that cap in place after a
+    successful reauth would refuse the very recovery this function exists
+    to perform.
+
+    Deliberately bypasses the dashboard's autokick on/off setting (unlike
+    ``_kick_dropped_bridges``): the user just took the explicit "reauth"
+    action that authorizes this one sweep, and a session unreachable
+    specifically BECAUSE the token expired is not the failure autokick's
+    opt-out exists to silence. It does NOT bypass
+    ``reachability.may_kick`` — a session mid-turn (``busy``/``shell``)
+    still must not be SIGTERM'd here; that one is left for the next
+    ordinary sweep once it reaches a boundary.
+    """
+    kick_store = bridge_kicks.KickHistoryStore(sd)
+    entries = [e for e in store.scan().entries if e.get("claude") is not None]
+    for entry in entries:
+        kick_store.reset(entry["claude"]["session_id"])
+
+    states = session_state.read_all()
+    for entry in entries:
+        pid = entry["pid"]
+        sid = entry["claude"]["session_id"]
+        kind = classifier.classify(entry, boot, probe)
+        if kind == classifier.CRASHED:
+            with mutation_lock(sd):
+                spawner, tabs_expected = _tab_spawner(config)
+                ops.reopen(
+                    store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, _now(), grace=config.get("close_grace_seconds"),
+                    remote_control=config.get("remote_control"),
+                    tab_spawner=spawner, tabs_expected=tabs_expected,
+                )
+        elif kind == classifier.LIVE:
+            state = states.get(sid)
+            if state is None:
+                continue  # nothing readable to act on (mirrors `_reachability_by_sid`)
+            pid_matched = state.pid is not None and state.pid in controller.claude_groups(pid)
+            reach = reachability.reachability(
+                state.bridge_session_id, pid_matched=pid_matched, field_present=state.field_present,
+            )
+            if reach != reachability.UNREACHABLE:
+                continue
+            allowed, _refusal = reachability.may_kick(state.status)
+            if not allowed:
+                continue  # mid-turn (busy/shell) — do not destroy work in flight
+            with mutation_lock(sd):
+                _do_kick(entry, kick_store, config, boot, probe, controller, flags, store)
+
+
 def _cmd_remove(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
@@ -3656,6 +3760,8 @@ def make_web_handler(
     settings_writer: Callable[[object], dict] | None = None,
     qr_svg_provider: Callable[[], str | None] | None = None,
     machines_provider: Callable[[], dict] | None = None,
+    reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
+    reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -3691,6 +3797,8 @@ def make_web_handler(
                 settings_writer=settings_writer,
                 qr_svg_provider=qr_svg_provider,
                 machines_provider=machines_provider,
+                reauth_provider=reauth_provider,
+                reauth_code_provider=reauth_code_provider,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -4058,7 +4166,94 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
     extract = _tail_facts_extractor(config)
 
+    # --- dashboard reauth (spec 2026-08-21) --------------------------------
+    # State shared across the poll thread (`provider()`, called on every
+    # /api/sessions GET) and the two reauth POST handlers below — all run on
+    # separate `ThreadingHTTPServer` request threads. Every read/write here
+    # that is not a single atomic Python statement is guarded by
+    # `_reauth_lock`, so two concurrent pollers can't both observe the
+    # expired -> valid transition and double-fire recovery (double-kick,
+    # double-reopen).
+    _REAUTH_SESSION = "crr-reauth"
+    _reauth_lock = threading.Lock()
+    _reauth_active = False
+    _reauth_url: str | None = None
+    _prev_auth_state = "unknown"
+
+    def reauth_provider() -> tuple[bool, str, bool]:
+        """Non-blocking: spawn ``claude auth login`` in a detached tmux
+        pane and return immediately.
+
+        The OAuth URL is NOT returned here — it surfaces via
+        ``auth_reauth_url`` on the next dashboard poll cycle (see
+        ``_poll_reauth_url_once``, wired into ``provider()`` below), which
+        matches the existing polling model instead of holding the HTTP
+        socket open for however long ``claude auth login`` takes to print
+        its URL.
+        """
+        nonlocal _reauth_active, _reauth_url
+        with _reauth_lock:
+            if _reauth_active:
+                return (False, "Reauth already in progress", False)
+            _reauth_active = True
+            _reauth_url = None
+        try:
+            tmux_spawner.new_detached_session(
+                _REAUTH_SESSION, str(Path.home()), ["claude", "auth", "login"],
+            )
+        except Exception:
+            with _reauth_lock:
+                _reauth_active = False
+            return (False, "Failed to start reauth — is tmux installed?", False)
+        return (True, "Reauth started — URL will appear on next poll", False)
+
+    def _poll_reauth_url_once() -> str | None:
+        """One non-blocking capture-pane attempt against the reauth pane.
+
+        Called from ``provider()`` each poll while a URL has not yet been
+        captured. ``RealTmux.capture_pane`` uses ``-J`` (join wrapped
+        lines) — without it the ~200-char OAuth URL wraps at the pane's
+        column width and this regex would capture a truncated, invalid
+        URL.
+        """
+        output = tmux_spawner.capture_pane(_REAUTH_SESSION)
+        if not output:
+            return None
+        m = re.search(r"visit:\s+(https://\S+)", output)
+        return m.group(1) if m else None
+
+    def reauth_code_provider(code: str) -> tuple[bool, str, bool]:
+        """Non-blocking: send the login code into the reauth pane and
+        return immediately.
+
+        Success detection — the credentials file refreshing, which flips
+        ``auth_state`` to ``"valid"`` and fires ``_post_reauth_recovery``
+        — happens on a LATER ``provider()`` poll, never here.
+        """
+        if not _reauth_active:
+            return (False, "No reauth in progress", False)
+        tmux_spawner.send_keys(_REAUTH_SESSION, code)
+        return (True, "Code submitted — watching for credential refresh", False)
+
+    def _cleanup_reauth() -> None:
+        """Idempotent: tear down the reauth pane and clear in-process
+        state.
+
+        Called with ``_reauth_lock`` held by ``provider()``'s transition
+        check (below), except ``reauth_provider``'s own failure path, which
+        is lock-free but runs before anyone else could have observed
+        ``_reauth_active`` as True.
+        """
+        nonlocal _reauth_active, _reauth_url
+        try:
+            tmux_spawner.kill_session(_REAUTH_SESSION)
+        except Exception:
+            pass
+        _reauth_active = False
+        _reauth_url = None
+
     def provider() -> dict:
+        nonlocal _prev_auth_state, _reauth_url
         now = _now()
         if _guessed_upgradable(store, now):
             with mutation_lock(sd):
@@ -4070,6 +4265,29 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # were last valid and never reflect a later expiry or reauth.
         creds = _read_credentials(_credentials_path(config))
         auth_state_value, auth_expires_in_seconds = auth.auth_state(creds, now=time.time())
+
+        # At most one capture-pane attempt per poll while a reauth is
+        # active and no URL has been captured yet.
+        if _reauth_active and _reauth_url is None:
+            url = _poll_reauth_url_once()
+            if url:
+                _reauth_url = url
+
+        # The expired -> valid transition is what fires post-reauth
+        # recovery — locked so two concurrent poll threads can't both see
+        # it and double-fire (`_cleanup_reauth` clears `_reauth_active`
+        # before the lock releases, so only the first thread through wins).
+        recovery_needed = False
+        with _reauth_lock:
+            if (_reauth_active and _prev_auth_state == "expired"
+                    and auth_state_value in ("valid", "expiring")):
+                recovery_needed = True
+                _cleanup_reauth()
+            _prev_auth_state = auth_state_value
+        if recovery_needed:
+            _post_reauth_recovery(store, archive, boot, probe, controller, flags,
+                                   config, sd, tmux_spawner)
+
         payload = status.assemble_sessions(
             entries,
             boot,
@@ -4090,7 +4308,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             autokick_session_overrides=settings_store.read_session_overrides(),
             auth_state=auth_state_value,
             auth_expires_in_seconds=auth_expires_in_seconds,
-            auth_reauth_url=None,  # set by the reauth endpoint handler (Task 4)
+            auth_reauth_url=_reauth_url,
         )
         contracts.validate_sessions_payload(payload)
         return payload
@@ -4300,6 +4518,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         settings_writer=settings_writer,
         qr_svg_provider=qr_svg_provider,
         machines_provider=machines_provider,
+        reauth_provider=reauth_provider,
+        reauth_code_provider=reauth_code_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),

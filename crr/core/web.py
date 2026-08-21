@@ -245,6 +245,8 @@ def handle_request(
     settings_writer: Callable[[Any], dict[str, Any]] | None = None,
     qr_svg_provider: Callable[[], str | None] | None = None,
     machines_provider: Callable[[], dict[str, Any]] | None = None,
+    reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
+    reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -481,6 +483,42 @@ def handle_request(
             if sid_action_provider is None:
                 return _plain(503, "actions unavailable")
             ok, message, degraded = sid_action_provider(op, sid)
+            return _json(200 if ok else 409, _action_result(ok, message, degraded))
+
+        if path == "/api/reauth":
+            # Same CSRF posture as /api/action — host allowlist already ran;
+            # JSON content-type gate; no CORS headers are ever emitted.
+            # NON-BLOCKING (spec 2026-08-21): the provider only spawns the
+            # tmux pane running `claude auth login` and returns immediately —
+            # the OAuth URL surfaces via `auth_reauth_url` on the NEXT
+            # /api/sessions poll, not on this response, so this handler never
+            # holds the socket open waiting for tmux/claude to print anything.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            if reauth_provider is None:
+                return _plain(503, "reauth unavailable")
+            ok, message, degraded = reauth_provider()
+            return _json(200 if ok else 409, _action_result(ok, message, degraded))
+
+        if path == "/api/reauth-code":
+            # Same CSRF posture and NON-BLOCKING contract as /api/reauth: the
+            # provider sends the code into the pane and returns immediately.
+            # Success (credentials refreshed -> auth_state flips to "valid")
+            # is detected on a LATER poll, never by this response.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            code = data.get("code") if isinstance(data, dict) else None
+            if not isinstance(code, str) or not code:
+                return _plain(400, 'expected {"code": "<string>"}')
+            if reauth_code_provider is None:
+                return _plain(503, "reauth unavailable")
+            ok, message, degraded = reauth_code_provider(code)
             return _json(200 if ok else 409, _action_result(ok, message, degraded))
 
         return _plain(404, "not found")
