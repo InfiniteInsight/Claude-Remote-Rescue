@@ -3779,6 +3779,7 @@ def make_web_handler(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     diag_error_display_cap: int | None = None,
+    reauth_success_display_ms: int | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -3819,6 +3820,7 @@ def make_web_handler(
                 diag_error_display_cap=diag_error_display_cap,
                 flash_ms=flash_ms,
                 filter_debounce_ms=filter_debounce_ms,
+                reauth_success_display_ms=reauth_success_display_ms,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -4537,6 +4539,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         flash_ms=config.get("flash_ms"),
         filter_debounce_ms=config.get("filter_debounce_ms"),
         diag_error_display_cap=config.get("diag_error_display_cap"),
+        reauth_success_display_ms=config.get("reauth_success_display_ms"),
     )
 
     # Snapshot the page template NOW ([lesson: template/code skew]) — a lazy
