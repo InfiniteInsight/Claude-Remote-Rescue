@@ -51,7 +51,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
+from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -75,6 +75,28 @@ def _load_config() -> cfg.Config:
     except (cfg.ConfigError, ValueError, OSError) as exc:
         print(f"crr: ignoring bad config {toml_path}: {exc}", file=sys.stderr)
         return cfg.Config()
+
+
+def _credentials_path(config: cfg.Config) -> Path:
+    """Where Claude Code keeps its OAuth credentials.
+
+    Takes ``config`` for interface symmetry with the other per-command path
+    helpers in this module (and in case a future config knob relocates the
+    file); the location itself is not currently configurable.
+    """
+    return Path.home() / ".claude" / ".credentials.json"
+
+
+def _read_credentials(path: Path) -> dict | None:
+    """Read and parse the Claude credentials file, or None on any error.
+
+    The I/O half of the auth check; the pure classification happens in
+    ``crr.core.auth.auth_state``.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
 
 
 def _tail_facts_extractor(config: cfg.Config):
@@ -2297,6 +2319,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     _kick_dropped_bridges(
         store.scan().entries, boot, probe, config, settings_store, store, sd,
         controller, flags,
+        credentials_path=_credentials_path(config),
     )
     return 0
 
@@ -2317,6 +2340,7 @@ def _kick_dropped_bridges(
     kick=ops.kick,
     clock=time.time,
     kick_store: "bridge_kicks.KickHistoryStore | None" = None,
+    credentials_path: Path | None = None,
 ) -> None:
     """Watchdog step (spec 2026-08-07 Slice 2; detector replaced by spec
     2026-08-09 Phase 3): restart a LIVE session the phone can no longer
@@ -2327,6 +2351,14 @@ def _kick_dropped_bridges(
     checked in this exact order; every skip is printed with its reason —
     a watchdog that silently restarts things is unauditable:
 
+      0. (spec 2026-08-21, dashboard reauth) if ``credentials_path`` is
+         given and ``auth.auth_state`` reads it as ``"expired"``, the whole
+         pass is suppressed before any other guard runs. A kick relaunches
+         under the SAME expired OAuth token, so it would just fail to
+         reconnect again — and burn one of ``kick_eligible``'s capped
+         attempts (guard 6, below) doing it. ``credentials_path=None``
+         (the default) skips this check entirely, matching every caller
+         that predates this guard.
       1. ``remote_control_watch`` must be on — the whole step's gate.
       2. the session must classify LIVE — never CRASHED (that is the
          reviver's job, above), never GHOST (no controlling terminal to
@@ -2389,6 +2421,15 @@ def _kick_dropped_bridges(
     conversation. ``kicked_sids`` makes this pass kick each sid at most
     once per sweep.
     """
+    if credentials_path is not None:
+        creds = _read_credentials(credentials_path)
+        state, _ = auth.auth_state(creds, now=clock())
+        if state == "expired":
+            print("crr revive: auth expired — suppressing auto-kicks "
+                  "(reauth required before sessions can reconnect)",
+                  file=sys.stderr)
+            return
+
     if not config.get("remote_control_watch"):
         return
 
@@ -4024,6 +4065,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 _verify_guessed_sids(store, now)
         settings_store = settings.SettingsStore(sd)
         entries = store.scan().entries
+        # Re-read and re-classify every poll, like reachability above: a
+        # value cached at server start would freeze the moment credentials
+        # were last valid and never reflect a later expiry or reauth.
+        creds = _read_credentials(_credentials_path(config))
+        auth_state_value, auth_expires_in_seconds = auth.auth_state(creds, now=time.time())
         payload = status.assemble_sessions(
             entries,
             boot,
@@ -4042,6 +4088,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
             autokick_global_override=settings_store.effective_global_autokick(),
             autokick_degraded=settings_store.is_degraded(),
             autokick_session_overrides=settings_store.read_session_overrides(),
+            auth_state=auth_state_value,
+            auth_expires_in_seconds=auth_expires_in_seconds,
+            auth_reauth_url=None,  # set by the reauth endpoint handler (Task 4)
         )
         contracts.validate_sessions_payload(payload)
         return payload

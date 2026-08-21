@@ -1785,8 +1785,9 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
 
     calls = []
 
-    def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags):
-        calls.append((sd, store))
+    def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags,
+                       *, credentials_path=None):
+        calls.append((sd, store, credentials_path))
         print("watchdog pass ran")
 
     monkeypatch.setattr(cli, "_kick_dropped_bridges", fake_watchdog)
@@ -1795,9 +1796,13 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
     out = capsys.readouterr().out
     assert rc == 0
     assert len(calls) == 1
-    sd, store = calls[0]
+    sd, store, credentials_path = calls[0]
     assert sd == tmp_path
     assert isinstance(store, JournalStore)
+    # [dashboard reauth] the watchdog must see the same credentials path the
+    # dashboard poll reads, so a systemd-timer sweep and a browser poll agree
+    # on whether auth is expired.
+    assert credentials_path == cli._credentials_path(cfg.Config())
     lines = out.splitlines()
     assert lines.index("revived 0, gave up 0, already running 0") < lines.index("watchdog pass ran")
 
@@ -4302,6 +4307,61 @@ def test_the_web_provider_reports_parked_for_a_tmux_restored_session(tmp_path, m
     live["names"] = {"crr-8a1b2c3d"}
     # Re-asked per poll: a set resolved once at startup would still say crashed.
     assert provider()["sessions"][0]["state"] == "parked"
+
+
+def test_web_provider_includes_auth_state(tmp_path, monkeypatch):
+    """The sessions payload from provider() must include the auth fields
+    (spec 2026-08-21, dashboard reauth) — read fresh from the credentials
+    file each poll, mirroring how reachability is re-asked each poll rather
+    than resolved once at server start."""
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    now = 1_700_000_000.0
+    creds_path = tmp_path / ".credentials.json"
+    # 4-day access expiry clears the 3-day "expiring" warning window (see
+    # tests/test_auth.py::test_valid_both_tokens_fresh) — this test asserts
+    # on the "valid" state specifically, not "expiring".
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now + 4 * 86400) * 1000),
+        "refreshTokenExpiresAt": int((now + 30 * 86400) * 1000),
+    }))
+    monkeypatch.setattr("crr.cli._credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr("time.time", lambda: now)
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return set()
+        def attached_sessions(self): return set()
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    captured = {}
+
+    def fake_make_web_handler(provider, allowed, suffixes, **kw):
+        captured["provider"] = provider
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
+
+    payload = captured["provider"]()
+    assert payload["auth_state"] == "valid"
+    assert isinstance(payload["auth_expires_in_seconds"], int)
+    assert payload["auth_reauth_url"] is None
 
 
 def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatch, capsys):

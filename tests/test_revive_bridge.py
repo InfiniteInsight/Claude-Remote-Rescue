@@ -17,6 +17,8 @@ because an idle session writes none). It reads Claude Code's own
 `core.reachability`.
 """
 
+import json
+
 import pytest
 
 from crr import cli
@@ -107,7 +109,7 @@ def _signal(tail_kind="assistant-end", mtime=0.0):
 
 def _run(entries, settings_store, tmp_path, recorder, *, now=10_000.0,
          state=None, signal=None, probe=None, controller=None,
-         config=None, store=None, kick_store=None):
+         config=None, store=None, kick_store=None, credentials_path=None):
     """One `_kick_dropped_bridges` pass with every seam faked."""
     return cli._kick_dropped_bridges(
         entries, FakeBoot(), probe or FakeProbe(), config or cfg.Config(),
@@ -116,7 +118,102 @@ def _run(entries, settings_store, tmp_path, recorder, *, now=10_000.0,
         read_session_state=lambda: _state() if state is None else state,
         read_takeover_signal=lambda sid: signal or _signal(),
         kick=recorder, clock=lambda: now, kick_store=kick_store,
+        credentials_path=credentials_path,
     )
+
+
+# --------------------------------------------------------------------------
+# Guard 0: auth-expired suppression (spec 2026-08-21, dashboard reauth).
+# A kicked session relaunches under the same expired OAuth token, so it
+# would just fail to reconnect again — and burn one of its capped kick
+# attempts doing it. This guard sits ahead of every other guard below.
+# --------------------------------------------------------------------------
+
+def _creds_file(tmp_path, now, *, access_delta, refresh_delta):
+    creds_path = tmp_path / ".credentials.json"
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now + access_delta) * 1000),
+        "refreshTokenExpiresAt": int((now + refresh_delta) * 1000),
+    }))
+    return creds_path
+
+
+def test_kick_dropped_bridges_suppressed_when_auth_expired(tmp_path, capsys):
+    """When the credentials file says EXPIRED, the watchdog must not kick
+    anything — a kicked session would immediately fail again, wasting its
+    restart budget.
+    """
+    now = 1_700_000_000.0
+    creds_path = _creds_file(tmp_path, now, access_delta=-3600, refresh_delta=-7200)
+
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    recorder = _Recorder()
+
+    _run(store.scan().entries, settings.SettingsStore(tmp_path), tmp_path, recorder,
+         state=_state(None, status="idle"), now=now, credentials_path=creds_path)
+
+    assert recorder.calls == [], "kick must NOT fire when auth is expired"
+    err = capsys.readouterr().err
+    assert "auth expired" in err
+    assert "suppressing" in err.lower()
+
+
+def test_kick_dropped_bridges_proceeds_when_auth_valid(tmp_path):
+    """Same LIVE/unreachable/eligible setup, but with valid credentials —
+    the auth guard must not block a kick that would otherwise fire.
+
+    Access token 4 days out clears the 3-day "expiring" warning window (see
+    tests/test_auth.py::test_valid_both_tokens_fresh) — a 12h access expiry
+    would classify as "expiring", not "valid", and this test is specifically
+    about the "valid" branch.
+    """
+    now = 1_700_000_000.0
+    creds_path = _creds_file(
+        tmp_path, now, access_delta=4 * 86400, refresh_delta=30 * 86400)
+
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    recorder = _Recorder()
+
+    _run(store.scan().entries, settings.SettingsStore(tmp_path), tmp_path, recorder,
+         state=_state(None, status="idle"), now=now, credentials_path=creds_path)
+
+    assert recorder.calls == [_PID], "kick must fire when auth is valid"
+
+
+def test_kick_dropped_bridges_proceeds_when_auth_expiring(tmp_path):
+    """The guard checks ``state == "expired"``, deliberately not
+    ``in ("expired", "expiring")``. Per auth.auth_state's own tests
+    (test_auth.py::test_expiring_access_expired_refresh_alive), "expiring"
+    covers an access token already expired with a live refresh token — a
+    kick there is exactly what recovers the session (the relaunch triggers
+    Claude Code's own doRefresh). Suppressing on "expiring" would break
+    that recovery path."""
+    now = 1_700_000_000.0
+    creds_path = _creds_file(tmp_path, now, access_delta=-3600, refresh_delta=2 * 86400)
+
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    recorder = _Recorder()
+
+    _run(store.scan().entries, settings.SettingsStore(tmp_path), tmp_path, recorder,
+         state=_state(None, status="idle"), now=now, credentials_path=creds_path)
+
+    assert recorder.calls == [_PID], "kick must fire when auth is only expiring"
+
+
+def test_kick_dropped_bridges_proceeds_when_credentials_path_not_given(tmp_path):
+    """Backward compatibility: no credentials_path means the guard is a
+    no-op (the caller opted out, e.g. an older call site or a test)."""
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    recorder = _Recorder()
+
+    _run(store.scan().entries, settings.SettingsStore(tmp_path), tmp_path, recorder,
+         state=_state(None, status="idle"))
+
+    assert recorder.calls == [_PID]
 
 
 # --------------------------------------------------------------------------
