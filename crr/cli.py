@@ -82,9 +82,8 @@ def _load_config() -> cfg.Config:
 def _credentials_path(config: cfg.Config) -> Path:
     """Where Claude Code keeps its OAuth credentials.
 
-    Takes ``config`` for interface symmetry with the other per-command path
-    helpers in this module (and in case a future config knob relocates the
-    file); the location itself is not currently configurable.
+    Takes ``config`` in case a future config knob relocates the file;
+    the location itself is not currently configurable.
     """
     return Path.home() / ".claude" / ".credentials.json"
 

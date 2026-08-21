@@ -25,7 +25,8 @@ def auth_state(
 
     Returns ``(state, expires_in_seconds)`` where state is one of
     ``AUTH_STATES`` and ``expires_in_seconds`` is seconds until the
-    earliest expiration (None when the state is ``"unknown"``).
+    earliest expiration (None when the state is ``"unknown"``; may be
+    negative when the state is ``"expired"``).
 
     ``credentials`` is the parsed JSON from ``~/.claude/.credentials.json``.
     Timestamps (``expiresAt``, ``refreshTokenExpiresAt``) are Unix epoch

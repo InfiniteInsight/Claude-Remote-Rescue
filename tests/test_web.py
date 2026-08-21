@@ -51,6 +51,7 @@ def test_host_allowed_rejects_invalid(host):
 # --------------------------------------------------------------------------
 
 def _payload():
+    # Minimal shape — auth fields omitted (routing tests, not contract conformance).
     return {"contract": 1, "sessions": []}
 
 
