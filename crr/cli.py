@@ -2661,9 +2661,12 @@ def _do_kick(
     """Kick one LIVE-but-unreachable session, called from
     ``_post_reauth_recovery`` (below) under ``mutation_lock``.
 
-    Thin wrapper pairing ``ops.kick`` with ``kick_store.record_kick`` —
-    mirrors ``_kick_dropped_bridges``'s own pairing, so a recovery kick
-    leaves the same audit trail (``crr kicks --list``) an auto-kick would.
+    Thin wrapper pairing ``ops.kick`` with ``kick_store.record_kick``.
+    Unlike ``_kick_dropped_bridges``, this records a bare attempt (no
+    observation dict with pid/bridge/reachability lineage) because the
+    recovery path is a rare one-shot sweep whose observation schema may
+    differ from the watchdog's continuous monitoring.  The attempt is
+    still counted for ``bridge_kick_max_attempts``'s cap.
     """
     pid = entry["pid"]
     sid = entry["claude"]["session_id"]
@@ -2746,6 +2749,12 @@ def _post_reauth_recovery(
             allowed, _refusal = reachability.may_kick(state.status)
             if not allowed:
                 continue  # mid-turn (busy/shell) — do not destroy work in flight
+            if state.status == "idle":
+                sig = transcript_source.read_takeover_signal(sid)
+                seconds_idle = time.time() - sig["mtime"]
+                idle_window = config.get("takeover_idle_seconds")
+                if not takeover.ready_to_take_over(seconds_idle, sig["tail_kind"], idle_window=idle_window):
+                    continue  # idle but mid-turn — wait for a clean boundary
             with mutation_lock(sd):
                 _do_kick(entry, kick_store, config, boot, probe, controller, flags, store)
 

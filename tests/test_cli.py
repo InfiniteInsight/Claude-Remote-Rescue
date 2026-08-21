@@ -4623,7 +4623,7 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     leaves a LIVE-and-unreachable-but-BUSY session alone
     (`reachability.may_kick`), same guard `_kick_dropped_bridges` uses to
     avoid destroying work in flight."""
-    from crr.adapters import session_state
+    from crr.adapters import session_state, transcript_source
     from crr.core import bridge_kicks, ops
     from crr.core.flags import FlagStore
 
@@ -4679,6 +4679,11 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     monkeypatch.setattr(session_state, "read_all", lambda: states)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
 
+    # Idle session at a clean boundary (assistant-end, long idle) → eligible.
+    monkeypatch.setattr(transcript_source, "read_takeover_signal",
+                         lambda sid, home=None: {"mtime": 0.0, "tail_kind": "assistant-end"})
+    # time.time() - 0.0 >> default idle_window (20s), so ready_to_take_over → True.
+
     reset_sids = []
     monkeypatch.setattr(bridge_kicks.KickHistoryStore, "reset",
                          lambda self, sid, now=None: reset_sids.append(sid))
@@ -4701,6 +4706,72 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     assert set(reset_sids) == {sid_crashed, sid_kicked, sid_reachable, sid_busy}
     assert reopened_pids == [1001]
     assert kicked_pids == [1002]
+
+
+def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch):
+    """An idle session whose transcript tail is mid-turn (not at an
+    ``assistant-end`` boundary) must NOT be kicked by recovery — mirroring
+    the same two-signal corroboration that ``_kick_dropped_bridges`` uses
+    (``takeover.ready_to_take_over``). Without this guard, a long
+    non-streaming completion could be SIGTERM'd mid-output."""
+    from crr.adapters import session_state, transcript_source
+    from crr.core import bridge_kicks, ops
+    from crr.core.flags import FlagStore
+
+    sd = tmp_path
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+    flags = FlagStore(sd)
+    _BOOT = "current-boot"
+
+    sid_idle_midturn = "8a1b2c3d-0010-4a6b-8c7d-9e0f1a2b3c4d"
+
+    store.write(new_entry(
+        pid=2001, cwd="/home/u/project", host="tmux", shell="zsh",
+        boot_id=_BOOT, now="2026-08-21T00:00:00Z",
+        claude={"session_id": sid_idle_midturn, "sid_source": "injected",
+                "started": "2026-08-21T00:00:00Z"}))
+
+    class _Boot:
+        def current(self):
+            return _BOOT
+
+    class _Probe:
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            return True
+
+    class _Controller:
+        def claude_groups(self, pid):
+            return [pid + 5000]
+
+    states = {
+        sid_idle_midturn: session_state.SessionState(
+            pid=2001 + 5000, bridge_session_id=None, field_present=True,
+            status="idle", waiting_for=""),
+    }
+    monkeypatch.setattr(session_state, "read_all", lambda: states)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+
+    # Transcript tail is mid-turn — ready_to_take_over will return False.
+    monkeypatch.setattr(transcript_source, "read_takeover_signal",
+                         lambda sid, home=None: {"mtime": 0.0, "tail_kind": "mid-turn"})
+
+    monkeypatch.setattr(bridge_kicks.KickHistoryStore, "reset",
+                         lambda self, sid, now=None: None)
+
+    kicked_pids = []
+    monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
+
+    cli._post_reauth_recovery(
+        store, archive, _Boot(), _Probe(), _Controller(), flags,
+        cfg.Config(), sd, tmux_spawner=None,
+    )
+
+    # The idle mid-turn session must NOT be kicked.
+    assert kicked_pids == []
 
 
 def test_do_kick_records_the_attempt_even_when_ops_kick_raises(tmp_path, monkeypatch):
