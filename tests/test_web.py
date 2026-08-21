@@ -51,6 +51,7 @@ def test_host_allowed_rejects_invalid(host):
 # --------------------------------------------------------------------------
 
 def _payload():
+    # Minimal shape — auth fields omitted (routing tests, not contract conformance).
     return {"contract": 1, "sessions": []}
 
 
@@ -59,7 +60,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             untracked_provider=None, discoverable_provider=None, sid_action_provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
-            machines_provider=None,
+            machines_provider=None, reauth_provider=None, reauth_code_provider=None,
             query=""):
     h = {"Host": host}
     if headers:
@@ -78,6 +79,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         settings_writer=settings_writer,
         qr_svg_provider=qr_svg_provider,
         machines_provider=machines_provider,
+        reauth_provider=reauth_provider,
+        reauth_code_provider=reauth_code_provider,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -929,8 +932,11 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_59():
-    """v59: Reopen button on LIVE cards with tmux_session.
+def test_page_version_is_60():
+    """v60: Auth expiry badge + reauth modal (header badge for
+    expiring/expired/reauth-in-progress auth_state, plus the reauth modal
+    wired to /api/reauth and /api/reauth-code).
+    (v59: Reopen button on LIVE cards with tmux_session.
     (v58: Machines panel — tagged-only, OS field, "Tailnet Members" label.
     (v57: Machines panel — tag:crr peer list with on-tailnet badge.
     (v56: PWA installability — manifest link, apple-touch-icon, iOS meta
@@ -949,7 +955,7 @@ def test_page_version_is_59():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 59
+    assert web.PAGE_VERSION == 60
 
 
 def test_page_renders_the_parked_state():
@@ -1736,3 +1742,142 @@ class TestPwaRoutes:
                      "/icon-512.png", "/apple-touch-icon.png"):
             resp = _handle(path=path)
             assert resp.headers["Cache-Control"] == "no-store"
+
+
+# --------------------------------------------------------------------------
+# POST /api/reauth, POST /api/reauth-code — dashboard remote reauth (spec
+# 2026-08-21). Both are non-blocking: the provider spawns/pokes the tmux
+# pane and returns immediately, so these tests only assert the request is
+# routed to the provider and its (ok, message, degraded) reply is stamped
+# into the same envelope /api/action and /api/sid-action use.
+# --------------------------------------------------------------------------
+
+class TestPostReauth:
+    def test_calls_provider_and_returns_its_result(self):
+        called = []
+
+        def reauth():
+            called.append(True)
+            return (True, "Reauth started — URL will appear on next poll", False)
+
+        resp = _handle(
+            "POST", "/api/reauth",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            reauth_provider=reauth,
+        )
+        assert resp.status == 200
+        assert called
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+        assert "started" in body["message"].lower()
+
+    def test_failure_from_provider_is_409_not_an_exception(self):
+        resp = _handle(
+            "POST", "/api/reauth",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            reauth_provider=lambda: (False, "Reauth already in progress", False),
+        )
+        assert resp.status == 409
+        body = json.loads(resp.body)
+        assert body["ok"] is False
+
+    def test_requires_json_content_type(self):
+        resp = _handle(
+            "POST", "/api/reauth",
+            headers={"Content-Type": "text/plain"},
+            body=b"{}",
+            reauth_provider=lambda: (True, "url", False),
+        )
+        assert resp.status == 415
+
+    def test_unavailable_when_no_provider(self):
+        resp = _handle(
+            "POST", "/api/reauth",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+        )
+        assert resp.status == 503
+
+    def test_disallowed_host_is_403_before_dispatch(self):
+        resp = _handle(
+            "POST", "/api/reauth", host="evil.com",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            reauth_provider=lambda: (True, "url", False),
+        )
+        assert resp.status == 403
+
+
+class TestPostReauthCode:
+    def test_calls_provider_with_code_and_returns_its_result(self):
+        called = []
+
+        def reauth_code(code):
+            called.append(code)
+            return (True, "Code submitted — watching for credential refresh", False)
+
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"code": "abc123"}).encode(),
+            reauth_code_provider=reauth_code,
+        )
+        assert resp.status == 200
+        assert called == ["abc123"]
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+
+    def test_requires_code_field(self):
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"wrong": "field"}).encode(),
+            reauth_code_provider=lambda c: (True, "ok", False),
+        )
+        assert resp.status == 400
+
+    def test_rejects_non_string_code(self):
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"code": 12345}).encode(),
+            reauth_code_provider=lambda c: (True, "ok", False),
+        )
+        assert resp.status == 400
+
+    def test_rejects_empty_code(self):
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"code": ""}).encode(),
+            reauth_code_provider=lambda c: (True, "ok", False),
+        )
+        assert resp.status == 400
+
+    def test_bad_json_is_400(self):
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "application/json"},
+            body=b"not json",
+            reauth_code_provider=lambda c: (True, "ok", False),
+        )
+        assert resp.status == 400
+
+    def test_requires_json_content_type(self):
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "text/plain"},
+            body=json.dumps({"code": "abc"}).encode(),
+            reauth_code_provider=lambda c: (True, "ok", False),
+        )
+        assert resp.status == 415
+
+    def test_unavailable_when_no_provider(self):
+        resp = _handle(
+            "POST", "/api/reauth-code",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"code": "abc"}).encode(),
+        )
+        assert resp.status == 503

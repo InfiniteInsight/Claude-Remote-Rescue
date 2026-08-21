@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v14).
+"""Status assembler — journal entries -> /api/sessions payload (contract v15).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -160,6 +160,16 @@ def assemble_sessions(
     # root's single per-poll snapshot. None means the probe was not run or
     # could not answer: no conflict is claimed on absent evidence.
     claude_owners: Mapping[int, Sequence[int]] | None = None,
+    # (v15, spec 2026-08-21) The dashboard's GLOBAL OAuth auth state — one
+    # value for the whole payload, not per-card, because the credentials
+    # file `crr.core.auth.auth_state` classifies is shared by every session
+    # on this machine. "unknown" is the same "unreadable signal must not
+    # become a positive claim" default every other injected classification
+    # here uses; the cli resolves the real value from a filesystem read
+    # (core must not do it) and passes it in.
+    auth_state: str = "unknown",
+    auth_expires_in_seconds: int | None = None,
+    auth_reauth_url: str | None = None,
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -205,6 +215,14 @@ def assemble_sessions(
     alive, resolved ONCE per poll by the caller (core does no I/O).
     ``None`` is F16's honest "could not determine" and never promotes an
     entry — an unconfirmed query may not assert that a session is running.
+
+    ``auth_state``/``auth_expires_in_seconds``/``auth_reauth_url`` (v15) are
+    the dashboard's GLOBAL OAuth auth fields, injected the same way as
+    every other classification here: the cli reads
+    ``~/.claude/.credentials.json`` (a filesystem read core must not do)
+    and feeds it through ``crr.core.auth.auth_state``, then passes the
+    resolved triple in. Defaults are the honest "not resolved" values, not
+    a positive claim about credentials this call never saw.
     """
     autokick_session_overrides = autokick_session_overrides or {}
     reachability_by_sid = reachability_by_sid or {}
@@ -296,4 +314,10 @@ def assemble_sessions(
             }
         )
 
-    return {"contract": contracts.SESSIONS_CONTRACT_VERSION, "sessions": cards}
+    return {
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
+        "sessions": cards,
+        "auth_state": auth_state,
+        "auth_expires_in_seconds": auth_expires_in_seconds,
+        "auth_reauth_url": auth_reauth_url,
+    }

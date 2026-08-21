@@ -299,6 +299,72 @@ def test_attached_sessions_empty_when_none_attached(monkeypatch):
     assert tmux.RealTmux(timeout_seconds=5).attached_sessions() == set()
 
 
+# --- capture_pane / send_keys — dashboard reauth (spec 2026-08-21) --------
+
+def test_capture_pane_cmd_uses_dash_j_to_join_wrapped_lines():
+    assert tmux._capture_pane_cmd("crr-reauth") == [
+        "tmux", "capture-pane", "-t", "crr-reauth", "-p", "-J",
+    ]
+
+
+def test_capture_pane_returns_stdout_on_success(monkeypatch):
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda *a, **k: _Result(0, stdout="If the browser didn't open, visit: https://x\n"),
+    )
+    out = tmux.RealTmux(timeout_seconds=5).capture_pane("crr-reauth")
+    assert out == "If the browser didn't open, visit: https://x\n"
+
+
+def test_capture_pane_returns_none_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(tmux.subprocess, "run", lambda *a, **k: _Result(1, stderr="can't find session"))
+    assert tmux.RealTmux(timeout_seconds=5).capture_pane("crr-reauth") is None
+
+
+def test_capture_pane_returns_none_on_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="tmux", timeout=5)
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    assert tmux.RealTmux(timeout_seconds=5).capture_pane("crr-reauth") is None
+
+
+def test_capture_pane_returns_none_on_oserror(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("tmux binary vanished mid-call")
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    assert tmux.RealTmux(timeout_seconds=5).capture_pane("crr-reauth") is None
+
+
+def test_send_keys_cmd_sends_text_then_enter():
+    assert tmux._send_keys_cmd("crr-reauth", "abc123") == [
+        "tmux", "send-keys", "-t", "crr-reauth", "abc123", "Enter",
+    ]
+
+
+def test_send_keys_calls_subprocess_with_the_built_command(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda args, **k: seen.append(args) or _Result(0),
+    )
+    tmux.RealTmux(timeout_seconds=5).send_keys("crr-reauth", "abc123")
+    assert seen == [["tmux", "send-keys", "-t", "crr-reauth", "abc123", "Enter"]]
+
+
+def test_send_keys_swallows_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="tmux", timeout=5)
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    tmux.RealTmux(timeout_seconds=5).send_keys("crr-reauth", "abc123")  # must not raise
+
+
+def test_send_keys_swallows_oserror(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("tmux binary vanished mid-call")
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    tmux.RealTmux(timeout_seconds=5).send_keys("crr-reauth", "abc123")  # must not raise
+
+
 def test_attached_sessions_empty_when_no_server(monkeypatch):
     monkeypatch.setattr(
         tmux.subprocess, "run",
