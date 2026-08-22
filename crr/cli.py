@@ -3539,6 +3539,25 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         return 0
 
     tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    # #100: run a revive pass before scanning for rescued sessions so that
+    # archived entries (superseded-on-register after reboot PID reuse) get
+    # tmux sessions even when the watchdog has not run yet. The reviver's
+    # own tri-state handling makes it safe: it skips the pass entirely when
+    # tmux liveness is unknown, and no-ops when tmux is unavailable.
+    if tmux_spawner.available():
+        probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+        store = JournalStore(sd)
+        archive = ArchiveStore(sd)
+        with mutation_lock(sd):
+            _verify_guessed_sids(store, _now())
+            scan = store.scan()
+            reviver.revive_crashed(
+                scan.entries, boot, probe, tmux_spawner, store, archive,
+                max_strikes=config.get("zombie_strikes"),
+                now=_now(),
+                remote_control_enabled=config.get("remote_control"),
+                flags=FlagStore(sd),
+            )
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
     attached = tmux_spawner.attached_sessions() if tmux_spawner.available() else set()
     if live is None or attached is None:

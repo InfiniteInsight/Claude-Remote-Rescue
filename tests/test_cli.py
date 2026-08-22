@@ -3222,6 +3222,61 @@ def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsy
     assert "not now" in out
 
 
+class _FakeTmuxRevive:
+    """Tracks new_detached_session calls; live set grows as sessions are created."""
+    def __init__(self, *a, **k):
+        self._live = set()
+        self.created = []
+
+    def available(self):
+        return True
+
+    def list_sessions(self):
+        return set(self._live)
+
+    def attached_sessions(self):
+        return set()
+
+    def new_detached_session(self, name, cwd, argv):
+        self._live.add(name)
+        self.created.append((name, cwd, argv))
+
+    def session_pid(self, name):
+        return None
+
+
+def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkeypatch, capsys):
+    """#100: shell startup must trigger a revive pass so archived sessions
+    (superseded-on-register after reboot) get tmux sessions even without
+    the watchdog running."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    fake_tmux = _FakeTmuxRevive()
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: fake_tmux)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {
+                            "is_alive": lambda s, pid: False,
+                            "has_controlling_tty": lambda s, pid: False,
+                            "controlling_ttys": lambda s, pids: set(),
+                        })())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="old-boot-pre-reboot", now="2026-07-23T00:00:00Z",
+        claude=_claude_field(sid),
+    )
+    archive.archive(entry, "superseded-on-register", "2026-07-24T00:00:00Z")
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    assert fake_tmux.created, "archived session was not revived at shell startup"
+    assert sid in fake_tmux.created[0][0]
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
