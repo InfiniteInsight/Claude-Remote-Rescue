@@ -1344,6 +1344,32 @@ def test_deregister_removes_and_is_idempotent(tmp_path, monkeypatch):
     assert cli.main(["deregister", "--pid", "4242"]) == 0  # second call: no error
 
 
+def test_deregister_archives_claude_bearing_entry(tmp_path, monkeypatch):
+    """A shell exit must not silently destroy a claude session's revival data (#99)."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _seed(store, 4242)
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(sid)
+    store.write(entry)
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+    assert not store.tabs_dir.joinpath("4242.json").exists()
+    archive = ArchiveStore(tmp_path)
+    record = archive.read(sid)
+    assert record["reason"] == "shell-exited"
+
+
+def test_deregister_no_archive_for_claude_less_entry(tmp_path, monkeypatch):
+    """A plain shell exit (no claude) needs no archive record."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+    archive = ArchiveStore(tmp_path)
+    assert archive.scan().records == []
+
+
 # --- claude() wrapper support: claude-launch / claude-exit ---------------
 
 def test_claude_launch_injects_sid_and_journals_it(tmp_path, monkeypatch, capsys):

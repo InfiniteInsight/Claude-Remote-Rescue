@@ -401,6 +401,23 @@ def test_ghost_restored_archive_records_are_revival_candidates(tmp_path):
     assert archive.read(_claude()["session_id"])["reason"] == "ghost-restored"
 
 
+def test_shell_exited_archive_record_is_revived(tmp_path):
+    # #99: shell-exited means the shell died (SIGHUP) but claude may still be
+    # alive or resumable — deregister now archives instead of hard-deleting.
+    # The reviver must treat it as a revival candidate, not a terminal reason.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "shell-exited", _NOW)
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == [99]
+    assert tmux.created and tmux.created[0][0] == session_name({"claude": _claude()})
+
+
 def test_dismissed_archive_record_is_not_re_revived(tmp_path):
     # [bug 2026-07-29] ops.dismiss archives with reason "dismissed" — the
     # user's explicit "clean up without restoring". Without this skip, the

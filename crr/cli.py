@@ -1967,8 +1967,15 @@ def _cmd_last_cmd(args: argparse.Namespace) -> int:
 
 def _cmd_deregister(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
+    store = JournalStore(sd)
     with mutation_lock(sd):
-        JournalStore(sd).remove(args.pid)
+        try:
+            entry = store.read(args.pid)
+        except (KeyError, contracts.ContractError):
+            entry = None
+        if entry is not None and entry.get("claude") is not None:
+            ArchiveStore(sd).archive(entry, "shell-exited", _now())
+        store.remove(args.pid)
     return 0
 
 
