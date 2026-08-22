@@ -266,13 +266,23 @@ def revive_crashed(
         # next pass revived the very conversation the user just closed.
         # Honour it here: archive terminally, delist, and clear the flag so
         # it cannot linger onto a recycled pid.
+        #
+        # A stale flag from a previous boot (recycled pid) must NOT be
+        # honored — it would archive the wrong session (#98). Clear it and
+        # fall through to normal revival. Legacy flags (no boot_id) are
+        # honored to avoid breaking pre-upgrade state.
         if flags is not None:
             armed = flags.read(entry["pid"])
             if armed is not None and armed[0] == "close":
-                archive.archive(entry, "closed", now)
-                store.remove(entry["pid"])
-                flags.clear(entry["pid"])
-                continue
+                flag_boot = armed[2] if len(armed) > 2 else None
+                current_boot = boot_identity.current()
+                if flag_boot is not None and flag_boot != current_boot:
+                    flags.clear(entry["pid"])
+                else:
+                    archive.archive(entry, "closed", now)
+                    store.remove(entry["pid"])
+                    flags.clear(entry["pid"])
+                    continue
         action, updated, name = _decide(entry, live, max_strikes, now)
         pid = entry["pid"]
         if action == "reset-nochange":
@@ -310,8 +320,12 @@ def revive_crashed(
             if flags is not None and tab_spawner is not None:
                 armed = flags.read(pid)
                 if armed is not None and armed[0] == "relaunch":
-                    _try_open_tab(tab_spawner, name)
-                    flags.clear(pid)  # or it re-opens a tab every sweep
+                    flag_boot = armed[2] if len(armed) > 2 else None
+                    if flag_boot is not None and flag_boot != boot_identity.current():
+                        flags.clear(pid)
+                    else:
+                        _try_open_tab(tab_spawner, name)
+                        flags.clear(pid)
             revived.append(pid)
 
     # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'

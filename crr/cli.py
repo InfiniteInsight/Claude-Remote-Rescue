@@ -2183,7 +2183,7 @@ def _cmd_repair_check(args: argparse.Namespace) -> int:
     flag = flags.read(args.pid)
     if flag is None:
         return 0
-    kind, sid = flag
+    kind, sid, _boot_id = flag
     print(kind if sid is None else f"{kind} {sid}")
     return 0
 
@@ -3108,6 +3108,7 @@ def _takeover(
     sid: str,
     *,
     max_wait: float,
+    boot_id: str,
     read_signal=transcript_source.read_takeover_signal,
     clock=time.time,
     sleep=time.sleep,
@@ -3194,7 +3195,7 @@ def _takeover(
             return False, (
                 f"the live process for {sid[:8]} exited; adopt without --takeover"
             )
-        flags.arm_close(proc.ppid)
+        flags.arm_close(proc.ppid, boot_id=boot_id)
         try:
             controller.terminate_group(proc.pgid, grace)
         except OSError as exc:
@@ -3209,7 +3210,7 @@ def _takeover(
     return False, f"{prefix} but adoption failed: {msg}"
 
 
-def _web_takeover(store, sd, config, controller, flags, sid, **kwargs) -> tuple[bool, str]:
+def _web_takeover(store, sd, config, controller, flags, sid, *, boot_id, **kwargs) -> tuple[bool, str]:
     """Dashboard takeover (the phone-reachable ``/api/sid-action {op:"takeover"}``).
 
     ``max_wait=0.0`` so the request never blocks on the wait loop — the loop
@@ -3222,7 +3223,8 @@ def _web_takeover(store, sd, config, controller, flags, sid, **kwargs) -> tuple[
     bound the Kick/Close buttons already accept.) ``**kwargs`` forwards the
     injectable clock/sleep/read_signal seams for tests.
     """
-    ok, msg = _takeover(store, sd, config, controller, flags, sid, max_wait=0.0, **kwargs)
+    ok, msg = _takeover(store, sd, config, controller, flags, sid, max_wait=0.0,
+                        boot_id=boot_id, **kwargs)
     if not ok and "actively writing" in msg:
         return False, "session is mid-turn — try again in a moment"
     return ok, msg
@@ -3255,7 +3257,8 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
             f"{idle_window:g}s",
             file=sys.stderr,
         )
-    ok, msg = _takeover(store, sd, config, controller, flags, args.sid, max_wait=max_wait)
+    ok, msg = _takeover(store, sd, config, controller, flags, args.sid,
+                        max_wait=max_wait, boot_id=boot_identity.detect().current())
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1
 
@@ -4139,7 +4142,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         if op == "takeover":
             # _web_takeover uses max_wait=0.0 (non-blocking) and manages its
             # own mutation_lock for the kill, like _adopt — do NOT wrap it.
-            return (*_web_takeover(store, sd, config, controller, flags, sid), False)
+            return (*_web_takeover(store, sd, config, controller, flags, sid,
+                                  boot_id=boot.current()), False)
         if op in ("autokick-on", "autokick-off"):
             # Pins ONE session's auto-kick opt-in/opt-out (spec 2026-08-07,
             # Slice 3). `_write_session_autokick_locked` holds `mutation_lock`

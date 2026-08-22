@@ -142,7 +142,7 @@ def reopen(
 
     if state == GHOST:
         return _reopen_ghost(
-            store, archive, tmux, controller, flags, entry, pid, now,
+            store, archive, tmux, controller, flags, boot, entry, pid, now,
             live=live, grace=grace, remote_control=remote_control, tab_spawner=tab_spawner,
             tabs_expected=tabs_expected,
         )
@@ -169,6 +169,7 @@ def _reopen_ghost(
     tmux: TmuxSpawner,
     controller: "ProcessController",
     flags: "FlagStore",
+    boot: BootIdentity,
     entry: dict,
     pid: int,
     now: str,
@@ -210,7 +211,7 @@ def _reopen_ghost(
     groups = controller.claude_groups(pid)
     kill_suffix = ""
     if groups:
-        flags.arm_close(pid)
+        flags.arm_close(pid, boot_id=boot.current())
         landed, errors = _signal_groups(controller, groups, grace)
         if landed == 0:
             flags.clear(pid)  # no kill landed -> the flag must not linger
@@ -280,7 +281,7 @@ def close(
     groups = controller.claude_groups(pid)
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
-    flags.arm_close(pid)
+    flags.arm_close(pid, boot_id=boot.current())
     landed, errors = _signal_groups(controller, groups, grace)
     if landed == 0:
         flags.clear(pid)  # no kill landed -> the flag must not linger
@@ -317,7 +318,7 @@ def kick(
     groups = controller.claude_groups(pid)
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
-    flags.arm_relaunch(pid, entry["claude"]["session_id"])
+    flags.arm_relaunch(pid, entry["claude"]["session_id"], boot_id=boot.current())
     landed, errors = _signal_groups(controller, groups, grace)
     if landed == 0:
         flags.clear(pid)  # no kill landed -> the flag must not linger

@@ -501,7 +501,7 @@ def test_reopen_ghost_kills_flags_archives_and_spawns(tmp_path):
     ctrl, flags, tmux = FakeController(groups=[200]), FakeFlags(), FakeTmux()
     res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW, grace=0.1, remote_control=True)
     assert res.ok, res.message
-    assert flags.read(42) == ("close", None)          # armed and retained
+    assert flags.read(42)[:2] == ("close", None)       # armed and retained
     assert ctrl.terminated == [(200, 0.1)]
     rec = archive.read(_SID)
     assert rec["reason"] == "ghost-restored"
@@ -1094,11 +1094,11 @@ class FakeController:
 
 class FakeFlags:
     def __init__(self):
-        self.armed = {}               # pid -> (kind, sid|None)
-    def arm_relaunch(self, pid, sid):
-        self.armed[pid] = ("relaunch", sid)
-    def arm_close(self, pid):
-        self.armed[pid] = ("close", None)
+        self.armed = {}               # pid -> (kind, sid|None, boot_id)
+    def arm_relaunch(self, pid, sid, *, boot_id):
+        self.armed[pid] = ("relaunch", sid, boot_id)
+    def arm_close(self, pid, *, boot_id):
+        self.armed[pid] = ("close", None, boot_id)
     def clear(self, pid):
         self.armed.pop(pid, None)
     def read(self, pid):
@@ -1126,7 +1126,7 @@ def test_close_terminates_and_arms_the_close_flag(tmp_path):
     res = ops.close(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is True
     assert ctrl.terminated == [(555, 5)]
-    assert flags.armed[10] == ("close", None)
+    assert flags.armed[10][:2] == ("close", None)
 
 
 def test_close_rolls_the_flag_back_when_the_signal_fails(tmp_path):
@@ -1189,7 +1189,7 @@ def test_kick_arms_the_flag_then_terminates(tmp_path):
     ctrl, flags = FakeController(groups=[555]), FakeFlags()
     res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
     assert res.ok is True
-    assert flags.armed[10] == ("relaunch", _SID)  # sid armed
+    assert flags.armed[10][:2] == ("relaunch", _SID)  # sid armed
     assert ctrl.terminated == [(555, 5)]
 
 
@@ -1212,7 +1212,7 @@ def test_kick_keeps_flag_when_any_group_kill_lands(tmp_path):
     flags = FakeFlags()
     res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=0.1)
     assert res.ok is True
-    assert flags.armed.get(10) == ("relaunch", _SID)   # flag survives: a kill landed
+    assert flags.armed.get(10, (None,))[:2] == ("relaunch", _SID)  # flag survives: a kill landed
     assert ctrl.terminated == [(200, 0.1)]
 
 

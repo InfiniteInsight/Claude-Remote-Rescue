@@ -3199,7 +3199,7 @@ def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsy
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    FlagStore(tmp_path).arm_relaunch(4242, "sid-xyz")
+    FlagStore(tmp_path).arm_relaunch(4242, "sid-xyz", boot_id="b")
     rc = cli.main(["repair-check", "--pid", "4242"])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "relaunch sid-xyz"
@@ -3208,7 +3208,7 @@ def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys
 def test_repair_check_prints_close_kind(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    FlagStore(tmp_path).arm_close(4242)
+    FlagStore(tmp_path).arm_close(4242, boot_id="b")
     rc = cli.main(["repair-check", "--pid", "4242"])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "close"
@@ -3225,7 +3225,7 @@ def test_repair_check_clear_unlinks_the_flag(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     flags = FlagStore(tmp_path)
-    flags.arm_close(4242)
+    flags.arm_close(4242, boot_id="b")
     rc = cli.main(["repair-check", "--pid", "4242", "--clear"])
     assert rc == 0
     assert flags.read(4242) is None
@@ -3532,7 +3532,7 @@ class _FakeTakeoverFlags:
         self._calls = calls
         self.armed: set[int] = set()
 
-    def arm_close(self, pid):
+    def arm_close(self, pid, *, boot_id):
         self._calls.append(("arm_close", pid))
         self.armed.add(pid)
 
@@ -3595,7 +3595,7 @@ def test_takeover_happy_path_orders_arm_before_kill_before_adopt(tmp_path, monke
 
     ok, msg = cli._takeover(
         store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0, read_signal=read_signal, clock=clock, sleep=_failing_sleep,
+        max_wait=180.0, read_signal=read_signal, clock=clock, sleep=_failing_sleep, boot_id="test-boot",
     )
     assert ok
     assert msg.startswith("took over ")
@@ -3638,7 +3638,7 @@ def test_takeover_success_message_omits_the_competing_session_warning(tmp_path, 
     flags = _FakeTakeoverFlags(calls)
     ok, msg = cli._takeover(
         store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3671,7 +3671,7 @@ def test_web_takeover_refuses_when_no_live_process(tmp_path, monkeypatch):
     controller = _FakeResumeController([None], calls)
     flags = _FakeTakeoverFlags(calls)
     ok, msg = cli._web_takeover(
-        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""},
         clock=_scripted([0.0]), sleep=_failing_sleep,
     )
@@ -3690,7 +3690,7 @@ def test_web_takeover_translates_the_mid_turn_refusal_for_the_phone(tmp_path, mo
     controller = _FakeResumeController([proc, proc], calls)
     flags = _FakeTakeoverFlags(calls)
     ok, msg = cli._web_takeover(
-        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 1000.0, "tail_kind": "mid-turn"},
         clock=_scripted([1000.0]), sleep=_failing_sleep,
     )
@@ -3717,7 +3717,7 @@ def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypat
 
     ok, msg = cli._takeover(
         store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3770,7 +3770,7 @@ def test_takeover_polls_through_activity_then_takes_over(tmp_path, monkeypatch):
 
     ok, msg = cli._takeover(
         store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
-        max_wait=100.0, read_signal=read_signal, clock=clock,
+        max_wait=100.0, read_signal=read_signal, clock=clock, boot_id="test-boot",
         sleep=lambda s: sleeps.append(s),
     )
     assert ok
@@ -3790,7 +3790,7 @@ def test_takeover_no_live_process_refuses_without_kill_or_flag(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0, read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""},
+        max_wait=180.0, read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""}, boot_id="test-boot",
         clock=_scripted([0.0]), sleep=_failing_sleep,
     )
     assert not ok
@@ -3813,7 +3813,7 @@ def test_takeover_refuses_fast_when_idle_but_parked_mid_turn(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=100_000.0,
+        max_wait=100_000.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 0.0, "tail_kind": "mid-turn"},
         clock=_scripted([1000.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3837,7 +3837,7 @@ def test_takeover_times_out_while_still_actively_writing(tmp_path):
     # every iteration, until clock() crosses the max_wait deadline.
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=5.0,
+        max_wait=5.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 1_000_000.0, "tail_kind": "mid-turn"},
         clock=_scripted([0.0, 1.0, 1.0, 3.0, 3.0, 6.0, 6.0]),
         sleep=lambda s: sleeps.append(s),
@@ -3866,7 +3866,7 @@ def test_takeover_refuses_when_sid_becomes_tracked_before_the_kill(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3889,7 +3889,7 @@ def test_takeover_rolls_back_the_flag_when_the_kill_fails(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
