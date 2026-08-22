@@ -3277,6 +3277,48 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
     assert sid in fake_tmux.created[0][0]
 
 
+def test_rescue_check_revive_pass_runs_at_most_once_per_boot(tmp_path, monkeypatch, capsys):
+    """The revive pass must run once per boot, not every shell start.
+    Without a dedicated marker, archive-only entries (no journal rescued
+    sessions) never trigger claim_prompt, so subsequent shells re-sweep."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    fake_tmux = _FakeTmuxRevive()
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: fake_tmux)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {
+                            "is_alive": lambda s, pid: False,
+                            "has_controlling_tty": lambda s, pid: False,
+                            "controlling_ttys": lambda s, pids: set(),
+                        })())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="old-boot-pre-reboot", now="2026-07-23T00:00:00Z",
+        claude=_claude_field(sid),
+    )
+    archive.archive(entry, "superseded-on-register", "2026-07-24T00:00:00Z")
+
+    revive_calls = []
+    orig = cli.reviver.revive_crashed
+
+    def spy(*a, **kw):
+        revive_calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+
+    cli.main(["rescue-check"])
+    assert len(revive_calls) == 1, "first rescue-check must run the revive pass"
+
+    cli.main(["rescue-check"])
+    assert len(revive_calls) == 1, "second rescue-check must NOT re-run the revive pass"
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
