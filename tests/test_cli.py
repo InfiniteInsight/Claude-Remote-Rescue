@@ -1344,6 +1344,32 @@ def test_deregister_removes_and_is_idempotent(tmp_path, monkeypatch):
     assert cli.main(["deregister", "--pid", "4242"]) == 0  # second call: no error
 
 
+def test_deregister_archives_claude_bearing_entry(tmp_path, monkeypatch):
+    """A shell exit must not silently destroy a claude session's revival data (#99)."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _seed(store, 4242)
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(sid)
+    store.write(entry)
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+    assert not store.tabs_dir.joinpath("4242.json").exists()
+    archive = ArchiveStore(tmp_path)
+    record = archive.read(sid)
+    assert record["reason"] == "shell-exited"
+
+
+def test_deregister_no_archive_for_claude_less_entry(tmp_path, monkeypatch):
+    """A plain shell exit (no claude) needs no archive record."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+    archive = ArchiveStore(tmp_path)
+    assert archive.scan().records == []
+
+
 # --- claude() wrapper support: claude-launch / claude-exit ---------------
 
 def test_claude_launch_injects_sid_and_journals_it(tmp_path, monkeypatch, capsys):
@@ -3196,10 +3222,107 @@ def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsy
     assert "not now" in out
 
 
+class _FakeTmuxRevive:
+    """Tracks new_detached_session calls; live set grows as sessions are created."""
+    def __init__(self, *a, **k):
+        self._live = set()
+        self.created = []
+
+    def available(self):
+        return True
+
+    def list_sessions(self):
+        return set(self._live)
+
+    def attached_sessions(self):
+        return set()
+
+    def new_detached_session(self, name, cwd, argv):
+        self._live.add(name)
+        self.created.append((name, cwd, argv))
+
+    def session_pid(self, name):
+        return None
+
+
+def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkeypatch, capsys):
+    """#100: shell startup must trigger a revive pass so archived sessions
+    (superseded-on-register after reboot) get tmux sessions even without
+    the watchdog running."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    fake_tmux = _FakeTmuxRevive()
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: fake_tmux)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {
+                            "is_alive": lambda s, pid: False,
+                            "has_controlling_tty": lambda s, pid: False,
+                            "controlling_ttys": lambda s, pids: set(),
+                        })())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="old-boot-pre-reboot", now="2026-07-23T00:00:00Z",
+        claude=_claude_field(sid),
+    )
+    archive.archive(entry, "superseded-on-register", "2026-07-24T00:00:00Z")
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    assert fake_tmux.created, "archived session was not revived at shell startup"
+    assert sid in fake_tmux.created[0][0]
+
+
+def test_rescue_check_revive_pass_runs_at_most_once_per_boot(tmp_path, monkeypatch, capsys):
+    """The revive pass must run once per boot, not every shell start.
+    Without a dedicated marker, archive-only entries (no journal rescued
+    sessions) never trigger claim_prompt, so subsequent shells re-sweep."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    fake_tmux = _FakeTmuxRevive()
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: fake_tmux)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {
+                            "is_alive": lambda s, pid: False,
+                            "has_controlling_tty": lambda s, pid: False,
+                            "controlling_ttys": lambda s, pids: set(),
+                        })())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/proj", host="tmux", shell="zsh",
+        boot_id="old-boot-pre-reboot", now="2026-07-23T00:00:00Z",
+        claude=_claude_field(sid),
+    )
+    archive.archive(entry, "superseded-on-register", "2026-07-24T00:00:00Z")
+
+    revive_calls = []
+    orig = cli.reviver.revive_crashed
+
+    def spy(*a, **kw):
+        revive_calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+
+    cli.main(["rescue-check"])
+    assert len(revive_calls) == 1, "first rescue-check must run the revive pass"
+
+    cli.main(["rescue-check"])
+    assert len(revive_calls) == 1, "second rescue-check must NOT re-run the revive pass"
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    FlagStore(tmp_path).arm_relaunch(4242, "sid-xyz")
+    FlagStore(tmp_path).arm_relaunch(4242, "sid-xyz", boot_id="b")
     rc = cli.main(["repair-check", "--pid", "4242"])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "relaunch sid-xyz"
@@ -3208,7 +3331,7 @@ def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys
 def test_repair_check_prints_close_kind(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    FlagStore(tmp_path).arm_close(4242)
+    FlagStore(tmp_path).arm_close(4242, boot_id="b")
     rc = cli.main(["repair-check", "--pid", "4242"])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "close"
@@ -3225,7 +3348,7 @@ def test_repair_check_clear_unlinks_the_flag(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     flags = FlagStore(tmp_path)
-    flags.arm_close(4242)
+    flags.arm_close(4242, boot_id="b")
     rc = cli.main(["repair-check", "--pid", "4242", "--clear"])
     assert rc == 0
     assert flags.read(4242) is None
@@ -3532,7 +3655,7 @@ class _FakeTakeoverFlags:
         self._calls = calls
         self.armed: set[int] = set()
 
-    def arm_close(self, pid):
+    def arm_close(self, pid, *, boot_id):
         self._calls.append(("arm_close", pid))
         self.armed.add(pid)
 
@@ -3595,7 +3718,7 @@ def test_takeover_happy_path_orders_arm_before_kill_before_adopt(tmp_path, monke
 
     ok, msg = cli._takeover(
         store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0, read_signal=read_signal, clock=clock, sleep=_failing_sleep,
+        max_wait=180.0, read_signal=read_signal, clock=clock, sleep=_failing_sleep, boot_id="test-boot",
     )
     assert ok
     assert msg.startswith("took over ")
@@ -3638,7 +3761,7 @@ def test_takeover_success_message_omits_the_competing_session_warning(tmp_path, 
     flags = _FakeTakeoverFlags(calls)
     ok, msg = cli._takeover(
         store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3671,7 +3794,7 @@ def test_web_takeover_refuses_when_no_live_process(tmp_path, monkeypatch):
     controller = _FakeResumeController([None], calls)
     flags = _FakeTakeoverFlags(calls)
     ok, msg = cli._web_takeover(
-        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""},
         clock=_scripted([0.0]), sleep=_failing_sleep,
     )
@@ -3690,7 +3813,7 @@ def test_web_takeover_translates_the_mid_turn_refusal_for_the_phone(tmp_path, mo
     controller = _FakeResumeController([proc, proc], calls)
     flags = _FakeTakeoverFlags(calls)
     ok, msg = cli._web_takeover(
-        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID,
+        store, tmp_path / "state", cfg.Config(), controller, flags, _TAKEOVER_SID, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 1000.0, "tail_kind": "mid-turn"},
         clock=_scripted([1000.0]), sleep=_failing_sleep,
     )
@@ -3717,7 +3840,7 @@ def test_takeover_re_resolves_process_under_lock_before_kill(tmp_path, monkeypat
 
     ok, msg = cli._takeover(
         store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3770,7 +3893,7 @@ def test_takeover_polls_through_activity_then_takes_over(tmp_path, monkeypatch):
 
     ok, msg = cli._takeover(
         store, tmp_path / "state", config, controller, flags, _TAKEOVER_SID,
-        max_wait=100.0, read_signal=read_signal, clock=clock,
+        max_wait=100.0, read_signal=read_signal, clock=clock, boot_id="test-boot",
         sleep=lambda s: sleeps.append(s),
     )
     assert ok
@@ -3790,7 +3913,7 @@ def test_takeover_no_live_process_refuses_without_kill_or_flag(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0, read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""},
+        max_wait=180.0, read_signal=lambda sid: {"mtime": 0.0, "tail_kind": ""}, boot_id="test-boot",
         clock=_scripted([0.0]), sleep=_failing_sleep,
     )
     assert not ok
@@ -3813,7 +3936,7 @@ def test_takeover_refuses_fast_when_idle_but_parked_mid_turn(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=100_000.0,
+        max_wait=100_000.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 0.0, "tail_kind": "mid-turn"},
         clock=_scripted([1000.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3837,7 +3960,7 @@ def test_takeover_times_out_while_still_actively_writing(tmp_path):
     # every iteration, until clock() crosses the max_wait deadline.
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=5.0,
+        max_wait=5.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 1_000_000.0, "tail_kind": "mid-turn"},
         clock=_scripted([0.0, 1.0, 1.0, 3.0, 3.0, 6.0, 6.0]),
         sleep=lambda s: sleeps.append(s),
@@ -3866,7 +3989,7 @@ def test_takeover_refuses_when_sid_becomes_tracked_before_the_kill(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )
@@ -3889,7 +4012,7 @@ def test_takeover_rolls_back_the_flag_when_the_kill_fails(tmp_path):
 
     ok, msg = cli._takeover(
         store, tmp_path, config, controller, flags, _TAKEOVER_SID,
-        max_wait=180.0,
+        max_wait=180.0, boot_id="test-boot",
         read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
         clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
     )

@@ -263,6 +263,9 @@ ARCHIVE_REASONS = (
     # itself and archives under this reason — without it, the watchdog
     # revived the conversation the user had just closed.
     "closed",
+    # #99: shell SIGHUP fires deregister before claude may have exited.
+    # Revivable — the reviver picks these up like superseded-* records.
+    "shell-exited",
 )
 
 
