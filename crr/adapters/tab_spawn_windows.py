@@ -76,6 +76,15 @@ def interop_registered(binfmt_misc: Path | None = None) -> bool:
     return False
 
 
+def wt_probe(path: str, timeout: float) -> bool:
+    """True when ``wt.exe --version`` succeeds — the alias actually works."""
+    try:
+        subprocess.run([path, "--version"], capture_output=True, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def wt_command(
     argv: Sequence[str],
     cwd: str | None = None,
@@ -104,11 +113,14 @@ class WindowsTerminalSpawner:
         self._distro = distro
 
     def available(self) -> bool:
-        # Both halves are required: wt.exe on PATH, and an interop handler
-        # that can actually exec it. Reporting unavailable makes reopen
-        # degrade to the honest "attach with: tmux attach -t ..." rather than
-        # surfacing a raw ENOEXEC after the fact.
-        return wt_path() is not None and interop_registered()
+        # Three checks: wt.exe exists, interop handler registered, and the
+        # binary actually runs. The third catches broken App Execution Aliases
+        # (a 2-byte reparse point stub left after a Windows Terminal update
+        # that passes the first two checks but fails with EINVAL on exec).
+        path = wt_path()
+        if path is None or not interop_registered():
+            return False
+        return wt_probe(path, self._timeout)
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
         try:
