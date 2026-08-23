@@ -805,6 +805,7 @@ def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
     monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
                         lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
     monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", lambda path, timeout: True)
     spawner, _expected = cli._tab_spawner(cfg.Config())
     assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
 
@@ -4272,6 +4273,7 @@ def test_tab_spawner_uses_its_own_timeout_not_the_interop_one(monkeypatch):
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which", lambda b: "/mnt/c/wt.exe")
     monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", lambda path, timeout: True)
     config = cfg.Config()
     spawner, _expected = cli._tab_spawner(config)
     assert spawner._timeout == config.get("tab_spawn_timeout_seconds")
@@ -4290,6 +4292,7 @@ def test_tab_spawner_resolves_the_distro_at_call_time_over_a_stale_env(monkeypat
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.tab_spawn_windows, "wt_path", lambda: "/mnt/c/wt.exe")
     monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", lambda path, timeout: True)
     monkeypatch.setattr(cli.host, "_wslpath_root", lambda timeout=None: "\\\\wsl.localhost\\Renamed\\")
     monkeypatch.setenv("WSL_DISTRO_NAME", "Stale-Name")
     spawner, _ = cli._tab_spawner(cfg.Config())
@@ -4301,6 +4304,7 @@ def test_tab_spawner_falls_back_to_the_baked_env_when_wslpath_is_unavailable(mon
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.tab_spawn_windows, "wt_path", lambda: "/mnt/c/wt.exe")
     monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", lambda path, timeout: True)
     monkeypatch.setattr(cli.host, "_wslpath_root", lambda timeout=None: None)
     monkeypatch.setenv("WSL_DISTRO_NAME", "Baked-Name")
     spawner, _ = cli._tab_spawner(cfg.Config())
