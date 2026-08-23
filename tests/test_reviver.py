@@ -401,6 +401,23 @@ def test_ghost_restored_archive_records_are_revival_candidates(tmp_path):
     assert archive.read(_claude()["session_id"])["reason"] == "ghost-restored"
 
 
+def test_shell_exited_archive_record_is_revived(tmp_path):
+    # #99: shell-exited means the shell died (SIGHUP) but claude may still be
+    # alive or resumable — deregister now archives instead of hard-deleting.
+    # The reviver must treat it as a revival candidate, not a terminal reason.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "shell-exited", _NOW)
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == [99]
+    assert tmux.created and tmux.created[0][0] == session_name({"claude": _claude()})
+
+
 def test_dismissed_archive_record_is_not_re_revived(tmp_path):
     # [bug 2026-07-29] ops.dismiss archives with reason "dismissed" — the
     # user's explicit "clean up without restoring". Without this skip, the
@@ -592,6 +609,9 @@ class _Flags:
         self.armed.pop(pid, None)
 
 
+_CURRENT_BOOT = "current-boot-9999"  # matches FakeBoot().current()
+
+
 def test_a_close_flagged_entry_is_not_revived(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 2016, claude=_claude())
@@ -599,7 +619,7 @@ def test_a_close_flagged_entry_is_not_revived(tmp_path):
     outcome = revive_crashed(
         store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
         max_strikes=3, now=_NOW, remote_control_enabled=True,
-        flags=_Flags({2016: ("close", None)}),
+        flags=_Flags({2016: ("close", None, _CURRENT_BOOT)}),
     )
     assert tmux.created == [], "resurrected a conversation the user closed"
     assert outcome.revived == []
@@ -608,7 +628,7 @@ def test_a_close_flagged_entry_is_not_revived(tmp_path):
 def test_a_close_flagged_entry_is_archived_terminally_and_delisted(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 2016, claude=_claude())
-    flags = _Flags({2016: ("close", None)})
+    flags = _Flags({2016: ("close", None, _CURRENT_BOOT)})
     revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
                    archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
                    flags=flags)
@@ -616,6 +636,37 @@ def test_a_close_flagged_entry_is_archived_terminally_and_delisted(tmp_path):
         store.read(2016)                       # gone from the active journal
     assert archive.read(_claude()["session_id"])["reason"] == "closed"
     assert flags.cleared == [2016]             # and the flag does not linger
+
+
+def test_stale_boot_close_flag_is_ignored_not_honored(tmp_path):
+    """A close flag from a previous boot must not archive a recycled-pid session."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 2016, claude=_claude())
+    flags = _Flags({2016: ("close", None, "old-boot-dead")})
+    tmux = FakeTmux()
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=flags,
+    )
+    assert 2016 not in outcome.gave_up, "stale flag must not trigger give-up"
+    assert flags.cleared == [2016], "stale flag must be cleared"
+    assert len(tmux.created) == 1, "session should be revived normally"
+
+
+def test_close_flag_with_no_boot_id_is_honored(tmp_path):
+    """Legacy flags (no boot_id) are honored to avoid breaking existing state."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 2016, claude=_claude())
+    flags = _Flags({2016: ("close", None, None)})
+    revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=flags,
+    )
+    with pytest.raises(KeyError):
+        store.read(2016)
+    assert archive.read(_claude()["session_id"])["reason"] == "closed"
 
 
 def test_a_closed_archive_record_is_never_revived(tmp_path):
@@ -637,7 +688,7 @@ def test_a_relaunch_flag_does_not_stop_a_revival(tmp_path):
     tmux = FakeTmux()
     revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
                    max_strikes=3, now=_NOW, remote_control_enabled=True,
-                   flags=_Flags({2016: ("relaunch", _SID_A)}))
+                   flags=_Flags({2016: ("relaunch", _SID_A, _CURRENT_BOOT)}))
     assert len(tmux.created) == 1
 
 
@@ -668,7 +719,7 @@ def test_a_kicked_session_is_revived_with_a_tab(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 899149, claude=_claude())
     tab = _Tab()
-    flags = _Flags({899149: ("relaunch", _claude()["session_id"])})
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
     revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
                    archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
                    flags=flags, tab_spawner=tab)
@@ -697,7 +748,7 @@ def test_a_failed_tab_never_costs_the_revival(tmp_path):
     outcome = revive_crashed(
         store.scan().entries, FakeBoot(), FakeProbe(), tmux, store, archive,
         max_strikes=3, now=_NOW, remote_control_enabled=True,
-        flags=_Flags({899149: ("relaunch", _claude()["session_id"])}),
+        flags=_Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)}),
         tab_spawner=_Tab(fail=True),
     )
     assert outcome.revived == [899149]

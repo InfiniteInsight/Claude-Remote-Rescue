@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 _MARKER_PREFIX = "rescue-prompted-"
+_REVIVE_MARKER_PREFIX = "rescue-revived-"
 
 
 def rescued_sessions(
@@ -60,6 +61,28 @@ def rescued_sessions(
 
 def marker_path(state_dir: Path | str, boot_id: str) -> Path:
     return Path(state_dir) / f"{_MARKER_PREFIX}{boot_id}"
+
+
+def already_revived(state_dir: Path | str, boot_id: str) -> bool:
+    """Has this boot's revive pass already run?
+
+    Separate from ``already_prompted`` because the revive pass creates tmux
+    sessions (durable, idempotent) while the prompt marker gates user
+    interaction. Archive-only revivals produce no rescued journal entries,
+    so the prompt marker is never written — without a dedicated revive
+    marker the full sweep re-runs on every shell start.
+    """
+    return (Path(state_dir) / f"{_REVIVE_MARKER_PREFIX}{boot_id}").exists()
+
+
+def mark_revived(state_dir: Path | str, boot_id: str) -> None:
+    """Write this boot's revive marker and sweep stale ones."""
+    target = Path(state_dir) / f"{_REVIVE_MARKER_PREFIX}{boot_id}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.touch()
+    for stale in target.parent.glob(f"{_REVIVE_MARKER_PREFIX}*"):
+        if stale != target:
+            stale.unlink(missing_ok=True)
 
 
 def already_prompted(state_dir: Path | str, boot_id: str) -> bool:

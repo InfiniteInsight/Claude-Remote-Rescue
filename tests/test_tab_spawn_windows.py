@@ -42,6 +42,7 @@ def test_spawner_open_tab_runs_the_built_command(monkeypatch):
 def test_available_reflects_which(monkeypatch, tmp_path):
     monkeypatch.setattr(tsw.shutil, "which", lambda b: "/mnt/c/.../wt.exe")
     monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: True)
     assert tsw.WindowsTerminalSpawner(5).available() is True
     # Neither on PATH nor findable under /mnt -> genuinely absent.
     monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
@@ -165,6 +166,23 @@ def test_wt_path_is_none_when_it_genuinely_is_not_installed(tmp_path, monkeypatc
     assert tsw.wt_path() is None
 
 
+def test_available_is_false_when_wt_exe_probe_fails(monkeypatch):
+    """A broken App Execution Alias (2-byte reparse point stub) passes the
+    wt_path/interop checks but fails when actually executed. The probe in
+    available() must catch this and return False."""
+    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: False)
+    assert tsw.WindowsTerminalSpawner(5).available() is False
+
+
+def test_available_is_true_when_wt_exe_probe_succeeds(monkeypatch):
+    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: True)
+    assert tsw.WindowsTerminalSpawner(5).available() is True
+
+
 def test_available_uses_the_resolved_path_not_only_path(tmp_path, monkeypatch):
     # A stale service PATH must not read as "Windows Terminal is missing".
     found = tmp_path / "mnt/c/Users/Someone/AppData/Local/Microsoft/WindowsApps/wt.exe"
@@ -173,6 +191,7 @@ def test_available_uses_the_resolved_path_not_only_path(tmp_path, monkeypatch):
     monkeypatch.setattr(tsw.shutil, "which", lambda b: None)
     monkeypatch.setattr(tsw, "MNT_ROOT", tmp_path / "mnt")
     monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: True)
     assert tsw.WindowsTerminalSpawner(30).available() is True
 
 
