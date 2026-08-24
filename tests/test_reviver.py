@@ -275,8 +275,90 @@ def test_archived_session_with_no_live_tmux_is_revived(tmp_path):
     assert outcome.revived == [99]
     name = session_name({"claude": _claude()})
     assert tmux.created and tmux.created[0][0] == name
-    rec = archive.read(_claude()["session_id"])
-    assert rec["entry"]["revive_strikes"] == 1  # strike tracked in the archive
+    journaled = store.read(99)
+    assert journaled["revive_strikes"] == 1  # strike tracked in the journal
+    with pytest.raises(KeyError):
+        archive.read(_claude()["session_id"])  # removed from archive
+
+
+def test_revived_archive_entry_is_journaled_and_removed_from_archive(tmp_path):
+    """A revived archive entry must be re-journaled so rescued_sessions()
+    can find it and ops.reopen() can read it. The archive record must be
+    removed to avoid duplicates."""
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+
+    assert outcome.revived == [99]
+    # The entry must now be in the journal (at pid 99, since session_pid
+    # returns None so _rekey_onto_live_pid doesn't move it).
+    journaled = store.read(99)
+    assert journaled["claude"]["session_id"] == _claude()["session_id"]
+    assert journaled["revive_strikes"] == 1
+    # The archive record must be gone.
+    sid = _claude()["session_id"]
+    with pytest.raises(KeyError):
+        archive.read(sid)
+
+
+def test_reset_archive_entry_is_journaled_and_removed_from_archive(tmp_path):
+    """An archive entry whose tmux session is already live (reset) must also
+    be re-journaled so the rescue prompt can find it."""
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = session_name({"claude": _claude()})
+    entry = new_entry(
+        pid=99, cwd="/home/u/p99", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive = ArchiveStore(tmp_path)
+    archive.archive(entry, "superseded-on-register", _NOW)
+    tmux = FakeTmux(live={name})
+    outcome = _run(store, tmux, archive=archive)
+
+    assert 99 in outcome.reset
+    journaled = store.read(99)
+    assert journaled["tmux_session"] == name
+    with pytest.raises(KeyError):
+        archive.read(sid)
+
+
+def test_revive_archive_does_not_clobber_a_live_entry_at_the_archived_pid(tmp_path):
+    """superseded-on-register ⟺ the new shell reused the exact pid.
+    Register archives the old claude entry and writes a fresh claude-less
+    entry at the same pid. The reviver must not overwrite that live entry
+    when re-journaling the archived session."""
+    store = JournalStore(tmp_path)
+    _seed(store, 99, claude=None)  # fresh claude-less shell reused pid 99
+    archive = _archived_entry(tmp_path, pid=99)
+    tmux = _PidTmux(live=set(), pane_pid=7000)
+    outcome = _run(store, tmux, archive=archive)
+
+    assert outcome.revived == [99]
+    assert store.read(99)["claude"] is None  # live shell entry must survive
+    journaled = store.read(7000)
+    assert journaled["claude"]["session_id"] == _claude()["session_id"]
+
+
+def test_reset_archive_does_not_clobber_a_live_entry_at_the_archived_pid(tmp_path):
+    """Same clobber guard for the reset path through the archive loop."""
+    store = JournalStore(tmp_path)
+    _seed(store, 99, claude=None)  # fresh shell at pid 99
+    name = session_name({"claude": _claude()})
+    entry = new_entry(
+        pid=99, cwd="/home/u/p99", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive = ArchiveStore(tmp_path)
+    archive.archive(entry, "superseded-on-register", _NOW)
+    tmux = _PidTmux(live={name}, pane_pid=7000)
+    outcome = _run(store, tmux, archive=archive)
+
+    assert 99 in outcome.reset
+    assert store.read(99)["claude"] is None  # live shell entry must survive
+    journaled = store.read(7000)
+    assert journaled["claude"]["session_id"] == _claude()["session_id"]
 
 
 def test_archived_session_gives_up_in_place_past_limit(tmp_path):
@@ -398,7 +480,10 @@ def test_ghost_restored_archive_records_are_revival_candidates(tmp_path):
     outcome = _run(store, tmux, archive=archive)
     assert outcome.revived == [99]
     assert tmux.created and tmux.created[0][0] == "crr-8a1b2c3d"
-    assert archive.read(_claude()["session_id"])["reason"] == "ghost-restored"
+    journaled = store.read(99)
+    assert journaled["claude"]["session_id"] == _claude()["session_id"]
+    with pytest.raises(KeyError):
+        archive.read(_claude()["session_id"])  # re-journaled, removed from archive
 
 
 def test_shell_exited_archive_record_is_revived(tmp_path):

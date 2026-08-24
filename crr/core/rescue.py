@@ -85,6 +85,19 @@ def mark_revived(state_dir: Path | str, boot_id: str) -> None:
             stale.unlink(missing_ok=True)
 
 
+def invalidate_markers(state_dir: Path | str) -> None:
+    """Delete all rescue markers so the next shell start re-scans.
+
+    Called by deregister when a claude-bearing shell exits: the session was
+    just archived, so a previous "already prompted this boot" decision is
+    stale — the next interactive shell must re-scan and offer it.
+    """
+    sd = Path(state_dir)
+    for pattern in (f"{_MARKER_PREFIX}*", f"{_REVIVE_MARKER_PREFIX}*"):
+        for marker in sd.glob(pattern):
+            marker.unlink(missing_ok=True)
+
+
 def already_prompted(state_dir: Path | str, boot_id: str) -> bool:
     """Cheap pre-check: does this boot's marker already exist?
 

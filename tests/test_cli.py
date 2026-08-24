@@ -1361,6 +1361,43 @@ def test_deregister_archives_claude_bearing_entry(tmp_path, monkeypatch):
     assert record["reason"] == "shell-exited"
 
 
+def test_deregister_invalidates_rescue_markers_on_archive(tmp_path, monkeypatch):
+    """When deregister archives a claude-bearing entry, it must clear rescue
+    markers so the next shell startup re-scans and offers the just-closed
+    session instead of staying silent behind an already-prompted gate."""
+    from crr.core import rescue
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _seed(store, 4242)
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(sid)
+    store.write(entry)
+    rescue.claim_prompt(tmp_path, "current-boot")
+    rescue.mark_revived(tmp_path, "current-boot")
+    assert rescue.already_prompted(tmp_path, "current-boot")
+
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+
+    assert not rescue.already_prompted(tmp_path, "current-boot")
+    assert not rescue.already_revived(tmp_path, "current-boot")
+
+
+def test_deregister_does_not_invalidate_markers_for_claude_less(tmp_path, monkeypatch):
+    """A plain shell exit (no claude) must NOT clear rescue markers — only
+    claude-bearing exits justify a re-scan."""
+    from crr.core import rescue
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    rescue.claim_prompt(tmp_path, "current-boot")
+    assert rescue.already_prompted(tmp_path, "current-boot")
+
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+
+    assert rescue.already_prompted(tmp_path, "current-boot")
+
+
 def test_deregister_no_archive_for_claude_less_entry(tmp_path, monkeypatch):
     """A plain shell exit (no claude) needs no archive record."""
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
@@ -3249,7 +3286,8 @@ class _FakeTmuxRevive:
 def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkeypatch, capsys):
     """#100: shell startup must trigger a revive pass so archived sessions
     (superseded-on-register after reboot) get tmux sessions even without
-    the watchdog running."""
+    the watchdog running. The revived entry must then be re-journaled so
+    rescued_sessions() finds it and the rescue prompt/reopen fires."""
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
     fake_tmux = _FakeTmuxRevive()
@@ -3272,10 +3310,92 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
     )
     archive.archive(entry, "superseded-on-register", "2026-07-24T00:00:00Z")
 
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+
+    reopen_calls = []
+
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+        reopen_calls.append(pid)
+        return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid}")
+
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+    monkeypatch.setattr(cli.process_probe, "PsProcessController",
+                        lambda t: type("C", (), {})())
+
     rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
     assert rc == 0
     assert fake_tmux.created, "archived session was not revived at shell startup"
     assert sid in fake_tmux.created[0][0]
+    assert reopen_calls == [99], "revived archive entry must be offered via reopen"
+    assert "reopened 99" in out
+
+
+def test_rescue_check_fires_after_deregister_clears_markers(tmp_path, monkeypatch, capsys):
+    """End-to-end: a claude-bearing shell exits (deregister), clearing rescue
+    markers. The next shell startup (rescue-check) re-scans, revives the
+    archived session, and offers it to the user. This is the chain that was
+    broken before the fix: deregister archived the entry but left markers
+    intact, so the next rescue-check short-circuited at already_prompted."""
+    from crr.core import rescue
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+
+    # 1. Seed a claude-bearing journal entry and mark "already prompted".
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _seed(store, 4242)
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(sid)
+    store.write(entry)
+    rescue.claim_prompt(tmp_path, "current-boot")
+    rescue.mark_revived(tmp_path, "current-boot")
+
+    # 2. Shell exits — deregister archives + clears markers.
+    assert cli.main(["deregister", "--pid", "4242"]) == 0
+    assert not rescue.already_prompted(tmp_path, "current-boot")
+
+    # 3. Next shell starts — rescue-check should revive + offer the session.
+    fake_tmux = _FakeTmuxRevive()
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: fake_tmux)
+    monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
+                        lambda t: type("P", (), {
+                            "is_alive": lambda s, pid: False,
+                            "has_controlling_tty": lambda s, pid: False,
+                            "controlling_ttys": lambda s, pids: set(),
+                        })())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli.process_probe, "PsProcessController",
+                        lambda t: type("C", (), {})())
+
+    reopen_calls = []
+
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+        reopen_calls.append(pid)
+        return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid}")
+
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+
+    rc = cli.main(["rescue-check"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert fake_tmux.created, "archived session was not revived"
+    assert reopen_calls, "rescue prompt must fire after deregister clears markers"
+    assert "reopened" in out
 
 
 def test_rescue_check_revive_pass_runs_at_most_once_per_boot(tmp_path, monkeypatch, capsys):
