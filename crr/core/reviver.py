@@ -203,6 +203,55 @@ def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
     return True
 
 
+def _journal_from_archive(store, tmux, boot_identity, entry, name, now) -> bool:
+    """Re-journal an archive entry keyed on its live tmux pid.
+
+    Unlike ``_rekey_onto_live_pid`` (which assumes ``entry["pid"]`` is the
+    entry's own journal slot), an archive entry's pid may be occupied by a
+    different live session — the exact superseded-on-register case, where
+    the new shell reused the old pid.  Writing there would clobber it.
+
+    Writes directly at the live pane pid when known, falling back to
+    ``entry["pid"]`` only when that slot is genuinely free or same-session.
+    Returns True if the entry was journaled.
+    """
+    live_pid = tmux.session_pid(name)
+    if live_pid is not None and live_pid != entry["pid"]:
+        try:
+            existing = store.read(live_pid)
+        except KeyError:
+            existing = None
+        except Exception:
+            return False
+        if existing is not None:
+            same = (existing.get("claude") or {}).get("session_id") == \
+                (entry.get("claude") or {}).get("session_id")
+            if not same:
+                return False
+        moved = dict(entry)
+        moved["pid"] = live_pid
+        moved["boot_id"] = boot_identity.current()
+        moved["tmux_session"] = name
+        moved["host"] = "tmux"
+        moved["updated"] = now
+        store.write(moved)
+        return True
+
+    try:
+        existing = store.read(entry["pid"])
+    except KeyError:
+        existing = None
+    except Exception:
+        return False
+    if existing is not None:
+        same = (existing.get("claude") or {}).get("session_id") == \
+            (entry.get("claude") or {}).get("session_id")
+        if not same:
+            return False
+    store.write(dict(entry))
+    return True
+
+
 def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str):
     """Return (action, updated_entry, name) for one candidate.
 
@@ -351,16 +400,14 @@ def revive_crashed(
         pid = entry["pid"]
         sid = (entry.get("claude") or {}).get("session_id")
         if action == "reset-nochange":
-            store.write(dict(entry))
-            _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now)
-            if sid:
-                archive.remove(sid)
+            if _journal_from_archive(store, tmux, boot_identity, entry, name, now):
+                if sid:
+                    archive.remove(sid)
             reset.append(pid)
         elif action == "reset":
-            store.write(updated)
-            _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
-            if sid:
-                archive.remove(sid)
+            if _journal_from_archive(store, tmux, boot_identity, updated, name, now):
+                if sid:
+                    archive.remove(sid)
             reset.append(pid)
         elif action == "give_up":
             record["reason"] = "gave-up"
@@ -371,10 +418,9 @@ def revive_crashed(
                 name, entry["cwd"], revival_argv(entry, remote_control=remote_control_enabled)
             )
             live.add(name)  # dedupe within the pass (shared sid)
-            store.write(updated)
-            _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
-            if sid:
-                archive.remove(sid)
+            if _journal_from_archive(store, tmux, boot_identity, updated, name, now):
+                if sid:
+                    archive.remove(sid)
             revived.append(pid)
 
     return RevivalOutcome(revived, gave_up, reset)
