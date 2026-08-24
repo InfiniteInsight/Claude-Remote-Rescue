@@ -349,11 +349,18 @@ def revive_crashed(
         entry = record["entry"]
         action, updated, name = _decide(entry, live, max_strikes, now)
         pid = entry["pid"]
+        sid = (entry.get("claude") or {}).get("session_id")
         if action == "reset-nochange":
+            store.write(dict(entry))
+            _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now)
+            if sid:
+                archive.remove(sid)
             reset.append(pid)
         elif action == "reset":
-            record["entry"] = updated
-            archive.write(record)
+            store.write(updated)
+            _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
+            if sid:
+                archive.remove(sid)
             reset.append(pid)
         elif action == "give_up":
             record["reason"] = "gave-up"
@@ -364,8 +371,10 @@ def revive_crashed(
                 name, entry["cwd"], revival_argv(entry, remote_control=remote_control_enabled)
             )
             live.add(name)  # dedupe within the pass (shared sid)
-            record["entry"] = updated
-            archive.write(record)
+            store.write(updated)
+            _rekey_onto_live_pid(store, tmux, boot_identity, updated, name, now)
+            if sid:
+                archive.remove(sid)
             revived.append(pid)
 
     return RevivalOutcome(revived, gave_up, reset)

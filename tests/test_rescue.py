@@ -104,6 +104,25 @@ def test_claim_prompt_race_exactly_one_winner(tmp_path):
     assert sum(results) == 1
 
 
+def test_invalidate_markers_clears_both_prompt_and_revive_markers(tmp_path):
+    """invalidate_markers must delete ALL rescue-prompted-* and
+    rescue-revived-* files so the next shell start re-scans and re-prompts."""
+    rescue.claim_prompt(tmp_path, "boot-1")
+    rescue.mark_revived(tmp_path, "boot-1")
+    assert rescue.already_prompted(tmp_path, "boot-1")
+    assert rescue.already_revived(tmp_path, "boot-1")
+
+    rescue.invalidate_markers(tmp_path)
+
+    assert not rescue.already_prompted(tmp_path, "boot-1")
+    assert not rescue.already_revived(tmp_path, "boot-1")
+
+
+def test_invalidate_markers_is_idempotent(tmp_path):
+    """Calling invalidate_markers on a dir with no markers must not raise."""
+    rescue.invalidate_markers(tmp_path)  # no markers exist yet
+
+
 def test_docs_no_longer_say_shim_wiring_is_pending():
     """Task 3 landed the shim wiring (crr.bash/zsh/fish all call `crr
     rescue-check` on interactive startup) — CHANGELOG.md and DESIGN.md must

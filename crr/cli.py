@@ -1975,6 +1975,7 @@ def _cmd_deregister(args: argparse.Namespace) -> int:
             entry = None
         if entry is not None and entry.get("claude") is not None:
             ArchiveStore(sd).archive(entry, "shell-exited", _now())
+            rescue.invalidate_markers(sd)
         store.remove(args.pid)
     return 0
 
