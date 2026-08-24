@@ -389,7 +389,7 @@ def detmux(
     if state != CRASHED and tmux.session_pid(name) != pid:
         return OpResult(False, f"session {pid} is {state}, not parked — refusing "
                                "(detmux re-homes revived sessions only)")
-    if tab_spawner is None or not tab_spawner.available():
+    if tab_spawner is None:
         return OpResult(False, "no terminal tab spawner available on this host")
     try:
         tab_spawner.open_tab(attach_argv(name))
@@ -452,35 +452,20 @@ def untmux(
     The honest counterpart to ``detmux`` (which only re-homes into a tab
     that still runs tmux underneath — see its docstring). Same gates, same
     order: entry -> classify == CRASHED -> tmux_session set -> the named
-    session is actually live -> a tab spawner is available. The spawner
-    check runs BEFORE the kill deliberately: a missing spawner must refuse
-    without touching the tmux session at all, exactly like ``detmux``.
+    session is actually live -> a tab spawner is available.
 
     Ordering after the gates, each choice load-bearing:
 
-    1. Kill the tmux session. A kill failure (e.g. the underlying
-       ``tmux kill-session`` erroring) leaves the entry untouched and fails
-       the op — nothing destructive has landed, so there is nothing to
-       recover.
-    2. Archive the (now-dead) parked entry as ``"untmuxed"`` and delist it —
-       BEFORE the spawn. This is not bookkeeping tidiness, it is a
-       correctness gate: ``open_tab`` can take multiple seconds to cold-start
-       a terminal, and if the entry were still journaled (CRASHED, ``claude``
-       set) a reviver pass firing in that window would re-park it into a
-       *fresh* tmux session — a second, live claude on the same conversation.
-       Delisting first is the only thing that closes that race. The new
-       tracked entry does not come from here at all: the shimmed shell
-       registers itself once it starts.
-    3. Spawn the tracked window (``tracked_resume_argv``, ``cwd=entry["cwd"]``).
-       - Success: crr manages the conversation again as a new, non-tmux
-         session (the shell's own registration).
-       - Failure: the entry is already archived, which drops the sid out of
-         the active journal and back into Discoverable (that list is keyed on
-         journaled sids, not the archive) — ``crr discover --adopt`` brings it
-         back. NOT ``retrack``: that only undoes an ``"untracked"``/
-         ``"detmuxed"`` archival and refuses an ``"untmuxed"`` one. The
-         reviver cannot re-park it (it is delisted), which is exactly the
-         race we closed; the honest recovery is the adopt, so say so.
+    1. Spawn the tracked window FIRST (``tracked_resume_argv``). A spawn
+       failure refuses the op without touching the tmux session, so the
+       card keeps offering the button. ``wt.exe new-tab`` is IPC
+       (milliseconds); the actual shell starts asynchronously seconds
+       later, so kill+delist below completes before the new shell's
+       ``conflict-check`` runs.
+    2. Kill the tmux session. A kill failure leaves the entry untouched
+       (the tab from step 1 may have opened — honest reporting).
+    3. Archive+delist the old entry as ``"untmuxed"``. The new tracked
+       entry arrives independently when the shimmed shell registers.
     """
     try:
         entry = store.read(pid)
@@ -510,40 +495,33 @@ def untmux(
     if state != CRASHED and tmux.session_pid(name) != pid:
         return OpResult(False, f"session {pid} is {state}, not parked — refusing "
                                "(untmux re-homes revived sessions only)")
-    if tab_spawner is None or not tab_spawner.available():
+    if tab_spawner is None:
         return OpResult(False, "no terminal tab spawner available on this host")
+    # Spawn FIRST — the tab IS this operation. A spawn failure must refuse
+    # before any destructive step, so the tmux session survives and the
+    # card keeps offering the button. wt.exe new-tab is IPC (milliseconds);
+    # the actual shell starts async seconds later, so kill+delist below
+    # completes before the new shell's conflict-check runs.
+    tab_timed_out = False
+    try:
+        tab_spawner.open_tab(tracked_resume_argv(entry), cwd=entry["cwd"])
+    except TabSpawnTimeout:
+        tab_timed_out = True  # might have opened — proceed, report honestly
+    except Exception as exc:  # adapter subprocess/osascript failure
+        return OpResult(False, f"untmux {pid} failed to open a tab: {exc}")
     try:
         tmux.kill_session(name)
     except Exception as exc:  # adapter subprocess failure
         return OpResult(False, f"untmux {pid} failed to kill tmux session {name}: {exc}")
-    # Delist BEFORE the spawn — see docstring step 2 (closes the reviver
-    # re-park race across the multi-second terminal cold-start). This also
-    # keeps the shimmed shell's own `conflict-check --sid` (run on resume)
-    # from tripping: that check scans the JOURNAL (`store.scan()`) for a live
-    # owner of the sid, so once this entry is delisted there is nothing for it
-    # to collide with. The safety of this ordering depends on conflict-check
-    # staying journal-scoped — if it ever consulted the archive, an
-    # "untmuxed" record here would make the resume flash-and-abort.
     if entry.get("claude") is not None:
         archive.archive(entry, "untmuxed", now)
     store.remove(pid)
-    try:
-        tab_spawner.open_tab(tracked_resume_argv(entry), cwd=entry["cwd"])
-    except TabSpawnTimeout:
-        # "Could not confirm", not "failed" (#53): a cold terminal can open
-        # the tab and still outrun the budget. If it did open, the shell is
-        # registering; if it did not, the conversation is in Discoverable.
+    if tab_timed_out:
         return OpResult(
             True,
             f"un-tmuxed {pid}: opened a terminal but could not confirm it — if it "
             "did not appear, the conversation is in Discoverable; adopt it there",
             degraded=True,
-        )
-    except Exception as exc:  # adapter subprocess/osascript failure
-        return OpResult(
-            False,
-            f"untmux {pid}: tmux killed but the window failed to open: {exc}; "
-            "the conversation is in Discoverable — adopt it there to bring it back",
         )
     return OpResult(
         True,
