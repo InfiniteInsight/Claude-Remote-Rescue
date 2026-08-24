@@ -166,6 +166,20 @@ def test_wt_path_is_none_when_it_genuinely_is_not_installed(tmp_path, monkeypatc
     assert tsw.wt_path() is None
 
 
+def test_wt_probe_returns_false_on_nonzero_exit(monkeypatch):
+    """A broken App Execution Alias exits 1 with 'Invalid argument' but does
+    not raise an OSError. The probe must check the return code."""
+    import subprocess as _sp
+    monkeypatch.setattr(tsw.subprocess, "run", lambda *a, **kw: _sp.CompletedProcess(a[0], 1))
+    assert tsw.wt_probe("/fake/wt.exe", 5) is False
+
+
+def test_wt_probe_returns_true_on_zero_exit(monkeypatch):
+    import subprocess as _sp
+    monkeypatch.setattr(tsw.subprocess, "run", lambda *a, **kw: _sp.CompletedProcess(a[0], 0))
+    assert tsw.wt_probe("/fake/wt.exe", 5) is True
+
+
 def test_available_is_false_when_wt_exe_probe_fails(monkeypatch):
     """A broken App Execution Alias (2-byte reparse point stub) passes the
     wt_path/interop checks but fails when actually executed. The probe in

@@ -79,8 +79,8 @@ def interop_registered(binfmt_misc: Path | None = None) -> bool:
 def wt_probe(path: str, timeout: float) -> bool:
     """True when ``wt.exe --version`` succeeds — the alias actually works."""
     try:
-        subprocess.run([path, "--version"], capture_output=True, timeout=timeout)
-        return True
+        r = subprocess.run([path, "--version"], capture_output=True, timeout=timeout)
+        return r.returncode == 0
     except Exception:
         return False
 
