@@ -1383,9 +1383,10 @@ def test_deregister_invalidates_rescue_markers_on_archive(tmp_path, monkeypatch)
     assert not rescue.already_revived(tmp_path, "current-boot")
 
 
-def test_deregister_does_not_invalidate_markers_for_claude_less(tmp_path, monkeypatch):
-    """A plain shell exit (no claude) must NOT clear rescue markers — only
-    claude-bearing exits justify a re-scan."""
+def test_deregister_invalidates_markers_for_claude_less_too(tmp_path, monkeypatch):
+    """A plain shell exit also clears rescue markers — the user's claude
+    sessions live in tmux, not in Terminal shells, so a claude-less shell
+    closing is the normal trigger for 'Terminal was closed, re-scan.'"""
     from crr.core import rescue
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store = JournalStore(tmp_path)
@@ -1395,7 +1396,7 @@ def test_deregister_does_not_invalidate_markers_for_claude_less(tmp_path, monkey
 
     assert cli.main(["deregister", "--pid", "4242"]) == 0
 
-    assert rescue.already_prompted(tmp_path, "current-boot")
+    assert not rescue.already_prompted(tmp_path, "current-boot")
 
 
 def test_deregister_no_archive_for_claude_less_entry(tmp_path, monkeypatch):
