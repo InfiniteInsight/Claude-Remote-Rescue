@@ -642,10 +642,7 @@ def _open_tab(tab_spawner: TabSpawner | None, name: str) -> tuple[str, bool]:
     caller asked for a tab. ``landed`` lets the caller mark the op degraded
     instead of silently reporting success ([user request, 2026-08-09]).
     """
-    if tab_spawner is None or not tab_spawner.available():
-        # Honesty: revival already landed (durable) — say why no tab
-        # appeared instead of looking like the whole op did nothing, and
-        # give the manual fallback ([live bug, 2026-07-31]).
+    if tab_spawner is None:
         return f" (no tab spawner on this host — attach with: tmux attach -t {name})", False
     try:
         tab_spawner.open_tab(attach_argv(name))

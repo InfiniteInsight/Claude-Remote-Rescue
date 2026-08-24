@@ -3597,7 +3597,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         _terminal_reopen(sessions, config, sd)  # may exec (replaces this process)
         return 0
 
-    if tab is None or not tab.available():
+    if tab is None:
         # Host HAS a concept of tabs but none is available right now (e.g. a
         # WSL host with a dead interop handler) — keep the honest notice.
         print(f"crr: {n} conversation(s) restored after the last reboot — "

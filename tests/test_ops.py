@@ -258,17 +258,14 @@ def test_reopen_tab_failure_does_not_fail_the_op(tmp_path):
     assert store.read(42)["tmux_session"] == f"crr-{_SID}"  # revival persisted
 
 
-def test_reopen_unavailable_spawner_stays_detached(tmp_path):
+def test_reopen_no_spawner_stays_detached(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="entry-boot", claude=_claude())
-    tmux, tab = FakeTmux(), FakeTabSpawner(available=False)
+    tmux = FakeTmux()
     ctrl, flags = _idle_ctrl_flags()
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
-                     grace=0.1, tab_spawner=tab, remote_control=True)
+                     grace=0.1, tab_spawner=None, remote_control=True)
     assert res.ok
-    assert tab.opened == []  # never consulted an unavailable spawner
-    # [live bug, 2026-07-31] "did nothing" honesty: an unavailable spawner
-    # must say why no tab appeared and how to attach manually.
     name = f"crr-{_SID}"
     assert f"tmux attach -t {name}" in res.message
 
@@ -293,9 +290,16 @@ def test_open_tab_no_spawner_gives_the_attach_command():
     assert msg == " (no tab spawner on this host — attach with: tmux attach -t crr-8a1b2c3d)"
 
 
-def test_open_tab_unavailable_spawner_gives_the_attach_command():
-    msg, _landed = ops._open_tab(FakeTabSpawner(available=False), "crr-8a1b2c3d")
-    assert "tmux attach -t crr-8a1b2c3d" in msg
+def test_open_tab_does_not_reprobe_availability():
+    """_open_tab must NOT call available() — the caller already checked.
+
+    Re-probing on every invocation caused N wt.exe --version calls (one per
+    session), each opening a GUI help window on Windows Terminal (#100).
+    """
+    spawner = FakeTabSpawner(available=False)
+    suffix, landed = ops._open_tab(spawner, "crr-8a1b2c3d")
+    assert landed is True
+    assert "opened in a new tab" in suffix
 
 
 def test_open_tab_reports_whether_a_tab_actually_landed():

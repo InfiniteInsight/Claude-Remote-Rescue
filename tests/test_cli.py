@@ -2865,11 +2865,7 @@ def test_rescue_check_prints_notice_when_tab_unavailable(tmp_path, monkeypatch, 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
-    class _FakeTab:
-        def available(self):
-            return False
-
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
