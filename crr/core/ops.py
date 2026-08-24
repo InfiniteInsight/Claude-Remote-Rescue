@@ -452,20 +452,21 @@ def untmux(
     The honest counterpart to ``detmux`` (which only re-homes into a tab
     that still runs tmux underneath — see its docstring). Same gates, same
     order: entry -> classify == CRASHED -> tmux_session set -> the named
-    session is actually live -> a tab spawner is available.
+    session is actually live -> a tab spawner is available. The spawner
+    check runs BEFORE the kill deliberately: a missing spawner must refuse
+    without touching the tmux session at all, exactly like ``detmux``.
 
     Ordering after the gates, each choice load-bearing:
 
-    1. Spawn the tracked window FIRST (``tracked_resume_argv``). A spawn
-       failure refuses the op without touching the tmux session, so the
-       card keeps offering the button. ``wt.exe new-tab`` is IPC
-       (milliseconds); the actual shell starts asynchronously seconds
-       later, so kill+delist below completes before the new shell's
-       ``conflict-check`` runs.
-    2. Kill the tmux session. A kill failure leaves the entry untouched
-       (the tab from step 1 may have opened — honest reporting).
-    3. Archive+delist the old entry as ``"untmuxed"``. The new tracked
-       entry arrives independently when the shimmed shell registers.
+    1. Kill the tmux session. A kill failure leaves the entry untouched
+       and fails the op — nothing destructive has landed.
+    2. Archive the (now-dead) parked entry as ``"untmuxed"`` and delist
+       it — BEFORE the spawn. Leaving it journaled across the multi-
+       second terminal cold-start would let a reviver pass re-park it
+       into a fresh tmux session (a duplicate claude). Delisting first
+       closes that race.
+    3. Spawn the tracked window. If it fails, the conversation is already
+       in Discoverable — ``crr discover --adopt`` brings it back.
     """
     try:
         entry = store.read(pid)
@@ -497,18 +498,6 @@ def untmux(
                                "(untmux re-homes revived sessions only)")
     if tab_spawner is None:
         return OpResult(False, "no terminal tab spawner available on this host")
-    # Spawn FIRST — the tab IS this operation. A spawn failure must refuse
-    # before any destructive step, so the tmux session survives and the
-    # card keeps offering the button. wt.exe new-tab is IPC (milliseconds);
-    # the actual shell starts async seconds later, so kill+delist below
-    # completes before the new shell's conflict-check runs.
-    tab_timed_out = False
-    try:
-        tab_spawner.open_tab(tracked_resume_argv(entry), cwd=entry["cwd"])
-    except TabSpawnTimeout:
-        tab_timed_out = True  # might have opened — proceed, report honestly
-    except Exception as exc:  # adapter subprocess/osascript failure
-        return OpResult(False, f"untmux {pid} failed to open a tab: {exc}")
     try:
         tmux.kill_session(name)
     except Exception as exc:  # adapter subprocess failure
@@ -516,12 +505,20 @@ def untmux(
     if entry.get("claude") is not None:
         archive.archive(entry, "untmuxed", now)
     store.remove(pid)
-    if tab_timed_out:
+    try:
+        tab_spawner.open_tab(tracked_resume_argv(entry), cwd=entry["cwd"])
+    except TabSpawnTimeout:
         return OpResult(
             True,
             f"un-tmuxed {pid}: opened a terminal but could not confirm it — if it "
             "did not appear, the conversation is in Discoverable; adopt it there",
             degraded=True,
+        )
+    except Exception as exc:  # adapter subprocess/osascript failure
+        return OpResult(
+            False,
+            f"untmux {pid}: tmux killed but the window failed to open: {exc}; "
+            "the conversation is in Discoverable — adopt it there to bring it back",
         )
     return OpResult(
         True,

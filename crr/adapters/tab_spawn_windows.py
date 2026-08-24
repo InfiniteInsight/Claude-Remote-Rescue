@@ -113,11 +113,15 @@ class WindowsTerminalSpawner:
         self._distro = distro
 
     def available(self) -> bool:
-        # wt.exe reachable AND the kernel can exec Windows binaries.
-        # Actual executability is verified at open_tab() time — running
-        # wt.exe --version here opened a GUI help window on every probe,
-        # and the first open_tab() call is an equally reliable test.
-        return wt_path() is not None and interop_registered()
+        # wt.exe reachable, interop handler registered, AND the binary
+        # actually runs. The third catches broken App Execution Aliases
+        # AND contexts where wt.exe cannot exec (tmux, systemd). The
+        # probe opens a GUI help window when it succeeds, but callers
+        # now invoke it at most once per operation (not per-session).
+        path = wt_path()
+        if path is None or not interop_registered():
+            return False
+        return wt_probe(path, self._timeout)
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
         try:
