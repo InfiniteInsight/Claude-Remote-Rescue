@@ -113,14 +113,11 @@ class WindowsTerminalSpawner:
         self._distro = distro
 
     def available(self) -> bool:
-        # Three checks: wt.exe exists, interop handler registered, and the
-        # binary actually runs. The third catches broken App Execution Aliases
-        # (a 2-byte reparse point stub left after a Windows Terminal update
-        # that passes the first two checks but fails with EINVAL on exec).
-        path = wt_path()
-        if path is None or not interop_registered():
-            return False
-        return wt_probe(path, self._timeout)
+        # wt.exe reachable AND the kernel can exec Windows binaries.
+        # Actual executability is verified at open_tab() time — running
+        # wt.exe --version here opened a GUI help window on every probe,
+        # and the first open_tab() call is an equally reliable test.
+        return wt_path() is not None and interop_registered()
 
     def open_tab(self, argv: Sequence[str], cwd: str | None = None) -> None:
         try:

@@ -3626,6 +3626,12 @@ def _rescue_check(_args: argparse.Namespace) -> int:
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.
             print(res.message)
+            if tab is not None and res.degraded:
+                # First tab didn't land — spawner is broken (e.g. a dead
+                # wt.exe alias). Don't keep trying for the remaining
+                # sessions; they'll each get the "attach with: tmux ..."
+                # fallback instead of N identical failures.
+                tab = None
     return 0
 
 

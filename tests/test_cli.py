@@ -2949,6 +2949,37 @@ def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, 
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
 
 
+def test_rescue_check_disables_tab_after_first_degraded(tmp_path, monkeypatch, capsys):
+    """When the first open_tab fails (degraded), rescue-check must stop
+    passing the spawner to remaining sessions — they get the 'attach with:
+    tmux ...' fallback instead of N identical spawn failures."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}, {"pid": 44}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+
+    spawners_seen = []
+
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+        spawners_seen.append(tab_spawner)
+        return SimpleNamespace(ok=True, degraded=True,
+                               message=f"reopened {pid} (no tab)")
+
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    # First call gets the real spawner; remaining get None after degraded.
+    assert spawners_seen[0] is not None
+    assert all(s is None for s in spawners_seen[1:])
+
+
 def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch, capsys):
     """All three shims invoke `crr rescue-check 2>/dev/null`, so anything
     written to stderr from this consent path is thrown away — a user who
