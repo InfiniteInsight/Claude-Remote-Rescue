@@ -375,6 +375,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true",
         help="deploy even with uncommitted changes (or an unknown tree state)",
     )
+    dep.add_argument(
+        "--no-restart", action="store_true",
+        help="skip restarting crr-web.service after the build",
+    )
     dep.set_defaults(func=_cmd_deploy)
 
     gc = sub.add_parser("gc", help="drop archive records past the retention window")
@@ -1172,8 +1176,16 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
             if warn:
                 print(f"crr deploy: {warn}", file=sys.stderr)
 
-    print("restart the services to pick it up: "
-          "systemctl --user restart crr-web.service")
+    if args.no_restart:
+        print("skipping service restart (--no-restart)")
+    else:
+        err = deploy_io.restart_service()
+        if err:
+            print(f"crr deploy: {err}", file=sys.stderr)
+            print("restart it manually: "
+                  "systemctl --user restart crr-web.service")
+        else:
+            print("restarted crr-web.service")
     return 0
 
 

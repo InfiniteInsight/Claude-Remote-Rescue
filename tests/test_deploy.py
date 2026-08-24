@@ -265,6 +265,7 @@ def test_deploy_links_crr_onto_PATH_after_a_successful_build(tmp_path, monkeypat
     monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
     monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
     monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
     monkeypatch.setenv("PATH", str(home / ".local" / "bin"))
     assert cli.main(["deploy"]) == 0
     assert (home / ".local" / "bin" / "crr").is_symlink()
@@ -294,3 +295,105 @@ def test_path_warning_uses_the_platform_separator():
     assert deploy.path_warning(multi, link, sep=";") is None
     assert deploy.path_warning(multi, link, sep=":") is not None  # the old bug
     assert deploy.path_warning("/home/u/.local/bin:/usr/bin", link, sep=":") is None
+
+
+# --- deploy auto-restart (#101) -----------------------------------------------
+#
+# `crr deploy` printed "restart the services to pick it up" and left the
+# operator to remember. Forgotten restarts leave the dashboard running
+# stale code — the exact landmine the deploy was built to prevent.
+
+def test_restart_service_calls_systemctl_restart(monkeypatch):
+    from crr.adapters import deploy as ad
+    calls = []
+
+    class Ok:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: calls.append(cmd) or Ok())
+    assert ad.restart_service() is None
+    assert calls == [["systemctl", "--user", "restart", "crr-web.service"]]
+
+
+def test_restart_service_reports_failure(monkeypatch):
+    from crr.adapters import deploy as ad
+
+    class Fail:
+        returncode, stdout, stderr = 1, "", "unit not found"
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: Fail())
+    err = ad.restart_service()
+    assert err and "unit not found" in err
+
+
+def test_restart_service_degrades_on_exceptions(monkeypatch):
+    from crr.adapters import deploy as ad
+
+    def boom(*a, **k):
+        raise OSError("no systemctl")
+
+    monkeypatch.setattr(ad.subprocess, "run", boom)
+    err = ad.restart_service()
+    assert err and "no systemctl" in err
+
+
+def test_deploy_restarts_the_service_after_a_successful_build(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    restarted = []
+    home = tmp_path / "home"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: restarted.append(1) or None)
+    monkeypatch.setenv("PATH", str(home / ".local" / "bin"))
+    assert cli.main(["deploy"]) == 0
+    assert restarted == [1], "service was not restarted after a successful deploy"
+    assert "restarted crr-web" in capsys.readouterr().out
+
+
+def test_deploy_does_not_restart_when_the_build_failed(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    restarted = []
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: "install failed: boom")
+    monkeypatch.setattr(ad, "restart_service", lambda **k: restarted.append(1) or None)
+    assert cli.main(["deploy"]) == 1
+    assert restarted == [], "restarted the service after a failed build"
+
+
+def test_deploy_reports_restart_failure_but_still_succeeds(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    home = tmp_path / "home"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: "unit not found")
+    monkeypatch.setenv("PATH", str(home / ".local" / "bin"))
+    assert cli.main(["deploy"]) == 0, "a restart failure must not fail the whole deploy"
+    out, err = capsys.readouterr()
+    assert "unit not found" in err
+
+
+def test_deploy_no_restart_skips_the_service_restart(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    restarted = []
+    home = tmp_path / "home"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: restarted.append(1) or None)
+    monkeypatch.setenv("PATH", str(home / ".local" / "bin"))
+    assert cli.main(["deploy", "--no-restart"]) == 0
+    assert restarted == [], "--no-restart did not skip the restart"

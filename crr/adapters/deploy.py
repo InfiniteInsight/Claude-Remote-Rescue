@@ -84,6 +84,23 @@ def read_marker(path: Path) -> str | None:
     return sha if isinstance(sha, str) and sha else None
 
 
+def restart_service(timeout: float = 30) -> str | None:
+    """Restart crr-web.service so it picks up the deployed code.
+
+    Returns an error message on failure, or None on success.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "restart", "crr-web.service"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode != 0:
+            return f"restart failed: {result.stderr.strip() or result.stdout.strip()}"
+    except (subprocess.SubprocessError, OSError) as exc:
+        return f"restart failed: {exc}"
+    return None
+
+
 def ensure_link(link: Path, target: Path) -> str | None:
     """Point ``link`` at ``target``. Returns an error message, or None.
 
