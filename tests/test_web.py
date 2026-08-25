@@ -1421,7 +1421,7 @@ def test_cmd_web_resolves_the_tab_spawner_per_action_not_once_at_startup(monkeyp
 
     calls = {"n": 0}
 
-    def counting_tab_spawner(config):
+    def counting_tab_spawner(config, *, probe=True):
         calls["n"] += 1
         return None, True
 

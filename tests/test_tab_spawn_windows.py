@@ -197,6 +197,29 @@ def test_available_is_true_when_wt_exe_probe_succeeds(monkeypatch):
     assert tsw.WindowsTerminalSpawner(5).available() is True
 
 
+def test_available_probe_false_skips_the_window_opening_probe(monkeypatch):
+    """probe=False (best-effort reopen / rescue re-home) must NOT call
+    wt_probe — that is the only step that opens a GUI help window
+    [/exit revival 2026-08-25]. The windowless checks still gate it."""
+    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+
+    def _boom(path, timeout):
+        raise AssertionError("wt_probe must not run when probe=False")
+
+    monkeypatch.setattr(tsw, "wt_probe", _boom)
+    assert tsw.WindowsTerminalSpawner(5).available(probe=False) is True
+
+
+def test_available_probe_false_still_requires_wt_and_interop(monkeypatch):
+    # Skipping the probe does not skip the windowless prerequisites: a
+    # missing wt.exe or unregistered interop is still False.
+    monkeypatch.setattr(tsw, "wt_path", lambda: None)
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: True)
+    assert tsw.WindowsTerminalSpawner(5).available(probe=False) is False
+
+
 def test_available_uses_the_resolved_path_not_only_path(tmp_path, monkeypatch):
     # A stale service PATH must not read as "Windows Terminal is missing".
     found = tmp_path / "mnt/c/Users/Someone/AppData/Local/Microsoft/WindowsApps/wt.exe"

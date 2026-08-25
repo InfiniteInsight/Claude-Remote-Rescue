@@ -810,6 +810,25 @@ def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
     assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
 
 
+def test_tab_spawner_probe_false_does_not_run_the_wt_window_probe(monkeypatch):
+    # The recovery paths (reopen / rescue re-home) pass probe=False so a
+    # session coming back never flashes a wt help window
+    # [/exit revival 2026-08-25]. wt_probe must not be called at all.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
+                        lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+
+    def _boom(path, timeout):
+        raise AssertionError("wt_probe (opens a GUI window) ran despite probe=False")
+
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", _boom)
+    spawner, expected = cli._tab_spawner(cfg.Config(), probe=False)
+    assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
+    assert expected is True
+
+
 def test_tab_spawner_falls_through_when_wsl_interop_is_unregistered(monkeypatch):
     # wt.exe resolves on DrvFs but cannot exec — don't hand back a spawner
     # that will only ENOEXEC; fall through to the Linux desktop detector
@@ -882,7 +901,7 @@ def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
     # a script must not start reading a live session as a failure. So: loud
     # on stderr, exit 0.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 as crr-abc12345",
                                                           degraded=True))
@@ -896,7 +915,7 @@ def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
 
 def test_cmd_reopen_stays_quiet_when_the_tab_opened(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 (opened in a new tab)"))
     monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True})())
@@ -2130,7 +2149,7 @@ def test_reopen_headless_drops_you_into_tmux(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)  # available(), list_sessions()
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))  # headless
     monkeypatch.delenv("TMUX", raising=False)  # not in tmux
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -2159,7 +2178,7 @@ def test_reopen_headless_ghost_still_drops_you_in(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -2248,7 +2267,7 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
             pass
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     store = JournalStore(tmp_path)
     store.write(new_entry(
@@ -2312,7 +2331,7 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
             opened.append((list(argv), cwd))
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     store = JournalStore(tmp_path)
     store.write(new_entry(
@@ -2902,7 +2921,7 @@ def test_rescue_check_headless_prompts_and_declines_once(tmp_path, monkeypatch, 
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))  # timeout -> decline
 
     rc = cli.main(["rescue-check"])
@@ -2928,7 +2947,7 @@ def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypat
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
 
     rc = cli.main(["rescue-check"])
@@ -2947,7 +2966,7 @@ def test_rescue_check_prints_notice_when_tab_unavailable(tmp_path, monkeypatch, 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
@@ -2971,7 +2990,7 @@ def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, 
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
@@ -3010,7 +3029,7 @@ def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, 
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("select.select must not be called when auto_open is true")))
@@ -3045,7 +3064,7 @@ def test_rescue_check_disables_tab_after_first_degraded(tmp_path, monkeypatch, c
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     spawners_seen = []
 
@@ -3079,7 +3098,7 @@ def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
@@ -3115,7 +3134,7 @@ def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "\n")  # Enter, no text
 
@@ -3148,7 +3167,7 @@ def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "")  # EOF
 
@@ -3173,7 +3192,7 @@ def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))
 
     calls = []
@@ -3204,7 +3223,7 @@ def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys)
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     def _raise_keyboard_interrupt(*a, **k):
         raise KeyboardInterrupt
@@ -3258,7 +3277,7 @@ def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monke
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     def _boom(*a, **k):
         raise RuntimeError("boom")
@@ -3279,7 +3298,7 @@ def test_rescue_check_auto_open_headless_skips_prompt(tmp_path, monkeypatch, cap
     # No config.toml — rescue_auto_open defaults to True
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))  # headless
     monkeypatch.setenv("TMUX", "sock,1,0")  # inside tmux
     monkeypatch.setattr(cli.select, "select",
                         lambda *a, **k: (_ for _ in ()).throw(
@@ -3310,7 +3329,7 @@ def test_rescue_check_headless_in_tmux_links_windows_no_exec(tmp_path, monkeypat
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))  # headless
     monkeypatch.setenv("TMUX", "sock,1,0")  # inside tmux
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
@@ -3340,7 +3359,7 @@ def test_rescue_check_headless_not_in_tmux_execs_attach(tmp_path, monkeypatch, c
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.delenv("TMUX", raising=False)  # not in tmux
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
@@ -3361,7 +3380,7 @@ def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsy
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "n\n")
@@ -3429,7 +3448,7 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     reopen_calls = []
 
@@ -3493,7 +3512,7 @@ def test_rescue_check_fires_after_deregister_clears_markers(tmp_path, monkeypatc
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.process_probe, "PsProcessController",
                         lambda t: type("C", (), {})())
 
@@ -4735,7 +4754,7 @@ def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
 
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: ("SPAWNER", True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: ("SPAWNER", True))
     monkeypatch.setattr(cli.tmux, "RealTmux",
                         lambda t: type("T", (), {"available": lambda s: True})())
     assert cli.main(["revive"]) == 0
