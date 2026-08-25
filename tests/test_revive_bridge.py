@@ -86,7 +86,8 @@ def _entry(pid=_PID, boot=_BOOT, sid=_SID):
     return new_entry(
         pid=pid, cwd="/home/u/project", host="tmux", shell="zsh",
         boot_id=boot, now="2026-08-07T00:00:00Z",
-        claude={"session_id": sid, "sid_source": "injected", "started": "2026-08-07T00:00:00Z"},
+        claude={"session_id": sid, "sid_source": "injected", "started": "2026-08-07T00:00:00Z",
+                "skip_permissions": False},
     )
 
 

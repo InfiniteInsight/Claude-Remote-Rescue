@@ -973,7 +973,7 @@ def test_config_effective_prints_defaults_version_header(capsys):
 
 def _live_entry(pid, boot_id):
     return {
-        "v": 1,
+        "v": contracts.JOURNAL_SCHEMA_VERSION,
         "pid": pid,
         "boot_id": boot_id,
         "cwd": "/home/u/project",
@@ -983,6 +983,7 @@ def _live_entry(pid, boot_id):
             "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
             "sid_source": "injected",
             "started": "2026-07-23T00:00:00Z",
+            "skip_permissions": False,
         },
         "last_cmd": "claude",
         "tmux_session": None,
@@ -1257,8 +1258,9 @@ def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
     assert entry["boot_id"] == boot_identity.detect().current()
 
 
-def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
-    return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"}
+def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", skip_permissions=False):
+    return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z",
+            "skip_permissions": skip_permissions}
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")
@@ -1476,6 +1478,65 @@ def test_claude_launch_missing_entry_still_prints_a_sid(tmp_path, monkeypatch, c
     assert rc == 0 and len(sid) == 36
 
 
+def test_claude_launch_records_skip_permissions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    cli.main(["claude-launch", "--pid", "4242", "--skip-permissions"])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is True
+
+
+def test_claude_launch_defaults_skip_permissions_false(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    cli.main(["claude-launch", "--pid", "4242"])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is False
+
+
+def test_claude_resume_records_skip_permissions(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid, "--skip-permissions"])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is True
+
+
+def test_claude_resume_defaults_skip_permissions_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is False
+
+
+def test_claude_resume_without_flag_clears_prior_skip_permissions(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid, "--skip-permissions"])
+    assert store.read(4242)["claude"]["skip_permissions"] is True
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid])
+    assert store.read(4242)["claude"]["skip_permissions"] is False
+
+
 # --- claude() wrapper support: remote-control-args (shim-facing) ---------
 
 def test_remote_control_args_prints_the_flag_and_derived_name(tmp_path, monkeypatch, capsys):
@@ -1592,7 +1653,8 @@ def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkey
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-25T12:00:00+00:00",
         claude={"session_id": _G1_SID, "sid_source": "guessed",
-                "started": "2026-07-25T12:00:00+00:00"},
+                "started": "2026-07-25T12:00:00+00:00",
+                "skip_permissions": False},
     )
     store.write(entry)
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
@@ -1609,7 +1671,8 @@ def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-25T12:00:00+00:00",
         claude={"session_id": _G1_SID, "sid_source": "guessed",
-                "started": "2026-07-25T12:00:00+00:00"},
+                "started": "2026-07-25T12:00:00+00:00",
+                "skip_permissions": False},
     )
     store.write(entry)
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
@@ -1628,7 +1691,8 @@ def test_status_upgrades_guessed_sid_when_transcript_confirms(tmp_path, monkeypa
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-30T00:00:00+00:00",
         claude={"session_id": sid, "sid_source": "guessed",
-                "started": "2026-07-30T00:00:00+00:00"},
+                "started": "2026-07-30T00:00:00+00:00",
+                "skip_permissions": False},
     ))
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.transcript_source, "list_transcripts",
@@ -1652,7 +1716,8 @@ def test_status_stays_lock_free_when_no_guess_is_upgradable(tmp_path, monkeypatc
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-30T00:00:00+00:00",
         claude={"session_id": sid, "sid_source": "guessed",
-                "started": "2026-07-30T00:00:00+00:00"},
+                "started": "2026-07-30T00:00:00+00:00",
+                "skip_permissions": False},
     ))
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.transcript_source, "list_transcripts",
@@ -1703,7 +1768,8 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
         boot_id="an-old-boot-that-cannot-match",  # boot mismatch => crashed
         now="2026-07-25T12:00:00+00:00",
         claude={"session_id": _G1_SID, "sid_source": "guessed",
-                "started": "2026-07-25T12:00:00+00:00"},
+                "started": "2026-07-25T12:00:00+00:00",
+                "skip_permissions": False},
     ))
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
     _write_transcript_file(tmp_path / "home", "/home/u/proj", _G1_SID, mtime=started + 60)
@@ -3525,7 +3591,8 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
     store.write(new_entry(
         pid=4242, cwd=str(tmp_path), host="tmux", shell="zsh",
         boot_id="00000000-0000-4000-8000-000000000000", now="2026-07-24T00:00:00Z",
-        claude={"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"},
+        claude={"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z",
+                "skip_permissions": False},
     ))
     try:
         rc = cli.main(["revive"])
@@ -4466,7 +4533,8 @@ def _parked_journal_entry(tmp_path, sid):
         boot_id="a-previous-boot", now="2026-01-01T00:00:00+00:00",
         tmux_session="crr-8a1b2c3d",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
 
 def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkeypatch, capsys):
@@ -4597,7 +4665,8 @@ def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatc
         boot_id="a-previous-boot", now="2026-01-01T00:00:00+00:00",
         tmux_session="crr-8a1b2c3d",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
     class FakeTmux:
         def available(self): return True
@@ -4667,7 +4736,8 @@ def test_reachability_matches_a_tmux_revived_session_via_the_live_snapshot(tmp_p
         pid=1960, cwd="/home/u/p", host="tmux", shell="bash",
         boot_id="b", now="2026-01-01T00:00:00+00:00", tmux_session="crr-x",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
     class LiveClaudeLeadsItsGroup:
         def claude_group_pids(self, pids): return {p: [p] for p in pids}
@@ -4700,7 +4770,8 @@ def test_a_dead_pid_state_file_never_licenses_a_claim(tmp_path, monkeypatch):
         pid=999999, cwd="/home/u/p", host="tmux", shell="bash",
         boot_id="an-old-boot", now="2026-01-01T00:00:00+00:00", tmux_session="crr-x",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
     class PidIsGone:
         def claude_group_pids(self, pids): return {p: [] for p in pids}
@@ -4731,7 +4802,8 @@ def _seed_conflict(tmp_path, sid):
         store.write(new_entry(pid=pid, cwd="/p", host="tmux", shell="fish",
                               boot_id="B", now=_NOW_STR,
                               claude={"session_id": sid, "sid_source": "injected",
-                                      "started": _NOW_STR}))
+                                      "started": _NOW_STR,
+                                      "skip_permissions": False}))
     return store
 
 

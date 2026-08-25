@@ -17,8 +17,9 @@ _NOW = "2026-07-24T00:00:00Z"
 _SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 
-def _claude():
-    return {"session_id": _SID, "sid_source": "injected", "started": _NOW}
+def _claude(skip_permissions=False):
+    return {"session_id": _SID, "sid_source": "injected", "started": _NOW,
+            "skip_permissions": skip_permissions}
 
 
 def _seed(store, pid, *, boot="entry-boot", claude=None):
@@ -764,6 +765,26 @@ def test_tracked_resume_argv_defaults_to_bash_for_an_unknown_shell():
         assert ops.tracked_resume_argv(e)[0] == "bash"
 
 
+def test_tracked_resume_argv_includes_skip_permissions_when_set():
+    e = {"claude": {"session_id": _SID, "skip_permissions": True}, "shell": "fish"}
+    assert ops.tracked_resume_argv(e) == [
+        "fish", "-i", "-C",
+        f"claude --resume {_SID} --dangerously-skip-permissions",
+    ]
+
+
+def test_tracked_resume_argv_omits_skip_permissions_when_false():
+    e = {"claude": {"session_id": _SID, "skip_permissions": False}, "shell": "fish"}
+    argv = ops.tracked_resume_argv(e)
+    assert "--dangerously-skip-permissions" not in " ".join(argv)
+
+
+def test_tracked_resume_argv_omits_skip_permissions_for_v1_entry():
+    e = {"claude": {"session_id": _SID}, "shell": "bash"}
+    argv = ops.tracked_resume_argv(e)
+    assert "--dangerously-skip-permissions" not in " ".join(argv)
+
+
 # --- untmux ------------------------------------------------------------------
 #
 # Real un-tmux: kill the parked tmux session and relaunch the conversation in
@@ -1029,6 +1050,7 @@ def test_retrack_refuses_when_pid_slot_now_belongs_to_a_different_live_session(t
     _archive_untracked(archive, pid=42)
     live_claude = {
         "session_id": _OTHER_SID, "sid_source": "injected", "started": _NOW,
+        "skip_permissions": False,
     }
     _seed(store, 42, claude=live_claude)
     res = ops.retrack(store, archive, _SID, _NOW)

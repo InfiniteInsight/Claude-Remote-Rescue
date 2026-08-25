@@ -125,7 +125,8 @@ def test_a_watchdog_kick_records_its_justification(tmp_path, capsys):
                       boot_id="boot-1", now="2026-01-01T00:00:00+00:00",
                       tmux_session=None,
                       claude={"session_id": SID, "sid_source": "injected",
-                              "started": "2026-01-01T00:00:00+00:00"})
+                              "started": "2026-01-01T00:00:00+00:00",
+                              "skip_permissions": False})
     store = JournalStore(tmp_path)
     store.write(entry)
 
@@ -558,7 +559,8 @@ def _transition_sweep(tmp_path, states, entries=1, clock_at=10_000.0):
             pid=4242 + i, cwd="/home/u/p", host="tab", shell="bash",
             boot_id="boot-1", now="2026-01-01T00:00:00+00:00", tmux_session=None,
             claude={"session_id": SID, "sid_source": "injected",
-                    "started": "2026-01-01T00:00:00+00:00"}))
+                    "started": "2026-01-01T00:00:00+00:00",
+                    "skip_permissions": False}))
 
     class FakeBoot:
         def current(self): return "boot-1"

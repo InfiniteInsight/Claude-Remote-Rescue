@@ -71,7 +71,7 @@ def new_entry(
     revive_strikes: int = 0,
     claude: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a schema-v1 journal entry, validated before it is returned.
+    """Build a journal entry at the current schema version, validated before return.
 
     Centralizes the entry shape in one place (alongside the contract), so
     the register/wrapper code paths cannot drift from the schema. ``now``

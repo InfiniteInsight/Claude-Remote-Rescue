@@ -546,6 +546,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cl.add_argument("--pid", type=int, required=True)
     cl.add_argument("--session-id", default=None, help="use this sid instead of generating one")
+    cl.add_argument("--skip-permissions", action="store_true", default=False,
+                    help="record that claude was launched with --dangerously-skip-permissions")
     cl.set_defaults(func=_cmd_claude_launch)
 
     cr = sub.add_parser(
@@ -555,6 +557,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--pid", type=int, required=True)
     cr.add_argument("--cwd", required=True, help="cwd, to locate the transcript(s) to guess from")
     cr.add_argument("--session-id", default=None, help="explicit sid from --resume <sid>, if any")
+    cr.add_argument("--skip-permissions", action="store_true", default=False,
+                    help="record that claude was launched with --dangerously-skip-permissions")
     cr.set_defaults(func=_cmd_claude_resume)
 
     ce = sub.add_parser(
@@ -1992,7 +1996,9 @@ def _cmd_deregister(args: argparse.Namespace) -> int:
     return 0
 
 
-def _attach_claude_session(sd: Path, pid: int, sid: str, sid_source: str) -> None:
+def _attach_claude_session(
+    sd: Path, pid: int, sid: str, sid_source: str, *, skip_permissions: bool = False,
+) -> None:
     """Attach a claude session to a journaled shell, archiving a superseded one.
 
     Shared by claude-launch (injected) and claude-resume (guessed/verified).
@@ -2011,7 +2017,11 @@ def _attach_claude_session(sd: Path, pid: int, sid: str, sid_source: str) -> Non
         # pid. Preserve it before overwriting or its revival data is lost.
         if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
             ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
-        entry["claude"] = {"session_id": sid, "sid_source": sid_source, "started": _now()}
+        entry["claude"] = {
+            "session_id": sid, "sid_source": sid_source, "started": _now(),
+            "skip_permissions": skip_permissions,
+        }
+        entry["v"] = contracts.JOURNAL_SCHEMA_VERSION
         entry["updated"] = _now()
         store.write(entry)
 
@@ -2027,7 +2037,10 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
         # never journal it — claude itself will reject a non-UUID sid.
         print(sid)
         return 0
-    _attach_claude_session(state_dir.state_dir(), args.pid, sid, "injected")
+    _attach_claude_session(
+        state_dir.state_dir(), args.pid, sid, "injected",
+        skip_permissions=args.skip_permissions,
+    )
     print(sid)
     return 0
 
@@ -2045,7 +2058,10 @@ def _cmd_claude_resume(args: argparse.Namespace) -> int:
     if derived is None:
         return 0  # no explicit sid and no transcript to guess — leave untracked
     sid, sid_source = derived
-    _attach_claude_session(state_dir.state_dir(), args.pid, sid, sid_source)
+    _attach_claude_session(
+        state_dir.state_dir(), args.pid, sid, sid_source,
+        skip_permissions=args.skip_permissions,
+    )
     return 0
 
 

@@ -20,7 +20,8 @@ from typing import Any, Iterable, Mapping
 # bump is the honest signal that consumers must re-check.
 # --------------------------------------------------------------------------
 
-JOURNAL_SCHEMA_VERSION = 1
+# v2 adds skip_permissions to claude sub-object (persist --dangerously-skip-permissions).
+JOURNAL_SCHEMA_VERSION = 2
 # v3 adds `tmux_session` (nullable per-session field; `detmux` op — 57195a5).
 #    Restored 2026-08-08 (#38): this line was DELETED by a later edit rather
 #    than superseded, which is how a ledger silently loses its own history.
@@ -189,7 +190,8 @@ JOURNAL_KEYS = (
     "revive_strikes",
     "updated",
 )
-JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started")
+_JOURNAL_CLAUDE_KEYS_V1 = ("session_id", "sid_source", "started")
+JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started", "skip_permissions")
 
 SESSION_CARD_KEYS = (
     "pid",
@@ -336,14 +338,14 @@ def _require_enum(value: Any, allowed: Iterable[str], what: str) -> None:
 # --------------------------------------------------------------------------
 
 def validate_journal_entry(entry: Any) -> None:
-    """Raise ContractError unless ``entry`` is a valid schema-v1 journal entry."""
+    """Raise ContractError unless ``entry`` is a valid journal entry (v1 or v2)."""
     entry = _require_mapping(entry, "journal entry")
     _require_exact_keys(entry, JOURNAL_KEYS, "journal entry")
 
     _require_type(entry["v"], int, "journal 'v'")
-    if entry["v"] != JOURNAL_SCHEMA_VERSION:
+    if entry["v"] not in (1, JOURNAL_SCHEMA_VERSION):
         raise ContractError(
-            f"journal 'v' is {entry['v']}, this build understands {JOURNAL_SCHEMA_VERSION}"
+            f"journal 'v' is {entry['v']}, this build understands 1..{JOURNAL_SCHEMA_VERSION}"
         )
 
     _require_type(entry["pid"], int, "journal 'pid'")
@@ -362,12 +364,15 @@ def validate_journal_entry(entry: Any) -> None:
     # session exists (None). Once present it must be fully formed.
     if entry["claude"] is not None:
         claude = _require_mapping(entry["claude"], "journal 'claude'")
-        _require_exact_keys(claude, JOURNAL_CLAUDE_KEYS, "journal 'claude'")
+        claude_keys = JOURNAL_CLAUDE_KEYS if entry["v"] >= 2 else _JOURNAL_CLAUDE_KEYS_V1
+        _require_exact_keys(claude, claude_keys, "journal 'claude'")
         _require_type(claude["session_id"], str, "journal 'claude.session_id'")
         if not valid_session_id(claude["session_id"]):
             raise ContractError("journal 'claude.session_id' must be a UUID")
         _require_enum(claude["sid_source"], SID_SOURCES, "journal 'claude.sid_source'")
         _require_type(claude["started"], str, "journal 'claude.started'")
+        if entry["v"] >= 2:
+            _require_type(claude["skip_permissions"], bool, "journal 'claude.skip_permissions'")
 
 
 # --------------------------------------------------------------------------

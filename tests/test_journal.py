@@ -168,7 +168,7 @@ def test_new_entry_is_contract_valid_and_claude_less_by_default():
         now="2026-07-23T00:00:00Z",
     )
     contracts.validate_journal_entry(entry)  # must not raise
-    assert entry["v"] == 1
+    assert entry["v"] == contracts.JOURNAL_SCHEMA_VERSION
     assert entry["pid"] == 42
     assert entry["updated"] == "2026-07-23T00:00:00Z"
     assert entry["claude"] is None
@@ -181,6 +181,7 @@ def test_new_entry_carries_claude_when_given():
         "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
         "sid_source": "injected",
         "started": "2026-07-23T00:00:00Z",
+        "skip_permissions": False,
     }
     entry = new_entry(
         pid=42, cwd="/x", host="ssh", shell="bash",

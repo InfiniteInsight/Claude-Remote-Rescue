@@ -88,6 +88,7 @@ function claude
     # explicit --resume sid must still be seen as having the sid.
     set -l _resuming 0
     set -l _continuing 0
+    set -l _skip_perms 0
     for _arg in $argv
         switch $_arg
             case -c --continue
@@ -95,7 +96,15 @@ function claude
                 set _continuing 1
             case -r --resume '--resume=*' --session-id '--session-id=*'
                 set _resuming 1
+            case --dangerously-skip-permissions
+                set _skip_perms 1
         end
+    end
+    set -l _crr_sp_args
+    set -l _dsp_args
+    if test $_skip_perms -eq 1
+        set _crr_sp_args --skip-permissions
+        set _dsp_args --dangerously-skip-permissions
     end
     # The conversation the repair loop resumes: injected sid on a fresh
     # launch, explicit sid on a resume, sid of each consumed relaunch flag.
@@ -132,7 +141,7 @@ function claude
             if not _crr conflict-check --sid $_sid
                 return 1
             end
-            _crr claude-resume --pid $fish_pid --cwd $PWD --session-id $_sid >/dev/null
+            _crr claude-resume --pid $fish_pid --cwd $PWD --session-id $_sid $_crr_sp_args >/dev/null
             set _cur_sid $_sid
         else
             # [#68] `--continue` hands crr no sid, but the conversation it
@@ -155,11 +164,11 @@ function claude
                     return 1
                 end
             end
-            _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
+            _crr claude-resume --pid $fish_pid --cwd $PWD $_crr_sp_args >/dev/null
         end
         command claude (_crr_rc_args) $argv
     else
-        set -l _crr_sid (_crr claude-launch --pid $fish_pid)
+        set -l _crr_sid (_crr claude-launch --pid $fish_pid $_crr_sp_args)
         if test -n "$_crr_sid"
             set _cur_sid $_crr_sid
             command claude --session-id $_crr_sid (_crr_rc_args) $argv
@@ -181,7 +190,7 @@ function claude
         if test "$_flag[1]" = relaunch; and test -n "$_flag[2]"
             set _cur_sid $_flag[2]
             set _crashes 0
-            command claude --resume $_flag[2] (_crr_rc_args)
+            command claude --resume $_flag[2] $_dsp_args (_crr_rc_args)
             set _code $status
             continue
         end
@@ -212,15 +221,15 @@ function claude
         end
         set _crashes (math $_crashes + 1)
         if test -n "$_cur_sid"
-            command claude --resume $_cur_sid (_crr_rc_args)
+            command claude --resume $_cur_sid $_dsp_args (_crr_rc_args)
         else
             # [#68] Deliberately NOT conflict-checked, unlike the launch
             # path above: this is crash recovery resuming the conversation
             # that just died in THIS shell. The only agent it could
             # collide with is the one that is already gone, and prompting
             # here would ask the user to kill their own dead session.
-            _crr claude-resume --pid $fish_pid --cwd $PWD >/dev/null
-            command claude --continue (_crr_rc_args)
+            _crr claude-resume --pid $fish_pid --cwd $PWD $_crr_sp_args >/dev/null
+            command claude --continue $_dsp_args (_crr_rc_args)
         end
         set _code $status
     end

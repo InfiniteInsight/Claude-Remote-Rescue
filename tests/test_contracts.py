@@ -113,7 +113,7 @@ def test_valid_journal_entry_passes():
 
 def test_journal_wrong_version_rejected():
     e = _journal_entry()
-    e["v"] = 2
+    e["v"] = 999
     with pytest.raises(contracts.ContractError):
         contracts.validate_journal_entry(e)
 
@@ -225,6 +225,52 @@ def test_journal_pid_true_bool_rejected():
     e["pid"] = True
     with pytest.raises(contracts.ContractError):
         contracts.validate_journal_entry(e)
+
+
+# --------------------------------------------------------------------------
+# Journal schema v2 — skip_permissions in claude sub-object
+# --------------------------------------------------------------------------
+
+def _journal_entry_v2():
+    e = _journal_entry()
+    e["v"] = 2
+    e["claude"]["skip_permissions"] = False
+    return e
+
+
+def test_journal_v2_entry_accepted():
+    contracts.validate_journal_entry(_journal_entry_v2())
+
+
+def test_journal_v1_entry_still_accepted():
+    contracts.validate_journal_entry(_journal_entry())
+
+
+def test_journal_v2_skip_permissions_must_be_bool():
+    e = _journal_entry_v2()
+    e["claude"]["skip_permissions"] = "yes"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_v2_rejects_claude_without_skip_permissions():
+    e = _journal_entry_v2()
+    del e["claude"]["skip_permissions"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_v1_claude_rejects_extra_key():
+    e = _journal_entry()
+    e["claude"]["skip_permissions"] = False
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_archive_with_v1_embedded_entry_still_validates():
+    record = _archive_record()
+    assert record["entry"]["v"] == 1
+    contracts.validate_archive_record(record)
 
 
 # --------------------------------------------------------------------------

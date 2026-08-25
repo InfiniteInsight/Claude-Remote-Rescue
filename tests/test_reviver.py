@@ -28,8 +28,9 @@ _ENTRY_BOOT = "entry-boot-0000"
 _NOW = "2026-07-24T00:00:00Z"
 
 
-def _claude(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
-    return {"session_id": sid, "sid_source": "injected", "started": _NOW}
+def _claude(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", skip_permissions=False):
+    return {"session_id": sid, "sid_source": "injected", "started": _NOW,
+            "skip_permissions": skip_permissions}
 
 
 def _seed(store, pid, *, boot=_ENTRY_BOOT, claude=None, tmux_session=None, strikes=0):
@@ -148,6 +149,35 @@ def test_revival_argv_places_remote_control_last_so_nothing_follows_the_name():
     argv = revival_argv(entry, remote_control=True)
     assert argv[-2] == "--remote-control"
     assert argv[-1] == "my-proj"
+
+
+def test_revival_argv_includes_skip_permissions_when_set():
+    entry = {"claude": _claude(skip_permissions=True), "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert argv == ["claude", "--resume", _claude()["session_id"],
+                    "--dangerously-skip-permissions"]
+
+
+def test_revival_argv_omits_skip_permissions_when_false():
+    entry = {"claude": _claude(skip_permissions=False), "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_revival_argv_omits_skip_permissions_for_v1_entry():
+    claude_v1 = {"session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                 "sid_source": "injected", "started": _NOW}
+    entry = {"claude": claude_v1, "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_revival_argv_skip_permissions_before_remote_control():
+    entry = {"claude": _claude(skip_permissions=True), "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=True)
+    dsp_idx = argv.index("--dangerously-skip-permissions")
+    rc_idx = argv.index("--remote-control")
+    assert dsp_idx < rc_idx
 
 
 def test_crashed_claude_session_is_revived(tmp_path):

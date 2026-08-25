@@ -124,6 +124,8 @@ def revival_argv(entry: Mapping[str, Any], *, remote_control: bool) -> list[str]
     revive sessions unreachable from the phone.
     """
     argv = ["claude", "--resume", entry["claude"]["session_id"]]
+    if entry["claude"].get("skip_permissions", False):
+        argv.append("--dangerously-skip-permissions")
     if remote_control:
         # Appended last so nothing on the line can follow (and be swallowed
         # by) the name — belt-and-suspenders on top of the explicit name

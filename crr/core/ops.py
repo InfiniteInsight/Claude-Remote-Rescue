@@ -427,6 +427,8 @@ def tracked_resume_argv(entry: Mapping[str, Any]) -> list[str]:
     sid = entry["claude"]["session_id"]
     shell = entry.get("shell") or "bash"
     command = f"claude --resume {sid}"
+    if entry["claude"].get("skip_permissions", False):
+        command += " --dangerously-skip-permissions"
     if shell == "fish":
         return ["fish", "-i", "-C", command]
     if shell not in ("bash", "zsh"):
