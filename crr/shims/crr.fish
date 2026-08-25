@@ -178,6 +178,19 @@ function claude
     end
     set -l _code $status
 
+    # Clean exit (/exit, code 0): clear the journal claude field NOW, before
+    # the repair-check round-trips below. Those are several sequential
+    # `crr` process startups, and for their whole duration the entry still
+    # carries claude — so a tab-close in that window (SIGHUP -> fish_exit ->
+    # `crr deregister`) archives a session the user already ended cleanly as
+    # a revivable "shell-exited" one, and the next new tab resurrects it
+    # [/exit revival 2026-08-24]. Clearing first shrinks that race to the gap between claude
+    # returning and this one call. Crash paths (code != 0) deliberately keep
+    # the field set so a genuine mid-session close still revives.
+    if test $_code -eq 0
+        _crr claude-exit --pid $fish_pid
+    end
+
     set -l _crashes 0
     while test -x "$_CRR_BIN"
         # Command substitution splits on newlines only — split the single

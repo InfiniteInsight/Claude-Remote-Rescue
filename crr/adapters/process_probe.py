@@ -235,7 +235,10 @@ def _parse_ps_rows_full_args(stdout: str) -> list[tuple[int, int, int, str]]:
     return rows
 
 
-def _child_groups(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list[int]:
+def _child_groups(
+    rows: list[tuple[int, int, int, str]], shell_pid: int,
+    include_shell_group: bool = False,
+) -> list[int]:
     shell_pgid = next((pgid for pid, _ppid, pgid, _a in rows if pid == shell_pid), None)
     if shell_pgid is None:
         return []
@@ -247,10 +250,23 @@ def _child_groups(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list
     if _is_claude_argv0(self_argv0):
         return [shell_pgid] if shell_pgid > 0 else []
     groups: list[int] = []
+    own_group_has_claude = False
     for _pid, ppid, pgid, argv0 in rows:
-        if (ppid == shell_pid and pgid != shell_pgid and pgid > 0
-                and pgid not in groups and _is_claude_argv0(argv0)):
+        if not (ppid == shell_pid and pgid > 0 and _is_claude_argv0(argv0)):
+            continue
+        if pgid == shell_pgid:
+            # A claude child sharing the journaled process's OWN group means
+            # that process runs no job control — it is the reviver's `sh -c`
+            # exit-hook wrapper [/exit revival 2026-08-24], never an interactive shell (which
+            # always gives claude its own group). Signalling shell_pgid here
+            # ends the whole throwaway pane, which is the kill target. It is
+            # gated on include_shell_group so this can NEVER fire for a live
+            # user shell: only kick on a tmux-parked entry opts in.
+            own_group_has_claude = True
+        elif pgid not in groups:
             groups.append(pgid)
+    if include_shell_group and own_group_has_claude and shell_pgid not in groups:
+        groups.append(shell_pgid)
     return groups
 
 
@@ -346,7 +362,7 @@ class PsProcessController:
     def __init__(self, timeout_seconds: float) -> None:
         self._timeout = timeout_seconds
 
-    def claude_groups(self, shell_pid: int) -> list[int]:
+    def claude_groups(self, shell_pid: int, *, include_shell_group: bool = False) -> list[int]:
         try:
             result = subprocess.run(
                 _ps_snapshot_argv(),
@@ -356,7 +372,10 @@ class PsProcessController:
             return []
         if result.returncode != 0:
             return []
-        return _child_groups(_parse_ps_rows(result.stdout), shell_pid)
+        return _child_groups(
+            _parse_ps_rows(result.stdout), shell_pid,
+            include_shell_group=include_shell_group,
+        )
 
     def find_resume_process(self, session_id: str) -> ResumeProcess | None:
         """Locate a live ``claude --resume <session_id>`` process (`crr

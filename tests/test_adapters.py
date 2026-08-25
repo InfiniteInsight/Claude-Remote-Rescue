@@ -368,6 +368,29 @@ def test_child_groups_excludes_a_child_that_shares_the_shell_group():
     assert pp._child_groups(rows, shell_pid=100) == []
 
 
+def test_child_groups_includes_own_group_for_a_parked_wrapper_when_opted_in():
+    # The reviver's `sh -c 'claude …'` exit-hook wrapper [/exit revival 2026-08-24] runs no job
+    # control, so its claude child sits in the wrapper's OWN group. Kick on a
+    # tmux-parked entry opts in via include_shell_group and must get that
+    # group back — otherwise the wrapped session can never be kicked.
+    rows = [(100, 1, 100, "sh"), (200, 100, 100, "claude")]
+    assert pp._child_groups(rows, shell_pid=100, include_shell_group=True) == [100]
+
+
+def test_child_groups_opt_in_never_returns_a_group_without_a_claude_child():
+    # include_shell_group is not a blanket "return my own group": the group
+    # is returned only because a claude child actually lives in it.
+    rows = [(100, 1, 100, "sh"), (200, 100, 100, "make")]
+    assert pp._child_groups(rows, shell_pid=100, include_shell_group=True) == []
+
+
+def test_child_groups_opt_in_still_prefers_distinct_claude_groups():
+    # A job-controlled claude child (its own group) is returned as before;
+    # opting in only ADDS the own-group case, it doesn't replace it.
+    rows = [(100, 1, 100, "sh"), (200, 100, 200, "claude")]
+    assert pp._child_groups(rows, shell_pid=100, include_shell_group=True) == [200]
+
+
 def test_child_groups_empty_when_shell_absent_or_childless():
     assert pp._child_groups([(100, 1, 100, "-fish")], shell_pid=100) == []
     assert pp._child_groups([(200, 100, 200, "claude")], shell_pid=100) == []

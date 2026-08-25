@@ -538,6 +538,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dereg = sub.add_parser("deregister", help="[shim] remove a shell's journal entry")
     dereg.add_argument("--pid", type=int, required=True)
+    dereg.add_argument(
+        "--reason", default="shell-exited", choices=contracts.ARCHIVE_REASONS,
+        help="archive reason for a still-claude-bearing entry (default: shell-exited). "
+             "The reviver's exit-hook wrapper passes 'closed' for a clean /exit so the "
+             "conversation is archived terminally, not revived.",
+    )
     dereg.set_defaults(func=_cmd_deregister)
 
     cl = sub.add_parser(
@@ -1990,7 +1996,7 @@ def _cmd_deregister(args: argparse.Namespace) -> int:
         except (KeyError, contracts.ContractError):
             entry = None
         if entry is not None and entry.get("claude") is not None:
-            ArchiveStore(sd).archive(entry, "shell-exited", _now())
+            ArchiveStore(sd).archive(entry, getattr(args, "reason", None) or "shell-exited", _now())
         rescue.invalidate_markers(sd)
         store.remove(args.pid)
     return 0
@@ -2298,6 +2304,9 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             # pointing at it (#62) — the sweep, not kick, creates the
             # replacement, so the tab can only be opened from here.
             tab_spawner=_tab_spawner(config)[0],
+            # The crr the exit-hook wrapper calls on a clean /exit [/exit revival 2026-08-24]:
+            # the deployed copy, matching the service-mutation principle.
+            crr_bin=_resolve_service_bin(None),
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -2739,7 +2748,8 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
                          boot, probe, args.pid, _now(),
                          grace=config.get("close_grace_seconds"),
                          remote_control=config.get("remote_control"),
-                         tab_spawner=spawner, tabs_expected=tabs_expected)
+                         tab_spawner=spawner, tabs_expected=tabs_expected,
+                         crr_bin=_resolve_service_bin(None))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     if res.ok and not tabs_expected and reopen_name:
         # Headless host: no GUI tab was possible. Drop the user into the now-
@@ -3585,6 +3595,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 now=_now(),
                 remote_control_enabled=config.get("remote_control"),
                 flags=FlagStore(sd),
+                crr_bin=_resolve_service_bin(None),
             )
         rescue.mark_revived(sd, boot_id)
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
@@ -3650,6 +3661,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 grace=config.get("close_grace_seconds"),
                 remote_control=config.get("remote_control"),
                 tab_spawner=tab, tabs_expected=tabs_expected,
+                crr_bin=_resolve_service_bin(None),
             )
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.
@@ -4124,7 +4136,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                                   pid, _now(), grace=config.get("close_grace_seconds"),
                                   remote_control=config.get("remote_control"),
-                                  tab_spawner=spawner, tabs_expected=tabs_expected)
+                                  tab_spawner=spawner, tabs_expected=tabs_expected,
+                                  crr_bin=_resolve_service_bin(None))
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))

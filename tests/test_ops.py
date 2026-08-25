@@ -165,6 +165,24 @@ def test_reopen_omits_remote_control_when_disabled(tmp_path):
     assert tmux.created[0][2] == ["claude", "--resume", _SID]
 
 
+def test_reopen_wraps_the_spawn_with_the_exit_hook(tmp_path):
+    # A reopened session runs in tmux with no shell, exactly like a
+    # boot-revived one — so its spawn must carry the exit-hook wrapper too,
+    # or a clean /exit of the reopened conversation re-revives it [/exit revival 2026-08-24].
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, remote_control=False, crr_bin="/usr/bin/crr")
+    assert res.ok
+    assert tmux.created[0][2] == [
+        "sh", "-c",
+        'claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
+        "sh", "--resume", _SID,
+    ]
+
+
 def test_reopen_refuses_claude_less(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=None)
@@ -1099,8 +1117,10 @@ class FakeController:
         self.terminated = []          # (pgid, grace) per call
         self.raise_on_terminate = False   # legacy: raise OSError for every pgid
         self.raise_for = dict(raise_for or {})  # pgid -> exception, per-pgid failure
+        self.group_calls = []         # (shell_pid, include_shell_group) per call
 
-    def claude_groups(self, shell_pid):
+    def claude_groups(self, shell_pid, *, include_shell_group=False):
+        self.group_calls.append((shell_pid, include_shell_group))
         return list(self.groups)
 
     def terminate_group(self, pgid, grace_seconds):
@@ -1146,6 +1166,20 @@ def test_close_terminates_and_arms_the_close_flag(tmp_path):
     assert res.ok is True
     assert ctrl.terminated == [(555, 5)]
     assert flags.armed[10][:2] == ("close", None)
+
+
+def test_close_opts_into_the_shell_group_for_a_parked_wrapper(tmp_path):
+    # Remote exit on a tmux-parked session must find claude inside the
+    # reviver's `sh -c` wrapper group, same opt-in as kick [/exit revival 2026-08-24].
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    e = store.read(10)
+    e["tmux_session"] = f"crr-{_SID}"
+    store.write(e)
+    ctrl, flags = FakeController(groups=[100]), FakeFlags()
+    res = ops.close(store, ctrl, flags, boot, probe, 10, grace=5)
+    assert res.ok is True
+    assert ctrl.group_calls == [(10, True)]
 
 
 def test_close_rolls_the_flag_back_when_the_signal_fails(tmp_path):
@@ -1210,6 +1244,31 @@ def test_kick_arms_the_flag_then_terminates(tmp_path):
     assert res.ok is True
     assert flags.armed[10][:2] == ("relaunch", _SID)  # sid armed
     assert ctrl.terminated == [(555, 5)]
+
+
+def test_kick_opts_into_the_shell_group_for_a_parked_wrapper(tmp_path):
+    # A tmux-parked entry's pane is the reviver's `sh -c` exit-hook wrapper
+    # [/exit revival 2026-08-24]; its claude child shares the wrapper's own group, so kick must let
+    # claude_groups return that group (include_shell_group=True).
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    e = store.read(10)
+    e["tmux_session"] = f"crr-{_SID}"
+    store.write(e)
+    ctrl, flags = FakeController(groups=[100]), FakeFlags()
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
+    assert res.ok is True
+    assert ctrl.group_calls == [(10, True)]
+
+
+def test_kick_does_not_opt_into_the_shell_group_for_a_live_shim_shell(tmp_path):
+    # A live shim shell (no tmux_session) must NEVER opt in — signalling its
+    # own group would kill the user's shell.
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)  # _live seeds no tmux_session
+    ctrl, flags = FakeController(groups=[555]), FakeFlags()
+    ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
+    assert ctrl.group_calls == [(10, False)]
 
 
 def test_kick_rolls_the_flag_back_when_the_signal_fails(tmp_path):

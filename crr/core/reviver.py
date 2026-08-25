@@ -27,6 +27,7 @@ fully testable with fakes and touches no OS directly.
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any, Mapping, NamedTuple, Sequence
 
 from crr.core.archive import ArchiveStore
@@ -134,6 +135,41 @@ def revival_argv(entry: Mapping[str, Any], *, remote_control: bool) -> list[str]
     return argv
 
 
+def exit_hook_argv(claude_argv: Sequence[str], crr_bin: str) -> list[str]:
+    """Wrap a bare claude launch so a CLEAN (exit 0) exit deregisters it.
+
+    A tmux-revived claude runs with no shell between it and tmux (#58), so
+    when the user attaches and ``/exit``s, nothing clears the journal: the
+    dead pane pid classifies CRASHED and the very next revive pass
+    resurrects the conversation the user deliberately ended (the
+    tmux-parked twin of the shim's ``claude-exit`` gap). Interpose a
+    minimal ``sh`` that, on claude's clean exit, runs ``crr deregister
+    --reason closed`` — archiving terminally and delisting, exactly the
+    bookkeeping the shim's ``fish_exit`` does for a hosted session. A
+    non-zero exit (a genuine crash) runs nothing, so real crashes still
+    revive.
+
+    claude's own arguments ride through ``"$@"`` — never interpolated into
+    the script text — so a session id, cwd, or remote-control name cannot
+    smuggle a shell metacharacter into the command; only ``crr_bin`` (a
+    trusted, crr-resolved absolute path) and the fixed ``claude`` command
+    word are embedded, both ``shlex.quote``-escaped. ``$$`` is the pane
+    ``sh``'s pid — exactly the pid the reviver re-keys the journal onto
+    (``_rekey_onto_live_pid`` reads ``#{pane_pid}``, which is this ``sh``,
+    not its claude child) — so ``deregister --pid $$`` targets the right
+    slot. Because the pane process is now a shell hosting a claude child
+    (not claude itself), a revived session finally has the SAME shape as a
+    shim-hosted one, which is what lets ``kick`` find and signal it (see
+    ``_child_groups``' ``include_shell_group``).
+    """
+    prog = claude_argv[0]
+    script = (
+        f'{shlex.quote(prog)} "$@"; '
+        f'test $? -eq 0 && {shlex.quote(crr_bin)} deregister --pid $$ --reason closed'
+    )
+    return ["sh", "-c", script, "sh", *claude_argv[1:]]
+
+
 def attach_argv(name: str) -> list[str]:
     """Word-form argv for a visible tab to attach to the detached session.
 
@@ -163,12 +199,14 @@ def _try_open_tab(tab_spawner, name: str) -> bool:
 def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
     """Re-key ``entry`` onto the pid actually running in tmux session ``name``.
 
-    The reviver spawns ``tmux new-session -- claude ...`` with no shell in
-    between, so the revived claude never runs the shim's ``claude()`` wrapper
-    and never calls ``crr register``. Every revived conversation was therefore
-    absent from the journal: the only entry stayed keyed to the long-dead
-    shell pid, so its card read "crashed" and offered Reopen instead of Kick
-    while the conversation was alive (#58).
+    The reviver spawns claude under a minimal ``sh`` exit-hook wrapper ([/exit revival 2026-08-24];
+    ``exit_hook_argv``), never the interactive shim, so the revived claude
+    never runs the shim's ``claude()`` wrapper and never calls ``crr
+    register``. Every revived conversation was therefore absent from the
+    journal: the only entry stayed keyed to the long-dead shell pid, so its
+    card read "crashed" and offered Reopen instead of Kick while the
+    conversation was alive (#58). Re-keying targets the pane pid (the ``sh``
+    wrapper), which hosts claude as its child — the shape kick expects.
 
     The current boot id is stamped along with the pid — ``classify`` returns
     CRASHED on a boot mismatch *without consulting the pid at all*, so a
@@ -290,6 +328,7 @@ def revive_crashed(
     remote_control_enabled: bool,
     flags=None,
     tab_spawner=None,
+    crr_bin: str | None = None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -304,6 +343,16 @@ def revive_crashed(
     revived: list[int] = []
     gave_up: list[int] = []
     reset: list[int] = []
+
+    def _spawn_argv(e: Mapping[str, Any]) -> list[str]:
+        # crr_bin is injected (composition root resolves it, like
+        # remote_control) so core stays pure. When present, wrap the launch
+        # so a clean /exit deregisters itself [/exit revival 2026-08-24]; when absent (older
+        # callers, tests that don't exercise the hook) fall back to the bare
+        # command — the pre-fix behaviour, which degrades safely to "revive
+        # again" rather than emitting a broken script.
+        argv = revival_argv(e, remote_control=remote_control_enabled)
+        return exit_hook_argv(argv, crr_bin) if crr_bin else argv
 
     # 1. Active crashed-with-claude entries.
     for entry in entries:
@@ -352,9 +401,7 @@ def revive_crashed(
             store.remove(pid)
             gave_up.append(pid)
         else:  # revive
-            tmux.new_detached_session(
-                name, entry["cwd"], revival_argv(entry, remote_control=remote_control_enabled)
-            )
+            tmux.new_detached_session(name, entry["cwd"], _spawn_argv(entry))
             live.add(name)  # dedupe within the pass: a shared sid is now "live"
             store.write(updated)
             # The spawn just created the process crr must be able to Kick;
@@ -416,9 +463,7 @@ def revive_crashed(
             archive.write(record)
             gave_up.append(pid)
         else:  # revive
-            tmux.new_detached_session(
-                name, entry["cwd"], revival_argv(entry, remote_control=remote_control_enabled)
-            )
+            tmux.new_detached_session(name, entry["cwd"], _spawn_argv(entry))
             live.add(name)  # dedupe within the pass (shared sid)
             if _journal_from_archive(store, tmux, boot_identity, updated, name, now):
                 if sid:
