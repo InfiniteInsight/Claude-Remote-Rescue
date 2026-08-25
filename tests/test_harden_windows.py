@@ -131,11 +131,15 @@ def test_doctor_carries_the_same_finding(monkeypatch, capsys):
 
 def test_harden_reports_a_restart_that_landed_outside_the_window(monkeypatch, capsys):
     # A clean policy state so the restart-measurement line is the thing
-    # under test, not the policy gaps.
+    # under test, not the policy gaps. The restart date is relative to now
+    # (yesterday) rather than a fixed calendar date, so this test does not
+    # rot once "now" drifts past the fixed date's 14-day lookback window.
+    from datetime import datetime, timedelta
+    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     _patch_state(monkeypatch, _HS(True, 8, 2, False))
     monkeypatch.setattr(
         cli, "run_capture",
-        lambda cmd, timeout: "2026-08-11 03:12:45 [6008] unexpected shutdown\n")
+        lambda cmd, timeout: f"{recent} 03:12:45 [6008] unexpected shutdown\n")
     assert cli.main(["harden"]) == 0
     out = capsys.readouterr().out
     assert "restarts outside active hours" in out.lower()
