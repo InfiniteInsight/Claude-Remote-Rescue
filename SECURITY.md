@@ -11,11 +11,47 @@ lives inline in [DESIGN.md](DESIGN.md).
   to `0.0.0.0`.
 - **The tailnet is the entire authentication boundary.** You reach the
   dashboard by putting it on your [Tailscale](https://tailscale.com) tailnet
-  (`tailscale serve`) or behind your own authenticating reverse proxy. There
-  are no accounts, sessions, or passwords in crr itself — by design, there is
-  no auth surface of our own to get wrong.
+  (`tailscale serve`) or behind your own authenticating reverse proxy.
 - If you expose the loopback port to a wider network yourself, you have
   removed the boundary crr relies on. Don't.
+
+## Dashboard login (optional)
+
+crr can additionally gate the dashboard behind a passphrase — off by
+default, since the tailnet is the primary boundary above. A bootstrap
+prompt on first visit offers to set one up; it can be declined and
+re-enabled later from Settings.
+
+- **Passphrase hashing**: scrypt (`hashlib.scrypt`), unique random salt per
+  passphrase, timing-safe comparison (`hmac.compare_digest`).
+- **Sessions are stateless**: `crr_session` is an HMAC-SHA256-signed token
+  (`token_id | issued_at`, signed with a per-setup random secret), not a
+  server-side session table. Cookie flags: `HttpOnly`, `SameSite=Strict`, no
+  `Secure` — crr serves plain HTTP on loopback; TLS terminates at the
+  Tailscale Serve / tunnel edge, and a `Secure` flag on a plain-HTTP
+  `Set-Cookie` is silently dropped by the browser.
+- **Logout is stateless too**: `/api/logout` clears the cookie client-side,
+  but a captured token remains valid until it expires or the signing secret
+  rotates. Changing the passphrase (or disabling then re-enabling login)
+  mints a new secret and invalidates every outstanding session at once —
+  the actual remedy for a suspected leaked cookie.
+- **Fails open on a corrupt/missing auth store**: an unreadable
+  `dashboard_auth.json` degrades to login-disabled, not login-required.
+  Rationale: a corrupt file must never be able to lock the owner out of
+  their own dashboard from a phone with no CLI access. The bootstrap prompt
+  reappears to nudge re-setup.
+- **A fixed set of routes stay unauthenticated even with login enabled**:
+  `GET /api/version`, `/manifest.webmanifest`, `/sw.js`, and the PWA icons
+  (needed for install and the version self-heal to work before login), plus
+  `POST /api/login` itself. Every other route requires a valid session
+  cookie once login is on.
+- **Rate limiting**: a global (not per-IP — crr doesn't see the real client
+  IP behind Tailscale Serve) in-memory failure counter imposes an
+  exponentially growing server-side delay (`time.sleep`, capped at 300s)
+  after 5 consecutive failures, on every subsequent attempt until one
+  succeeds. The delay itself is the defense — there's no separate
+  "unlock at time T" state to bypass. It resets on a successful login or a
+  service restart.
 
 ## Defenses in depth (even inside the boundary)
 
