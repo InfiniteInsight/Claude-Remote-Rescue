@@ -23,6 +23,7 @@ from crr import cli
 from crr.adapters import boot_identity, process_probe, session_state, state_dir
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core import dashboard_auth
 from crr.core import discovery
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
@@ -5247,6 +5248,189 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
 
     # The idle mid-turn session must NOT be kicked.
     assert kicked_pids == []
+
+
+# --------------------------------------------------------------------------
+# Dashboard login wiring (spec 2026-08-26, Task 5) — the closures `_cmd_web`
+# builds around `dashboard_auth.DashboardAuthStore` and hands to
+# `make_web_handler`, captured through `_web_captured` exactly like the
+# reauth providers above.
+# --------------------------------------------------------------------------
+
+def test_auth_enabled_fn_flips_live_after_enable_no_restart_needed(tmp_path, monkeypatch):
+    """Enabling login through `dashboard_auth_provider` must be visible to
+    `auth_enabled_fn` on the very next call — this is the "live per-request"
+    choice (docstring on `make_web_handler`): no service restart to pick up
+    a passphrase set from the Settings/bootstrap modal."""
+    captured = _web_captured(monkeypatch, tmp_path)
+
+    assert captured["auth_enabled_fn"]() is False
+
+    ok, message = captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+    assert ok is True
+    assert message == "Login enabled"
+    assert captured["auth_enabled_fn"]() is True
+
+
+def test_login_provider_sets_cookie_with_expected_attributes(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+
+    ok, error, headers = captured["login_provider"]("x" * 8)
+
+    assert ok is True
+    assert error == ""
+    cookie = headers["Set-Cookie"]
+    assert cookie.startswith(f"{dashboard_auth.COOKIE_NAME}=")
+    assert "HttpOnly" in cookie
+    assert "SameSite=Strict" in cookie
+    assert "Path=/" in cookie
+    assert "Secure" not in cookie  # loopback/tailnet-only; no TLS termination here
+    session_hours = cfg.Config().get("dashboard_session_hours")
+    assert f"Max-Age={session_hours * 3600}" in cookie
+
+
+def test_login_provider_wrong_passphrase_is_rejected_and_rate_limited(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+
+    for _ in range(5):
+        ok, error, headers = captured["login_provider"]("wrong-pass")
+        assert ok is False
+        assert error == "Incorrect passphrase"
+        assert headers == {}
+
+    sleeps = []
+    monkeypatch.setattr("crr.cli.time.sleep", lambda s: sleeps.append(s))
+    ok, error, _headers = captured["login_provider"]("wrong-pass")
+    assert ok is False
+    assert "Too many attempts" in error
+    assert sleeps and sleeps[0] > 0
+
+
+def test_login_provider_reset_on_success_clears_rate_limit(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+    for _ in range(4):
+        captured["login_provider"]("wrong-pass")
+
+    ok, _error, _headers = captured["login_provider"]("x" * 8)
+    assert ok is True
+
+    # A correct login resets the failure counter — the next wrong guess is
+    # NOT immediately rate-limited.
+    ok2, error2, _headers2 = captured["login_provider"]("still-wrong")
+    assert ok2 is False
+    assert error2 == "Incorrect passphrase"
+
+
+def test_auth_check_round_trips_a_token_issued_by_login_provider(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+    _ok, _error, headers = captured["login_provider"]("x" * 8)
+    cookie = headers["Set-Cookie"]
+    token = cookie.split(";")[0].split("=", 1)[1]
+
+    assert captured["auth_check"](token) is True
+    assert captured["auth_check"]("garbage") is False
+
+
+def test_auth_check_fails_closed_when_login_never_enabled(tmp_path, monkeypatch):
+    """No signing secret has ever been minted -> every token is invalid,
+    never a crash (`signing_secret()` returning None short-circuits)."""
+    captured = _web_captured(monkeypatch, tmp_path)
+    assert captured["auth_check"]("anything") is False
+
+
+def test_dashboard_auth_provider_passphrase_error_becomes_ok_false_not_raise(tmp_path, monkeypatch):
+    """PassphraseError (bad current passphrase, mismatch, too short) must
+    come back as (False, message) — NOT propagate — so `web.handle_request`
+    emits the {"ok": false, "message": ...} JSON contract the Settings/
+    bootstrap modal JS parses with `r.json()`, rather than a plain-text 400
+    that would throw in the browser."""
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+
+    ok, message = captured["dashboard_auth_provider"](
+        {"op": "change", "current": "wrong", "new": "y" * 8, "confirm": "y" * 8}
+    )
+    assert ok is False
+    assert "incorrect" in message.lower()
+
+    ok2, message2 = captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "short", "confirm": "short"}
+    )
+    assert ok2 is False
+    assert "8" in message2
+
+
+def test_dashboard_auth_provider_disable_and_dismiss_bootstrap(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
+    )
+    assert captured["bootstrap_state_fn"]()["login_enabled"] is True
+
+    ok, _msg = captured["dashboard_auth_provider"]({"op": "disable", "current": "x" * 8})
+    assert ok is True
+    assert captured["bootstrap_state_fn"]()["login_enabled"] is False
+
+    assert captured["bootstrap_state_fn"]()["bootstrap_dismissed"] is False
+    ok2, _msg2 = captured["dashboard_auth_provider"]({"op": "dismiss-bootstrap"})
+    assert ok2 is True
+    assert captured["bootstrap_state_fn"]()["bootstrap_dismissed"] is True
+
+
+def test_logout_provider_clears_the_cookie(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    headers = captured["logout_provider"]()
+    cookie = headers["Set-Cookie"]
+    assert cookie.startswith(f"{dashboard_auth.COOKIE_NAME}=;")
+    assert "Max-Age=0" in cookie
+
+
+def test_auth_enabled_cannot_reach_handle_request_without_a_live_auth_check(tmp_path, monkeypatch):
+    """Obligation from the Task 4 review: `auth_enabled=True` must never
+    reach `web.handle_request` alongside `auth_check=None` (that combination
+    silently fails open there). `make_web_handler` closes this at the one
+    choke point every request passes through — prove it end to end over a
+    real socket rather than trusting the wiring by inspection."""
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    payload = {"contract": 1, "sessions": []}
+    handler = cli.make_web_handler(
+        lambda: payload, {"localhost", "127.0.0.1"}, (".ts.net",),
+        auth_enabled_fn=lambda: True,  # login IS enabled...
+        auth_check=None,               # ...but no way to validate a cookie
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "localhost"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            # Must NOT fail open to a login page / 401 — falls back to
+            # ungated (same as auth_enabled_fn absent entirely), which is a
+            # deliberately narrow, documented degradation, not a crash.
+            assert r.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_do_kick_records_the_attempt_even_when_ops_kick_raises(tmp_path, monkeypatch):

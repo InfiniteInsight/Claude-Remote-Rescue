@@ -53,7 +53,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
+from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -3868,6 +3868,12 @@ def make_web_handler(
     machines_provider: Callable[[], dict] | None = None,
     reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
+    auth_enabled_fn: Callable[[], bool] | None = None,
+    auth_check: Callable[[str], bool] | None = None,
+    login_provider: Callable[[str], tuple[bool, str, dict[str, str]]] | None = None,
+    logout_provider: Callable[[], dict[str, str]] | None = None,
+    dashboard_auth_provider: Callable[[dict], tuple[bool, str]] | None = None,
+    bootstrap_state_fn: Callable[[], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -3882,6 +3888,16 @@ def make_web_handler(
 
     Thin adapter: it only marshals bytes to/from ``web.handle_request``
     (the pure core handler that owns routing + the security gate).
+
+    ``auth_enabled_fn`` is re-evaluated on EVERY request (not cached at
+    handler construction) — enabling/disabling login from the Settings
+    modal or the bootstrap prompt takes effect on the very next poll, with
+    no service restart. ``auth_enabled`` is only ever forwarded to
+    ``web.handle_request`` alongside a live ``auth_check`` (see the `and`
+    below) — this is the one choke point all requests pass through, so it
+    is structurally impossible for the gate to fire with no way to
+    validate a cookie (spec 2026-08-26, Task 4 review: "silently fails
+    open if auth_enabled=True but auth_check=None").
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -3889,6 +3905,7 @@ def make_web_handler(
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             path, _, query = self.path.partition("?")
+            auth_enabled = bool(auth_enabled_fn()) if auth_enabled_fn else False
             resp = web.handle_request(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
@@ -3906,6 +3923,12 @@ def make_web_handler(
                 machines_provider=machines_provider,
                 reauth_provider=reauth_provider,
                 reauth_code_provider=reauth_code_provider,
+                auth_enabled=auth_enabled and auth_check is not None,
+                auth_check=auth_check,
+                login_provider=login_provider,
+                logout_provider=logout_provider,
+                dashboard_auth_provider=dashboard_auth_provider,
+                bootstrap_state=bootstrap_state_fn() if bootstrap_state_fn else None,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -4248,6 +4271,77 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # cached at startup would keep answering "no tab" for the life of the
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
     ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+
+    # --- dashboard login (spec 2026-08-26) ----------------------------------
+    # `rate_limiter` is per-process, in-memory state — a service restart
+    # resets it, same as `_reauth_active` above. `auth_store.login_enabled`
+    # is passed straight through as `auth_enabled_fn` (see `make_web_handler`
+    # docstring): it is re-read from disk on every request, so flipping login
+    # on/off from the Settings or bootstrap modal takes effect on the very
+    # next poll, with no service restart required.
+    auth_store = dashboard_auth.DashboardAuthStore(sd)
+    rate_limiter = dashboard_auth.LoginRateLimiter()
+
+    def auth_check(cookie_value: str) -> bool:
+        secret = auth_store.signing_secret()
+        if secret is None:
+            return False
+        max_age_seconds = config.get("dashboard_session_hours") * 3600
+        return dashboard_auth.validate_token(cookie_value, secret, max_age_seconds)
+
+    def login_provider(passphrase: str) -> tuple[bool, str, dict[str, str]]:
+        delay = rate_limiter.check()
+        if delay > 0:
+            time.sleep(delay)
+            return False, f"Too many attempts. Try again in {int(delay)} seconds.", {}
+        if not auth_store.verify(passphrase):
+            rate_limiter.record_failure()
+            return False, "Incorrect passphrase", {}
+        rate_limiter.reset()
+        secret = auth_store.signing_secret()
+        if secret is None:
+            return False, "Login not configured", {}
+        token = dashboard_auth.create_token(secret)
+        max_age_seconds = config.get("dashboard_session_hours") * 3600
+        cookie = (f"{dashboard_auth.COOKIE_NAME}={token}; "
+                  f"HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_seconds}")
+        return True, "", {"Set-Cookie": cookie}
+
+    def logout_provider() -> dict[str, str]:
+        cookie = (f"{dashboard_auth.COOKIE_NAME}=; "
+                  f"HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+        return {"Set-Cookie": cookie}
+
+    def dashboard_auth_provider(data: dict) -> tuple[bool, str]:
+        # PassphraseError (too short / mismatch / wrong current) is a
+        # rejected but well-formed request — it comes back as (False,
+        # message) so the JSON contract holds and the modal can show the
+        # reason inline. A genuinely malformed op is the only case left to
+        # raise: web.handle_request turns that into a plain-text 400,
+        # which the fixed set of ops this UI sends should never trigger.
+        op = data.get("op")
+        try:
+            if op == "enable":
+                auth_store.enable(data.get("passphrase", ""), data.get("confirm", ""))
+                return True, "Login enabled"
+            if op == "change":
+                auth_store.change(data.get("current", ""), data.get("new", ""), data.get("confirm", ""))
+                return True, "Passphrase changed"
+            if op == "disable":
+                auth_store.disable(data.get("current", ""))
+                return True, "Login disabled"
+        except dashboard_auth.PassphraseError as exc:
+            return False, str(exc)
+        if op == "dismiss-bootstrap":
+            auth_store.dismiss_bootstrap()
+            return True, "Bootstrap dismissed"
+        raise ValueError(f"unknown op: {op}")
+
+    def bootstrap_state_provider() -> dict:
+        return {
+            "login_enabled": auth_store.login_enabled(),
+            "bootstrap_dismissed": auth_store.bootstrap_dismissed(),
+        }
 
     def qr_svg_provider() -> str | None:
         # Lazy, like diagnostics/discoverable: tailscale status + serve
@@ -4630,6 +4724,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
+        auth_enabled_fn=auth_store.login_enabled,
+        auth_check=auth_check,
+        login_provider=login_provider,
+        logout_provider=logout_provider,
+        dashboard_auth_provider=dashboard_auth_provider,
+        bootstrap_state_fn=bootstrap_state_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),

@@ -421,6 +421,30 @@
       <h2>Settings</h2>
       <button id="admin-close" type="button" title="Close">&times;</button>
     </div>
+    <div id="login-section" style="padding: 10px 16px 0;">
+      <h3 style="margin:0 0 6px; font-size:12px; color:#8a93a2; font-weight:600;">Dashboard Login</h3>
+      <div id="login-status"></div>
+      <div id="login-setup" style="display:none; margin:8px 0 0;">
+        <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Passphrase (8+ characters)</label>
+        <input type="password" id="loginSetupPass" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Confirm</label>
+        <input type="password" id="loginSetupConfirm" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        <p id="loginSetupError" style="color:#fca5a5; font-size:13px; margin:0 0 6px; display:none;"></p>
+        <button onclick="enableLoginFromSettings()" style="padding:6px 12px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px;">Enable login</button>
+        <button onclick="cancelLoginSetup()" style="padding:6px 12px; background:transparent; color:#8a93a2; border:1px solid #2f3745; border-radius:6px; cursor:pointer; font-size:13px; margin-left:6px;">Cancel</button>
+      </div>
+      <div id="login-change" style="display:none; margin:8px 0 0;">
+        <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Current passphrase</label>
+        <input type="password" id="loginChangeCurrent" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">New passphrase</label>
+        <input type="password" id="loginChangeNew" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Confirm new</label>
+        <input type="password" id="loginChangeConfirm" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        <p id="loginChangeError" style="color:#fca5a5; font-size:13px; margin:0 0 6px; display:none;"></p>
+        <button onclick="submitChangePassphrase()" style="padding:6px 12px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px;">Change</button>
+        <button onclick="cancelLoginChange()" style="padding:6px 12px; background:transparent; color:#8a93a2; border:1px solid #2f3745; border-radius:6px; cursor:pointer; font-size:13px; margin-left:6px;">Cancel</button>
+      </div>
+    </div>
     <div id="autokick-section" style="padding: 10px 16px 0;">
       <h3 style="margin:0 0 6px; font-size:12px; color:#8a93a2; font-weight:600;">Auto-kick dropped Remote Control sessions</h3>
       <div class="note" style="margin: 0 0 8px;">When a session's Remote Control link to the phone drops while claude keeps working, crr can restart it (at a safe turn boundary) so it reconnects. <strong>Turning this off keeps the badge</strong> — you lose the automatic action, not the diagnosis. A session can also opt itself out individually on its card; this switch is a hard override that beats every per-session choice.</div>
@@ -468,6 +492,24 @@
       <button id="reauthSubmitBtn" onclick="submitReauthCode()">Submit code</button>
     </div>
     <button onclick="cancelReauth()" style="margin-top:8px;">Cancel</button>
+  </div>
+</div>
+<div id="bootstrapModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:90; align-items:center; justify-content:center;">
+  <div style="background:#12161d; border:1px solid #2f3745; border-radius:8px; padding:24px; max-width:400px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.6); color:#e6e6e6;">
+    <h3 style="margin:0 0 12px;">Secure this dashboard?</h3>
+    <p style="font-size:13px; color:#8a93a2; margin:0 0 16px;">This dashboard can restart and control your Claude sessions. Set a passphrase to require login.</p>
+    <div id="bootstrapSetup" style="display:none; margin:0 0 12px;">
+      <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Passphrase (8+ characters)</label>
+      <input type="password" id="bootstrapPass" style="width:100%; padding:6px; margin:0 0 8px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+      <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Confirm</label>
+      <input type="password" id="bootstrapConfirm" style="width:100%; padding:6px; margin:0 0 8px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+      <p id="bootstrapError" style="color:#fca5a5; font-size:13px; margin:0 0 8px; display:none;"></p>
+      <button onclick="submitBootstrapPassphrase()" style="width:100%; padding:8px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer;">Enable login</button>
+    </div>
+    <div id="bootstrapButtons">
+      <button onclick="showBootstrapSetup()" style="width:100%; padding:8px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; margin:0 0 8px;">Set passphrase</button>
+      <button onclick="dismissBootstrap()" style="width:100%; padding:8px; background:transparent; color:#8a93a2; border:1px solid #2f3745; border-radius:6px; cursor:pointer;">No login</button>
+    </div>
   </div>
 </div>
 <div id="sessions"></div>
@@ -1300,9 +1342,164 @@ function cancelReauth() {
   document.getElementById('reauthModal').style.display = 'none';
 }
 
+// Dashboard login (spec 2026-08-26): bootstrap prompt + Settings modal
+// section. Both are driven off the `login_enabled`/`bootstrap_dismissed`
+// fields the server merges into every /api/sessions payload — same
+// once-per-poll pattern as renderAuthBadge above, not per-session.
+function checkBootstrap(data) {
+  var modal = document.getElementById('bootstrapModal');
+  if (!modal) return;
+  if (data.login_enabled === false && data.bootstrap_dismissed === false) {
+    modal.style.display = 'flex';
+  } else {
+    modal.style.display = 'none';
+  }
+}
+
+function showBootstrapSetup() {
+  document.getElementById('bootstrapButtons').style.display = 'none';
+  document.getElementById('bootstrapSetup').style.display = 'block';
+  document.getElementById('bootstrapPass').focus();
+}
+
+function submitBootstrapPassphrase() {
+  var pp = document.getElementById('bootstrapPass').value;
+  var confirm = document.getElementById('bootstrapConfirm').value;
+  var errEl = document.getElementById('bootstrapError');
+  fetch('/api/dashboard-auth', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op: 'enable', passphrase: pp, confirm: confirm})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) {
+      // Enabling flips the auth gate on immediately (live per-request
+      // check) with no cookie issued yet — the next poll would 401.
+      // Reload now so the browser lands on the real login page instead of
+      // a dashboard that silently stops updating.
+      location.reload();
+    } else {
+      errEl.textContent = d.message || 'Failed';
+      errEl.style.display = 'block';
+    }
+  }).catch(function() {
+    errEl.textContent = 'Failed';
+    errEl.style.display = 'block';
+  });
+}
+
+function dismissBootstrap() {
+  fetch('/api/dashboard-auth', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op: 'dismiss-bootstrap'})
+  }).then(function() {
+    document.getElementById('bootstrapModal').style.display = 'none';
+  });
+}
+
+function renderLoginSection(data) {
+  // NOTE: does not touch #login-setup / #login-change display — this runs
+  // on every poll tick, and clobbering those here would hide the form (and
+  // discard whatever the user is mid-typing) out from under them within one
+  // poll interval. Only the explicit show/cancel/submit-success handlers
+  // below open or close those forms.
+  var status = document.getElementById('login-status');
+  if (!status) return;
+  if (data.login_enabled) {
+    status.innerHTML = '<div style="font-size:13px; color:#cdd3dd; margin:0 0 8px;">Login is enabled</div>'
+      + '<button onclick="showLoginChange()" style="padding:4px 10px; background:transparent; color:#9fb0f5; border:1px solid #2f3745; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">Change passphrase</button>'
+      + '<button onclick="disableLogin()" style="padding:4px 10px; background:transparent; color:#e0a53b; border:1px solid #2f3745; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">Disable login</button>'
+      + '<button onclick="logoutDashboard()" style="padding:4px 10px; background:transparent; color:#8a93a2; border:1px solid #2f3745; border-radius:6px; cursor:pointer; font-size:12px;">Log out</button>';
+  } else {
+    status.innerHTML = '<div style="font-size:13px; color:#8a93a2; margin:0 0 8px;">Login is not enabled</div>'
+      + '<button onclick="showLoginSetup()" style="padding:4px 10px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">Set passphrase</button>';
+  }
+}
+
+function showLoginSetup() {
+  document.getElementById('login-setup').style.display = 'block';
+  document.getElementById('loginSetupPass').focus();
+}
+function cancelLoginSetup() {
+  document.getElementById('login-setup').style.display = 'none';
+}
+function enableLoginFromSettings() {
+  var pp = document.getElementById('loginSetupPass').value;
+  var confirm = document.getElementById('loginSetupConfirm').value;
+  var errEl = document.getElementById('loginSetupError');
+  fetch('/api/dashboard-auth', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op: 'enable', passphrase: pp, confirm: confirm})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    // Same reload as the bootstrap modal's submit: enabling flips the auth
+    // gate on immediately with no cookie for this tab yet, so the next
+    // poll would 401. Reload lands on the login page instead.
+    if (d.ok) { location.reload(); }
+    else { errEl.textContent = d.message || 'Failed'; errEl.style.display = 'block'; }
+  }).catch(function() {
+    errEl.textContent = 'Failed';
+    errEl.style.display = 'block';
+  });
+}
+
+function showLoginChange() {
+  document.getElementById('login-change').style.display = 'block';
+  document.getElementById('loginChangeCurrent').focus();
+}
+function cancelLoginChange() {
+  document.getElementById('login-change').style.display = 'none';
+}
+function submitChangePassphrase() {
+  var cur = document.getElementById('loginChangeCurrent').value;
+  var np = document.getElementById('loginChangeNew').value;
+  var confirm = document.getElementById('loginChangeConfirm').value;
+  var errEl = document.getElementById('loginChangeError');
+  fetch('/api/dashboard-auth', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op: 'change', current: cur, 'new': np, confirm: confirm})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    // Changing the passphrase rotates the signing secret (spec 2026-08-26:
+    // "passphrase change invalidates sessions"), which invalidates the
+    // cookie THIS tab is holding too. Reload for the same reason as
+    // enable, above — the next poll would otherwise 401 silently.
+    if (d.ok) { location.reload(); }
+    else { errEl.textContent = d.message || 'Failed'; errEl.style.display = 'block'; }
+  }).catch(function() {
+    errEl.textContent = 'Failed';
+    errEl.style.display = 'block';
+  });
+}
+
+function disableLogin() {
+  var pp = prompt('Enter current passphrase to disable login:');
+  if (!pp) return;
+  fetch('/api/dashboard-auth', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op: 'disable', current: pp})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) pollSessions();
+    else alert(d.message || 'Failed');
+  }).catch(function() {
+    alert('Failed');
+  });
+}
+
+function logoutDashboard() {
+  fetch('/api/logout', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}'
+  }).then(function() { location.reload(); });
+}
+
 function render(payload) {
   if (payload) lastSessions = (payload.sessions) || [];
   if (payload) renderAuthBadge(payload);
+  if (payload) checkBootstrap(payload);
+  if (payload) renderLoginSection(payload);
   var total = lastSessions;
   var visible = total.filter(passesFilter);
   var list = document.getElementById("sessions");
@@ -1385,8 +1582,16 @@ function render(payload) {
 
 function pollSessions() {
   fetch("/api/sessions", { headers: { "Accept": "application/json" } })
-    .then(function (r) { return r.json(); })
-    .then(render)
+    .then(function (r) {
+      // A session cookie can also expire mid-view (not just the
+      // enable/change flows above, which reload explicitly): without this,
+      // the 401 body has neither `sessions` nor `login_enabled`, so
+      // `render` would silently empty the list and mislabel login as
+      // "not enabled" with nothing prompting the user to sign back in.
+      if (r.status === 401) { location.reload(); return null; }
+      return r.json();
+    })
+    .then(function (data) { if (data) render(data); })
     .catch(function () { /* transient; next tick retries */ });
 }
 

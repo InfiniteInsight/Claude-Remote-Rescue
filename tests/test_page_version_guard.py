@@ -34,15 +34,8 @@ def _page_sha() -> str:
 
 # version -> sha256 of crr/core/page.html when that version shipped.
 # APPEND a new entry for every page change; never edit an existing one.
-#
-# Exception: 61 was bumped in Task 4 of the 2026-08-26 dashboard-login plan
-# AHEAD of the page.html change it is for — that change lands in Task 5.
-# Until then, 61 legitimately pins the same hash as 60 (page.html is
-# untouched), which is why it's listed in _PENDING_PAGE_CHANGE below. Once
-# Task 5 lands, update the 61 hash in place (its version number doesn't
-# change, only its content does) and remove 61 from that set.
 PAGE_PINS: dict[int, str] = {
-    61: "5f759283a79f02ab2d878232eec3d69d063f0e219723f2df77f0f92f7ff178de",
+    61: "a7cfa17e9c1b981968079d4b5f95e32158ed3d449d6f3177962cd2e1d0516eb4",
     60: "5f759283a79f02ab2d878232eec3d69d063f0e219723f2df77f0f92f7ff178de",
     59: "c8bbc40aae86b0b1b5f4d411dfbca1fd1f8c8313a80c9696d04054fd8d9f0b2f",
     58: "acaef00dba29842887e481c89b369321b5b3d5ea35880cf4aca8ceffe4e1d0dc",
@@ -79,7 +72,7 @@ def test_page_html_matches_the_pin_for_the_current_version():
 # Versions bumped ahead of their own page.html change (see the PAGE_PINS
 # comment above) — the ONLY sanctioned way for two entries to share a hash.
 # Remove an entry once its page.html change lands and its pin is updated.
-_PENDING_PAGE_CHANGE = {61}
+_PENDING_PAGE_CHANGE: set[int] = set()
 
 
 def test_no_two_versions_share_a_page_hash():
