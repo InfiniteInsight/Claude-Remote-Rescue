@@ -538,6 +538,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dereg = sub.add_parser("deregister", help="[shim] remove a shell's journal entry")
     dereg.add_argument("--pid", type=int, required=True)
+    dereg.add_argument(
+        "--reason", default="shell-exited", choices=contracts.ARCHIVE_REASONS,
+        help="archive reason for a still-claude-bearing entry (default: shell-exited). "
+             "The reviver's exit-hook wrapper passes 'closed' for a clean /exit so the "
+             "conversation is archived terminally, not revived.",
+    )
     dereg.set_defaults(func=_cmd_deregister)
 
     cl = sub.add_parser(
@@ -546,6 +552,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cl.add_argument("--pid", type=int, required=True)
     cl.add_argument("--session-id", default=None, help="use this sid instead of generating one")
+    cl.add_argument("--skip-permissions", action="store_true", default=False,
+                    help="record that claude was launched with --dangerously-skip-permissions")
     cl.set_defaults(func=_cmd_claude_launch)
 
     cr = sub.add_parser(
@@ -555,6 +563,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--pid", type=int, required=True)
     cr.add_argument("--cwd", required=True, help="cwd, to locate the transcript(s) to guess from")
     cr.add_argument("--session-id", default=None, help="explicit sid from --resume <sid>, if any")
+    cr.add_argument("--skip-permissions", action="store_true", default=False,
+                    help="record that claude was launched with --dangerously-skip-permissions")
     cr.set_defaults(func=_cmd_claude_resume)
 
     ce = sub.add_parser(
@@ -1986,13 +1996,15 @@ def _cmd_deregister(args: argparse.Namespace) -> int:
         except (KeyError, contracts.ContractError):
             entry = None
         if entry is not None and entry.get("claude") is not None:
-            ArchiveStore(sd).archive(entry, "shell-exited", _now())
+            ArchiveStore(sd).archive(entry, getattr(args, "reason", None) or "shell-exited", _now())
         rescue.invalidate_markers(sd)
         store.remove(args.pid)
     return 0
 
 
-def _attach_claude_session(sd: Path, pid: int, sid: str, sid_source: str) -> None:
+def _attach_claude_session(
+    sd: Path, pid: int, sid: str, sid_source: str, *, skip_permissions: bool = False,
+) -> None:
     """Attach a claude session to a journaled shell, archiving a superseded one.
 
     Shared by claude-launch (injected) and claude-resume (guessed/verified).
@@ -2011,7 +2023,11 @@ def _attach_claude_session(sd: Path, pid: int, sid: str, sid_source: str) -> Non
         # pid. Preserve it before overwriting or its revival data is lost.
         if entry.get("claude") is not None and entry["claude"]["session_id"] != sid:
             ArchiveStore(sd).archive(entry, "superseded-on-launch", _now())
-        entry["claude"] = {"session_id": sid, "sid_source": sid_source, "started": _now()}
+        entry["claude"] = {
+            "session_id": sid, "sid_source": sid_source, "started": _now(),
+            "skip_permissions": skip_permissions,
+        }
+        entry["v"] = contracts.JOURNAL_SCHEMA_VERSION
         entry["updated"] = _now()
         store.write(entry)
 
@@ -2027,7 +2043,10 @@ def _cmd_claude_launch(args: argparse.Namespace) -> int:
         # never journal it — claude itself will reject a non-UUID sid.
         print(sid)
         return 0
-    _attach_claude_session(state_dir.state_dir(), args.pid, sid, "injected")
+    _attach_claude_session(
+        state_dir.state_dir(), args.pid, sid, "injected",
+        skip_permissions=args.skip_permissions,
+    )
     print(sid)
     return 0
 
@@ -2045,7 +2064,10 @@ def _cmd_claude_resume(args: argparse.Namespace) -> int:
     if derived is None:
         return 0  # no explicit sid and no transcript to guess — leave untracked
     sid, sid_source = derived
-    _attach_claude_session(state_dir.state_dir(), args.pid, sid, sid_source)
+    _attach_claude_session(
+        state_dir.state_dir(), args.pid, sid, sid_source,
+        skip_permissions=args.skip_permissions,
+    )
     return 0
 
 
@@ -2280,8 +2302,13 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             flags=FlagStore(sd),
             # And without this a KICKED conversation comes back with nothing
             # pointing at it (#62) — the sweep, not kick, creates the
-            # replacement, so the tab can only be opened from here.
-            tab_spawner=_tab_spawner(config)[0],
+            # replacement, so the tab can only be opened from here. probe=False:
+            # this best-effort tab must not flash a wt help window on revival
+            # [/exit revival 2026-08-25].
+            tab_spawner=_tab_spawner(config, probe=False)[0],
+            # The crr the exit-hook wrapper calls on a clean /exit [/exit revival 2026-08-24]:
+            # the deployed copy, matching the service-mutation principle.
+            crr_bin=_resolve_service_bin(None),
         )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -2648,8 +2675,16 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     return 0 if res.ok else 2
 
 
-def _tab_spawner(config: cfg.Config) -> tuple[object | None, bool]:
+def _tab_spawner(config: cfg.Config, *, probe: bool = True) -> tuple[object | None, bool]:
     """Return ``(spawner, tabs_expected)`` for this host.
+
+    ``probe`` controls only the WSL/wt.exe path: True (default) runs the
+    GUI-window-opening wt liveness probe, needed before a destructive
+    spawn-before-kill (untmux/detmux). Best-effort callers (reopen, the
+    rescue re-home) pass probe=False so recovering a session no longer
+    flashes a wt help window [/exit revival 2026-08-25]; their tab is a
+    convenience on an already-durable tmux session, so open_tab reports any
+    failure rather than losing anything.
 
     macOS → Terminal.app / iTerm2. WSL → Windows Terminal (wt.exe). Other
     Linux (desktop) → gnome-terminal / konsole / kitty / wezterm.
@@ -2679,7 +2714,7 @@ def _tab_spawner(config: cfg.Config) -> tuple[object | None, bool]:
                 # no longer exists (#54). The env stays the fallback.
                 host.distro_name(os.environ, timeout=config.get("interop_timeout_seconds")),
             )
-            if spawner.available():
+            if spawner.available(probe=probe):
                 return spawner, True
             # No usable spawner, but this host still owes a tab.
             return None, True
@@ -2705,7 +2740,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     flags = FlagStore(sd)
-    spawner, tabs_expected = _tab_spawner(config)
+    spawner, tabs_expected = _tab_spawner(config, probe=False)
     # Capture the target session name + cwd BEFORE reopen: a GHOST reopen
     # archives + delists the entry (ops._reopen_ghost -> store.remove), so
     # reading it back by pid afterward would miss it and skip the drop-in.
@@ -2723,7 +2758,8 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
                          boot, probe, args.pid, _now(),
                          grace=config.get("close_grace_seconds"),
                          remote_control=config.get("remote_control"),
-                         tab_spawner=spawner, tabs_expected=tabs_expected)
+                         tab_spawner=spawner, tabs_expected=tabs_expected,
+                         crr_bin=_resolve_service_bin(None))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     if res.ok and not tabs_expected and reopen_name:
         # Headless host: no GUI tab was possible. Drop the user into the now-
@@ -3569,6 +3605,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 now=_now(),
                 remote_control_enabled=config.get("remote_control"),
                 flags=FlagStore(sd),
+                crr_bin=_resolve_service_bin(None),
             )
         rescue.mark_revived(sd, boot_id)
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
@@ -3596,7 +3633,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         return 0
 
     n = len(found)
-    tab, tabs_expected = _tab_spawner(config)
+    tab, tabs_expected = _tab_spawner(config, probe=False)
 
     if not tabs_expected:
         # Genuinely headless (no GUI tabs on this host); we have a tty (this
@@ -3634,6 +3671,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 grace=config.get("close_grace_seconds"),
                 remote_control=config.get("remote_control"),
                 tab_spawner=tab, tabs_expected=tabs_expected,
+                crr_bin=_resolve_service_bin(None),
             )
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.
@@ -4104,11 +4142,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "dismiss":
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
-                spawner, tabs_expected = _tab_spawner(config)
+                spawner, tabs_expected = _tab_spawner(config, probe=False)
                 res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                                   pid, _now(), grace=config.get("close_grace_seconds"),
                                   remote_control=config.get("remote_control"),
-                                  tab_spawner=spawner, tabs_expected=tabs_expected)
+                                  tab_spawner=spawner, tabs_expected=tabs_expected,
+                                  crr_bin=_resolve_service_bin(None))
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))

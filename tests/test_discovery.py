@@ -240,6 +240,7 @@ def test_build_adopted_entry_fields():
         # resume.verify_guessed upgrades this to "verified" on the very
         # next status/poll pass instead of paying a permanent glob.
         "started": discovery._UNKNOWN_STARTED,
+        "skip_permissions": False,
     }
 
 

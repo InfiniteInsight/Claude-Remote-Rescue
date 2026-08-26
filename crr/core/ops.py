@@ -20,7 +20,12 @@ from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, GHOST, LIVE, classify
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TabSpawnTimeout, TmuxSpawner
-from crr.core.reviver import attach_argv, resolved_session_name, revival_argv
+from crr.core.reviver import (
+    attach_argv,
+    exit_hook_argv,
+    resolved_session_name,
+    revival_argv,
+)
 
 if TYPE_CHECKING:
     from crr.core.flags import FlagStore
@@ -67,6 +72,19 @@ def dismiss(
     return OpResult(True, f"dismissed {pid}")
 
 
+def _revival_spawn_argv(entry, *, remote_control: bool, crr_bin: str | None) -> list[str]:
+    """The word-form argv for a detached-tmux revival, exit-hook-wrapped.
+
+    A reopen-spawned session, exactly like a boot-revived one, runs in tmux
+    with no shell — so a clean /exit would leave it looking crashed and the
+    reviver would resurrect it [/exit revival 2026-08-24]. Wrap the launch so a clean exit
+    deregisters itself. crr_bin is injected (the composition root resolves
+    it); None falls back to the bare command (older callers/tests), which
+    degrades safely to "revive again" rather than a broken script."""
+    argv = revival_argv(entry, remote_control=remote_control)
+    return exit_hook_argv(argv, crr_bin) if crr_bin else argv
+
+
 def reopen(
     store: JournalStore,
     archive: ArchiveStore,
@@ -86,6 +104,7 @@ def reopen(
     # were never possible" and "tab-capable host, the tab did not appear"
     # arrives as a plain bool rather than core learning what WSL is.
     tabs_expected: bool = False,
+    crr_bin: str | None = None,
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
 
@@ -144,7 +163,7 @@ def reopen(
         return _reopen_ghost(
             store, archive, tmux, controller, flags, boot, entry, pid, now,
             live=live, grace=grace, remote_control=remote_control, tab_spawner=tab_spawner,
-            tabs_expected=tabs_expected,
+            tabs_expected=tabs_expected, crr_bin=crr_bin,
         )
 
     # CRASHED — original path, unchanged.
@@ -153,7 +172,8 @@ def reopen(
         base = f"already running as {name}"
     else:
         tmux.new_detached_session(
-            name, entry["cwd"], revival_argv(entry, remote_control=remote_control)
+            name, entry["cwd"],
+            _revival_spawn_argv(entry, remote_control=remote_control, crr_bin=crr_bin),
         )
         entry["tmux_session"] = name
         entry["updated"] = now
@@ -179,6 +199,7 @@ def _reopen_ghost(
     remote_control: bool,
     tab_spawner: TabSpawner | None,
     tabs_expected: bool,
+    crr_bin: str | None = None,
 ) -> OpResult:
     """The GHOST branch of ``reopen`` (see its docstring for the "why").
 
@@ -208,7 +229,10 @@ def _reopen_ghost(
        candidate for the watchdog (not in the reviver's terminal-reasons
        skip tuple), so it is revived within one pass regardless.
     """
-    groups = controller.claude_groups(pid)
+    # A tmux-parked entry's claude sits in the reviver's `sh -c` wrapper's own
+    # group (no job control, [/exit revival 2026-08-24]) — opt in so the kill-first ordering can
+    # actually find and signal it, or a respawn would race a still-live claude.
+    groups = controller.claude_groups(pid, include_shell_group=bool(entry.get("tmux_session")))
     kill_suffix = ""
     if groups:
         flags.arm_close(pid, boot_id=boot.current())
@@ -232,7 +256,8 @@ def _reopen_ghost(
         )
     try:
         tmux.new_detached_session(
-            name, entry["cwd"], revival_argv(entry, remote_control=remote_control)
+            name, entry["cwd"],
+            _revival_spawn_argv(entry, remote_control=remote_control, crr_bin=crr_bin),
         )
     except Exception as exc:  # adapter subprocess failure
         return OpResult(
@@ -278,7 +303,10 @@ def close(
     state = classify(entry, boot, probe)
     if state == CRASHED:
         return OpResult(False, f"session {pid} is crashed, not running — refusing")
-    groups = controller.claude_groups(pid)
+    # Parked-wrapper opt-in, same as kick/reopen: a tmux-parked session's
+    # claude shares the reviver's `sh -c` wrapper's group [/exit revival 2026-08-24], so remote
+    # exit must be allowed to find it there.
+    groups = controller.claude_groups(pid, include_shell_group=bool(entry.get("tmux_session")))
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
     flags.arm_close(pid, boot_id=boot.current())
@@ -315,7 +343,13 @@ def kick(
     state = classify(entry, boot, probe)
     if state == CRASHED:
         return OpResult(False, f"session {pid} is crashed, not running — use reopen")
-    groups = controller.claude_groups(pid)
+    # A tmux-parked entry's pane process is the reviver's `sh -c` exit-hook
+    # wrapper [/exit revival 2026-08-24], which runs no job control — its claude child sits in the
+    # wrapper's own group, so claude_groups must be allowed to return that
+    # group. This is safe ONLY because the wrapper is disposable, never a
+    # user's shell; a live shim shell (no tmux_session) never opts in.
+    parked = bool(entry.get("tmux_session"))
+    groups = controller.claude_groups(pid, include_shell_group=parked)
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
     flags.arm_relaunch(pid, entry["claude"]["session_id"], boot_id=boot.current())
@@ -427,6 +461,8 @@ def tracked_resume_argv(entry: Mapping[str, Any]) -> list[str]:
     sid = entry["claude"]["session_id"]
     shell = entry.get("shell") or "bash"
     command = f"claude --resume {sid}"
+    if entry["claude"].get("skip_permissions", False):
+        command += " --dangerously-skip-permissions"
     if shell == "fish":
         return ["fish", "-i", "-C", command]
     if shell not in ("bash", "zsh"):

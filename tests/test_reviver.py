@@ -18,6 +18,7 @@ from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 from crr.core.reviver import (
     attach_argv,
+    exit_hook_argv,
     resolved_session_name,
     revival_argv,
     revive_crashed,
@@ -28,8 +29,9 @@ _ENTRY_BOOT = "entry-boot-0000"
 _NOW = "2026-07-24T00:00:00Z"
 
 
-def _claude(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
-    return {"session_id": sid, "sid_source": "injected", "started": _NOW}
+def _claude(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", skip_permissions=False):
+    return {"session_id": sid, "sid_source": "injected", "started": _NOW,
+            "skip_permissions": skip_permissions}
 
 
 def _seed(store, pid, *, boot=_ENTRY_BOOT, claude=None, tmux_session=None, strikes=0):
@@ -148,6 +150,94 @@ def test_revival_argv_places_remote_control_last_so_nothing_follows_the_name():
     argv = revival_argv(entry, remote_control=True)
     assert argv[-2] == "--remote-control"
     assert argv[-1] == "my-proj"
+
+
+def test_revival_argv_includes_skip_permissions_when_set():
+    entry = {"claude": _claude(skip_permissions=True), "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert argv == ["claude", "--resume", _claude()["session_id"],
+                    "--dangerously-skip-permissions"]
+
+
+def test_revival_argv_omits_skip_permissions_when_false():
+    entry = {"claude": _claude(skip_permissions=False), "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_revival_argv_omits_skip_permissions_for_v1_entry():
+    claude_v1 = {"session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                 "sid_source": "injected", "started": _NOW}
+    entry = {"claude": claude_v1, "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=False)
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_revival_argv_skip_permissions_before_remote_control():
+    entry = {"claude": _claude(skip_permissions=True), "cwd": "/home/u/proj"}
+    argv = revival_argv(entry, remote_control=True)
+    dsp_idx = argv.index("--dangerously-skip-permissions")
+    rc_idx = argv.index("--remote-control")
+    assert dsp_idx < rc_idx
+
+
+# --- exit_hook_argv: clean /exit deregisters a tmux-parked session [/exit revival 2026-08-24] ---
+
+def test_exit_hook_argv_wraps_launch_to_deregister_on_clean_exit():
+    argv = exit_hook_argv(
+        ["claude", "--resume", "SID", "--remote-control", "p42"], "/usr/bin/crr"
+    )
+    # sh runs the script; claude's args become "$@" (positional), never
+    # interpolated into the script text.
+    assert argv == [
+        "sh", "-c",
+        'claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
+        "sh", "--resume", "SID", "--remote-control", "p42",
+    ]
+
+
+def test_exit_hook_argv_keeps_claude_args_out_of_the_script_text():
+    # The script text is fixed; nothing from claude's args (a sid, a cwd, a
+    # remote-control name) can smuggle a shell metacharacter into it.
+    weird = ["claude", "--resume", "a;b`c$(d)", "--remote-control", "x y"]
+    argv = exit_hook_argv(weird, "/usr/bin/crr")
+    script = argv[2]
+    assert "a;b" not in script and "x y" not in script
+    # They ride through as literal positional args instead.
+    assert argv[3:] == ["sh", "--resume", "a;b`c$(d)", "--remote-control", "x y"]
+
+
+def test_exit_hook_argv_quotes_a_crr_bin_with_spaces():
+    argv = exit_hook_argv(["claude", "--resume", "SID"], "/opt/my crr/crr")
+    assert "'/opt/my crr/crr' deregister --pid $$ --reason closed" in argv[2]
+
+
+def test_revive_crashed_wraps_the_spawn_with_the_exit_hook(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+    scan = store.scan()
+    revive_crashed(
+        scan.entries, FakeBoot(), FakeProbe(), tmux, store, ArchiveStore(tmp_path),
+        max_strikes=3, now=_NOW, remote_control_enabled=True, crr_bin="/usr/bin/crr",
+    )
+    name = session_name({"claude": _claude()})
+    assert tmux.created == [(
+        name, "/home/u/p42",
+        ["sh", "-c",
+         'claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
+         "sh", "--resume", _claude()["session_id"], "--remote-control", "p42"],
+    )]
+
+
+def test_revive_crashed_spawns_bare_claude_without_a_crr_bin(tmp_path):
+    # Back-compat: no crr_bin -> the pre-fix bare command (degrades to
+    # "revive again", never a broken script).
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+    _run(store, tmux)  # _run passes no crr_bin
+    assert tmux.created[0][2][0] == "claude"
 
 
 def test_crashed_claude_session_is_revived(tmp_path):
@@ -417,6 +507,25 @@ def test_detmuxed_archive_record_is_not_re_revived(tmp_path):
     )
     archive.archive(entry, "detmuxed", _NOW)  # already terminal
     tmux = FakeTmux(live=set())  # the attached tab's tmux session is gone
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []
+
+
+def test_closed_archive_record_is_not_re_revived(tmp_path):
+    # A tmux-parked session the user ended with /exit is archived "closed" by
+    # the reviver's exit-hook wrapper (`crr deregister --reason closed`, [/exit revival 2026-08-24]).
+    # "closed" is terminal: the archive loop must skip it, or the very next
+    # revive pass would `claude --resume` the conversation the user just
+    # deliberately ended — the whole bug this fix closes.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(), tmux_session="crr-8a1b2c3d",
+    )
+    archive.archive(entry, "closed", _NOW)  # already terminal
+    tmux = FakeTmux(live=set())  # the pane's tmux session is gone
     outcome = _run(store, tmux, archive=archive)
     assert outcome.revived == []
     assert tmux.created == []

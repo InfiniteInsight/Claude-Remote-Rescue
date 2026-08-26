@@ -70,7 +70,8 @@ def test_a_normally_registered_card_still_reports_its_real_host_and_shell():
                       boot_id="boot-1", now="2026-01-01T00:00:00+00:00",
                       tmux_session="crr-abc",
                       claude={"session_id": SID, "sid_source": "injected",
-                              "started": "2026-01-01T00:00:00+00:00"})
+                              "started": "2026-01-01T00:00:00+00:00",
+                              "skip_permissions": False})
     card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
     assert card["adopted"] is False
     assert card["host"] == "tmux" and card["shell"] == "fish"
@@ -136,7 +137,8 @@ def test_a_normal_payload_passes_its_own_contract():
                       boot_id="boot-1", now="2026-01-01T00:00:00+00:00",
                       tmux_session="crr-abc",
                       claude={"session_id": SID, "sid_source": "injected",
-                              "started": "2026-01-01T00:00:00+00:00"})
+                              "started": "2026-01-01T00:00:00+00:00",
+                              "skip_permissions": False})
     contracts.validate_sessions_payload(
         assemble_sessions([entry], FakeBoot(), FakeProbe()))
 

@@ -74,10 +74,12 @@ class RealTmux:
     def session_pid(self, name: str) -> int | None:
         """The pid running in ``name``'s first pane, or None if unknown.
 
-        A revived session's pane pid IS the claude process (the reviver
-        spawns `tmux new-session -- claude ...` with no shell in between),
-        which is what lets the journal be re-keyed onto the live process
-        (#58). None means "could not determine" and is never guessed at:
+        A revived session's pane pid is the process the reviver launched —
+        now the minimal ``sh`` exit-hook wrapper that hosts claude as its
+        child ([/exit revival 2026-08-24]; legacy sessions from before that change ran ``claude``
+        directly, and both re-key identically). That pane pid is what the
+        journal is re-keyed onto (#58), so kick/classify act on a real live
+        process. None means "could not determine" and is never guessed at:
         re-keying an entry onto a pid we did not observe would point every
         pid-keyed op at the wrong process.
         """

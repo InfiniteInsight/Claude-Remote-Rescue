@@ -86,7 +86,8 @@ def build_adopted_entry(session_id: str, cwd: str, now: str) -> dict[str, Any]:
         boot_id=ADOPTED_BOOT_ID,
         now=now,
         tmux_session=None,
-        claude={"session_id": session_id, "sid_source": "guessed", "started": _UNKNOWN_STARTED},
+        claude={"session_id": session_id, "sid_source": "guessed", "started": _UNKNOWN_STARTED,
+                "skip_permissions": False},
     )
 
 

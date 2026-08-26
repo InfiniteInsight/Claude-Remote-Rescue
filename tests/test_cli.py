@@ -810,6 +810,25 @@ def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
     assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
 
 
+def test_tab_spawner_probe_false_does_not_run_the_wt_window_probe(monkeypatch):
+    # The recovery paths (reopen / rescue re-home) pass probe=False so a
+    # session coming back never flashes a wt help window
+    # [/exit revival 2026-08-25]. wt_probe must not be called at all.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
+                        lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+
+    def _boom(path, timeout):
+        raise AssertionError("wt_probe (opens a GUI window) ran despite probe=False")
+
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", _boom)
+    spawner, expected = cli._tab_spawner(cfg.Config(), probe=False)
+    assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
+    assert expected is True
+
+
 def test_tab_spawner_falls_through_when_wsl_interop_is_unregistered(monkeypatch):
     # wt.exe resolves on DrvFs but cannot exec — don't hand back a spawner
     # that will only ENOEXEC; fall through to the Linux desktop detector
@@ -882,7 +901,7 @@ def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
     # a script must not start reading a live session as a failure. So: loud
     # on stderr, exit 0.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 as crr-abc12345",
                                                           degraded=True))
@@ -896,7 +915,7 @@ def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
 
 def test_cmd_reopen_stays_quiet_when_the_tab_opened(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 (opened in a new tab)"))
     monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True})())
@@ -973,7 +992,7 @@ def test_config_effective_prints_defaults_version_header(capsys):
 
 def _live_entry(pid, boot_id):
     return {
-        "v": 1,
+        "v": contracts.JOURNAL_SCHEMA_VERSION,
         "pid": pid,
         "boot_id": boot_id,
         "cwd": "/home/u/project",
@@ -983,6 +1002,7 @@ def _live_entry(pid, boot_id):
             "session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
             "sid_source": "injected",
             "started": "2026-07-23T00:00:00Z",
+            "skip_permissions": False,
         },
         "last_cmd": "claude",
         "tmux_session": None,
@@ -1257,8 +1277,9 @@ def test_register_creates_claude_less_entry(tmp_path, monkeypatch):
     assert entry["boot_id"] == boot_identity.detect().current()
 
 
-def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"):
-    return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"}
+def _claude_field(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", skip_permissions=False):
+    return {"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z",
+            "skip_permissions": skip_permissions}
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")
@@ -1359,6 +1380,22 @@ def test_deregister_archives_claude_bearing_entry(tmp_path, monkeypatch):
     archive = ArchiveStore(tmp_path)
     record = archive.read(sid)
     assert record["reason"] == "shell-exited"
+
+
+def test_deregister_reason_closed_archives_terminally(tmp_path, monkeypatch):
+    """The reviver's exit-hook wrapper passes --reason closed on a clean /exit
+    so the conversation is archived under a TERMINAL reason (not the revivable
+    'shell-exited'), and the next revive pass leaves it alone [/exit revival 2026-08-24]."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _seed(store, 4242)
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(sid)
+    store.write(entry)
+    assert cli.main(["deregister", "--pid", "4242", "--reason", "closed"]) == 0
+    assert not store.tabs_dir.joinpath("4242.json").exists()
+    assert ArchiveStore(tmp_path).read(sid)["reason"] == "closed"
 
 
 def test_deregister_invalidates_rescue_markers_on_archive(tmp_path, monkeypatch):
@@ -1474,6 +1511,65 @@ def test_claude_launch_missing_entry_still_prints_a_sid(tmp_path, monkeypatch, c
     rc = cli.main(["claude-launch", "--pid", "999"])
     sid = capsys.readouterr().out.strip()
     assert rc == 0 and len(sid) == 36
+
+
+def test_claude_launch_records_skip_permissions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    cli.main(["claude-launch", "--pid", "4242", "--skip-permissions"])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is True
+
+
+def test_claude_launch_defaults_skip_permissions_false(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    _seed(store, 4242)
+    cli.main(["claude-launch", "--pid", "4242"])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is False
+
+
+def test_claude_resume_records_skip_permissions(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid, "--skip-permissions"])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is True
+
+
+def test_claude_resume_defaults_skip_permissions_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid])
+    claude = store.read(4242)["claude"]
+    assert claude["skip_permissions"] is False
+
+
+def test_claude_resume_without_flag_clears_prior_skip_permissions(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    store = JournalStore(tmp_path / "state")
+    _seed(store, 4242, cwd="/home/u/proj")
+    sid = "eeeeeeee-5555-4555-8555-555555555555"
+    _write_transcript_file(tmp_path / "home", "/home/u/proj", sid)
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid, "--skip-permissions"])
+    assert store.read(4242)["claude"]["skip_permissions"] is True
+    cli.main(["claude-resume", "--pid", "4242", "--cwd", "/home/u/proj",
+              "--session-id", sid])
+    assert store.read(4242)["claude"]["skip_permissions"] is False
 
 
 # --- claude() wrapper support: remote-control-args (shim-facing) ---------
@@ -1592,7 +1688,8 @@ def test_verify_guessed_sids_upgrades_when_transcript_is_active(tmp_path, monkey
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-25T12:00:00+00:00",
         claude={"session_id": _G1_SID, "sid_source": "guessed",
-                "started": "2026-07-25T12:00:00+00:00"},
+                "started": "2026-07-25T12:00:00+00:00",
+                "skip_permissions": False},
     )
     store.write(entry)
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
@@ -1609,7 +1706,8 @@ def test_verify_guessed_sids_leaves_idle_guess_alone(tmp_path, monkeypatch):
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-25T12:00:00+00:00",
         claude={"session_id": _G1_SID, "sid_source": "guessed",
-                "started": "2026-07-25T12:00:00+00:00"},
+                "started": "2026-07-25T12:00:00+00:00",
+                "skip_permissions": False},
     )
     store.write(entry)
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
@@ -1628,7 +1726,8 @@ def test_status_upgrades_guessed_sid_when_transcript_confirms(tmp_path, monkeypa
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-30T00:00:00+00:00",
         claude={"session_id": sid, "sid_source": "guessed",
-                "started": "2026-07-30T00:00:00+00:00"},
+                "started": "2026-07-30T00:00:00+00:00",
+                "skip_permissions": False},
     ))
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.transcript_source, "list_transcripts",
@@ -1652,7 +1751,8 @@ def test_status_stays_lock_free_when_no_guess_is_upgradable(tmp_path, monkeypatc
         pid=7, cwd="/home/u/proj", host="tmux", shell="zsh",
         boot_id="b", now="2026-07-30T00:00:00+00:00",
         claude={"session_id": sid, "sid_source": "guessed",
-                "started": "2026-07-30T00:00:00+00:00"},
+                "started": "2026-07-30T00:00:00+00:00",
+                "skip_permissions": False},
     ))
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.transcript_source, "list_transcripts",
@@ -1703,7 +1803,8 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
         boot_id="an-old-boot-that-cannot-match",  # boot mismatch => crashed
         now="2026-07-25T12:00:00+00:00",
         claude={"session_id": _G1_SID, "sid_source": "guessed",
-                "started": "2026-07-25T12:00:00+00:00"},
+                "started": "2026-07-25T12:00:00+00:00",
+                "skip_permissions": False},
     ))
     started = datetime.fromisoformat("2026-07-25T12:00:00+00:00").timestamp()
     _write_transcript_file(tmp_path / "home", "/home/u/proj", _G1_SID, mtime=started + 60)
@@ -2048,7 +2149,7 @@ def test_reopen_headless_drops_you_into_tmux(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)  # available(), list_sessions()
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))  # headless
     monkeypatch.delenv("TMUX", raising=False)  # not in tmux
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -2077,7 +2178,7 @@ def test_reopen_headless_ghost_still_drops_you_in(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -2166,7 +2267,7 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
             pass
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     store = JournalStore(tmp_path)
     store.write(new_entry(
@@ -2230,7 +2331,7 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
             opened.append((list(argv), cwd))
 
     monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     store = JournalStore(tmp_path)
     store.write(new_entry(
@@ -2820,7 +2921,7 @@ def test_rescue_check_headless_prompts_and_declines_once(tmp_path, monkeypatch, 
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))  # timeout -> decline
 
     rc = cli.main(["rescue-check"])
@@ -2846,7 +2947,7 @@ def test_rescue_check_headless_notice_claims_before_printing(tmp_path, monkeypat
     _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.setattr(cli.rescue, "claim_prompt", lambda *a, **k: False)
 
     rc = cli.main(["rescue-check"])
@@ -2865,7 +2966,7 @@ def test_rescue_check_prints_notice_when_tab_unavailable(tmp_path, monkeypatch, 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
@@ -2889,14 +2990,15 @@ def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, 
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
     calls = []
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid} as crr-x")
 
@@ -2927,7 +3029,7 @@ def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, 
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("select.select must not be called when auto_open is true")))
@@ -2935,7 +3037,8 @@ def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, 
     calls = []
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid} as crr-x")
 
@@ -2961,12 +3064,13 @@ def test_rescue_check_disables_tab_after_first_degraded(tmp_path, monkeypatch, c
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     spawners_seen = []
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         spawners_seen.append(tab_spawner)
         return SimpleNamespace(ok=True, degraded=True,
                                message=f"reopened {pid} (no tab)")
@@ -2994,12 +3098,13 @@ def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         if pid == 42:
             return SimpleNamespace(ok=True, degraded=False, message=f"crr: #{pid} de-tmuxed")
         return SimpleNamespace(ok=False, degraded=False, message=f"crr: #{pid} de-tmux failed")
@@ -3029,14 +3134,15 @@ def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "\n")  # Enter, no text
 
     calls = []
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"crr: #{pid} de-tmuxed")
 
@@ -3061,7 +3167,7 @@ def test_rescue_check_eof_declines(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "")  # EOF
 
@@ -3086,7 +3192,7 @@ def test_rescue_check_timeout_declines(tmp_path, monkeypatch, capsys):
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: ([], [], []))
 
     calls = []
@@ -3117,7 +3223,7 @@ def test_rescue_check_keyboard_interrupt_declines(tmp_path, monkeypatch, capsys)
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     def _raise_keyboard_interrupt(*a, **k):
         raise KeyboardInterrupt
@@ -3171,7 +3277,7 @@ def test_rescue_check_claims_before_prompt_survives_prompt_crash(tmp_path, monke
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     def _boom(*a, **k):
         raise RuntimeError("boom")
@@ -3192,7 +3298,7 @@ def test_rescue_check_auto_open_headless_skips_prompt(tmp_path, monkeypatch, cap
     # No config.toml — rescue_auto_open defaults to True
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))  # headless
     monkeypatch.setenv("TMUX", "sock,1,0")  # inside tmux
     monkeypatch.setattr(cli.select, "select",
                         lambda *a, **k: (_ for _ in ()).throw(
@@ -3223,7 +3329,7 @@ def test_rescue_check_headless_in_tmux_links_windows_no_exec(tmp_path, monkeypat
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))  # headless
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))  # headless
     monkeypatch.setenv("TMUX", "sock,1,0")  # inside tmux
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
@@ -3253,7 +3359,7 @@ def test_rescue_check_headless_not_in_tmux_execs_attach(tmp_path, monkeypatch, c
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.delenv("TMUX", raising=False)  # not in tmux
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "y\n")
@@ -3274,7 +3380,7 @@ def test_rescue_check_headless_decline_does_nothing(tmp_path, monkeypatch, capsy
     (tmp_path / "config.toml").write_text("rescue_auto_open = false\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (None, False))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(cli.select, "select", lambda r, w, x, timeout: (r, [], []))
     monkeypatch.setattr(sys.stdin, "readline", lambda: "n\n")
@@ -3342,12 +3448,13 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
 
     reopen_calls = []
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         reopen_calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid}")
 
@@ -3405,14 +3512,15 @@ def test_rescue_check_fires_after_deregister_clears_markers(tmp_path, monkeypatc
         def available(self):
             return True
 
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: (_FakeTab(), True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.process_probe, "PsProcessController",
                         lambda t: type("C", (), {})())
 
     reopen_calls = []
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
-                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected):
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None):
         reopen_calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid}")
 
@@ -3525,7 +3633,8 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
     store.write(new_entry(
         pid=4242, cwd=str(tmp_path), host="tmux", shell="zsh",
         boot_id="00000000-0000-4000-8000-000000000000", now="2026-07-24T00:00:00Z",
-        claude={"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z"},
+        claude={"session_id": sid, "sid_source": "injected", "started": "2026-07-24T00:00:00Z",
+                "skip_permissions": False},
     ))
     try:
         rc = cli.main(["revive"])
@@ -4466,7 +4575,8 @@ def _parked_journal_entry(tmp_path, sid):
         boot_id="a-previous-boot", now="2026-01-01T00:00:00+00:00",
         tmux_session="crr-8a1b2c3d",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
 
 def test_status_json_reports_parked_for_a_tmux_restored_session(tmp_path, monkeypatch, capsys):
@@ -4597,7 +4707,8 @@ def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatc
         boot_id="a-previous-boot", now="2026-01-01T00:00:00+00:00",
         tmux_session="crr-8a1b2c3d",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
     class FakeTmux:
         def available(self): return True
@@ -4643,7 +4754,7 @@ def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
 
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
-    monkeypatch.setattr(cli, "_tab_spawner", lambda config: ("SPAWNER", True))
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: ("SPAWNER", True))
     monkeypatch.setattr(cli.tmux, "RealTmux",
                         lambda t: type("T", (), {"available": lambda s: True})())
     assert cli.main(["revive"]) == 0
@@ -4667,7 +4778,8 @@ def test_reachability_matches_a_tmux_revived_session_via_the_live_snapshot(tmp_p
         pid=1960, cwd="/home/u/p", host="tmux", shell="bash",
         boot_id="b", now="2026-01-01T00:00:00+00:00", tmux_session="crr-x",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
     class LiveClaudeLeadsItsGroup:
         def claude_group_pids(self, pids): return {p: [p] for p in pids}
@@ -4700,7 +4812,8 @@ def test_a_dead_pid_state_file_never_licenses_a_claim(tmp_path, monkeypatch):
         pid=999999, cwd="/home/u/p", host="tmux", shell="bash",
         boot_id="an-old-boot", now="2026-01-01T00:00:00+00:00", tmux_session="crr-x",
         claude={"session_id": sid, "sid_source": "injected",
-                "started": "2026-01-01T00:00:00+00:00"}))
+                "started": "2026-01-01T00:00:00+00:00",
+                "skip_permissions": False}))
 
     class PidIsGone:
         def claude_group_pids(self, pids): return {p: [] for p in pids}
@@ -4731,7 +4844,8 @@ def _seed_conflict(tmp_path, sid):
         store.write(new_entry(pid=pid, cwd="/p", host="tmux", shell="fish",
                               boot_id="B", now=_NOW_STR,
                               claude={"session_id": sid, "sid_source": "injected",
-                                      "started": _NOW_STR}))
+                                      "started": _NOW_STR,
+                                      "skip_permissions": False}))
     return store
 
 

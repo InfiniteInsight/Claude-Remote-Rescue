@@ -95,11 +95,18 @@ class ProcessController(Protocol):
     separate from the read-only ProcessProbe so read callers get no signal
     power). Discovery is by ancestry; signalling targets the whole group."""
 
-    def claude_groups(self, shell_pid: int) -> list[int]:
+    def claude_groups(self, shell_pid: int, *, include_shell_group: bool = False) -> list[int]:
         """Process-group ids of the shell's non-shell child jobs (claude).
 
-        Excludes the shell's own group, so a returned pgid is always safe to
-        signal without killing the shell. Empty when none / shell absent."""
+        Excludes the shell's own group by default, so a returned pgid is
+        always safe to signal without killing the shell. Empty when none /
+        shell absent.
+
+        ``include_shell_group`` opts the caller into ALSO returning the
+        shell's own group when a claude child shares it — true only for a
+        reviver-parked entry, whose pane process is a throwaway ``sh -c``
+        exit-hook wrapper (no job control, so claude sits in its group), not
+        a user shell. A live shell must never pass this."""
         ...
 
     def terminate_group(self, pgid: int, grace_seconds: float) -> None:
