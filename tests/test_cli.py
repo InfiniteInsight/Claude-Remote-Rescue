@@ -1921,6 +1921,94 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
     assert "crr revive: tmux state unknown — pass skipped (no strikes accrued)" in err
 
 
+def test_revive_skips_revival_when_auth_expired(tmp_path, monkeypatch, capsys):
+    """When OAuth credentials are expired, the entire revival pass must be
+    skipped — a revived session would launch under the stale token, die
+    immediately, and burn a give-up strike it can never recover from.
+    """
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    creds_path = tmp_path / ".credentials.json"
+    now = 1_700_000_000.0
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now - 3600) * 1000),
+        "refreshTokenExpiresAt": int((now - 7200) * 1000),
+    }))
+    monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+        def session_pid(self, name):
+            return None
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    revive_called = []
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: revive_called.append(True) or cli.reviver.RevivalOutcome([], [], []),
+    )
+
+    rc = cli.main(["revive"])
+    assert rc == 0
+    assert revive_called == [], "revive_crashed must NOT be called when auth is expired"
+    err = capsys.readouterr().err
+    assert "auth expired" in err
+    assert "skipping revival" in err.lower()
+
+
+def test_revive_proceeds_when_auth_valid(tmp_path, monkeypatch, capsys):
+    """Revival must proceed normally when auth is valid."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    creds_path = tmp_path / ".credentials.json"
+    now = 1_700_000_000.0
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now + 4 * 86400) * 1000),
+        "refreshTokenExpiresAt": int((now + 30 * 86400) * 1000),
+    }))
+    monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+        def session_pid(self, name):
+            return None
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    revive_called = []
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: revive_called.append(True) or cli.reviver.RevivalOutcome([], [], []),
+    )
+
+    rc = cli.main(["revive"])
+    assert rc == 0
+    assert revive_called == [True], "revive_crashed must be called when auth is valid"
+
+
 def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, monkeypatch, capsys):
     # Slice 2 (dropped-Remote-Control watchdog): the deliverable is the
     # WIRING in `_cmd_revive`, not just the standalone `_kick_dropped_bridges`
@@ -1951,8 +2039,9 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
 
     calls = []
 
-    def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags):
-        calls.append((sd, store))
+    def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags,
+                       *, credentials_path=None):
+        calls.append((sd, store, credentials_path))
         print("watchdog pass ran")
 
     monkeypatch.setattr(cli, "_kick_dropped_bridges", fake_watchdog)
@@ -1961,9 +2050,13 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
     out = capsys.readouterr().out
     assert rc == 0
     assert len(calls) == 1
-    sd, store = calls[0]
+    sd, store, credentials_path = calls[0]
     assert sd == tmp_path
     assert isinstance(store, JournalStore)
+    # [dashboard reauth] the watchdog must see the same credentials path the
+    # dashboard poll reads, so a systemd-timer sweep and a browser poll agree
+    # on whether auth is expired.
+    assert credentials_path == cli._credentials_path(cfg.Config())
     lines = out.splitlines()
     assert lines.index("revived 0, gave up 0, already running 0") < lines.index("watchdog pass ran")
 
@@ -4687,6 +4780,499 @@ def test_the_web_provider_reports_parked_for_a_tmux_restored_session(tmp_path, m
     live["names"] = {"crr-8a1b2c3d"}
     # Re-asked per poll: a set resolved once at startup would still say crashed.
     assert provider()["sessions"][0]["state"] == "parked"
+
+
+def test_web_provider_includes_auth_state(tmp_path, monkeypatch):
+    """The sessions payload from provider() must include the auth fields
+    (spec 2026-08-21, dashboard reauth) — read fresh from the credentials
+    file each poll, mirroring how reachability is re-asked each poll rather
+    than resolved once at server start."""
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    now = 1_700_000_000.0
+    creds_path = tmp_path / ".credentials.json"
+    # 4-day access expiry clears the 3-day "expiring" warning window (see
+    # tests/test_auth.py::test_valid_both_tokens_fresh) — this test asserts
+    # on the "valid" state specifically, not "expiring".
+    creds_path.write_text(json.dumps({
+        "expiresAt": int((now + 4 * 86400) * 1000),
+        "refreshTokenExpiresAt": int((now + 30 * 86400) * 1000),
+    }))
+    monkeypatch.setattr("crr.cli._credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr("time.time", lambda: now)
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return set()
+        def attached_sessions(self): return set()
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    captured = {}
+
+    def fake_make_web_handler(provider, allowed, suffixes, **kw):
+        captured["provider"] = provider
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
+
+    payload = captured["provider"]()
+    assert payload["auth_state"] == "valid"
+    assert isinstance(payload["auth_expires_in_seconds"], int)
+    assert payload["auth_reauth_url"] is None
+
+
+# --------------------------------------------------------------------------
+# Dashboard reauth (spec 2026-08-21) — POST /api/reauth + /api/reauth-code
+# provider closures inside `_cmd_web`, and the non-blocking flow through
+# `provider()`: capture-pane polling for the OAuth URL, and firing
+# `_post_reauth_recovery` on the expired -> valid transition.
+#
+# Driven through `cli.main(["web", ...])` with `make_web_handler` faked to
+# capture every provider closure it's handed (mirrors
+# `test_web_provider_includes_auth_state`, above) and `tmux.RealTmux`
+# replaced by one shared `FakeTmux` instance, so calls made by the
+# `tmux_spawner` `_cmd_web` builds once and by `_live_tmux_sessions`/
+# `_attached_tmux_sessions` (which build a fresh `RealTmux` per poll) all
+# land on the same fake — no real tmux is ever attached to, and no real
+# subprocess is ever exec'd.
+# --------------------------------------------------------------------------
+
+class FakeReauthTmux:
+    """Records every tmux call `_cmd_web`'s reauth flow can make."""
+
+    def __init__(self, *, capture_output="", raise_on_new_session=False):
+        self.available_ = True
+        self.new_session_calls = []
+        self.kill_session_calls = []
+        self.capture_pane_calls = []
+        self.send_keys_calls = []
+        self._capture_output = capture_output
+        self._raise_on_new_session = raise_on_new_session
+
+    def available(self):
+        return self.available_
+
+    def list_sessions(self):
+        return set()
+
+    def attached_sessions(self):
+        return set()
+
+    def new_detached_session(self, name, cwd, argv):
+        self.new_session_calls.append((name, cwd, list(argv)))
+        if self._raise_on_new_session:
+            raise subprocess.CalledProcessError(1, argv)
+
+    def kill_session(self, name):
+        self.kill_session_calls.append(name)
+
+    def capture_pane(self, name):
+        self.capture_pane_calls.append(name)
+        return self._capture_output
+
+    def send_keys(self, name, text):
+        self.send_keys_calls.append((name, text))
+
+
+def _web_captured(monkeypatch, tmp_path, fake_tmux=None):
+    """Run `cli.main(["web", ...])` with `make_web_handler` faked so the
+    test can call the real provider closures directly, exactly like
+    `test_web_provider_includes_auth_state` above — `_FakeServer.
+    serve_forever` raises `KeyboardInterrupt` immediately so `_cmd_web`
+    completes (having already built every provider) instead of blocking.
+    """
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: fake_tmux or FakeReauthTmux())
+
+    captured = {}
+
+    def fake_make_web_handler(sessions_provider, allowed, suffixes, **kw):
+        captured["provider"] = sessions_provider
+        captured.update(kw)
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
+    return captured
+
+
+def _write_creds(path, now, *, expired):
+    """A credentials file that reads `auth.auth_state` as "expired" (both
+    tokens past) or "valid" (both fresh, well outside the 3-day window)."""
+    delta = -10.0 if expired else 4 * 86400
+    path.write_text(json.dumps({
+        "expiresAt": int((now + delta) * 1000),
+        "refreshTokenExpiresAt": int((now + delta) * 1000),
+    }))
+
+
+def test_reauth_provider_spawns_tmux_session_nonblocking(tmp_path, monkeypatch):
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    ok, message, degraded = captured["reauth_provider"]()
+
+    assert ok is True
+    assert "started" in message.lower()
+    assert degraded is False
+    assert len(fake_tmux.new_session_calls) == 1
+    name, _cwd, argv = fake_tmux.new_session_calls[0]
+    assert name == "crr-reauth"
+    assert argv == ["claude", "auth", "login"]
+
+
+def test_reauth_provider_rejects_concurrent(tmp_path, monkeypatch):
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    ok1, _msg1, _deg1 = captured["reauth_provider"]()
+    assert ok1 is True
+
+    ok2, msg2, _deg2 = captured["reauth_provider"]()
+    assert ok2 is False
+    assert "already in progress" in msg2.lower()
+    # Only the first call actually spawned a pane.
+    assert len(fake_tmux.new_session_calls) == 1
+
+
+def test_reauth_provider_resets_active_flag_when_tmux_fails(tmp_path, monkeypatch):
+    """A tmux failure must not leave `_reauth_active` stuck True forever —
+    the next reauth attempt must be allowed to proceed."""
+    fake_tmux = FakeReauthTmux(raise_on_new_session=True)
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    ok1, msg1, _deg1 = captured["reauth_provider"]()
+    assert ok1 is False
+    assert "failed" in msg1.lower()
+
+    fake_tmux._raise_on_new_session = False
+    ok2, _msg2, _deg2 = captured["reauth_provider"]()
+    assert ok2 is True
+
+
+def test_reauth_url_captured_on_poll(tmp_path, monkeypatch):
+    """After `reauth_provider()` starts the pane, `provider()`'s next call
+    captures the URL out of the pane text via `_poll_reauth_url_once` and
+    surfaces it as `auth_reauth_url` — using `-J` join semantics so a
+    wrapped OAuth URL is not truncated (spike data, task-4 brief)."""
+    spike_output = (
+        "Opening browser to sign in…\n"
+        "If the browser didn't open, visit: "
+        "https://claude.com/cai/oauth/authorize?code=true&client_id=FAKE\n"
+        "Paste code here if prompted > \n"
+    )
+    fake_tmux = FakeReauthTmux(capture_output=spike_output)
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    ok, _msg, _deg = captured["reauth_provider"]()
+    assert ok is True
+
+    payload = captured["provider"]()
+    assert payload["auth_reauth_url"] == (
+        "https://claude.com/cai/oauth/authorize?code=true&client_id=FAKE"
+    )
+    assert fake_tmux.capture_pane_calls == ["crr-reauth"]
+
+    # Once captured, later polls do not re-capture (nothing left to poll for).
+    payload2 = captured["provider"]()
+    assert payload2["auth_reauth_url"] == payload["auth_reauth_url"]
+    assert fake_tmux.capture_pane_calls == ["crr-reauth"]
+
+
+def test_reauth_url_is_none_without_an_active_reauth(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    payload = captured["provider"]()
+    assert payload["auth_reauth_url"] is None
+
+
+def test_reauth_code_provider_sends_keys_nonblocking(tmp_path, monkeypatch):
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    captured["reauth_provider"]()
+    ok, message, degraded = captured["reauth_code_provider"]("abc123")
+
+    assert ok is True
+    assert "submitted" in message.lower()
+    assert degraded is False
+    assert fake_tmux.send_keys_calls == [("crr-reauth", "abc123")]
+
+
+def test_reauth_code_provider_without_active_reauth_fails(tmp_path, monkeypatch):
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    ok, message, _degraded = captured["reauth_code_provider"]("abc123")
+    assert ok is False
+    assert "no reauth in progress" in message.lower()
+    assert fake_tmux.send_keys_calls == []
+
+
+def test_post_reauth_recovery_fires_once_on_expired_to_valid_transition(tmp_path, monkeypatch):
+    """`provider()` must call `_post_reauth_recovery` exactly once, on the
+    FIRST poll where auth flips expired -> valid while a reauth is active
+    — never on a poll where no reauth was active (a token that simply
+    expired and was refreshed outside the dashboard is not this flow), and
+    never a second time on a later poll (idempotent)."""
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+
+    now = 1_700_000_000.0
+    creds_path = tmp_path / ".credentials.json"
+    monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds_path)
+    monkeypatch.setattr("time.time", lambda: now)
+
+    calls = []
+    monkeypatch.setattr(cli, "_post_reauth_recovery", lambda *a, **kw: calls.append(1))
+
+    # 1. Auth expired, no reauth active yet: recovery must not fire.
+    _write_creds(creds_path, now, expired=True)
+    payload = captured["provider"]()
+    assert payload["auth_state"] == "expired"
+    assert calls == []
+
+    # 2. User starts the reauth flow from the dashboard.
+    ok, _msg, _deg = captured["reauth_provider"]()
+    assert ok is True
+
+    # 3. Still expired (login not finished): no recovery yet.
+    captured["provider"]()
+    assert calls == []
+
+    # 4. Credentials refresh -> auth flips to valid: recovery fires exactly once.
+    _write_creds(creds_path, now, expired=False)
+    captured["provider"]()
+    assert calls == [1]
+
+    # 5. A further poll, still valid: must not fire again.
+    captured["provider"]()
+    assert calls == [1]
+    # The pane is torn down as part of cleanup.
+    assert "crr-reauth" in fake_tmux.kill_session_calls
+
+
+# --------------------------------------------------------------------------
+# `_post_reauth_recovery` / `_do_kick` — the post-reauth sweep fired from
+# `provider()` on the expired -> valid transition (tested above through
+# `_post_reauth_recovery` being called). Exercised directly here, mirroring
+# `tests/test_revive_bridge.py`'s fakes for `_kick_dropped_bridges`: a fake
+# boot/probe/controller decide classifier + reachability, `ops.reopen` and
+# `_do_kick` are monkeypatched so no real process is ever touched.
+# --------------------------------------------------------------------------
+
+def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(tmp_path, monkeypatch):
+    """Resets EVERY claude-bearing session's kick counters (an attempt cap
+    exhausted while auth was expired must not block recovery), reopens the
+    CRASHED session, and kicks the LIVE-and-unreachable-and-idle one — but
+    leaves a LIVE-and-unreachable-but-BUSY session alone
+    (`reachability.may_kick`), same guard `_kick_dropped_bridges` uses to
+    avoid destroying work in flight."""
+    from crr.adapters import session_state, transcript_source
+    from crr.core import bridge_kicks, ops
+    from crr.core.flags import FlagStore
+
+    sd = tmp_path
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+    flags = FlagStore(sd)
+    _BOOT = "current-boot"
+
+    sid_crashed = "8a1b2c3d-0000-4a6b-8c7d-9e0f1a2b3c4d"
+    sid_kicked = "8a1b2c3d-0001-4a6b-8c7d-9e0f1a2b3c4d"
+    sid_reachable = "8a1b2c3d-0002-4a6b-8c7d-9e0f1a2b3c4d"
+    sid_busy = "8a1b2c3d-0003-4a6b-8c7d-9e0f1a2b3c4d"
+
+    def _write(pid, sid, boot_id):
+        store.write(new_entry(
+            pid=pid, cwd="/home/u/project", host="tmux", shell="zsh",
+            boot_id=boot_id, now="2026-08-21T00:00:00Z",
+            claude={"session_id": sid, "sid_source": "injected",
+                    "started": "2026-08-21T00:00:00Z",
+                    "skip_permissions": False}))
+
+    _write(1001, sid_crashed, "a-previous-boot")  # boot mismatch -> CRASHED
+    _write(1002, sid_kicked, _BOOT)               # LIVE, unreachable, idle
+    _write(1003, sid_reachable, _BOOT)            # LIVE, reachable
+    _write(1004, sid_busy, _BOOT)                 # LIVE, unreachable, busy
+
+    class _Boot:
+        def current(self):
+            return _BOOT
+
+    class _Probe:
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            return True
+
+    class _Controller:
+        def claude_groups(self, pid):
+            return [pid + 5000]  # arbitrary claude pgid, distinct from the shell pid
+
+    states = {
+        sid_kicked: session_state.SessionState(
+            pid=1002 + 5000, bridge_session_id=None, field_present=True,
+            status="idle", waiting_for=""),
+        sid_reachable: session_state.SessionState(
+            pid=1003 + 5000, bridge_session_id="some-bridge-id", field_present=True,
+            status="idle", waiting_for=""),
+        sid_busy: session_state.SessionState(
+            pid=1004 + 5000, bridge_session_id=None, field_present=True,
+            status="busy", waiting_for=""),
+    }
+    monkeypatch.setattr(session_state, "read_all", lambda: states)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
+
+    # Idle session at a clean boundary (assistant-end, long idle) → eligible.
+    monkeypatch.setattr(transcript_source, "read_takeover_signal",
+                         lambda sid, home=None: {"mtime": 0.0, "tail_kind": "assistant-end"})
+    # time.time() - 0.0 >> default idle_window (20s), so ready_to_take_over → True.
+
+    reset_sids = []
+    monkeypatch.setattr(bridge_kicks.KickHistoryStore, "reset",
+                         lambda self, sid, now=None: reset_sids.append(sid))
+
+    reopened_pids = []
+
+    def fake_reopen(*a, **kw):
+        reopened_pids.append(a[7])  # (store, archive, tmux, controller, flags, boot, probe, pid, now)
+        return ops.OpResult(True, "reopened")
+    monkeypatch.setattr(ops, "reopen", fake_reopen)
+
+    kicked_pids = []
+    monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
+
+    cli._post_reauth_recovery(
+        store, archive, _Boot(), _Probe(), _Controller(), flags,
+        cfg.Config(), sd, tmux_spawner=None,
+    )
+
+    assert set(reset_sids) == {sid_crashed, sid_kicked, sid_reachable, sid_busy}
+    assert reopened_pids == [1001]
+    assert kicked_pids == [1002]
+
+
+def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch):
+    """An idle session whose transcript tail is mid-turn (not at an
+    ``assistant-end`` boundary) must NOT be kicked by recovery — mirroring
+    the same two-signal corroboration that ``_kick_dropped_bridges`` uses
+    (``takeover.ready_to_take_over``). Without this guard, a long
+    non-streaming completion could be SIGTERM'd mid-output."""
+    from crr.adapters import session_state, transcript_source
+    from crr.core import bridge_kicks, ops
+    from crr.core.flags import FlagStore
+
+    sd = tmp_path
+    store = JournalStore(sd)
+    archive = ArchiveStore(sd)
+    flags = FlagStore(sd)
+    _BOOT = "current-boot"
+
+    sid_idle_midturn = "8a1b2c3d-0010-4a6b-8c7d-9e0f1a2b3c4d"
+
+    store.write(new_entry(
+        pid=2001, cwd="/home/u/project", host="tmux", shell="zsh",
+        boot_id=_BOOT, now="2026-08-21T00:00:00Z",
+        claude={"session_id": sid_idle_midturn, "sid_source": "injected",
+                "started": "2026-08-21T00:00:00Z",
+                "skip_permissions": False}))
+
+    class _Boot:
+        def current(self):
+            return _BOOT
+
+    class _Probe:
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            return True
+
+    class _Controller:
+        def claude_groups(self, pid):
+            return [pid + 5000]
+
+    states = {
+        sid_idle_midturn: session_state.SessionState(
+            pid=2001 + 5000, bridge_session_id=None, field_present=True,
+            status="idle", waiting_for=""),
+    }
+    monkeypatch.setattr(session_state, "read_all", lambda: states)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
+
+    # Transcript tail is mid-turn — ready_to_take_over will return False.
+    monkeypatch.setattr(transcript_source, "read_takeover_signal",
+                         lambda sid, home=None: {"mtime": 0.0, "tail_kind": "mid-turn"})
+
+    monkeypatch.setattr(bridge_kicks.KickHistoryStore, "reset",
+                         lambda self, sid, now=None: None)
+
+    kicked_pids = []
+    monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
+
+    cli._post_reauth_recovery(
+        store, archive, _Boot(), _Probe(), _Controller(), flags,
+        cfg.Config(), sd, tmux_spawner=None,
+    )
+
+    # The idle mid-turn session must NOT be kicked.
+    assert kicked_pids == []
+
+
+def test_do_kick_records_the_attempt_even_when_ops_kick_raises(tmp_path, monkeypatch):
+    """`_do_kick` must count the attempt even on an exception — same
+    reasoning as `_kick_dropped_bridges`'s own `finally`: a silently
+    uncounted attempt would let a later sweep retry with no memory of this
+    one, reopening the restart-loop hole the attempt cap exists to close."""
+    from crr.core import bridge_kicks, ops
+    from crr.core.flags import FlagStore
+
+    sd = tmp_path
+    store = JournalStore(sd)
+    flags = FlagStore(sd)
+    kick_store = bridge_kicks.KickHistoryStore(sd)
+    sid = "8a1b2c3d-0000-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = {"pid": 42, "claude": {"session_id": sid}}
+
+    def boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ops, "kick", boom)
+    with pytest.raises(RuntimeError):
+        cli._do_kick(entry, kick_store, cfg.Config(), boot=None, probe=None,
+                     controller=None, flags=flags, store=store)
+
+    assert kick_store.attempts(sid) == 1
 
 
 def test_status_human_says_restored_not_the_raw_parked_enum(tmp_path, monkeypatch, capsys):

@@ -587,6 +587,32 @@ def test_conflict_is_False_not_None_when_the_probe_cannot_answer():
     assert [c["conflict"] for c in payload["sessions"]] == [False, False]
 
 
+def test_auth_fields_default_to_unknown_and_validate():
+    # v15: no auth kwargs passed -> the honest "not resolved" defaults, and
+    # the payload must still satisfy the validator.
+    payload = assemble_sessions([], FakeBoot(), FakeProbe())
+    assert payload["auth_state"] == "unknown"
+    assert payload["auth_expires_in_seconds"] is None
+    assert payload["auth_reauth_url"] is None
+    contracts.validate_sessions_payload(payload)
+
+
+def test_auth_fields_are_wired_through_and_validate():
+    # The cli injects the resolved triple (from crr.core.auth.auth_state);
+    # assemble_sessions must pass it through verbatim into the payload, and
+    # the result must still round-trip through the validator.
+    payload = assemble_sessions(
+        [], FakeBoot(), FakeProbe(),
+        auth_state="expiring",
+        auth_expires_in_seconds=3600,
+        auth_reauth_url="https://example.ts.net/reauth",
+    )
+    assert payload["auth_state"] == "expiring"
+    assert payload["auth_expires_in_seconds"] == 3600
+    assert payload["auth_reauth_url"] == "https://example.ts.net/reauth"
+    contracts.validate_sessions_payload(payload)
+
+
 def test_owners_of_sid_names_the_processes_a_user_would_choose_between():
     from crr.core.status import owners_of_sid
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"

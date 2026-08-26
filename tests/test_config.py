@@ -90,7 +90,10 @@ def test_vestigial_keys_are_gone_and_version_bumped():
         with pytest.raises(cfg.ConfigError):
             cfg.Config({gone: 1})   # now an unknown key: loud, not silent
     # v21 (2026-08-20): rescue_auto_open (spec — reopen tab reliability: auto-open on boot).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 21
+    # v22 (2026-08-21): reauth_success_display_ms (dashboard reauth Task 5 —
+    # reauth modal auto-close delay, sourced from config like every other
+    # page timing prior).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 22
 
 
 def test_context_pressure_fraction_defaults():
