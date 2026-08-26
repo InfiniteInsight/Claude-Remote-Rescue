@@ -68,10 +68,31 @@ State transitions:
 | `false` | `true` | Dashboard functional, no prompt (user chose "No login") |
 | `true` | (ignored) | Login required, passphrase set |
 
-**Corrupt file handling:** degrade to login disabled (fail-open for access).
-Rationale: a corrupt auth file locking someone out of their own dashboard
-from their phone — with no CLI access to fix it — is worse than a brief
-open window. The bootstrap prompt reappears, nudging re-setup.
+**Corrupt file handling (revised, user-decided 2026-08-26):** fail CLOSED,
+not open. The original rationale below was rejected: a corrupt auth file
+silently disabling the security boundary is unacceptable, even to avoid a
+phone-only lockout. Three states, distinguished by
+`DashboardAuthStore.is_corrupt()`:
+
+1. File absent (`FileNotFoundError`) → `is_corrupt()` False → login
+   disabled, bootstrap prompt as today. Unchanged — this is the
+   fresh-install/upgrade path, not a failure.
+2. File valid → unchanged.
+3. File present but corrupt (invalid JSON, not a dict, or a store version
+   this build doesn't understand) → `is_corrupt()` True → the auth gate
+   activates: every request is treated as unauthenticated (`GET /` shows
+   the login page, APIs 401), no existing session cookie validates, and a
+   login attempt returns "Auth store is corrupted — repair or delete
+   dashboard_auth.json on the server." instead of "Incorrect passphrase".
+   Recovery is deliberately shell-only.
+
+Superseded rationale (kept for context): "degrade to login disabled
+(fail-open for access) — a corrupt auth file locking someone out of their
+own dashboard from their phone, with no CLI access to fix it, is worse
+than a brief open window." Rejected because it conflates a data-integrity
+failure with a deliberate off state, and a corrupt file is exactly the
+kind of unexpected condition an attacker (or bit rot) could induce to
+disable the gate.
 
 ### Config key
 

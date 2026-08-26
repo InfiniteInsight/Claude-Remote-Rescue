@@ -105,6 +105,30 @@ class DashboardAuthStore:
             return {}
         return data
 
+    def is_corrupt(self) -> bool:
+        """True only for state 3: the file exists but is unreadable,
+        invalid JSON, not a dict, or fails the store version check.
+
+        False for state 1 (absent — `FileNotFoundError`, the fresh-install
+        / upgrade path) and state 2 (valid). This is deliberately distinct
+        from `_read()`, which still returns {} for both absent and corrupt
+        so the existing accessors (`login_enabled()`, etc.) keep their
+        simple "no data yet" semantics — only the CLI wiring layer treats
+        corrupt differently by consulting this method (fail closed, spec
+        2026-08-26 revision).
+        """
+        try:
+            data = read_json_file(self._path)
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError):
+            return True
+        if not isinstance(data, dict):
+            return True
+        if not contracts.store_version_ok(data, contracts.DASHBOARD_AUTH_STORE_VERSION):
+            return True
+        return False
+
     def _write(self, data: dict[str, Any]) -> None:
         data["v"] = contracts.DASHBOARD_AUTH_STORE_VERSION
         write_json_atomic(self._path, data)

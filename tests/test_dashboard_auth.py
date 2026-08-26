@@ -155,11 +155,61 @@ def test_store_dismiss_bootstrap(tmp_path):
     assert store.bootstrap_dismissed() is True
 
 
-def test_store_corrupt_file_degrades_to_disabled(tmp_path):
-    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+def test_store_absent_file_is_not_corrupt(tmp_path):
+    """State 1 (fresh install / upgrade path): no file at all must never
+    read as corrupt — that would make the live gate (login_enabled() OR
+    is_corrupt()) active for every user who never configured login."""
     store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.is_corrupt() is False
     assert store.login_enabled() is False
     assert store.bootstrap_dismissed() is False
+
+
+def test_store_valid_file_is_not_corrupt(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    assert store.is_corrupt() is False
+
+
+def test_store_corrupt_invalid_json_fails_closed(tmp_path):
+    """State 3: file present but not valid JSON. `login_enabled()` stays
+    False (accessor semantics unchanged — `_read()` still returns {} for
+    both absent and corrupt), but `is_corrupt()` now distinguishes this
+    from state 1 so the CLI wiring can fail the auth gate CLOSED instead
+    of treating it as login-never-configured."""
+    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.is_corrupt() is True
+    assert store.login_enabled() is False
+    assert store.bootstrap_dismissed() is False
+    assert store.signing_secret() is None
+
+
+def test_store_corrupt_not_a_dict_fails_closed(tmp_path):
+    (tmp_path / dashboard_auth.FILENAME).write_text("[1, 2, 3]")
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.is_corrupt() is True
+
+
+def test_store_corrupt_future_version_fails_closed(tmp_path):
+    import json
+    (tmp_path / dashboard_auth.FILENAME).write_text(
+        json.dumps({"v": 999, "login_enabled": True})
+    )
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.is_corrupt() is True
+
+
+def test_store_corrupt_unreadable_file_fails_closed(tmp_path):
+    """An OSError other than FileNotFoundError (e.g. permission denied) on
+    a path that exists but can't be read as a file is treated as corrupt,
+    not absent — fail closed is the safe direction for an unreadable auth
+    store. A directory at the expected path raises IsADirectoryError /
+    PermissionError on every OS and euid (unlike chmod(0), which root and
+    Windows both ignore), so it's used here instead."""
+    (tmp_path / dashboard_auth.FILENAME).mkdir()
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.is_corrupt() is True
 
 
 def test_store_enable_rejects_when_already_enabled(tmp_path):

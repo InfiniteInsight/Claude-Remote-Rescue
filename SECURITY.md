@@ -35,11 +35,20 @@ re-enabled later from Settings.
   rotates. Changing the passphrase (or disabling then re-enabling login)
   mints a new secret and invalidates every outstanding session at once —
   the actual remedy for a suspected leaked cookie.
-- **Fails open on a corrupt/missing auth store**: an unreadable
-  `dashboard_auth.json` degrades to login-disabled, not login-required.
-  Rationale: a corrupt file must never be able to lock the owner out of
-  their own dashboard from a phone with no CLI access. The bootstrap prompt
-  reappears to nudge re-setup.
+- **Fails closed on a corrupt auth store, open on a missing one**: these are
+  different states. A *missing* `dashboard_auth.json` simply means login was
+  never configured — the dashboard is reachable and the bootstrap prompt
+  offers to set one up, exactly as on a fresh install. A *corrupt* one
+  (invalid JSON, not an object, or a store version this build doesn't
+  understand) activates the auth gate instead of disabling it: every
+  request is treated as unauthenticated (`GET /` shows the login page, APIs
+  return 401), no existing session cookie can validate, and a login attempt
+  returns an explicit "Auth store is corrupted" error rather than
+  "Incorrect passphrase". A corrupt security-relevant file must not be able
+  to silently drop the security boundary it's supposed to enforce.
+  Recovery is deliberately shell-only: repair or delete
+  `dashboard_auth.json` on the host, then the dashboard is reachable again
+  (with login disabled, since the passphrase record is gone).
 - **A fixed set of routes stay unauthenticated even with login enabled**:
   `GET /api/version`, `/manifest.webmanifest`, `/sw.js`, and the PWA icons
   (needed for install and the version self-heal to work before login), plus

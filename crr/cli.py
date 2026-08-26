@@ -4272,17 +4272,27 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
     ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
 
-    # --- dashboard login (spec 2026-08-26) ----------------------------------
+    # --- dashboard login (spec 2026-08-26, corrupt-store handling revised
+    # to fail closed) --------------------------------------------------------
     # `rate_limiter` is per-process, in-memory state — a service restart
-    # resets it, same as `_reauth_active` above. `auth_store.login_enabled`
-    # is passed straight through as `auth_enabled_fn` (see `make_web_handler`
-    # docstring): it is re-read from disk on every request, so flipping login
-    # on/off from the Settings or bootstrap modal takes effect on the very
-    # next poll, with no service restart required.
+    # resets it, same as `_reauth_active` above. `auth_enabled_fn` below
+    # (`login_enabled() OR is_corrupt()`) is re-read from disk on every
+    # request (see `make_web_handler` docstring): flipping login on/off from
+    # the Settings or bootstrap modal, or a store going corrupt mid-run,
+    # takes effect on the very next poll, with no service restart required.
     auth_store = dashboard_auth.DashboardAuthStore(sd)
     rate_limiter = dashboard_auth.LoginRateLimiter()
 
     def auth_check(cookie_value: str) -> bool:
+        # Explicit corrupt check (fail-closed, spec 2026-08-26 revision):
+        # `signing_secret()` already returns None on a corrupt store (its
+        # `_read()` returns {} for corrupt same as absent), which alone
+        # would make this return False — but that's an accident of a
+        # method built for a different purpose. Checking `is_corrupt()`
+        # directly documents the fail-closed intent and doesn't depend on
+        # `signing_secret()` keeping that shape.
+        if auth_store.is_corrupt():
+            return False
         secret = auth_store.signing_secret()
         if secret is None:
             return False
@@ -4290,6 +4300,18 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return dashboard_auth.validate_token(cookie_value, secret, max_age_seconds)
 
     def login_provider(passphrase: str) -> tuple[bool, str, dict[str, str]]:
+        # Corrupt store (fail-closed, spec 2026-08-26 revision): checked
+        # before the rate limiter and before verification. This is not a
+        # guessed passphrase, so it must not consume a rate-limit slot
+        # (`record_failure`) or pay the backoff delay — and the message
+        # must name the real cause instead of the misleading "Incorrect
+        # passphrase" (recovery is deliberately shell-only: repair/delete
+        # the file on the host).
+        if auth_store.is_corrupt():
+            return False, (
+                "Auth store is corrupted — repair or delete "
+                "dashboard_auth.json on the server."
+            ), {}
         # Delay-then-verify, not delay-then-reject: the correct passphrase
         # must still succeed once the rate limit engages, or 5 wrong guesses
         # permanently lock the real owner out (only a service restart used
@@ -4345,6 +4367,19 @@ def _cmd_web(args: argparse.Namespace) -> int:
         raise ValueError(f"unknown op: {op}")
 
     def bootstrap_state_provider() -> dict:
+        # Corrupt store (fail-closed, spec 2026-08-26 revision): report
+        # login_enabled=True, never False. page.html only shows the
+        # bootstrap prompt when login_enabled===false AND
+        # bootstrap_dismissed===false — reporting the store's real
+        # (disabled) login_enabled here would invite the bootstrap flow on
+        # top of a gate that already rejects every login attempt. The gate
+        # itself (auth_enabled_fn) blocks /api/sessions regardless; this
+        # only keeps the reported state from being misleading.
+        if auth_store.is_corrupt():
+            return {
+                "login_enabled": True,
+                "bootstrap_dismissed": auth_store.bootstrap_dismissed(),
+            }
         return {
             "login_enabled": auth_store.login_enabled(),
             "bootstrap_dismissed": auth_store.bootstrap_dismissed(),
@@ -4731,7 +4766,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
-        auth_enabled_fn=auth_store.login_enabled,
+        # Fail-closed on a corrupt store (spec 2026-08-26 revision): the
+        # gate must activate even though `login_enabled()` itself stays
+        # False on corrupt (see dashboard_auth.DashboardAuthStore._read).
+        auth_enabled_fn=lambda: auth_store.login_enabled() or auth_store.is_corrupt(),
         auth_check=auth_check,
         login_provider=login_provider,
         logout_provider=logout_provider,

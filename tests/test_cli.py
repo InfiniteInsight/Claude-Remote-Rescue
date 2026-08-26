@@ -5470,6 +5470,59 @@ def test_logout_provider_clears_the_cookie(tmp_path, monkeypatch):
     assert "Max-Age=0" in cookie
 
 
+def test_auth_enabled_fn_is_true_when_store_is_corrupt(tmp_path, monkeypatch):
+    """Fail-closed revision (user decision 2026-08-26, replacing the
+    original fail-open spec): a corrupt `dashboard_auth.json` must activate
+    the gate, not disable it — `auth_enabled_fn` is `login_enabled() OR
+    is_corrupt()`."""
+    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+    captured = _web_captured(monkeypatch, tmp_path)
+    assert captured["auth_enabled_fn"]() is True
+
+
+def test_auth_enabled_fn_is_false_when_store_is_absent(tmp_path, monkeypatch):
+    """Regression for state 1 (fresh install / upgrade): no file at all
+    must NOT trip the corrupt-store gate."""
+    captured = _web_captured(monkeypatch, tmp_path)
+    assert captured["auth_enabled_fn"]() is False
+
+
+def test_auth_check_returns_false_when_store_is_corrupt(tmp_path, monkeypatch):
+    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+    captured = _web_captured(monkeypatch, tmp_path)
+    assert captured["auth_check"]("anything") is False
+
+
+def test_login_provider_reports_corrupt_store_before_verifying(tmp_path, monkeypatch):
+    """A login attempt against a corrupt store must surface the real
+    reason — not "Incorrect passphrase" — and must not touch the rate
+    limiter (it's not a guess, so no `record_failure`, no sleep)."""
+    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+    captured = _web_captured(monkeypatch, tmp_path)
+
+    sleeps = []
+    monkeypatch.setattr("crr.cli.time.sleep", lambda s: sleeps.append(s))
+    ok, error, headers = captured["login_provider"]("anything")
+
+    assert ok is False
+    assert error == (
+        "Auth store is corrupted — repair or delete dashboard_auth.json on the server."
+    )
+    assert headers == {}
+    assert sleeps == []
+
+
+def test_bootstrap_state_fn_reports_login_enabled_true_when_corrupt(tmp_path, monkeypatch):
+    """Corrupt must not show the bootstrap prompt: the front end shows it
+    only when `login_enabled === false && bootstrap_dismissed === false`
+    (page.html). The gate already blocks /api/sessions regardless, but the
+    reported state must not accidentally invite bootstrap."""
+    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+    captured = _web_captured(monkeypatch, tmp_path)
+    state = captured["bootstrap_state_fn"]()
+    assert state["login_enabled"] is True
+
+
 def test_auth_enabled_cannot_reach_handle_request_without_a_live_auth_check(tmp_path, monkeypatch):
     """Obligation from the Task 4 review: `auth_enabled=True` must never
     reach `web.handle_request` alongside `auth_check=None` (that combination
