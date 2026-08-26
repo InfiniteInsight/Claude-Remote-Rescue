@@ -84,3 +84,105 @@ def validate_token(
         return (ts - issued_at) < max_age_seconds
     except Exception:
         return False
+
+
+class DashboardAuthStore:
+    """Read/write the dashboard login auth file."""
+
+    def __init__(self, state_dir: Path) -> None:
+        self._path = Path(state_dir) / FILENAME
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            data = read_json_file(self._path)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        if not contracts.store_version_ok(data, contracts.DASHBOARD_AUTH_STORE_VERSION):
+            return {}
+        return data
+
+    def _write(self, data: dict[str, Any]) -> None:
+        data["v"] = contracts.DASHBOARD_AUTH_STORE_VERSION
+        write_json_atomic(self._path, data)
+
+    def login_enabled(self) -> bool:
+        return bool(self._read().get("login_enabled", False))
+
+    def bootstrap_dismissed(self) -> bool:
+        return bool(self._read().get("bootstrap_dismissed", False))
+
+    def signing_secret(self) -> bytes | None:
+        raw = self._read().get("signing_secret")
+        if isinstance(raw, str):
+            try:
+                return bytes.fromhex(raw)
+            except ValueError:
+                return None
+        return None
+
+    def verify(self, passphrase: str) -> bool:
+        data = self._read()
+        h = data.get("passphrase_hash")
+        s = data.get("passphrase_salt")
+        if not isinstance(h, str) or not isinstance(s, str):
+            return False
+        return verify_passphrase(passphrase, h, s)
+
+    def enable(self, passphrase: str, confirm: str) -> None:
+        if passphrase != confirm:
+            raise PassphraseError("passphrases do not match")
+        h, s = hash_passphrase(passphrase)
+        self._write({
+            "login_enabled": True,
+            "bootstrap_dismissed": False,
+            "passphrase_hash": h,
+            "passphrase_salt": s,
+            "signing_secret": secrets.token_bytes(32).hex(),
+        })
+
+    def change(self, current: str, new_passphrase: str, confirm: str) -> None:
+        if not self.verify(current):
+            raise PassphraseError("current passphrase is incorrect")
+        if new_passphrase != confirm:
+            raise PassphraseError("new passphrases do not match")
+        h, s = hash_passphrase(new_passphrase)
+        data = self._read()
+        data.update({
+            "passphrase_hash": h,
+            "passphrase_salt": s,
+            "signing_secret": secrets.token_bytes(32).hex(),
+        })
+        self._write(data)
+
+    def disable(self, current: str) -> None:
+        if not self.verify(current):
+            raise PassphraseError("current passphrase is incorrect")
+        data = self._read()
+        data["login_enabled"] = False
+        self._write(data)
+
+    def dismiss_bootstrap(self) -> None:
+        data = self._read()
+        data["bootstrap_dismissed"] = True
+        self._write(data)
+
+
+class LoginRateLimiter:
+    """Global in-memory login attempt rate limiter."""
+
+    def __init__(self) -> None:
+        self._failures = 0
+
+    def check(self) -> float:
+        """Seconds to wait before the next attempt is allowed. 0.0 = ok."""
+        if self._failures < 5:
+            return 0.0
+        return min(2 ** (self._failures - 5), 300)
+
+    def record_failure(self) -> None:
+        self._failures += 1
+
+    def reset(self) -> None:
+        self._failures = 0

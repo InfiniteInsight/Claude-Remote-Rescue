@@ -73,3 +73,139 @@ def test_token_rejects_tampered_payload():
     parts[0] = b64.urlsafe_b64encode(bytes(payload)).rstrip(b"=").decode()
     tampered = ".".join(parts)
     assert dashboard_auth.validate_token(tampered, secret, max_age_seconds=3600, now=1500.0) is False
+
+
+def test_store_default_state(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.login_enabled() is False
+    assert store.bootstrap_dismissed() is False
+    assert store.signing_secret() is None
+
+
+def test_store_enable_sets_login_enabled(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    assert store.login_enabled() is True
+    assert store.signing_secret() is not None
+
+
+def test_store_enable_rejects_mismatched_confirm(tmp_path):
+    import pytest
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    with pytest.raises(dashboard_auth.PassphraseError, match="do not match"):
+        store.enable("my-passphrase", "different")
+
+
+def test_store_enable_rejects_short_passphrase(tmp_path):
+    import pytest
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    with pytest.raises(dashboard_auth.PassphraseError):
+        store.enable("short", "short")
+
+
+def test_store_verify_correct(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    assert store.verify("my-passphrase") is True
+
+
+def test_store_verify_wrong(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    assert store.verify("wrong-passphrase") is False
+
+
+def test_store_change_passphrase_invalidates_old_secret(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("old-passphrase", "old-passphrase")
+    old_secret = store.signing_secret()
+    store.change("old-passphrase", "new-passphrase!", "new-passphrase!")
+    assert store.signing_secret() != old_secret
+    assert store.verify("new-passphrase!") is True
+    assert store.verify("old-passphrase") is False
+
+
+def test_store_change_rejects_wrong_current(tmp_path):
+    import pytest
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    with pytest.raises(dashboard_auth.PassphraseError, match="incorrect"):
+        store.change("wrong", "new-phrase!", "new-phrase!")
+
+
+def test_store_disable(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    store.disable("my-passphrase")
+    assert store.login_enabled() is False
+
+
+def test_store_disable_rejects_wrong_passphrase(tmp_path):
+    import pytest
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    with pytest.raises(dashboard_auth.PassphraseError, match="incorrect"):
+        store.disable("wrong")
+
+
+def test_store_dismiss_bootstrap(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.bootstrap_dismissed() is False
+    store.dismiss_bootstrap()
+    assert store.bootstrap_dismissed() is True
+
+
+def test_store_corrupt_file_degrades_to_disabled(tmp_path):
+    (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    assert store.login_enabled() is False
+    assert store.bootstrap_dismissed() is False
+
+
+def test_store_re_enable_generates_new_secret(tmp_path):
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    secret1 = store.signing_secret()
+    store.disable("my-passphrase")
+    store.enable("new-pass-phrase", "new-pass-phrase")
+    assert store.signing_secret() != secret1
+
+
+def test_rate_limiter_permits_first_five():
+    rl = dashboard_auth.LoginRateLimiter()
+    for _ in range(5):
+        assert rl.check() == 0.0
+        rl.record_failure()
+
+
+def test_rate_limiter_blocks_after_five():
+    rl = dashboard_auth.LoginRateLimiter()
+    for _ in range(5):
+        rl.record_failure()
+    delay = rl.check()
+    assert delay > 0
+
+
+def test_rate_limiter_delay_grows_exponentially():
+    rl = dashboard_auth.LoginRateLimiter()
+    for _ in range(6):
+        rl.record_failure()
+    d1 = rl.check()
+    rl.record_failure()
+    d2 = rl.check()
+    assert d2 > d1
+
+
+def test_rate_limiter_caps_at_300():
+    rl = dashboard_auth.LoginRateLimiter()
+    for _ in range(50):
+        rl.record_failure()
+    assert rl.check() <= 300
+
+
+def test_rate_limiter_resets_on_success():
+    rl = dashboard_auth.LoginRateLimiter()
+    for _ in range(10):
+        rl.record_failure()
+    rl.reset()
+    assert rl.check() == 0.0
