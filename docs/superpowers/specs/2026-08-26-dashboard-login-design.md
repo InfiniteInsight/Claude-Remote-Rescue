@@ -232,7 +232,7 @@ previous enabled period don't work.
 - Expired token rejected.
 - Token invalid after signing secret change (passphrase change invalidation).
 - Rate limiter: permits up to 5, blocks on 6th, resets on success.
-- Store read/write/corrupt-degrade.
+- Store read/write; corrupt file fails closed (absent file stays not-corrupt).
 - Minimum passphrase length enforcement (< 8 chars rejected).
 
 ### `tests/test_web.py` (request handler)
