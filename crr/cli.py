@@ -4290,10 +4290,17 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return dashboard_auth.validate_token(cookie_value, secret, max_age_seconds)
 
     def login_provider(passphrase: str) -> tuple[bool, str, dict[str, str]]:
+        # Delay-then-verify, not delay-then-reject: the correct passphrase
+        # must still succeed once the rate limit engages, or 5 wrong guesses
+        # permanently lock the real owner out (only a service restart used
+        # to clear `_failures`). The `time.sleep(delay)` IS the defense — a
+        # brute-force client pays the growing delay on every attempt, right
+        # or wrong. We don't promise a "try again in N seconds" wait that
+        # doesn't actually gate anything (the previous message was false:
+        # there's no timestamp, so nothing enforces N seconds later).
         delay = rate_limiter.check()
         if delay > 0:
             time.sleep(delay)
-            return False, f"Too many attempts. Try again in {int(delay)} seconds.", {}
         if not auth_store.verify(passphrase):
             rate_limiter.record_failure()
             return False, "Incorrect passphrase", {}

@@ -1075,10 +1075,15 @@ Create the auth providers:
         return dashboard_auth.validate_token(cookie_value, secret, max_age_seconds)
 
     def login_provider(passphrase: str) -> tuple[bool, str, dict[str, str]]:
+        # Delay-then-verify: on a rate-limited attempt, sleep for `delay`
+        # seconds and then STILL check the passphrase. An early return here
+        # (returning "too many attempts" without verifying) would reject the
+        # correct passphrase forever once failures reach 5, since `_failures`
+        # only decreases via reset() on a successful verify — a real bug
+        # found in review, not a hypothetical.
         delay = rate_limiter.check()
         if delay > 0:
             time.sleep(delay)
-            return False, f"Too many attempts. Try again in {int(delay)} seconds.", {}
         if not auth_store.verify(passphrase):
             rate_limiter.record_failure()
             return False, "Incorrect passphrase", {}

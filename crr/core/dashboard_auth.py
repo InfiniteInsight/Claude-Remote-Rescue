@@ -14,6 +14,7 @@ import html as html_mod
 import os
 import secrets
 import struct
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,13 @@ class DashboardAuthStore:
         return verify_passphrase(passphrase, h, s)
 
     def enable(self, passphrase: str, confirm: str) -> None:
+        if self.login_enabled():
+            # A stolen-cookie holder must not be able to overwrite the
+            # passphrase (and rotate the signing secret, locking the real
+            # owner out) via the same op the *first-time* setup uses. Once
+            # login is on, changing it requires the current passphrase
+            # (`change`), same as `disable` does.
+            raise PassphraseError("login already enabled; use change")
         if passphrase != confirm:
             raise PassphraseError("passphrases do not match")
         h, s = hash_passphrase(passphrase)
@@ -171,22 +179,35 @@ class DashboardAuthStore:
 
 
 class LoginRateLimiter:
-    """Global in-memory login attempt rate limiter."""
+    """Global in-memory login attempt rate limiter.
+
+    `ThreadingHTTPServer` runs each request on its own thread, and
+    `login_provider` calls `check()`, then (on a wrong passphrase)
+    `record_failure()`, from that thread. A single lock around each method
+    keeps `_failures` reads/increments/resets atomic across concurrent
+    requests — it does not make check()-then-record() atomic as a pair
+    (two threads can both observe the same `_failures` and both increment),
+    which is an accepted, documented simplification.
+    """
 
     def __init__(self) -> None:
         self._failures = 0
+        self._lock = threading.Lock()
 
     def check(self) -> float:
         """Seconds to wait before the next attempt is allowed. 0.0 = ok."""
-        if self._failures < 5:
-            return 0.0
-        return min(2 ** (self._failures - 5), 300)
+        with self._lock:
+            if self._failures < 5:
+                return 0.0
+            return min(2 ** (self._failures - 5), 300)
 
     def record_failure(self) -> None:
-        self._failures += 1
+        with self._lock:
+            self._failures += 1
 
     def reset(self) -> None:
-        self._failures = 0
+        with self._lock:
+            self._failures = 0
 
 
 def login_page(error: str = "") -> str:

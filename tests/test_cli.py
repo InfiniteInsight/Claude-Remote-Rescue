@@ -5306,12 +5306,53 @@ def test_login_provider_wrong_passphrase_is_rejected_and_rate_limited(tmp_path, 
         assert error == "Incorrect passphrase"
         assert headers == {}
 
+    # Past the threshold, a wrong passphrase still fails — but now via
+    # delay-then-verify, not an early "too many attempts" return (that
+    # message promised a wait no timestamp ever enforced). The delay is the
+    # only defense, so verification must still happen after sleeping.
     sleeps = []
     monkeypatch.setattr("crr.cli.time.sleep", lambda s: sleeps.append(s))
     ok, error, _headers = captured["login_provider"]("wrong-pass")
     assert ok is False
-    assert "Too many attempts" in error
+    assert error == "Incorrect passphrase"
     assert sleeps and sleeps[0] > 0
+
+    # Backoff keeps growing on the rate-limited path too — record_failure()
+    # must still run, not be skipped because we're already over threshold.
+    ok2, _error2, _headers2 = captured["login_provider"]("wrong-pass")
+    assert ok2 is False
+    assert sleeps[1] > sleeps[0]
+
+
+def test_login_provider_correct_passphrase_succeeds_past_rate_limit_threshold(tmp_path, monkeypatch):
+    """Regression for the critical finding: once `_failures` reaches 5, the
+    ONLY way it ever decreases is `reset()` on a successful verify. An
+    early-return "too many attempts" path that skips verification entirely
+    would reject the correct passphrase forever (until a service restart) —
+    this must not happen; the delay is server-side punishment, not a lockout."""
+    captured = _web_captured(monkeypatch, tmp_path)
+    captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "correct-horse-battery", "confirm": "correct-horse-battery"}
+    )
+
+    monkeypatch.setattr("crr.cli.time.sleep", lambda s: None)
+    for _ in range(6):
+        ok, _error, _headers = captured["login_provider"]("wrong-pass")
+        assert ok is False
+
+    ok, error, headers = captured["login_provider"]("correct-horse-battery")
+    assert ok is True
+    assert error == ""
+    assert "Set-Cookie" in headers
+
+    # And the rate limiter is now reset — a subsequent wrong guess is not
+    # immediately rate-limited.
+    sleeps = []
+    monkeypatch.setattr("crr.cli.time.sleep", lambda s: sleeps.append(s))
+    ok2, error2, _headers2 = captured["login_provider"]("wrong-again")
+    assert ok2 is False
+    assert error2 == "Incorrect passphrase"
+    assert sleeps == []
 
 
 def test_login_provider_reset_on_success_clears_rate_limit(tmp_path, monkeypatch):
@@ -5369,11 +5410,39 @@ def test_dashboard_auth_provider_passphrase_error_becomes_ok_false_not_raise(tmp
     assert ok is False
     assert "incorrect" in message.lower()
 
+    # "enable" is now guarded against overwriting an already-enabled login
+    # (Finding 2) — disable first so this exercises the short-passphrase
+    # validation on a fresh "enable", not the "already enabled" guard.
+    captured["dashboard_auth_provider"]({"op": "disable", "current": "x" * 8})
     ok2, message2 = captured["dashboard_auth_provider"](
         {"op": "enable", "passphrase": "short", "confirm": "short"}
     )
     assert ok2 is False
     assert "8" in message2
+
+
+def test_dashboard_auth_provider_enable_rejected_when_already_enabled(tmp_path, monkeypatch):
+    """An already-authenticated client (e.g. a stolen but still-valid
+    session cookie) POSTing {"op": "enable", ...} must not be able to
+    silently overwrite the passphrase and signing secret without proving
+    knowledge of the current passphrase — that would lock the real owner
+    out of every open session. "change" is the only way to rotate once
+    login is on."""
+    captured = _web_captured(monkeypatch, tmp_path)
+    ok, _msg = captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "original-pass", "confirm": "original-pass"}
+    )
+    assert ok is True
+
+    ok2, message2 = captured["dashboard_auth_provider"](
+        {"op": "enable", "passphrase": "attacker-pass", "confirm": "attacker-pass"}
+    )
+    assert ok2 is False
+    assert "already enabled" in message2.lower()
+
+    # The original passphrase must still work — it was never overwritten.
+    ok3, _error3, _headers3 = captured["login_provider"]("original-pass")
+    assert ok3 is True
 
 
 def test_dashboard_auth_provider_disable_and_dismiss_bootstrap(tmp_path, monkeypatch):

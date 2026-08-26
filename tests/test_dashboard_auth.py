@@ -162,6 +162,19 @@ def test_store_corrupt_file_degrades_to_disabled(tmp_path):
     assert store.bootstrap_dismissed() is False
 
 
+def test_store_enable_rejects_when_already_enabled(tmp_path):
+    """An authenticated-but-not-passphrase-holding client (e.g. stolen
+    cookie) must not be able to overwrite hash/salt/secret via "enable" —
+    that would lock the real owner out without ever proving they knew the
+    current passphrase. "change" is the only path once login is on."""
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    with pytest.raises(dashboard_auth.PassphraseError, match="already enabled"):
+        store.enable("new-passphrase", "new-passphrase")
+    # The original passphrase and secret must be untouched.
+    assert store.verify("my-passphrase") is True
+
+
 def test_store_re_enable_generates_new_secret(tmp_path):
     store = dashboard_auth.DashboardAuthStore(tmp_path)
     store.enable("my-passphrase", "my-passphrase")
