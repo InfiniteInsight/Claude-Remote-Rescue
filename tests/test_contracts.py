@@ -77,7 +77,13 @@ def _archive_record():
 
 
 def _sessions_payload():
-    return {"contract": contracts.SESSIONS_CONTRACT_VERSION, "sessions": [_session_card()]}
+    return {
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
+        "sessions": [_session_card()],
+        "auth_state": "unknown",
+        "auth_expires_in_seconds": None,
+        "auth_reauth_url": None,
+    }
 
 
 def _diagnostics_payload():
@@ -281,7 +287,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_14():
+def test_sessions_contract_version_is_15():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -299,7 +305,9 @@ def test_sessions_contract_version_is_14():
     # now dead code, so this one is not a widening.
     # v14 adds `attached` (#32) — a new bool key on the card (a parked
     # session the user has already reopened), so a v13 consumer is missing it.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 14
+    # v15 adds `auth_state`, `auth_expires_in_seconds`, `auth_reauth_url` to
+    # the PAYLOAD (spec 2026-08-21) — global OAuth state, not per-card.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 15
 
 
 def test_states_enum_includes_parked():
@@ -488,6 +496,65 @@ def test_sessions_payload_rejects_previous_contract_version():
     payload = _sessions_payload()
     payload["contract"] = 2
     with pytest.raises(contracts.ContractError):
+        contracts.validate_sessions_payload(payload)
+
+
+# --------------------------------------------------------------------------
+# /api/sessions — auth state fields (v15, spec 2026-08-21)
+# --------------------------------------------------------------------------
+
+def test_sessions_payload_requires_auth_fields():
+    """v15 payload must include auth_state, auth_expires_in_seconds, auth_reauth_url."""
+    payload = {"contract": 15, "sessions": []}
+    with pytest.raises(contracts.ContractError, match="missing key"):
+        contracts.validate_sessions_payload(payload)
+
+
+def test_sessions_payload_validates_auth_state_enum():
+    payload = {
+        "contract": 15,
+        "sessions": [],
+        "auth_state": "bogus",
+        "auth_expires_in_seconds": None,
+        "auth_reauth_url": None,
+    }
+    with pytest.raises(contracts.ContractError, match="auth_state"):
+        contracts.validate_sessions_payload(payload)
+
+
+def test_sessions_payload_accepts_valid_auth_fields():
+    for state in ("valid", "expiring", "expired", "unknown"):
+        payload = {
+            "contract": 15,
+            "sessions": [],
+            "auth_state": state,
+            "auth_expires_in_seconds": 86400 if state != "unknown" else None,
+            "auth_reauth_url": None,
+        }
+        contracts.validate_sessions_payload(payload)  # should not raise
+
+
+def test_sessions_payload_rejects_non_int_auth_expires_in_seconds():
+    payload = {
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
+        "sessions": [],
+        "auth_state": "expiring",
+        "auth_expires_in_seconds": "soon",
+        "auth_reauth_url": None,
+    }
+    with pytest.raises(contracts.ContractError, match="auth_expires_in_seconds"):
+        contracts.validate_sessions_payload(payload)
+
+
+def test_sessions_payload_rejects_non_str_auth_reauth_url():
+    payload = {
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
+        "sessions": [],
+        "auth_state": "expired",
+        "auth_expires_in_seconds": None,
+        "auth_reauth_url": 7,
+    }
+    with pytest.raises(contracts.ContractError, match="auth_reauth_url"):
         contracts.validate_sessions_payload(payload)
 
 

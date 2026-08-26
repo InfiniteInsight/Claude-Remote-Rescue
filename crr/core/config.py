@@ -94,7 +94,12 @@ from typing import Any, Mapping
 # tag used to discover peer machines for the Machines panel; default tag:crr)
 # v21: added rescue_auto_open (spec 2026-08-20 — reopen tab reliability:
 # auto-open tabs for restored sessions on boot, skipping the [Y/n] prompt)
-CONFIG_DEFAULTS_VERSION = 21
+# v22: added reauth_success_display_ms (dashboard reauth Task 5 — how long
+# the reauth modal shows "Login refreshed!" before auto-closing once
+# auth_state flips back to valid; same family as flash_ms/notice_seconds,
+# a page timing prior injected via @PLACEHOLDER@, never a bare literal in
+# page.html; see tests/test_priors.py::test_no_bare_numeric_delay_in_page_timers)
+CONFIG_DEFAULTS_VERSION = 22
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -289,6 +294,11 @@ DEFAULTS: dict[str, Any] = {
     "boot_preferred_tailnet": "",
     # launcher (Phase 3)
     "launcher_tag": "tag:crr",
+    # dashboard reauth (Task 5): how long the reauth modal shows "Login
+    # refreshed!" before auto-closing, once a poll reports auth_state back
+    # to "valid". Same family as flash_ms — long enough to read, short
+    # enough not to linger as if it were a state.
+    "reauth_success_display_ms": 2000,
 }
 
 

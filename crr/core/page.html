@@ -124,6 +124,15 @@
     margin-left: 8px; background: transparent; color: #6b7280;
     border: 1px dashed #2f3745; text-transform: none; letter-spacing: 0;
   }
+  /* Auth expiry badge (header bar). This page is dark-only (color-scheme:
+     dark, no @media(prefers-color-scheme) elsewhere), so it uses the brief's
+     dark-mode palette as the single rule set rather than pairing a
+     light-mode base with a dark-mode override the page would never render
+     consistently. */
+  .auth-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .auth-expiring { background: #92400e; color: #fbbf24; }
+  .auth-expired { background: #991b1b; color: #fca5a5; }
+  .auth-reauth { background: #78350f; color: #fbbf24; }
   /* Per-session auto-kick toggle button (spec 2026-08-07, Slice 3): visually
      distinct from the destructive/neutral action buttons so it doesn't read
      as "Kick" or "Close" at a glance. Disabled state (global switch off)
@@ -350,6 +359,7 @@
   <!-- Answers "am I good to leave the desk?" without reading every card —
        the question the whole reachability feature exists to serve. -->
   <span class="meta" id="reachableSummary"></span>
+  <span id="authBadge"></span>
 </header>
 <div id="key">
   <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span><span class="k-parked kterm" data-help="Running inside a detached tmux session — crr restored it after a reboot. The conversation is alive; Reopen brings it back into a terminal tab, or attach with: tmux attach -t &lt;name&gt;.">restored</span><span class="k-attached kterm" data-help="A restored session you have already reopened — a terminal (tmux client) is attached to it. Lets you tell, in a long restore list, which conversations are already back from those still parked.">attached</span></span>
@@ -447,6 +457,19 @@
     </div>
   </div>
 </div>
+<div id="reauthModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:100; align-items:center; justify-content:center;">
+  <div style="background:#12161d; border:1px solid #2f3745; border-radius:8px; padding:20px; max-width:400px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.6); color:#e6e6e6;">
+    <h3 style="margin:0 0 12px;">Re-authenticate Claude Code</h3>
+    <p id="reauthStatus">Starting auth flow...</p>
+    <p><a id="reauthUrl" href="#" target="_blank" rel="noopener" style="word-break:break-all; color:#9fb0f5;"></a></p>
+    <div id="reauthCodeSection" style="display:none;">
+      <label>Paste the login code:</label>
+      <input id="reauthCodeInput" type="text" style="width:100%; padding:6px; margin:8px 0; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;" />
+      <button id="reauthSubmitBtn" onclick="submitReauthCode()">Submit code</button>
+    </div>
+    <button onclick="cancelReauth()" style="margin-top:8px;">Cancel</button>
+  </div>
+</div>
 <div id="sessions"></div>
 <div id="empty" style="display:none">No journaled sessions.</div>
 
@@ -462,6 +485,7 @@ var NOTICE_MS = @NOTICE_MS@;
 var RELOAD_DELAY_MS = @RELOAD_DELAY_MS@;
 var DIAG_ERR_CAP = @DIAG_ERR_CAP@;
 var FILTER_DEBOUNCE_MS = @FILTER_DEBOUNCE_MS@;
+var REAUTH_SUCCESS_MS = @REAUTH_SUCCESS_MS@;
 
 function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
@@ -1151,8 +1175,134 @@ function renderStacked(list, sessions, uncertain, groupColor, latest) {
   });
 }
 
+// Auth expiry badge (header) + reauth modal wiring. Driven entirely by
+// top-level fields on the /api/sessions payload (auth_state,
+// auth_expires_in_seconds, auth_reauth_url) — not per-session, so it is
+// rendered once per poll rather than per card.
+function renderAuthBadge(data) {
+  var badge = document.getElementById('authBadge');
+  if (!badge) return;
+  var state = data.auth_state;
+  var expires = data.auth_expires_in_seconds;
+  var url = data.auth_reauth_url;
+
+  if (state === 'valid' || state === 'unknown') {
+    badge.textContent = '';
+    badge.className = '';
+    // Auto-close reauth modal if auth just became valid
+    var modal = document.getElementById('reauthModal');
+    if (modal && modal.style.display === 'flex') {
+      document.getElementById('reauthStatus').textContent = 'Login refreshed!';
+      setTimeout(function() { modal.style.display = 'none'; }, REAUTH_SUCCESS_MS);
+    }
+    return;
+  }
+
+  if (url) {
+    badge.className = 'auth-badge auth-reauth';
+    badge.textContent = 'Reauth in progress…';
+    // Populate modal with URL from poll (non-blocking flow)
+    var modal = document.getElementById('reauthModal');
+    if (modal && modal.style.display === 'flex') {
+      document.getElementById('reauthStatus').textContent = 'Open this link to sign in:';
+      var a = document.getElementById('reauthUrl');
+      a.textContent = url;
+      a.setAttribute('href', url);
+      document.getElementById('reauthCodeSection').style.display = 'block';
+    }
+    return;
+  }
+
+  if (state === 'expiring') {
+    badge.className = 'auth-badge auth-expiring';
+    badge.textContent = 'Login expires in ' + formatDuration(expires);
+    return;
+  }
+
+  if (state === 'expired') {
+    badge.className = 'auth-badge auth-expired';
+    badge.innerHTML = '';
+    var text = document.createTextNode('Login expired ');
+    badge.appendChild(text);
+    var btn = document.createElement('button');
+    btn.textContent = 'Reauth';
+    btn.onclick = startReauth;
+    btn.style.cssText = 'margin-left:6px; padding:2px 8px; border-radius:3px; border:1px solid currentColor; background:transparent; color:inherit; cursor:pointer;';
+    badge.appendChild(btn);
+  }
+}
+
+function formatDuration(seconds) {
+  if (seconds == null || seconds <= 0) return '—';
+  var d = Math.floor(seconds / 86400);
+  var h = Math.floor((seconds % 86400) / 3600);
+  if (d > 0) return d + 'd ' + h + 'h';
+  var m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function startReauth() {
+  var modal = document.getElementById('reauthModal');
+  modal.style.display = 'flex';
+  document.getElementById('reauthStatus').textContent = 'Starting auth flow…';
+  document.getElementById('reauthCodeSection').style.display = 'none';
+  document.getElementById('reauthUrl').textContent = '';
+  document.getElementById('reauthUrl').removeAttribute('href');
+
+  fetch('/api/reauth', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}'
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.ok) {
+      // Non-blocking: URL arrives via auth_reauth_url on next poll.
+      document.getElementById('reauthStatus').textContent = 'Waiting for auth URL…';
+    } else {
+      document.getElementById('reauthStatus').textContent = 'Error: ' + data.message;
+    }
+  })
+  .catch(function() {
+    document.getElementById('reauthStatus').textContent = 'Failed to start reauth.';
+  });
+}
+
+function submitReauthCode() {
+  var code = document.getElementById('reauthCodeInput').value.trim();
+  if (!code) return;
+  document.getElementById('reauthSubmitBtn').disabled = true;
+  document.getElementById('reauthStatus').textContent = 'Submitting code…';
+
+  fetch('/api/reauth-code', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: code})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.ok) {
+      // Non-blocking: success will show when auth_state flips to
+      // "valid" on the next poll. Keep modal open with status message.
+      document.getElementById('reauthStatus').textContent = 'Code submitted — waiting for login to refresh…';
+    } else {
+      document.getElementById('reauthStatus').textContent = 'Error: ' + data.message;
+      document.getElementById('reauthSubmitBtn').disabled = false;
+    }
+  })
+  .catch(function() {
+    document.getElementById('reauthStatus').textContent = 'Failed to submit code.';
+    document.getElementById('reauthSubmitBtn').disabled = false;
+  });
+}
+
+function cancelReauth() {
+  document.getElementById('reauthModal').style.display = 'none';
+}
+
 function render(payload) {
   if (payload) lastSessions = (payload.sessions) || [];
+  if (payload) renderAuthBadge(payload);
   var total = lastSessions;
   var visible = total.filter(passesFilter);
   var list = document.getElementById("sessions");

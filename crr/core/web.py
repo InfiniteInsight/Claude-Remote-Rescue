@@ -41,7 +41,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 59  # v59: Reopen button on LIVE cards with tmux_session
+PAGE_VERSION = 60  # v60: Auth expiry badge + reauth modal
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -51,6 +51,7 @@ _RELOAD_DELAY_MS_PLACEHOLDER = "@RELOAD_DELAY_MS@"
 _DIAG_ERR_CAP_PLACEHOLDER = "@DIAG_ERR_CAP@"
 _FLASH_MS_PLACEHOLDER = "@FLASH_MS@"
 _FILTER_DEBOUNCE_MS_PLACEHOLDER = "@FILTER_DEBOUNCE_MS@"
+_REAUTH_SUCCESS_MS_PLACEHOLDER = "@REAUTH_SUCCESS_MS@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
 
@@ -114,6 +115,7 @@ def render_page(
     diag_error_display_cap: int | None = None,
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
+    reauth_success_display_ms: int | None = None,
 ) -> str:
     """Serve-time substitution of version + configured intervals into the page."""
     poll = cfg.DEFAULTS["dashboard_poll_seconds"] if poll_seconds is None else poll_seconds
@@ -134,6 +136,11 @@ def render_page(
     debounce = (
         cfg.DEFAULTS["filter_debounce_ms"] if filter_debounce_ms is None else filter_debounce_ms
     )
+    reauth_success = (
+        cfg.DEFAULTS["reauth_success_display_ms"]
+        if reauth_success_display_ms is None
+        else reauth_success_display_ms
+    )
     return (
         load_page()
         .replace(_VERSION_PLACEHOLDER, str(version))
@@ -145,6 +152,7 @@ def render_page(
         .replace(_DIAG_ERR_CAP_PLACEHOLDER, str(int(diag_err_cap)))
         .replace(_FLASH_MS_PLACEHOLDER, str(int(flash)))
         .replace(_FILTER_DEBOUNCE_MS_PLACEHOLDER, str(int(debounce)))
+        .replace(_REAUTH_SUCCESS_MS_PLACEHOLDER, str(int(reauth_success)))
     )
 
 
@@ -245,6 +253,8 @@ def handle_request(
     settings_writer: Callable[[Any], dict[str, Any]] | None = None,
     qr_svg_provider: Callable[[], str | None] | None = None,
     machines_provider: Callable[[], dict[str, Any]] | None = None,
+    reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
+    reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -257,6 +267,7 @@ def handle_request(
     diag_error_display_cap: int | None = None,
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
+    reauth_success_display_ms: int | None = None,
 ) -> Response:
     # Host allowlist first — before any routing or work (DNS-rebinding defense).
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
@@ -269,6 +280,7 @@ def handle_request(
                 confirm_arm_seconds=confirm_arm_seconds, notice_seconds=notice_seconds,
                 reload_delay_ms=reload_delay_ms, diag_error_display_cap=diag_error_display_cap,
                 flash_ms=flash_ms, filter_debounce_ms=filter_debounce_ms,
+                reauth_success_display_ms=reauth_success_display_ms,
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
         if path == "/api/sessions":
@@ -481,6 +493,42 @@ def handle_request(
             if sid_action_provider is None:
                 return _plain(503, "actions unavailable")
             ok, message, degraded = sid_action_provider(op, sid)
+            return _json(200 if ok else 409, _action_result(ok, message, degraded))
+
+        if path == "/api/reauth":
+            # Same CSRF posture as /api/action — host allowlist already ran;
+            # JSON content-type gate; no CORS headers are ever emitted.
+            # NON-BLOCKING (spec 2026-08-21): the provider only spawns the
+            # tmux pane running `claude auth login` and returns immediately —
+            # the OAuth URL surfaces via `auth_reauth_url` on the NEXT
+            # /api/sessions poll, not on this response, so this handler never
+            # holds the socket open waiting for tmux/claude to print anything.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            if reauth_provider is None:
+                return _plain(503, "reauth unavailable")
+            ok, message, degraded = reauth_provider()
+            return _json(200 if ok else 409, _action_result(ok, message, degraded))
+
+        if path == "/api/reauth-code":
+            # Same CSRF posture and NON-BLOCKING contract as /api/reauth: the
+            # provider sends the code into the pane and returns immediately.
+            # Success (credentials refreshed -> auth_state flips to "valid")
+            # is detected on a LATER poll, never by this response.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            code = data.get("code") if isinstance(data, dict) else None
+            if not isinstance(code, str) or not code:
+                return _plain(400, 'expected {"code": "<string>"}')
+            if reauth_code_provider is None:
+                return _plain(503, "reauth unavailable")
+            ok, message, degraded = reauth_code_provider(code)
             return _json(200 if ok else 409, _action_result(ok, message, degraded))
 
         return _plain(404, "not found")
