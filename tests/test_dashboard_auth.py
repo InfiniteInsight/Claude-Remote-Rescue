@@ -226,3 +226,9 @@ def test_login_page_includes_error_message():
 def test_login_page_no_error_by_default():
     html = dashboard_auth.login_page()
     assert 'id="error"' in html or "error" not in html.lower().split("<form")[0]
+
+
+def test_login_page_escapes_error_html():
+    html = dashboard_auth.login_page(error="<script>x</script>")
+    assert "<script>x</script>" not in html
+    assert "&lt;script&gt;" in html

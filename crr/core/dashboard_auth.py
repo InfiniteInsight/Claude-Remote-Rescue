@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html as html_mod
 import os
 import secrets
 import struct
@@ -192,7 +193,7 @@ def login_page(error: str = "") -> str:
     """Self-contained HTML login page. Never includes dashboard content."""
     error_html = (
         f'<p id="error" style="color:#fca5a5; margin:0 0 12px;">'
-        f'{error}</p>'
+        f'{html_mod.escape(error)}</p>'
         if error else ""
     )
     return f"""<!DOCTYPE html>
