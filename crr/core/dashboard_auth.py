@@ -186,3 +186,65 @@ class LoginRateLimiter:
 
     def reset(self) -> None:
         self._failures = 0
+
+
+def login_page(error: str = "") -> str:
+    """Self-contained HTML login page. Never includes dashboard content."""
+    error_html = (
+        f'<p id="error" style="color:#fca5a5; margin:0 0 12px;">'
+        f'{error}</p>'
+        if error else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crr — login</title>
+<style>
+  body {{ margin:0; background:#0d1117; color:#cdd3dd; font-family:system-ui, -apple-system, sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; }}
+  .box {{ background:#12161d; border:1px solid #2f3745; border-radius:8px; padding:28px; max-width:360px; width:90%; }}
+  h1 {{ font-size:18px; margin:0 0 16px; color:#e6e6e6; }}
+  label {{ display:block; font-size:13px; margin:0 0 6px; color:#8a93a2; }}
+  input[type=password] {{ width:100%; padding:8px 10px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px; font:inherit; font-size:14px; }}
+  button {{ margin-top:14px; width:100%; padding:8px; background:#2563eb; color:#fff; border:none; border-radius:6px; font:inherit; font-size:14px; cursor:pointer; }}
+  button:hover {{ background:#1d4ed8; }}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>crr dashboard</h1>
+  {error_html}
+  <form method="POST" action="/api/login" id="loginForm">
+    <label for="pp">Passphrase</label>
+    <input type="password" id="pp" name="passphrase" autofocus required>
+    <button type="submit">Log in</button>
+  </form>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', function(e) {{
+      e.preventDefault();
+      var pp = document.getElementById('pp').value;
+      fetch('/api/login', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{passphrase: pp}})
+      }}).then(function(r) {{
+        if (r.ok) location.href = '/';
+        else return r.json();
+      }}).then(function(d) {{
+        if (d && d.error) {{
+          var el = document.getElementById('error');
+          if (!el) {{
+            el = document.createElement('p');
+            el.id = 'error';
+            el.style.cssText = 'color:#fca5a5; margin:0 0 12px;';
+            document.querySelector('.box').insertBefore(el, document.getElementById('loginForm'));
+          }}
+          el.textContent = d.error;
+        }}
+      }});
+    }});
+  </script>
+</div>
+</body>
+</html>"""

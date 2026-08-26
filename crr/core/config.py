@@ -99,7 +99,9 @@ from typing import Any, Mapping
 # auth_state flips back to valid; same family as flash_ms/notice_seconds,
 # a page timing prior injected via @PLACEHOLDER@, never a bare literal in
 # page.html; see tests/test_priors.py::test_no_bare_numeric_delay_in_page_timers)
-CONFIG_DEFAULTS_VERSION = 22
+# v23: added dashboard_session_hours (dashboard login — optional passphrase
+# auth gate; see crr.core.dashboard_auth)
+CONFIG_DEFAULTS_VERSION = 23
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -299,6 +301,11 @@ DEFAULTS: dict[str, Any] = {
     # to "valid". Same family as flash_ms — long enough to read, short
     # enough not to linger as if it were a state.
     "reauth_success_display_ms": 2000,
+    # dashboard login (spec 2026-08-26): how long a login session cookie
+    # stays valid. 720 hours = 30 days. Changing this does not invalidate
+    # existing sessions — it only affects the Max-Age on NEW cookies and
+    # the server-side expiry check.
+    "dashboard_session_hours": 720,
 }
 
 

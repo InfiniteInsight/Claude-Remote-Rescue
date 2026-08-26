@@ -209,3 +209,20 @@ def test_rate_limiter_resets_on_success():
         rl.record_failure()
     rl.reset()
     assert rl.check() == 0.0
+
+
+def test_login_page_returns_html():
+    html = dashboard_auth.login_page()
+    assert "<form" in html
+    assert "passphrase" in html.lower()
+    assert "<title>" in html
+
+
+def test_login_page_includes_error_message():
+    html = dashboard_auth.login_page(error="bad password")
+    assert "bad password" in html
+
+
+def test_login_page_no_error_by_default():
+    html = dashboard_auth.login_page()
+    assert 'id="error"' in html or "error" not in html.lower().split("<form")[0]
