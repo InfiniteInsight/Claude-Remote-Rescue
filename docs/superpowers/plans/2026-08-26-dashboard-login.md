@@ -543,7 +543,7 @@ class LoginRateLimiter:
 
     def check(self) -> float:
         """Seconds to wait before the next attempt is allowed. 0.0 = ok."""
-        if self._failures <= 5:
+        if self._failures < 5:
             return 0.0
         return min(2 ** (self._failures - 5), 300)
 
