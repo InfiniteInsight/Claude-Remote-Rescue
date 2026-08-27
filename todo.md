@@ -8,8 +8,10 @@
 ## Up next
 
 - [x] Dashboard reauth — PR #106, merged 2026-08-26
-- [ ] Optional dashboard login even on tailnet — app-level auth gate
-      (token/passphrase) so CRR doesn't depend on the network layer for security
+- [x] Dashboard login — PR #107, merged 2026-08-27. Default-on passphrase auth
+      with explicit opt-out (blocking setup page on first visit), fail-closed on
+      corrupt store, delay-then-verify rate limiting. App-level gate independent
+      of the network layer.
 - [ ] Pluggable tunnel support — abstract tunnel lifecycle (start/stop/health-check/
       advertise-URL) so CRR can manage Cloudflare Tunnel the same way it manages
       Tailscale. Cloudflare free tier covers tunnels + Access (Zero Trust) for
