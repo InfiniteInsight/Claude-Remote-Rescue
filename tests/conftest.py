@@ -66,3 +66,32 @@ def _boot_identity_on_unsupported_platforms(request, monkeypatch):
     if platform.system() in ("Linux", "Darwin"):
         return
     monkeypatch.setattr(boot_identity, "detect", lambda: _FakeBootIdentity())
+
+
+@pytest.fixture(autouse=True)
+def _forbid_unstubbed_exec(monkeypatch):
+    """Make a reached-but-unstubbed exec seam fail loudly, not silently.
+
+    ``crr.cli._exec`` is ``os.execvp``: reaching it replaces the running
+    process. In a test that means the pytest process itself is overwritten —
+    no traceback, no failure summary, the suite just stops mid-run with the
+    remaining tests never reported. That is precisely how the Ubuntu CI job
+    went dark for days (a rescue-check test drove the real reopen path with
+    the seam live). Defaulting the seam to a raise converts that whole failure
+    class into an ordinary, named test failure.
+
+    Tests that genuinely exercise exec override this with their own
+    ``monkeypatch.setattr(cli, "_exec", ...)``; that runs after this fixture
+    and wins for the duration of the test.
+    """
+    from crr import cli
+
+    def _forbidden(*args, **kwargs):
+        raise RuntimeError(
+            "cli._exec (os.execvp) reached without being stubbed: this test "
+            "drove a real exec path and would have replaced the pytest process. "
+            "Stub cli._exec in the test (see the rescue-check tests for the "
+            "pattern)."
+        )
+
+    monkeypatch.setattr(cli, "_exec", _forbidden)
