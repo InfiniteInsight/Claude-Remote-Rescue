@@ -4318,13 +4318,15 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 "Auth store is corrupted — repair or delete "
                 "dashboard_auth.json on the server."
             ), {}
-        # UNDECIDED or OPTED_OUT (spec 2026-08-26 revision): no passphrase
-        # has ever been set, so there is nothing to verify against. Checked
-        # before the rate limiter for the same reason as the corrupt check
-        # above — this isn't a guessed passphrase, so it must not consume a
-        # rate-limit slot or pay the backoff delay, and "Incorrect
-        # passphrase" (what a bare `verify()` failure would say — no hash
-        # ever compares equal) would misname the real cause.
+        # UNDECIDED or OPTED_OUT (spec 2026-08-26 revision): either no
+        # passphrase has ever been set, or `disable()` cleared the old
+        # hash/salt/secret along with it (security-hygiene fix) — either
+        # way there is nothing to verify against. Checked before the rate
+        # limiter for the same reason as the corrupt check above — this
+        # isn't a guessed passphrase, so it must not consume a rate-limit
+        # slot or pay the backoff delay, and "Incorrect passphrase" (what a
+        # bare `verify()` failure would say — no hash ever compares equal)
+        # would misname the real cause.
         if auth_store.signing_secret() is None:
             return False, "Login not configured", {}
         # Delay-then-verify, not delay-then-reject: the correct passphrase

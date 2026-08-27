@@ -5770,6 +5770,41 @@ class TestDashboardLoginStateMachine:
         assert b'id="sessions"' in resp2.body
         assert b"Secure this dashboard" not in resp2.body
 
+    def test_disable_clears_credential_material_old_passphrase_no_longer_logs_in(
+        self, tmp_path, monkeypatch,
+    ):
+        """Security-hygiene fix: once disabled, the old passphrase must not
+        still work against `/api/login` — that would be a live, rate-limited
+        oracle for a passphrase the user believes they turned off, and it
+        would mint a real (if useless) session cookie. After disable, a
+        login attempt with the old passphrase must get the same "Login not
+        configured" answer as a fresh install, and no Set-Cookie."""
+        captured = _web_captured(monkeypatch, tmp_path)
+        _dispatch_web(
+            captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+        )
+        login_resp = _dispatch_web(
+            captured, "POST", "/api/login", headers=_JSON_HDR,
+            body=json.dumps({"passphrase": "x" * 8}).encode(),
+        )
+        cookie_value = login_resp.headers["Set-Cookie"].split(";")[0]
+
+        disable_resp = _dispatch_web(
+            captured, "POST", "/api/dashboard-auth",
+            headers={**_JSON_HDR, "Cookie": cookie_value},
+            body=json.dumps({"op": "disable", "current": "x" * 8}).encode(),
+        )
+        assert json.loads(disable_resp.body)["ok"] is True
+
+        resp = _dispatch_web(
+            captured, "POST", "/api/login", headers=_JSON_HDR,
+            body=json.dumps({"passphrase": "x" * 8}).encode(),
+        )
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "Login not configured"}
+        assert "Set-Cookie" not in resp.headers
+
 
 def test_do_kick_records_the_attempt_even_when_ops_kick_raises(tmp_path, monkeypatch):
     """`_do_kick` must count the attempt even on an exception — same

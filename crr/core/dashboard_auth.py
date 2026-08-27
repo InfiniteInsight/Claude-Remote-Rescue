@@ -192,17 +192,25 @@ class DashboardAuthStore:
     def disable(self, current: str) -> None:
         if not self.verify(current):
             raise PassphraseError("current passphrase is incorrect")
-        data = self._read()
-        data["login_enabled"] = False
+        # Security-hygiene fix: write a fresh dict with NO passphrase_hash /
+        # passphrase_salt / signing_secret, rather than `_read()`-then-mutate
+        # (which retained them). Nothing downstream needs the old material —
+        # `enable()` already writes a brand-new hash+secret on re-enable —
+        # and retaining it left `/api/login` able to keep verifying the old
+        # passphrase (a rate-limited oracle) and mint a real session cookie
+        # even while "disabled".
+        #
         # Disabling IS opting out (spec 2026-08-26 revision, default-secure
-        # bootstrap): without this, a user who just authenticated to turn
-        # login off would land back in UNDECIDED (login_enabled=False,
-        # bootstrap_dismissed=False) and be immediately re-blocked by the
-        # setup gate on their very next request — turning "disable" into a
-        # self-lockout. Setting bootstrap_dismissed here routes them to
+        # bootstrap): without bootstrap_dismissed=True, a user who just
+        # authenticated to turn login off would land back in UNDECIDED
+        # (login_enabled=False, bootstrap_dismissed=False) and be immediately
+        # re-blocked by the setup gate on their very next request — turning
+        # "disable" into a self-lockout. Setting it here routes them to
         # OPTED_OUT instead, which is what "disable" actually means.
-        data["bootstrap_dismissed"] = True
-        self._write(data)
+        self._write({
+            "login_enabled": False,
+            "bootstrap_dismissed": True,
+        })
 
     def dismiss_bootstrap(self) -> None:
         data = self._read()

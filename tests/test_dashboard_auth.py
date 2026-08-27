@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 
 import pytest
@@ -153,6 +154,27 @@ def test_store_disable_transitions_to_opted_out_not_undecided(tmp_path):
     store.disable("my-passphrase")
     assert store.login_enabled() is False
     assert store.bootstrap_dismissed() is True
+
+
+def test_store_disable_clears_credential_material(tmp_path):
+    """Security-hygiene fix: `disable()` must not retain the old
+    passphrase_hash/passphrase_salt/signing_secret in dashboard_auth.json.
+    Retaining them would leave a rate-limited oracle for the old
+    passphrase — POST /api/login could still verify against it and mint a
+    (useless but real) session cookie — even though the dashboard is
+    supposedly opted out of login. `enable()` always writes a brand-new
+    hash+secret, so nothing downstream needs the old material to survive."""
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    store.disable("my-passphrase")
+
+    raw = json.loads((tmp_path / dashboard_auth.FILENAME).read_text())
+    assert "passphrase_hash" not in raw
+    assert "passphrase_salt" not in raw
+    assert "signing_secret" not in raw
+
+    assert store.verify("my-passphrase") is False
+    assert store.signing_secret() is None
 
 
 def test_store_disable_rejects_wrong_passphrase(tmp_path):

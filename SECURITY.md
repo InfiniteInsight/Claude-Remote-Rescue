@@ -75,8 +75,12 @@ allowlist above is what keeps strangers off it in the first place.
 - **A fixed set of routes stay unauthenticated even with login enabled or
   pending**: `GET /api/version`, `/manifest.webmanifest`, `/sw.js`, and the
   PWA icons (needed for install and the version self-heal to work before
-  login), plus `POST /api/login` itself (which, with no passphrase
-  configured yet, answers "Login not configured" rather than checking one).
+  login), plus `POST /api/login` itself (which, with no passphrase currently
+  configured — either never set, or cleared by `disable()` — answers "Login
+  not configured" rather than checking one; `disable()` deliberately drops
+  the old passphrase_hash/passphrase_salt/signing_secret from
+  `dashboard_auth.json` so there is nothing left to check an old passphrase
+  against).
   Every other route requires a valid session cookie once login is on, or is
   blocked outright while the setup gate is pending.
 - **Rate limiting**: a global (not per-IP — crr doesn't see the real client
