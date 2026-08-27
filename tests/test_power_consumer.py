@@ -537,10 +537,14 @@ def _run_awake_and_signal_twice(tmp_path, sig, poll_seconds=30, ladder=1.0, gap=
     )
     output_lines = []
     try:
-        assert _wait_for_marker(proc, "hold", output_lines, timeout=5), (
+        # Startup-bound guard, not a behavior timeout: the child must spawn a
+        # fresh interpreter and import crr before its first poll, which can run
+        # slow on a loaded CI box. The wait returns the instant the marker
+        # appears, so a generous ceiling only affects the hang case.
+        assert _wait_for_marker(proc, "hold", output_lines, timeout=30), (
             f"child never reached its first poll; output so far: {output_lines}")
         proc.send_signal(sig)   # first stop signal, while idling between polls
-        assert _wait_for_marker(proc, "release-start", output_lines, timeout=5), (
+        assert _wait_for_marker(proc, "release-start", output_lines, timeout=15), (
             f"child never entered release(); output so far: {output_lines}")
         time.sleep(gap)   # let release() get partway through its ladder
         proc.send_signal(sig)   # second stop signal, mid-release
@@ -1297,7 +1301,12 @@ def test_power_sees_a_real_separate_awake_process_holding(tmp_path):
     )
     output_lines = []
     try:
-        assert _wait_for_marker(awake_proc, "hold", output_lines, timeout=5), (
+        # Startup-bound guards, not behavior timeouts: both children spawn a
+        # fresh interpreter and import crr before doing anything. The marker
+        # wait returns the instant "hold" appears, and the power sample exits
+        # as soon as it has read the state, so generous ceilings only bite the
+        # hang case (they were the source of intermittent CI failures at 5/10s).
+        assert _wait_for_marker(awake_proc, "hold", output_lines, timeout=30), (
             f"awake child never reached its first poll; output so far: {output_lines}")
 
         power_script = tmp_path / "run_power.py"
@@ -1305,7 +1314,7 @@ def test_power_sees_a_real_separate_awake_process_holding(tmp_path):
             _POWER_CROSS_PROCESS_HARNESS.format(tmp_path=str(tmp_path)))
         power_result = subprocess.run(
             [sys.executable, str(power_script)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=30,
         )
     finally:
         awake_proc.terminate()

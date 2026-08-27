@@ -3676,6 +3676,15 @@ def test_rescue_check_revive_pass_runs_at_most_once_per_boot(tmp_path, monkeypat
     assert len(revive_calls) == 1, "second rescue-check must NOT re-run the revive pass"
 
 
+def test_exec_seam_is_forbidden_unless_a_test_stubs_it():
+    """The conftest autouse guard defaults cli._exec to a raise, so a test that
+    reaches the exec seam without stubbing fails loudly instead of replacing
+    the pytest process. Regression guard for the Ubuntu-CI hard-kill; this test
+    deliberately does NOT stub _exec, to assert the default is protective."""
+    with pytest.raises(RuntimeError, match="os.execvp"):
+        cli._exec("echo", ["echo", "hi"])
+
+
 def test_repair_check_prints_relaunch_kind_and_sid(tmp_path, monkeypatch, capsys):
     from crr.core.flags import FlagStore
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
