@@ -5557,6 +5557,26 @@ def test_login_provider_reports_corrupt_store_before_verifying(tmp_path, monkeyp
     assert sleeps == []
 
 
+def test_login_provider_reports_not_configured_on_a_fresh_store(tmp_path, monkeypatch):
+    """UNDECIDED/OPTED_OUT (spec 2026-08-26 revision): no passphrase has
+    ever been set, so `POST /api/login` must say so — not fall through to
+    `verify()` (which would fail against a nonexistent hash and misreport
+    as "Incorrect passphrase") — and, like the corrupt-store case above,
+    this isn't a guessed passphrase: it must not touch the rate limiter
+    (no `record_failure`, no `sleep`) or a fresh install's first mistyped
+    login attempt would already be burning rate-limit budget."""
+    captured = _web_captured(monkeypatch, tmp_path)  # no enable(), no corrupt
+
+    sleeps = []
+    monkeypatch.setattr("crr.cli.time.sleep", lambda s: sleeps.append(s))
+    ok, error, headers = captured["login_provider"]("anything")
+
+    assert ok is False
+    assert error == "Login not configured"
+    assert headers == {}
+    assert sleeps == []
+
+
 def test_bootstrap_state_fn_reports_login_enabled_true_when_corrupt(tmp_path, monkeypatch):
     """Corrupt must not show the bootstrap prompt: the front end shows it
     only when `login_enabled === false && bootstrap_dismissed === false`
