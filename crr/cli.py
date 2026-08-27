@@ -53,7 +53,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
+from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -3868,6 +3868,13 @@ def make_web_handler(
     machines_provider: Callable[[], dict] | None = None,
     reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
+    auth_enabled_fn: Callable[[], bool] | None = None,
+    auth_check: Callable[[str], bool] | None = None,
+    setup_mode_fn: Callable[[], bool] | None = None,
+    login_provider: Callable[[str], tuple[bool, str, dict[str, str]]] | None = None,
+    logout_provider: Callable[[], dict[str, str]] | None = None,
+    dashboard_auth_provider: Callable[[dict], tuple[bool, str]] | None = None,
+    bootstrap_state_fn: Callable[[], dict] | None = None,
     poll_seconds: int | None = None,
     version_check_seconds: int | None = None,
     confirm_arm_seconds: int | None = None,
@@ -3882,6 +3889,16 @@ def make_web_handler(
 
     Thin adapter: it only marshals bytes to/from ``web.handle_request``
     (the pure core handler that owns routing + the security gate).
+
+    ``auth_enabled_fn`` is re-evaluated on EVERY request (not cached at
+    handler construction) — enabling/disabling login from the Settings
+    modal or the bootstrap prompt takes effect on the very next poll, with
+    no service restart. ``auth_enabled`` is only ever forwarded to
+    ``web.handle_request`` alongside a live ``auth_check`` (see the `and`
+    below) — this is the one choke point all requests pass through, so it
+    is structurally impossible for the gate to fire with no way to
+    validate a cookie (spec 2026-08-26, Task 4 review: "silently fails
+    open if auth_enabled=True but auth_check=None").
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -3889,6 +3906,8 @@ def make_web_handler(
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             path, _, query = self.path.partition("?")
+            auth_enabled = bool(auth_enabled_fn()) if auth_enabled_fn else False
+            setup_mode = bool(setup_mode_fn()) if setup_mode_fn else False
             resp = web.handle_request(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
@@ -3906,6 +3925,16 @@ def make_web_handler(
                 machines_provider=machines_provider,
                 reauth_provider=reauth_provider,
                 reauth_code_provider=reauth_code_provider,
+                auth_enabled=auth_enabled and auth_check is not None,
+                auth_check=auth_check,
+                # web.handle_request's gate checks auth_enabled first (elif
+                # setup_mode second), so CORRUPT/ENABLED always wins even if
+                # setup_mode is also true here — no extra guard needed.
+                setup_mode=setup_mode,
+                login_provider=login_provider,
+                logout_provider=logout_provider,
+                dashboard_auth_provider=dashboard_auth_provider,
+                bootstrap_state=bootstrap_state_fn() if bootstrap_state_fn else None,
                 query=query,
                 allowed_hosts=allowed_hosts,
                 allowed_suffixes=allowed_suffixes,
@@ -4248,6 +4277,156 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # cached at startup would keep answering "no tab" for the life of the
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
     ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+
+    # --- dashboard login (spec 2026-08-26, corrupt-store handling revised
+    # to fail closed) --------------------------------------------------------
+    # `rate_limiter` is per-process, in-memory state — a service restart
+    # resets it, same as `_reauth_active` above. `auth_enabled_fn` below
+    # (`login_enabled() OR is_corrupt()`) is re-read from disk on every
+    # request (see `make_web_handler` docstring): flipping login on/off from
+    # the Settings or bootstrap modal, or a store going corrupt mid-run,
+    # takes effect on the very next poll, with no service restart required.
+    auth_store = dashboard_auth.DashboardAuthStore(sd)
+    rate_limiter = dashboard_auth.LoginRateLimiter()
+
+    def auth_check(cookie_value: str) -> bool:
+        # Explicit corrupt check (fail-closed, spec 2026-08-26 revision):
+        # `signing_secret()` already returns None on a corrupt store (its
+        # `_read()` returns {} for corrupt same as absent), which alone
+        # would make this return False — but that's an accident of a
+        # method built for a different purpose. Checking `is_corrupt()`
+        # directly documents the fail-closed intent and doesn't depend on
+        # `signing_secret()` keeping that shape.
+        if auth_store.is_corrupt():
+            return False
+        secret = auth_store.signing_secret()
+        if secret is None:
+            return False
+        max_age_seconds = config.get("dashboard_session_hours") * 3600
+        return dashboard_auth.validate_token(cookie_value, secret, max_age_seconds)
+
+    def login_provider(passphrase: str) -> tuple[bool, str, dict[str, str]]:
+        # Corrupt store (fail-closed, spec 2026-08-26 revision): checked
+        # before the rate limiter and before verification. This is not a
+        # guessed passphrase, so it must not consume a rate-limit slot
+        # (`record_failure`) or pay the backoff delay — and the message
+        # must name the real cause instead of the misleading "Incorrect
+        # passphrase" (recovery is deliberately shell-only: repair/delete
+        # the file on the host).
+        if auth_store.is_corrupt():
+            return False, (
+                "Auth store is corrupted — repair or delete "
+                "dashboard_auth.json on the server."
+            ), {}
+        # UNDECIDED or OPTED_OUT (spec 2026-08-26 revision): either no
+        # passphrase has ever been set, or `disable()` cleared the old
+        # hash/salt/secret along with it (security-hygiene fix) — either
+        # way there is nothing to verify against. Checked before the rate
+        # limiter for the same reason as the corrupt check above — this
+        # isn't a guessed passphrase, so it must not consume a rate-limit
+        # slot or pay the backoff delay, and "Incorrect passphrase" (what a
+        # bare `verify()` failure would say — no hash ever compares equal)
+        # would misname the real cause.
+        if auth_store.signing_secret() is None:
+            return False, "Login not configured", {}
+        # Delay-then-verify, not delay-then-reject: the correct passphrase
+        # must still succeed once the rate limit engages, or 5 wrong guesses
+        # permanently lock the real owner out (only a service restart used
+        # to clear `_failures`). The `time.sleep(delay)` IS the defense — a
+        # brute-force client pays the growing delay on every attempt, right
+        # or wrong. We don't promise a "try again in N seconds" wait that
+        # doesn't actually gate anything (the previous message was false:
+        # there's no timestamp, so nothing enforces N seconds later).
+        delay = rate_limiter.check()
+        if delay > 0:
+            time.sleep(delay)
+        if not auth_store.verify(passphrase):
+            rate_limiter.record_failure()
+            return False, "Incorrect passphrase", {}
+        rate_limiter.reset()
+        secret = auth_store.signing_secret()
+        if secret is None:
+            return False, "Login not configured", {}
+        token = dashboard_auth.create_token(secret)
+        max_age_seconds = config.get("dashboard_session_hours") * 3600
+        cookie = (f"{dashboard_auth.COOKIE_NAME}={token}; "
+                  f"HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_seconds}")
+        return True, "", {"Set-Cookie": cookie}
+
+    def logout_provider() -> dict[str, str]:
+        cookie = (f"{dashboard_auth.COOKIE_NAME}=; "
+                  f"HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+        return {"Set-Cookie": cookie}
+
+    def dashboard_auth_provider(data: dict) -> tuple[bool, str]:
+        # PassphraseError (too short / mismatch / wrong current) is a
+        # rejected but well-formed request — it comes back as (False,
+        # message) so the JSON contract holds and the modal can show the
+        # reason inline. A genuinely malformed op is the only case left to
+        # raise: web.handle_request turns that into a plain-text 400,
+        # which the fixed set of ops this UI sends should never trigger.
+        op = data.get("op")
+        # Corrupt store: defense in depth. The gate already makes this
+        # endpoint unreachable while corrupt (auth_enabled_fn is True and
+        # /api/dashboard-auth is not in the ENABLED branch's exempt set, so
+        # an unauthenticated request never gets here — and auth_check can
+        # never succeed against a corrupt store, so neither does an
+        # authenticated one). This check documents that a corrupt store
+        # must never be overwritable through this provider even if the gate
+        # above it changes shape later.
+        if auth_store.is_corrupt():
+            return False, (
+                "Auth store is corrupted — repair or delete "
+                "dashboard_auth.json on the server."
+            )
+        # UNDECIDED (spec 2026-08-26 revision): the setup gate lets this
+        # endpoint through unauthenticated ONLY for "enable"/"dismiss-
+        # bootstrap" — web.py's gate is path-only, so the op restriction is
+        # enforced here. Without this, "change"/"disable" would already
+        # fail via verify() finding no hash (raises PassphraseError,
+        # "current passphrase is incorrect") — this makes the rejection
+        # explicit and independent of that incidental side effect.
+        if op in ("change", "disable") and not auth_store.login_enabled():
+            return False, "login is not enabled; nothing to " + op
+        try:
+            if op == "enable":
+                auth_store.enable(data.get("passphrase", ""), data.get("confirm", ""))
+                return True, "Login enabled"
+            if op == "change":
+                auth_store.change(data.get("current", ""), data.get("new", ""), data.get("confirm", ""))
+                return True, "Passphrase changed"
+            if op == "disable":
+                auth_store.disable(data.get("current", ""))
+                return True, "Login disabled"
+        except dashboard_auth.PassphraseError as exc:
+            return False, str(exc)
+        if op == "dismiss-bootstrap":
+            auth_store.dismiss_bootstrap()
+            return True, "Bootstrap dismissed"
+        raise ValueError(f"unknown op: {op}")
+
+    def bootstrap_state_provider() -> dict:
+        # Merged into /api/sessions for the Settings modal's login section
+        # (renderLoginSection in page.html), which reads `login_enabled` to
+        # decide between "Login is enabled" and "Set passphrase". The
+        # blocking setup gate itself (setup_mode_fn) is what actually keeps
+        # an unauthenticated visitor off the dashboard in UNDECIDED — this
+        # payload only feeds the settings UI once inside.
+        #
+        # Corrupt store (fail-closed, spec 2026-08-26 revision): report
+        # login_enabled=True, never False, so a corrupt store never
+        # misreports as "not enabled" here. Moot in practice — the gate
+        # (auth_enabled_fn) already blocks /api/sessions entirely while
+        # corrupt — but keeps this payload's own contract honest.
+        if auth_store.is_corrupt():
+            return {
+                "login_enabled": True,
+                "bootstrap_dismissed": auth_store.bootstrap_dismissed(),
+            }
+        return {
+            "login_enabled": auth_store.login_enabled(),
+            "bootstrap_dismissed": auth_store.bootstrap_dismissed(),
+        }
 
     def qr_svg_provider() -> str | None:
         # Lazy, like diagnostics/discoverable: tailscale status + serve
@@ -4630,6 +4809,26 @@ def _cmd_web(args: argparse.Namespace) -> int:
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
+        # Fail-closed on a corrupt store (spec 2026-08-26 revision): the
+        # gate must activate even though `login_enabled()` itself stays
+        # False on corrupt (see dashboard_auth.DashboardAuthStore._read).
+        auth_enabled_fn=lambda: auth_store.login_enabled() or auth_store.is_corrupt(),
+        auth_check=auth_check,
+        # UNDECIDED (default-secure bootstrap, spec 2026-08-26 revision):
+        # true only when the store is neither corrupt, nor enabled, nor
+        # opted out — i.e. a fresh install, or one where the setup prompt
+        # was never resolved. Re-read live on every request, same as
+        # auth_enabled_fn above, so enabling or dismissing takes effect on
+        # the very next poll with no service restart.
+        setup_mode_fn=lambda: not (
+            auth_store.is_corrupt()
+            or auth_store.login_enabled()
+            or auth_store.bootstrap_dismissed()
+        ),
+        login_provider=login_provider,
+        logout_provider=logout_provider,
+        dashboard_auth_provider=dashboard_auth_provider,
+        bootstrap_state_fn=bootstrap_state_provider,
         poll_seconds=config.get("dashboard_poll_seconds"),
         version_check_seconds=config.get("version_check_seconds"),
         confirm_arm_seconds=config.get("confirm_arm_seconds"),

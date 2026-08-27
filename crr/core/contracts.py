@@ -99,6 +99,9 @@ MACHINES_CONTRACT_VERSION = 1
 EXCLUSIONS_STORE_VERSION = 1
 SETTINGS_STORE_VERSION = 1
 KICKS_STORE_VERSION = 1
+# v1: dashboard login — optional passphrase auth gate (spec 2026-08-26; see
+# crr.core.dashboard_auth). Brand new store: no prior unversioned shape.
+DASHBOARD_AUTH_STORE_VERSION = 1
 
 
 def store_version_ok(raw: Any, current: int) -> bool:

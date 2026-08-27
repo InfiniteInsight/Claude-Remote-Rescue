@@ -93,7 +93,9 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # v22 (2026-08-21): reauth_success_display_ms (dashboard reauth Task 5 —
     # reauth modal auto-close delay, sourced from config like every other
     # page timing prior).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 22
+    # v23 (2026-08-26): dashboard_session_hours (dashboard login — session
+    # cookie Max-Age; see crr.core.dashboard_auth).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 23
 
 
 def test_context_pressure_fraction_defaults():

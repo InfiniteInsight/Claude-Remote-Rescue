@@ -61,7 +61,9 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
             machines_provider=None, reauth_provider=None, reauth_code_provider=None,
-            query=""):
+            query="", auth_enabled=False, auth_check=None, setup_mode=False,
+            login_provider=None,
+            logout_provider=None, dashboard_auth_provider=None, bootstrap_state=None):
     h = {"Host": host}
     if headers:
         h.update(headers)
@@ -84,6 +86,13 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
+        auth_enabled=auth_enabled,
+        auth_check=auth_check,
+        setup_mode=setup_mode,
+        login_provider=login_provider,
+        logout_provider=logout_provider,
+        dashboard_auth_provider=dashboard_auth_provider,
+        bootstrap_state=bootstrap_state,
     )
 
 
@@ -932,8 +941,15 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_60():
-    """v60: Auth expiry badge + reauth modal (header badge for
+def test_page_version_is_62():
+    """v62: remove the advisory bootstrap modal (#bootstrapModal,
+    checkBootstrap/showBootstrapSetup/submitBootstrapPassphrase/
+    dismissBootstrap) — superseded by the blocking setup page served
+    server-side (crr.core.dashboard_auth.setup_page) for the UNDECIDED
+    state (default-secure bootstrap, user decision 2026-08-26). The
+    Settings-modal login section (renderLoginSection) is unchanged.
+    (v61: Dashboard login — bootstrap prompt + settings section.
+    (v60: Auth expiry badge + reauth modal (header badge for
     expiring/expired/reauth-in-progress auth_state, plus the reauth modal
     wired to /api/reauth and /api/reauth-code).
     (v59: Reopen button on LIVE cards with tmux_session.
@@ -955,7 +971,7 @@ def test_page_version_is_60():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 60
+    assert web.PAGE_VERSION == 62
 
 
 def test_page_renders_the_parked_state():
@@ -1881,3 +1897,349 @@ class TestPostReauthCode:
             body=json.dumps({"code": "abc"}).encode(),
         )
         assert resp.status == 503
+
+
+# --------------------------------------------------------------------------
+# Dashboard login auth gate (spec 2026-08-26) — auth_enabled/auth_check
+# middleware, /api/login, /api/logout, /api/dashboard-auth, and the
+# bootstrap_state injection into /api/sessions.
+# --------------------------------------------------------------------------
+
+class TestAuthMiddleware:
+    def test_blocks_unauthenticated_api_request(self):
+        resp = _handle(
+            path="/api/sessions",
+            auth_enabled=True, auth_check=lambda cookie: False,
+        )
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "unauthorized"}
+
+    def test_serves_login_page_for_unauthenticated_root(self):
+        resp = _handle(
+            path="/",
+            auth_enabled=True, auth_check=lambda cookie: False,
+        )
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert b"passphrase" in resp.body.lower()
+        assert b"login" in resp.body.lower()
+
+    @pytest.mark.parametrize("path", [
+        "/api/version", "/manifest.webmanifest", "/sw.js",
+        "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png",
+    ])
+    def test_exempt_get_paths_pass_without_a_cookie(self, path):
+        resp = _handle(path=path, auth_enabled=True, auth_check=lambda cookie: False)
+        assert resp.status == 200
+
+    def test_login_post_is_exempt_without_a_cookie(self):
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps({"passphrase": "whatever"}).encode(),
+            auth_enabled=True, auth_check=lambda cookie: False,
+            login_provider=lambda p: (True, "", {}),
+        )
+        assert resp.status == 200
+
+    def test_passes_with_a_valid_cookie(self):
+        resp = _handle(
+            path="/api/sessions",
+            headers={"Cookie": f"{web.dashboard_auth.COOKIE_NAME}=valid-token"},
+            auth_enabled=True, auth_check=lambda cookie: cookie == "valid-token",
+        )
+        assert resp.status == 200
+
+    def test_rejects_wrong_cookie_value(self):
+        resp = _handle(
+            path="/api/sessions",
+            headers={"Cookie": f"{web.dashboard_auth.COOKIE_NAME}=stale-token"},
+            auth_enabled=True, auth_check=lambda cookie: cookie == "valid-token",
+        )
+        assert resp.status == 401
+
+    def test_missing_cookie_header_is_unauthorized(self):
+        resp = _handle(
+            path="/api/sessions",
+            auth_enabled=True, auth_check=lambda cookie: True,
+        )
+        # No Cookie header at all -> no cookie value -> never call auth_check
+        # with a valid-looking token, so this must still be 401.
+        assert resp.status == 401
+
+    def test_disabled_auth_passes_without_a_cookie(self):
+        resp = _handle(path="/api/sessions", auth_enabled=False)
+        assert resp.status == 200
+
+    def test_disallowed_host_wins_over_the_auth_gate(self):
+        # Host allowlist runs first regardless of auth state (DNS-rebinding
+        # defense takes priority over the login gate).
+        resp = _handle(
+            path="/api/sessions", host="evil.com",
+            auth_enabled=True, auth_check=lambda cookie: False,
+        )
+        assert resp.status == 403
+
+
+# --------------------------------------------------------------------------
+# Setup gate (spec 2026-08-26, default-secure bootstrap revision) —
+# UNDECIDED serves a blocking setup page instead of the dashboard, with
+# /api/dashboard-auth reachable unauthenticated (path-level only; the op
+# restriction is the provider's job, exercised at the cli.py layer).
+# --------------------------------------------------------------------------
+
+class TestSetupGate:
+    def test_root_serves_the_setup_page_not_the_dashboard(self):
+        resp = _handle(path="/", setup_mode=True)
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert b"Secure this dashboard" in resp.body
+        assert b'id="sessions"' not in resp.body
+
+    def test_api_sessions_is_401_in_setup_mode(self):
+        resp = _handle(path="/api/sessions", setup_mode=True)
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "unauthorized"}
+
+    @pytest.mark.parametrize("path", [
+        "/api/version", "/manifest.webmanifest", "/sw.js",
+        "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png",
+    ])
+    def test_exempt_get_paths_pass_in_setup_mode(self, path):
+        resp = _handle(path=path, setup_mode=True)
+        assert resp.status == 200
+
+    def test_dashboard_auth_post_reaches_the_provider_unauthenticated(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+            setup_mode=True,
+            dashboard_auth_provider=lambda data: (True, "Login enabled"),
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body) == {"ok": True, "message": "Login enabled"}
+
+    def test_login_post_is_exempt_but_provider_reports_not_configured(self):
+        # The gate lets this through by path (same exemption as ENABLED);
+        # it's the provider's job (cli.py's login_provider) to say "not
+        # configured" rather than check a passphrase that doesn't exist.
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps({"passphrase": "whatever"}).encode(),
+            setup_mode=True,
+            login_provider=lambda p: (False, "Login not configured", {}),
+        )
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "Login not configured"}
+
+    def test_other_post_endpoints_are_401_in_setup_mode(self):
+        resp = _handle(
+            method="POST", path="/api/logout", headers=_JSON, body=b"{}",
+            setup_mode=True,
+            logout_provider=lambda: {"Set-Cookie": "crr_session=; Max-Age=0"},
+        )
+        assert resp.status == 401
+
+    def test_other_get_endpoints_are_401_in_setup_mode(self):
+        resp = _handle(
+            path="/api/untracked", setup_mode=True,
+            untracked_provider=lambda q, o, limit: {"rows": []},
+        )
+        assert resp.status == 401
+
+    def test_disallowed_host_wins_over_the_setup_gate(self):
+        resp = _handle(path="/", host="evil.com", setup_mode=True)
+        assert resp.status == 403
+
+    def test_enabled_wins_over_setup_mode_when_both_true(self):
+        # Defensive: CORRUPT/ENABLED must always take priority (the cli.py
+        # wiring should never produce this combination, but the gate order
+        # itself is what actually guarantees it).
+        resp = _handle(
+            path="/", auth_enabled=True, auth_check=lambda c: False,
+            setup_mode=True,
+        )
+        assert resp.status == 200
+        assert b"Secure this dashboard" not in resp.body
+        assert b"passphrase" in resp.body.lower()  # the login page, not setup
+
+
+class TestPostLogin:
+    def test_success_merges_set_cookie_header_into_the_response(self):
+        def login_prov(passphrase):
+            assert passphrase == "correct"
+            return True, "", {"Set-Cookie": "crr_session=tok123; HttpOnly; SameSite=Strict; Path=/"}
+
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps({"passphrase": "correct"}).encode(),
+            auth_enabled=True, auth_check=lambda c: False,
+            login_provider=login_prov,
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body) == {"ok": True}
+        assert resp.headers["Set-Cookie"] == "crr_session=tok123; HttpOnly; SameSite=Strict; Path=/"
+
+    def test_failure_returns_401_with_the_providers_message(self):
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps({"passphrase": "wrong"}).encode(),
+            auth_enabled=True, auth_check=lambda c: False,
+            login_provider=lambda p: (False, "Incorrect passphrase", {}),
+        )
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "Incorrect passphrase"}
+
+    def test_requires_json_content_type(self):
+        resp = _handle(
+            method="POST", path="/api/login", headers={"Content-Type": "text/plain"},
+            body=json.dumps({"passphrase": "correct"}).encode(),
+            login_provider=lambda p: (True, "", {}),
+        )
+        assert resp.status == 415
+
+    def test_bad_json_is_400(self):
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON, body=b"not json",
+            login_provider=lambda p: (True, "", {}),
+        )
+        assert resp.status == 400
+
+    @pytest.mark.parametrize("payload", [{}, {"passphrase": ""}, {"passphrase": 5}])
+    def test_missing_or_invalid_passphrase_is_400(self, payload):
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps(payload).encode(),
+            login_provider=lambda p: (True, "", {}),
+        )
+        assert resp.status == 400
+
+    def test_missing_provider_is_503(self):
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps({"passphrase": "correct"}).encode(),
+        )
+        assert resp.status == 503
+
+
+class TestPostLogout:
+    def test_clears_the_cookie_via_the_providers_headers(self):
+        resp = _handle(
+            method="POST", path="/api/logout",
+            headers={"Content-Type": "application/json", "Cookie": "crr_session=valid"},
+            body=b"{}",
+            auth_enabled=True, auth_check=lambda c: c == "valid",
+            logout_provider=lambda: {
+                "Set-Cookie": "crr_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+            },
+        )
+        assert resp.status == 200
+        assert "Max-Age=0" in resp.headers.get("Set-Cookie", "")
+
+    def test_missing_provider_is_503(self):
+        resp = _handle(method="POST", path="/api/logout", headers=_JSON, body=b"{}")
+        assert resp.status == 503
+
+    def test_requires_json_content_type(self):
+        # Same CSRF posture as every other POST endpoint: no CORS headers are
+        # ever emitted, so this content-type gate is what defeats a
+        # simple-request cross-site logout.
+        resp = _handle(
+            method="POST", path="/api/logout", headers={"Content-Type": "text/plain"},
+            body=b"{}", logout_provider=lambda: {},
+        )
+        assert resp.status == 415
+
+
+class TestPostDashboardAuth:
+    def test_ok_true_returns_200_with_message(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+            dashboard_auth_provider=lambda data: (True, "Login enabled"),
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body) == {"ok": True, "message": "Login enabled"}
+
+    def test_ok_false_returns_400_with_message(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"op": "enable"}).encode(),
+            dashboard_auth_provider=lambda data: (False, "passphrases do not match"),
+        )
+        assert resp.status == 400
+        assert json.loads(resp.body) == {"ok": False, "message": "passphrases do not match"}
+
+    def test_provider_value_error_becomes_400(self):
+        def provider(data):
+            raise ValueError("unknown op")
+
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"op": "bogus"}).encode(),
+            dashboard_auth_provider=provider,
+        )
+        assert resp.status == 400
+        assert b"unknown op" in resp.body
+
+    def test_requires_json_content_type(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers={"Content-Type": "text/plain"},
+            body=json.dumps({"op": "enable"}).encode(),
+            dashboard_auth_provider=lambda data: (True, "ok"),
+        )
+        assert resp.status == 415
+
+    def test_bad_json_is_400(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON, body=b"not json",
+            dashboard_auth_provider=lambda data: (True, "ok"),
+        )
+        assert resp.status == 400
+
+    def test_missing_op_is_400(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"passphrase": "x"}).encode(),
+            dashboard_auth_provider=lambda data: (True, "ok"),
+        )
+        assert resp.status == 400
+
+    def test_missing_provider_is_503(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"op": "enable"}).encode(),
+        )
+        assert resp.status == 503
+
+
+class TestBootstrapStateInjection:
+    def test_merged_into_the_sessions_payload(self):
+        resp = _handle(
+            path="/api/sessions",
+            provider=lambda: {"contract": 1, "sessions": []},
+            bootstrap_state={"login_enabled": False, "bootstrap_dismissed": False},
+        )
+        body = json.loads(resp.body)
+        assert body["login_enabled"] is False
+        assert body["bootstrap_dismissed"] is False
+        assert body["sessions"] == []
+
+    def test_none_leaves_the_payload_untouched(self):
+        resp = _handle(
+            path="/api/sessions",
+            provider=lambda: {"contract": 1, "sessions": []},
+            bootstrap_state=None,
+        )
+        body = json.loads(resp.body)
+        assert "login_enabled" not in body
+        assert "bootstrap_dismissed" not in body
+
+    def test_does_not_mutate_the_providers_own_dict(self):
+        payload = {"contract": 1, "sessions": []}
+        resp = _handle(
+            path="/api/sessions",
+            provider=lambda: payload,
+            bootstrap_state={"login_enabled": True, "bootstrap_dismissed": True},
+        )
+        assert json.loads(resp.body)["login_enabled"] is True
+        assert "login_enabled" not in payload  # provider's dict is untouched

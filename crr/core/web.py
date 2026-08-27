@@ -29,6 +29,7 @@ from urllib.parse import parse_qs
 
 from crr.core import config as cfg
 from crr.core import contracts
+from crr.core import dashboard_auth
 from crr.core import pwa
 
 # Bump this whenever crr/core/page.html changes: the served page compares it
@@ -41,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 60  # v60: Auth expiry badge + reauth modal
+PAGE_VERSION = 62  # v62: remove the advisory bootstrap modal — replaced by the blocking setup page (crr.core.dashboard_auth.setup_page)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -177,6 +178,34 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
+def _parse_cookie(cookie_header: str, name: str) -> str:
+    """Extract a named cookie value from a Cookie header. '' if absent."""
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith(f"{name}="):
+            return part[len(name) + 1:]
+    return ""
+
+
+# Auth gate (spec 2026-08-26): the paths a browser must reach *before* it can
+# possibly have a session cookie — the login page's own static assets, plus
+# the version probe the page's self-heal poll needs even while logged out.
+_AUTH_EXEMPT_GET = frozenset({
+    "/api/version", "/manifest.webmanifest", "/sw.js",
+    "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png",
+})
+_AUTH_EXEMPT_POST = frozenset({"/api/login"})
+
+# Setup gate (spec 2026-08-26 revision, default-secure bootstrap): the
+# UNDECIDED state's exempt POST set is the login exemption above PLUS
+# /api/dashboard-auth itself — that's the one endpoint an unauthenticated
+# first visitor must be able to reach to either set a passphrase or opt
+# out. The op-level restriction (only "enable"/"dismiss-bootstrap", never
+# "change"/"disable") is enforced by the provider, not here — this gate
+# only knows paths, not payloads.
+_SETUP_EXEMPT_POST = _AUTH_EXEMPT_POST | {"/api/dashboard-auth"}
+
+
 ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", "untmux")
 
 # Sid-keyed actions — a SEPARATE namespace/endpoint from the pid-keyed
@@ -255,6 +284,13 @@ def handle_request(
     machines_provider: Callable[[], dict[str, Any]] | None = None,
     reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
+    auth_enabled: bool = False,
+    auth_check: Callable[[str], bool] | None = None,
+    setup_mode: bool = False,
+    login_provider: Callable[[str], tuple[bool, str, dict[str, str]]] | None = None,
+    logout_provider: Callable[[], dict[str, str]] | None = None,
+    dashboard_auth_provider: Callable[[dict], tuple[bool, str]] | None = None,
+    bootstrap_state: dict[str, Any] | None = None,
     allowed_hosts: set[str],
     allowed_suffixes: tuple[str, ...],
     query: str = "",
@@ -273,6 +309,48 @@ def handle_request(
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
         return _plain(403, "forbidden")
 
+    # Auth gate (spec 2026-08-26, default-secure bootstrap revision): two
+    # mutually-exclusive gated modes, checked in this order so CORRUPT
+    # always wins (the CLI wiring folds is_corrupt() into auth_enabled, so
+    # a corrupt store always takes the ENABLED branch below, never the
+    # setup one — see cli.py's auth_enabled_fn/setup_mode_fn). Placed after
+    # the host allowlist (that gate always wins) but before all routing, so
+    # no branch below ever runs unauthenticated.
+    if auth_enabled and auth_check is not None:
+        # ENABLED (or CORRUPT, which is ENABLED with an auth_check that can
+        # never succeed): every request except the exemptions above must
+        # carry a valid session cookie.
+        exempt = (
+            (method == "GET" and path in _AUTH_EXEMPT_GET)
+            or (method == "POST" and path in _AUTH_EXEMPT_POST)
+        )
+        if not exempt:
+            cookie_val = _parse_cookie(_header(headers, "Cookie"), dashboard_auth.COOKIE_NAME)
+            if not cookie_val or not auth_check(cookie_val):
+                if method == "GET" and path == "/":
+                    page = dashboard_auth.login_page()
+                    return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
+                return _json(401, {"error": "unauthorized"})
+    elif setup_mode:
+        # UNDECIDED: a fresh install (or one where the prompt was never
+        # resolved) serves a blocking setup page instead of the dashboard —
+        # no dashboard content, no API access — until the visitor either
+        # enables login or explicitly opts out. /api/dashboard-auth is
+        # reachable unauthenticated here ONLY (the provider enforces that
+        # only "enable"/"dismiss-bootstrap" are accepted; "change"/"disable"
+        # are rejected explicitly). /api/login stays exempt too, but with
+        # nothing configured yet it resolves to a "login not configured"
+        # failure rather than a passphrase check.
+        exempt = (
+            (method == "GET" and path in _AUTH_EXEMPT_GET)
+            or (method == "POST" and path in _SETUP_EXEMPT_POST)
+        )
+        if not exempt:
+            if method == "GET" and path == "/":
+                page = dashboard_auth.setup_page()
+                return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
+            return _json(401, {"error": "unauthorized"})
+
     if method == "GET":
         if path == "/":
             page = render_page(
@@ -284,7 +362,10 @@ def handle_request(
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
         if path == "/api/sessions":
-            return _json(200, sessions_provider())
+            payload = sessions_provider()
+            if bootstrap_state is not None:
+                payload = {**payload, **bootstrap_state}
+            return _json(200, payload)
         if path == "/api/version":
             return _json(200, {"version": page_version})
         if path == "/api/diagnostics":
@@ -530,6 +611,65 @@ def handle_request(
                 return _plain(503, "reauth unavailable")
             ok, message, degraded = reauth_code_provider(code)
             return _json(200 if ok else 409, _action_result(ok, message, degraded))
+
+        if path == "/api/login":
+            # Same CSRF posture as /api/action — host allowlist already ran;
+            # JSON content-type gate; no CORS headers are ever emitted. This
+            # is also in _AUTH_EXEMPT_POST above, since a logged-out client
+            # has no cookie to pass the gate with.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            passphrase = data.get("passphrase") if isinstance(data, dict) else None
+            if not isinstance(passphrase, str) or not passphrase:
+                return _plain(400, 'expected {"passphrase": "<string>"}')
+            if login_provider is None:
+                return _plain(503, "login unavailable")
+            ok, error, extra_headers = login_provider(passphrase)
+            if ok:
+                resp = _json(200, {"ok": True})
+                return Response(resp.status, {**resp.headers, **extra_headers}, resp.body)
+            return _json(401, {"error": error or "unauthorized"})
+
+        if path == "/api/logout":
+            # Same CSRF posture as /api/reauth — JSON content-type gate, no
+            # body fields to validate. Reached only with a valid session
+            # cookie (not in _AUTH_EXEMPT_POST) when auth is enabled.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            if logout_provider is None:
+                return _plain(503, "logout unavailable")
+            extra_headers = logout_provider()
+            resp = _json(200, {"ok": True})
+            return Response(resp.status, {**resp.headers, **extra_headers}, resp.body)
+
+        if path == "/api/dashboard-auth":
+            # Settings-modal login ops (enable/change/disable/dismiss-
+            # bootstrap): same CSRF posture as /api/exclusions — JSON
+            # content-type gate, writes to disk. The provider owns op
+            # validation and signals a rejected op/payload by raising
+            # ValueError, same contract as exclusions_writer/settings_writer.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            if not isinstance(data, dict) or "op" not in data:
+                return _plain(400, 'expected {"op": "..."}')
+            if dashboard_auth_provider is None:
+                return _plain(503, "dashboard auth unavailable")
+            try:
+                ok, message = dashboard_auth_provider(data)
+            except ValueError as exc:
+                return _plain(400, str(exc))
+            return _json(200 if ok else 400, {"ok": ok, "message": message})
 
         return _plain(404, "not found")
 

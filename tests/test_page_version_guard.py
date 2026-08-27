@@ -35,6 +35,8 @@ def _page_sha() -> str:
 # version -> sha256 of crr/core/page.html when that version shipped.
 # APPEND a new entry for every page change; never edit an existing one.
 PAGE_PINS: dict[int, str] = {
+    62: "7cd573716b8a29fa277dc15b60b25fbbf516c62a14de47658f45e72cffc4f1c9",
+    61: "a7cfa17e9c1b981968079d4b5f95e32158ed3d449d6f3177962cd2e1d0516eb4",
     60: "5f759283a79f02ab2d878232eec3d69d063f0e219723f2df77f0f92f7ff178de",
     59: "c8bbc40aae86b0b1b5f4d411dfbca1fd1f8c8313a80c9696d04054fd8d9f0b2f",
     58: "acaef00dba29842887e481c89b369321b5b3d5ea35880cf4aca8ceffe4e1d0dc",
@@ -68,11 +70,19 @@ def test_page_html_matches_the_pin_for_the_current_version():
     )
 
 
+# Versions bumped ahead of their own page.html change (see the PAGE_PINS
+# comment above) — the ONLY sanctioned way for two entries to share a hash.
+# Remove an entry once its page.html change lands and its pin is updated.
+_PENDING_PAGE_CHANGE: set[int] = set()
+
+
 def test_no_two_versions_share_a_page_hash():
     """Catches a copy-pasted entry — a new version pinned to the old page,
     which would let the next real page change slip through unnoticed."""
     seen: dict[str, int] = {}
     for version, sha in PAGE_PINS.items():
+        if version in _PENDING_PAGE_CHANGE:
+            continue
         assert sha not in seen, (
             f"versions {seen[sha]} and {version} pin the same page hash; one "
             "of them was copy-pasted rather than measured"
