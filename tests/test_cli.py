@@ -3654,6 +3654,12 @@ def test_rescue_check_revive_pass_runs_at_most_once_per_boot(tmp_path, monkeypat
     )
     archive.archive(entry, "superseded-on-register", "2026-07-24T00:00:00Z")
 
+    # Stub the os.execvp seam. This test drives the real rescue-check reopen
+    # path twice; on a runner where that path reaches _exec, an unstubbed
+    # seam replaces the pytest process itself (silent hard-kill, no traceback)
+    # rather than failing. Every sibling rescue-check test stubs it likewise.
+    monkeypatch.setattr(cli, "_exec", lambda *a, **k: None)
+
     revive_calls = []
     orig = cli.reviver.revive_crashed
 
