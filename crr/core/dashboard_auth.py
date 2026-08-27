@@ -194,6 +194,14 @@ class DashboardAuthStore:
             raise PassphraseError("current passphrase is incorrect")
         data = self._read()
         data["login_enabled"] = False
+        # Disabling IS opting out (spec 2026-08-26 revision, default-secure
+        # bootstrap): without this, a user who just authenticated to turn
+        # login off would land back in UNDECIDED (login_enabled=False,
+        # bootstrap_dismissed=False) and be immediately re-blocked by the
+        # setup gate on their very next request — turning "disable" into a
+        # self-lockout. Setting bootstrap_dismissed here routes them to
+        # OPTED_OUT instead, which is what "disable" actually means.
+        data["bootstrap_dismissed"] = True
         self._write(data)
 
     def dismiss_bootstrap(self) -> None:
@@ -290,6 +298,88 @@ def login_page(error: str = "") -> str:
         }}
       }});
     }});
+  </script>
+</div>
+</body>
+</html>"""
+
+
+def setup_page() -> str:
+    """Self-contained HTML setup page — the blocking gate a fresh install
+    serves instead of the dashboard (spec 2026-08-26 revision: auth is now
+    default-pending, not an advisory modal over a working dashboard). Same
+    styling family as `login_page()`; never includes dashboard content.
+
+    No dynamic server-side interpolation happens here (unlike `login_page`'s
+    `error` param) — every error this page can show comes back from a fetch
+    response and is rendered client-side via `textContent`, never
+    `innerHTML`, so there is nothing here for `html.escape` to guard, and
+    this is a plain string (not an f-string) so the JS braces below need no
+    doubling.
+    """
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crr — setup</title>
+<style>
+  body { margin:0; background:#0d1117; color:#cdd3dd; font-family:system-ui, -apple-system, sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .box { background:#12161d; border:1px solid #2f3745; border-radius:8px; padding:28px; max-width:380px; width:90%; }
+  h1 { font-size:18px; margin:0 0 8px; color:#e6e6e6; }
+  .lede { font-size:13px; color:#8a93a2; margin:0 0 18px; }
+  label { display:block; font-size:13px; margin:0 0 6px; color:#8a93a2; }
+  input[type=password] { width:100%; padding:8px 10px; margin:0 0 12px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px; font:inherit; font-size:14px; }
+  button { width:100%; padding:8px; border-radius:6px; font:inherit; font-size:14px; cursor:pointer; }
+  #enable-btn { margin-top:2px; background:#2563eb; color:#fff; border:none; }
+  #enable-btn:hover { background:#1d4ed8; }
+  #dismiss-btn { margin-top:14px; background:transparent; color:#5b6472; border:1px solid #2f3745; font-size:12px; }
+  #dismiss-btn:hover { color:#8a93a2; }
+  #error { color:#fca5a5; font-size:13px; margin:0 0 12px; display:none; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>Secure this dashboard</h1>
+  <p class="lede">This dashboard can restart and control your Claude Code sessions. Set a passphrase to require login before anything else loads.</p>
+  <p id="error"></p>
+  <form id="setupForm">
+    <label for="pp">Passphrase (8+ characters)</label>
+    <input type="password" id="pp" name="passphrase" autofocus required>
+    <label for="confirm">Confirm</label>
+    <input type="password" id="confirm" name="confirm" required>
+    <button type="submit" id="enable-btn">Enable login</button>
+  </form>
+  <button type="button" id="dismiss-btn">Continue without login (not recommended)</button>
+  <script>
+    function showError(msg) {
+      var el = document.getElementById('error');
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+    document.getElementById('setupForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var pp = document.getElementById('pp').value;
+      var confirm = document.getElementById('confirm').value;
+      fetch('/api/dashboard-auth', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({op: 'enable', passphrase: pp, confirm: confirm})
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) { location.href = '/'; }
+        else { showError(d.message || 'Failed'); }
+      }).catch(function() { showError('Failed'); });
+    });
+    document.getElementById('dismiss-btn').addEventListener('click', function() {
+      fetch('/api/dashboard-auth', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({op: 'dismiss-bootstrap'})
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) { location.reload(); }
+        else { showError(d.message || 'Failed'); }
+      }).catch(function() { showError('Failed'); });
+    });
   </script>
 </div>
 </body>

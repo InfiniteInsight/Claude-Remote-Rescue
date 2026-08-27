@@ -494,24 +494,6 @@
     <button onclick="cancelReauth()" style="margin-top:8px;">Cancel</button>
   </div>
 </div>
-<div id="bootstrapModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:90; align-items:center; justify-content:center;">
-  <div style="background:#12161d; border:1px solid #2f3745; border-radius:8px; padding:24px; max-width:400px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.6); color:#e6e6e6;">
-    <h3 style="margin:0 0 12px;">Secure this dashboard?</h3>
-    <p style="font-size:13px; color:#8a93a2; margin:0 0 16px;">This dashboard can restart and control your Claude sessions. Set a passphrase to require login.</p>
-    <div id="bootstrapSetup" style="display:none; margin:0 0 12px;">
-      <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Passphrase (8+ characters)</label>
-      <input type="password" id="bootstrapPass" style="width:100%; padding:6px; margin:0 0 8px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
-      <label style="display:block; font-size:13px; margin:0 0 4px; color:#8a93a2;">Confirm</label>
-      <input type="password" id="bootstrapConfirm" style="width:100%; padding:6px; margin:0 0 8px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
-      <p id="bootstrapError" style="color:#fca5a5; font-size:13px; margin:0 0 8px; display:none;"></p>
-      <button onclick="submitBootstrapPassphrase()" style="width:100%; padding:8px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer;">Enable login</button>
-    </div>
-    <div id="bootstrapButtons">
-      <button onclick="showBootstrapSetup()" style="width:100%; padding:8px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; margin:0 0 8px;">Set passphrase</button>
-      <button onclick="dismissBootstrap()" style="width:100%; padding:8px; background:transparent; color:#8a93a2; border:1px solid #2f3745; border-radius:6px; cursor:pointer;">No login</button>
-    </div>
-  </div>
-</div>
 <div id="sessions"></div>
 <div id="empty" style="display:none">No journaled sessions.</div>
 
@@ -1342,61 +1324,15 @@ function cancelReauth() {
   document.getElementById('reauthModal').style.display = 'none';
 }
 
-// Dashboard login (spec 2026-08-26): bootstrap prompt + Settings modal
-// section. Both are driven off the `login_enabled`/`bootstrap_dismissed`
-// fields the server merges into every /api/sessions payload — same
-// once-per-poll pattern as renderAuthBadge above, not per-session.
-function checkBootstrap(data) {
-  var modal = document.getElementById('bootstrapModal');
-  if (!modal) return;
-  if (data.login_enabled === false && data.bootstrap_dismissed === false) {
-    modal.style.display = 'flex';
-  } else {
-    modal.style.display = 'none';
-  }
-}
-
-function showBootstrapSetup() {
-  document.getElementById('bootstrapButtons').style.display = 'none';
-  document.getElementById('bootstrapSetup').style.display = 'block';
-  document.getElementById('bootstrapPass').focus();
-}
-
-function submitBootstrapPassphrase() {
-  var pp = document.getElementById('bootstrapPass').value;
-  var confirm = document.getElementById('bootstrapConfirm').value;
-  var errEl = document.getElementById('bootstrapError');
-  fetch('/api/dashboard-auth', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({op: 'enable', passphrase: pp, confirm: confirm})
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.ok) {
-      // Enabling flips the auth gate on immediately (live per-request
-      // check) with no cookie issued yet — the next poll would 401.
-      // Reload now so the browser lands on the real login page instead of
-      // a dashboard that silently stops updating.
-      location.reload();
-    } else {
-      errEl.textContent = d.message || 'Failed';
-      errEl.style.display = 'block';
-    }
-  }).catch(function() {
-    errEl.textContent = 'Failed';
-    errEl.style.display = 'block';
-  });
-}
-
-function dismissBootstrap() {
-  fetch('/api/dashboard-auth', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({op: 'dismiss-bootstrap'})
-  }).then(function() {
-    document.getElementById('bootstrapModal').style.display = 'none';
-  });
-}
-
+// Dashboard login (spec 2026-08-26, default-secure bootstrap revision):
+// Settings modal login section only. The advisory bootstrap modal that
+// used to overlay a fully-functional dashboard is gone — an unresolved
+// UNDECIDED state is now a blocking setup page served server-side
+// (crr.core.dashboard_auth.setup_page) before any of this JS ever loads,
+// so there is nothing left for the dashboard's own JS to gate. This
+// section renders off the `login_enabled` field the server merges into
+// every /api/sessions payload — same once-per-poll pattern as
+// renderAuthBadge above, not per-session.
 function renderLoginSection(data) {
   // NOTE: does not touch #login-setup / #login-change display — this runs
   // on every poll tick, and clobbering those here would hide the form (and
@@ -1432,9 +1368,9 @@ function enableLoginFromSettings() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({op: 'enable', passphrase: pp, confirm: confirm})
   }).then(function(r) { return r.json(); }).then(function(d) {
-    // Same reload as the bootstrap modal's submit: enabling flips the auth
-    // gate on immediately with no cookie for this tab yet, so the next
-    // poll would 401. Reload lands on the login page instead.
+    // Enabling flips the auth gate on immediately with no cookie for this
+    // tab yet, so the next poll would 401. Reload lands on the login page
+    // instead.
     if (d.ok) { location.reload(); }
     else { errEl.textContent = d.message || 'Failed'; errEl.style.display = 'block'; }
   }).catch(function() {
@@ -1498,7 +1434,6 @@ function logoutDashboard() {
 function render(payload) {
   if (payload) lastSessions = (payload.sessions) || [];
   if (payload) renderAuthBadge(payload);
-  if (payload) checkBootstrap(payload);
   if (payload) renderLoginSection(payload);
   var total = lastSessions;
   var visible = total.filter(passesFilter);

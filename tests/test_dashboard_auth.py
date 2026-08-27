@@ -140,6 +140,21 @@ def test_store_disable(tmp_path):
     assert store.login_enabled() is False
 
 
+def test_store_disable_transitions_to_opted_out_not_undecided(tmp_path):
+    """State-machine fix (spec 2026-08-26 revision): disable() must ALSO set
+    bootstrap_dismissed=True — disabling IS opting out. Without this, the
+    state right after an authenticated disable would be login_enabled=False
+    AND bootstrap_dismissed=False, which is UNDECIDED — the exact state the
+    blocking setup gate activates for. A user who just authenticated to
+    turn login off must not be immediately re-blocked by that gate on their
+    very next request."""
+    store = dashboard_auth.DashboardAuthStore(tmp_path)
+    store.enable("my-passphrase", "my-passphrase")
+    store.disable("my-passphrase")
+    assert store.login_enabled() is False
+    assert store.bootstrap_dismissed() is True
+
+
 def test_store_disable_rejects_wrong_passphrase(tmp_path):
     import pytest
     store = dashboard_auth.DashboardAuthStore(tmp_path)
@@ -295,3 +310,32 @@ def test_login_page_escapes_error_html():
     html = dashboard_auth.login_page(error="<script>x</script>")
     assert "<script>x</script>" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_setup_page_has_no_dashboard_content():
+    """The blocking setup page (default-secure bootstrap, spec 2026-08-26
+    revision) must be self-contained like login_page() — zero dashboard
+    content, so an unauthenticated UNDECIDED visitor never sees session
+    data or dashboard chrome."""
+    html = dashboard_auth.setup_page()
+    assert "Secure this dashboard" in html
+    assert 'id="sessions"' not in html
+    assert "Claude-Remote-Rescue" not in html  # the dashboard's own <title>
+
+
+def test_setup_page_offers_enable_and_dismiss():
+    html = dashboard_auth.setup_page()
+    assert "enable" in html.lower()
+    assert "passphrase" in html.lower()
+    assert "confirm" in html.lower()
+    assert "dashboard-auth" in html
+    assert "dismiss-bootstrap" in html
+    assert "Continue without login" in html
+
+
+def test_setup_page_is_distinct_from_login_page():
+    setup_html = dashboard_auth.setup_page()
+    login_html = dashboard_auth.login_page()
+    assert setup_html != login_html
+    assert "Log in" not in setup_html
+    assert "Secure this dashboard" not in login_html

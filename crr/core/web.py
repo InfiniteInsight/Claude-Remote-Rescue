@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 61  # v61: Dashboard login — bootstrap prompt + settings section
+PAGE_VERSION = 62  # v62: remove the advisory bootstrap modal — replaced by the blocking setup page (crr.core.dashboard_auth.setup_page)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -196,6 +196,15 @@ _AUTH_EXEMPT_GET = frozenset({
 })
 _AUTH_EXEMPT_POST = frozenset({"/api/login"})
 
+# Setup gate (spec 2026-08-26 revision, default-secure bootstrap): the
+# UNDECIDED state's exempt POST set is the login exemption above PLUS
+# /api/dashboard-auth itself — that's the one endpoint an unauthenticated
+# first visitor must be able to reach to either set a passphrase or opt
+# out. The op-level restriction (only "enable"/"dismiss-bootstrap", never
+# "change"/"disable") is enforced by the provider, not here — this gate
+# only knows paths, not payloads.
+_SETUP_EXEMPT_POST = _AUTH_EXEMPT_POST | {"/api/dashboard-auth"}
+
 
 ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", "untmux")
 
@@ -277,6 +286,7 @@ def handle_request(
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     auth_enabled: bool = False,
     auth_check: Callable[[str], bool] | None = None,
+    setup_mode: bool = False,
     login_provider: Callable[[str], tuple[bool, str, dict[str, str]]] | None = None,
     logout_provider: Callable[[], dict[str, str]] | None = None,
     dashboard_auth_provider: Callable[[dict], tuple[bool, str]] | None = None,
@@ -299,11 +309,17 @@ def handle_request(
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
         return _plain(403, "forbidden")
 
-    # Auth gate (spec 2026-08-26): when dashboard login is enabled, every
-    # request except the exemptions above must carry a valid session cookie.
-    # Placed after the host allowlist (that gate always wins) but before all
-    # routing, so no branch below ever runs unauthenticated.
+    # Auth gate (spec 2026-08-26, default-secure bootstrap revision): two
+    # mutually-exclusive gated modes, checked in this order so CORRUPT
+    # always wins (the CLI wiring folds is_corrupt() into auth_enabled, so
+    # a corrupt store always takes the ENABLED branch below, never the
+    # setup one — see cli.py's auth_enabled_fn/setup_mode_fn). Placed after
+    # the host allowlist (that gate always wins) but before all routing, so
+    # no branch below ever runs unauthenticated.
     if auth_enabled and auth_check is not None:
+        # ENABLED (or CORRUPT, which is ENABLED with an auth_check that can
+        # never succeed): every request except the exemptions above must
+        # carry a valid session cookie.
         exempt = (
             (method == "GET" and path in _AUTH_EXEMPT_GET)
             or (method == "POST" and path in _AUTH_EXEMPT_POST)
@@ -315,6 +331,25 @@ def handle_request(
                     page = dashboard_auth.login_page()
                     return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
                 return _json(401, {"error": "unauthorized"})
+    elif setup_mode:
+        # UNDECIDED: a fresh install (or one where the prompt was never
+        # resolved) serves a blocking setup page instead of the dashboard —
+        # no dashboard content, no API access — until the visitor either
+        # enables login or explicitly opts out. /api/dashboard-auth is
+        # reachable unauthenticated here ONLY (the provider enforces that
+        # only "enable"/"dismiss-bootstrap" are accepted; "change"/"disable"
+        # are rejected explicitly). /api/login stays exempt too, but with
+        # nothing configured yet it resolves to a "login not configured"
+        # failure rather than a passphrase check.
+        exempt = (
+            (method == "GET" and path in _AUTH_EXEMPT_GET)
+            or (method == "POST" and path in _SETUP_EXEMPT_POST)
+        )
+        if not exempt:
+            if method == "GET" and path == "/":
+                page = dashboard_auth.setup_page()
+                return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
+            return _json(401, {"error": "unauthorized"})
 
     if method == "GET":
         if path == "/":

@@ -4926,6 +4926,40 @@ def _web_captured(monkeypatch, tmp_path, fake_tmux=None):
     return captured
 
 
+def _dispatch_web(captured, method, path, headers=None, body=b"", query=""):
+    """Replay a request through `web.handle_request` using the REAL
+    provider closures `_cmd_web` built (captured via `_web_captured`) —
+    same auth_enabled/setup_mode computation `make_web_handler`'s
+    `_dispatch` does on every request, minus the actual socket. This is
+    what makes the dashboard-login state-machine tests below end-to-end:
+    a real `DashboardAuthStore` on `tmp_path` drives real closures, not
+    hand-fed booleans."""
+    from crr.core import web
+
+    h = {"Host": "localhost"}
+    if headers:
+        h.update(headers)
+    auth_enabled_fn = captured.get("auth_enabled_fn")
+    setup_mode_fn = captured.get("setup_mode_fn")
+    auth_enabled = bool(auth_enabled_fn()) if auth_enabled_fn else False
+    setup_mode = bool(setup_mode_fn()) if setup_mode_fn else False
+    bootstrap_state_fn = captured.get("bootstrap_state_fn")
+    return web.handle_request(
+        method, path, h, body,
+        sessions_provider=captured["provider"],
+        dashboard_auth_provider=captured.get("dashboard_auth_provider"),
+        login_provider=captured.get("login_provider"),
+        logout_provider=captured.get("logout_provider"),
+        bootstrap_state=bootstrap_state_fn() if bootstrap_state_fn else None,
+        auth_enabled=auth_enabled and captured.get("auth_check") is not None,
+        auth_check=captured.get("auth_check"),
+        setup_mode=setup_mode,
+        allowed_hosts={"localhost", "127.0.0.1"},
+        allowed_suffixes=(".ts.net",),
+        query=query,
+    )
+
+
 def _write_creds(path, now, *, expired):
     """A credentials file that reads `auth.auth_state` as "expired" (both
     tokens past) or "valid" (both fresh, well outside the 3-day window)."""
@@ -5445,7 +5479,12 @@ def test_dashboard_auth_provider_enable_rejected_when_already_enabled(tmp_path, 
     assert ok3 is True
 
 
-def test_dashboard_auth_provider_disable_and_dismiss_bootstrap(tmp_path, monkeypatch):
+def test_dashboard_auth_provider_disable_transitions_straight_to_opted_out(tmp_path, monkeypatch):
+    """Disabling IS opting out (state-machine fix, spec 2026-08-26
+    revision): `disable()` must also set bootstrap_dismissed=True, or the
+    user who just authenticated to turn login off would land back in
+    UNDECIDED and be immediately re-blocked by the setup gate on their very
+    next request — turning "disable" into a self-lockout."""
     captured = _web_captured(monkeypatch, tmp_path)
     captured["dashboard_auth_provider"](
         {"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}
@@ -5454,11 +5493,17 @@ def test_dashboard_auth_provider_disable_and_dismiss_bootstrap(tmp_path, monkeyp
 
     ok, _msg = captured["dashboard_auth_provider"]({"op": "disable", "current": "x" * 8})
     assert ok is True
-    assert captured["bootstrap_state_fn"]()["login_enabled"] is False
+    state = captured["bootstrap_state_fn"]()
+    assert state["login_enabled"] is False
+    assert state["bootstrap_dismissed"] is True
 
+
+def test_dashboard_auth_provider_dismiss_bootstrap_from_undecided(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
     assert captured["bootstrap_state_fn"]()["bootstrap_dismissed"] is False
-    ok2, _msg2 = captured["dashboard_auth_provider"]({"op": "dismiss-bootstrap"})
-    assert ok2 is True
+
+    ok, _msg = captured["dashboard_auth_provider"]({"op": "dismiss-bootstrap"})
+    assert ok is True
     assert captured["bootstrap_state_fn"]()["bootstrap_dismissed"] is True
 
 
@@ -5553,6 +5598,157 @@ def test_auth_enabled_cannot_reach_handle_request_without_a_live_auth_check(tmp_
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --------------------------------------------------------------------------
+# Dashboard login state machine (spec 2026-08-26 revision: default-secure
+# bootstrap — auth is opt-out, not opt-in). Four states — UNDECIDED,
+# OPTED_OUT, ENABLED, CORRUPT — driven end to end through the real
+# `_cmd_web` closures (`_web_captured`) and `web.handle_request`
+# (`_dispatch_web`), with a real `DashboardAuthStore` on `tmp_path`.
+# --------------------------------------------------------------------------
+
+_JSON_HDR = {"Content-Type": "application/json"}
+
+
+class TestDashboardLoginStateMachine:
+    def test_fresh_install_serves_the_setup_page_not_the_dashboard(self, tmp_path, monkeypatch):
+        captured = _web_captured(monkeypatch, tmp_path)
+        resp = _dispatch_web(captured, "GET", "/")
+        assert resp.status == 200
+        assert b"Secure this dashboard" in resp.body
+        assert b'id="sessions"' not in resp.body
+
+    def test_fresh_install_blocks_the_api(self, tmp_path, monkeypatch):
+        captured = _web_captured(monkeypatch, tmp_path)
+        resp = _dispatch_web(captured, "GET", "/api/sessions")
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "unauthorized"}
+
+    def test_fresh_install_exempts_version_and_pwa_assets(self, tmp_path, monkeypatch):
+        captured = _web_captured(monkeypatch, tmp_path)
+        for path in ("/api/version", "/manifest.webmanifest", "/sw.js"):
+            resp = _dispatch_web(captured, "GET", path)
+            assert resp.status == 200, path
+
+    def test_enable_unauthenticated_transitions_to_enabled(self, tmp_path, monkeypatch):
+        captured = _web_captured(monkeypatch, tmp_path)
+        resp = _dispatch_web(
+            captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body)["ok"] is True
+
+        # Subsequent unauthenticated request now sees the LOGIN page, not
+        # the setup page — the state transitioned all the way to ENABLED,
+        # live, with no service restart.
+        resp2 = _dispatch_web(captured, "GET", "/")
+        assert resp2.status == 200
+        assert b"Secure this dashboard" not in resp2.body
+        assert b"passphrase" in resp2.body.lower()
+        assert b"Log in" in resp2.body
+
+        resp3 = _dispatch_web(captured, "GET", "/api/sessions")
+        assert resp3.status == 401
+
+    def test_dismiss_bootstrap_transitions_to_opted_out(self, tmp_path, monkeypatch):
+        captured = _web_captured(monkeypatch, tmp_path)
+        resp = _dispatch_web(
+            captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+            body=json.dumps({"op": "dismiss-bootstrap"}).encode(),
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body)["ok"] is True
+
+        # OPTED_OUT: the gate is off entirely — exactly today's disabled
+        # behavior, dashboard open.
+        resp2 = _dispatch_web(captured, "GET", "/")
+        assert resp2.status == 200
+        assert b'id="sessions"' in resp2.body
+        assert b"Secure this dashboard" not in resp2.body
+
+        resp3 = _dispatch_web(captured, "GET", "/api/sessions")
+        assert resp3.status == 200
+
+    def test_undecided_rejects_change_and_disable_explicitly(self, tmp_path, monkeypatch):
+        captured = _web_captured(monkeypatch, tmp_path)
+        for op, extra in [
+            ("change", {"current": "x", "new": "y" * 8, "confirm": "y" * 8}),
+            ("disable", {"current": "x"}),
+        ]:
+            resp = _dispatch_web(
+                captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+                body=json.dumps({"op": op, **extra}).encode(),
+            )
+            assert resp.status == 400, op
+            body = json.loads(resp.body)
+            assert body["ok"] is False, op
+
+        # Neither rejected op touched the store: it's still UNDECIDED, and
+        # "enable" still works afterward.
+        resp = _dispatch_web(captured, "GET", "/")
+        assert b"Secure this dashboard" in resp.body
+
+    def test_corrupt_store_blocks_setup_ops_and_fails_closed(self, tmp_path, monkeypatch):
+        (tmp_path / dashboard_auth.FILENAME).write_text("not json")
+        captured = _web_captured(monkeypatch, tmp_path)
+
+        # Setup ops must NOT be reachable — a corrupt store must not be
+        # overwritable remotely, even via the op an UNDECIDED first-visitor
+        # could otherwise use unauthenticated.
+        resp = _dispatch_web(
+            captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+        )
+        assert resp.status == 401
+
+        resp2 = _dispatch_web(
+            captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+            body=json.dumps({"op": "dismiss-bootstrap"}).encode(),
+        )
+        assert resp2.status == 401
+
+        # GET / fails closed exactly as today: the login page, never the
+        # setup page (which would invite "fixing" the corrupt store).
+        resp3 = _dispatch_web(captured, "GET", "/")
+        assert resp3.status == 200
+        assert b"Secure this dashboard" not in resp3.body
+        assert b"passphrase" in resp3.body.lower()
+
+        resp4 = _dispatch_web(captured, "GET", "/api/sessions")
+        assert resp4.status == 401
+
+    def test_authenticated_disable_serves_dashboard_not_setup_page_next(self, tmp_path, monkeypatch):
+        """disable() -> bootstrap_dismissed=True (OPTED_OUT), end to end: an
+        authenticated disable must not dump the user back into UNDECIDED and
+        re-block the dashboard on their very next request."""
+        captured = _web_captured(monkeypatch, tmp_path)
+        _dispatch_web(
+            captured, "POST", "/api/dashboard-auth", headers=_JSON_HDR,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+        )
+        login_resp = _dispatch_web(
+            captured, "POST", "/api/login", headers=_JSON_HDR,
+            body=json.dumps({"passphrase": "x" * 8}).encode(),
+        )
+        assert login_resp.status == 200
+        cookie_value = login_resp.headers["Set-Cookie"].split(";")[0]
+
+        resp = _dispatch_web(
+            captured, "POST", "/api/dashboard-auth",
+            headers={**_JSON_HDR, "Cookie": cookie_value},
+            body=json.dumps({"op": "disable", "current": "x" * 8}).encode(),
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body)["ok"] is True
+
+        # Next request (no cookie needed — the gate is off now): dashboard,
+        # not the setup page.
+        resp2 = _dispatch_web(captured, "GET", "/")
+        assert resp2.status == 200
+        assert b'id="sessions"' in resp2.body
+        assert b"Secure this dashboard" not in resp2.body
 
 
 def test_do_kick_records_the_attempt_even_when_ops_kick_raises(tmp_path, monkeypatch):

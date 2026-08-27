@@ -60,13 +60,15 @@ atomic write, degrade-to-default on read).
 }
 ```
 
-State transitions:
+State transitions (UPDATED 2026-08-26 — see "Bootstrap prompt — SUPERSEDED"
+below for the full revision; the original row for `false`/`false` is struck
+through and corrected here so this table doesn't contradict the gate):
 
 | `login_enabled` | `bootstrap_dismissed` | Behavior |
 |---|---|---|
-| `false` | `false` | Dashboard functional, bootstrap prompt shown (default) |
-| `false` | `true` | Dashboard functional, no prompt (user chose "No login") |
-| `true` | (ignored) | Login required, passphrase set |
+| `false` | `false` | ~~Dashboard functional, bootstrap prompt shown (default)~~ **UNDECIDED: blocking setup page, dashboard unreachable, until enable or dismiss** |
+| `false` | `true` | OPTED_OUT: dashboard functional, no prompt (user chose "Continue without login") |
+| `true` | (ignored) | ENABLED: login required, passphrase set |
 
 **Corrupt file handling (revised, user-decided 2026-08-26):** fail CLOSED,
 not open. The original rationale below was rejected: a corrupt auth file
@@ -101,15 +103,25 @@ disable the gate.
 
 ## Request Flow
 
+UPDATED 2026-08-26 (default-secure bootstrap; step 2 below is superseded —
+see "Bootstrap prompt — SUPERSEDED"):
+
 1. Request arrives → host allowlist check (unchanged, always first).
-2. If `login_enabled` is false → pass through (current behavior).
-3. If `login_enabled` is true → check for valid `crr_session` cookie:
+2. If corrupt → treat as ENABLED with a cookie that can never validate
+   (step 3, but no login attempt ever succeeds; setup ops also blocked).
+3. Else if `login_enabled` is true → check for valid `crr_session` cookie:
    - Valid → proceed to normal routing.
    - Invalid/missing + `GET /` → serve login page (not the dashboard).
    - Invalid/missing + API request → 401 JSON `{"error": "unauthorized"}`.
    - **Exceptions (always unauthenticated):** `GET /api/version` (page
      self-heal), `GET /manifest.webmanifest` (PWA install),
      `POST /api/login` (the login endpoint itself).
+4. Else if UNDECIDED (`login_enabled=false AND bootstrap_dismissed=false`)
+   → the blocking setup gate: `GET /` serves the setup page; every other
+   non-exempt route 401s; `POST /api/dashboard-auth` is reachable
+   unauthenticated for `enable`/`dismiss-bootstrap` only.
+5. Else (OPTED_OUT: `login_enabled=false AND bootstrap_dismissed=true`) →
+   pass through, exactly today's disabled behavior.
 
 ## Cookie Attributes
 
@@ -125,15 +137,45 @@ the real protection.
 
 ## UI
 
-### Bootstrap prompt (modal overlay on first visit)
+### Bootstrap prompt — SUPERSEDED (user decision 2026-08-26)
 
-Appears when `login_enabled=false` and `bootstrap_dismissed=false`. The
-dashboard is fully functional behind it — the modal is advisory, not
-blocking. Re-appears every visit until the user clicks one of:
+**Original design (below, kept for history): an advisory modal overlay on
+first visit.** Appeared when `login_enabled=false` and
+`bootstrap_dismissed=false`. The dashboard was fully functional behind it —
+the modal was advisory, not blocking. Re-appeared every visit until the
+user clicked "Set passphrase" (→ `login_enabled=true`) or "No login" (→
+`bootstrap_dismissed=true`).
 
-- **"Set passphrase"** → opens passphrase setup form (passphrase + confirm,
-  8-char minimum). On success, sets `login_enabled=true`.
-- **"No login"** → sets `bootstrap_dismissed=true`.
+**Revised (2026-08-26): default-secure, blocking setup page.** Auth is now
+opt-OUT rather than opt-IN. `login_enabled=false AND
+bootstrap_dismissed=false` (UNDECIDED) is no longer "dashboard functional,
+advisory prompt shown" — it's a hard gate: `GET /` serves a self-contained
+blocking setup page (`dashboard_auth.setup_page()`, same family as
+`login_page()`) with zero dashboard content, and every API 401s except a
+narrow unauthenticated `POST /api/dashboard-auth` restricted to
+`{"op": "enable", ...}` and `{"op": "dismiss-bootstrap"}` — `change` and
+`disable` are rejected explicitly even here. The dashboard (and its API)
+stays unreachable until the first visitor either sets a passphrase or
+clicks "Continue without login (not recommended)".
+
+This makes the **first-comer-owns-bootstrap** property explicit rather than
+incidental: whoever reaches an undecided dashboard first is the one who
+decides whether it gets a passphrase — the same trust model the tailnet
+boundary already implied (anyone who can reach the dashboard at all is
+already inside it), just no longer hidden behind a dashboard that appeared
+to work regardless. `disable()` was also fixed to set
+`bootstrap_dismissed=true` (disabling IS opting out) — without that, an
+authenticated user turning login off would land back in UNDECIDED and be
+immediately re-blocked by the setup gate on their very next request.
+`PAGE_VERSION` bumped to 62 to remove the now-dead advisory-modal markup
+and JS (`#bootstrapModal`, `checkBootstrap`, `showBootstrapSetup`,
+`submitBootstrapPassphrase`, `dismissBootstrap`) — the Settings-modal login
+section (`renderLoginSection`) is unaffected, since OPTED_OUT and ENABLED
+still need it.
+
+The original "modal overlay" section follows for context; treat every
+"dashboard is fully functional behind it" statement as superseded by the
+above.
 
 ### Login page (standalone, replaces dashboard when unauthenticated)
 
@@ -207,7 +249,9 @@ previous enabled period don't work.
 
 - `DASHBOARD_AUTH_STORE_VERSION = 1` in `contracts.py`.
 - `CONFIG_DEFAULTS_VERSION` bumps for `dashboard_session_hours`.
-- `PAGE_VERSION` bumps for login page, bootstrap modal, Settings additions.
+- `PAGE_VERSION` bumps for login page, bootstrap modal, Settings additions
+  (v61), then again (v62) to REMOVE the bootstrap modal once it became dead
+  code under the blocking-setup-page revision.
 - `SESSIONS_PAYLOAD_VERSION` does NOT bump — the shape is unchanged.
 
 ## Global Constraints
@@ -245,4 +289,8 @@ previous enabled period don't work.
 - `POST /api/login` success sets cookie.
 - `POST /api/login` failure returns 401.
 - `POST /api/dashboard-auth` operations (enable/change/disable/dismiss).
-- Bootstrap state: prompt shown when not dismissed, not shown when dismissed.
+- UPDATED 2026-08-26: the advisory bootstrap-modal coverage above
+  ("prompt shown when not dismissed") is superseded — see
+  `TestSetupGate` in `test_web.py` and `TestDashboardLoginStateMachine`
+  in `test_cli.py` for the blocking-setup-page state-machine coverage
+  (UNDECIDED/OPTED_OUT/ENABLED/CORRUPT) that replaces it.

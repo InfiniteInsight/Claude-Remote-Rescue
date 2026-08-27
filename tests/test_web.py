@@ -61,7 +61,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
             machines_provider=None, reauth_provider=None, reauth_code_provider=None,
-            query="", auth_enabled=False, auth_check=None, login_provider=None,
+            query="", auth_enabled=False, auth_check=None, setup_mode=False,
+            login_provider=None,
             logout_provider=None, dashboard_auth_provider=None, bootstrap_state=None):
     h = {"Host": host}
     if headers:
@@ -87,6 +88,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         allowed_suffixes=SUFFIXES,
         auth_enabled=auth_enabled,
         auth_check=auth_check,
+        setup_mode=setup_mode,
         login_provider=login_provider,
         logout_provider=logout_provider,
         dashboard_auth_provider=dashboard_auth_provider,
@@ -939,11 +941,14 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_61():
-    """v61: Dashboard login — bootstrap prompt + settings section. Bumped
-    here in Task 4 of the 2026-08-26 dashboard-login plan AHEAD of the
-    page.html change it is for (that lands in Task 5) — see the
-    _PENDING_PAGE_CHANGE note in test_page_version_guard.py.
+def test_page_version_is_62():
+    """v62: remove the advisory bootstrap modal (#bootstrapModal,
+    checkBootstrap/showBootstrapSetup/submitBootstrapPassphrase/
+    dismissBootstrap) — superseded by the blocking setup page served
+    server-side (crr.core.dashboard_auth.setup_page) for the UNDECIDED
+    state (default-secure bootstrap, user decision 2026-08-26). The
+    Settings-modal login section (renderLoginSection) is unchanged.
+    (v61: Dashboard login — bootstrap prompt + settings section.
     (v60: Auth expiry badge + reauth modal (header badge for
     expiring/expired/reauth-in-progress auth_state, plus the reauth modal
     wired to /api/reauth and /api/reauth-code).
@@ -966,7 +971,7 @@ def test_page_version_is_61():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 61
+    assert web.PAGE_VERSION == 62
 
 
 def test_page_renders_the_parked_state():
@@ -1973,6 +1978,89 @@ class TestAuthMiddleware:
             auth_enabled=True, auth_check=lambda cookie: False,
         )
         assert resp.status == 403
+
+
+# --------------------------------------------------------------------------
+# Setup gate (spec 2026-08-26, default-secure bootstrap revision) —
+# UNDECIDED serves a blocking setup page instead of the dashboard, with
+# /api/dashboard-auth reachable unauthenticated (path-level only; the op
+# restriction is the provider's job, exercised at the cli.py layer).
+# --------------------------------------------------------------------------
+
+class TestSetupGate:
+    def test_root_serves_the_setup_page_not_the_dashboard(self):
+        resp = _handle(path="/", setup_mode=True)
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert b"Secure this dashboard" in resp.body
+        assert b'id="sessions"' not in resp.body
+
+    def test_api_sessions_is_401_in_setup_mode(self):
+        resp = _handle(path="/api/sessions", setup_mode=True)
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "unauthorized"}
+
+    @pytest.mark.parametrize("path", [
+        "/api/version", "/manifest.webmanifest", "/sw.js",
+        "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png",
+    ])
+    def test_exempt_get_paths_pass_in_setup_mode(self, path):
+        resp = _handle(path=path, setup_mode=True)
+        assert resp.status == 200
+
+    def test_dashboard_auth_post_reaches_the_provider_unauthenticated(self):
+        resp = _handle(
+            method="POST", path="/api/dashboard-auth", headers=_JSON,
+            body=json.dumps({"op": "enable", "passphrase": "x" * 8, "confirm": "x" * 8}).encode(),
+            setup_mode=True,
+            dashboard_auth_provider=lambda data: (True, "Login enabled"),
+        )
+        assert resp.status == 200
+        assert json.loads(resp.body) == {"ok": True, "message": "Login enabled"}
+
+    def test_login_post_is_exempt_but_provider_reports_not_configured(self):
+        # The gate lets this through by path (same exemption as ENABLED);
+        # it's the provider's job (cli.py's login_provider) to say "not
+        # configured" rather than check a passphrase that doesn't exist.
+        resp = _handle(
+            method="POST", path="/api/login", headers=_JSON,
+            body=json.dumps({"passphrase": "whatever"}).encode(),
+            setup_mode=True,
+            login_provider=lambda p: (False, "Login not configured", {}),
+        )
+        assert resp.status == 401
+        assert json.loads(resp.body) == {"error": "Login not configured"}
+
+    def test_other_post_endpoints_are_401_in_setup_mode(self):
+        resp = _handle(
+            method="POST", path="/api/logout", headers=_JSON, body=b"{}",
+            setup_mode=True,
+            logout_provider=lambda: {"Set-Cookie": "crr_session=; Max-Age=0"},
+        )
+        assert resp.status == 401
+
+    def test_other_get_endpoints_are_401_in_setup_mode(self):
+        resp = _handle(
+            path="/api/untracked", setup_mode=True,
+            untracked_provider=lambda q, o, limit: {"rows": []},
+        )
+        assert resp.status == 401
+
+    def test_disallowed_host_wins_over_the_setup_gate(self):
+        resp = _handle(path="/", host="evil.com", setup_mode=True)
+        assert resp.status == 403
+
+    def test_enabled_wins_over_setup_mode_when_both_true(self):
+        # Defensive: CORRUPT/ENABLED must always take priority (the cli.py
+        # wiring should never produce this combination, but the gate order
+        # itself is what actually guarantees it).
+        resp = _handle(
+            path="/", auth_enabled=True, auth_check=lambda c: False,
+            setup_mode=True,
+        )
+        assert resp.status == 200
+        assert b"Secure this dashboard" not in resp.body
+        assert b"passphrase" in resp.body.lower()  # the login page, not setup
 
 
 class TestPostLogin:

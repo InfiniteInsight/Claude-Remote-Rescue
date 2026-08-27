@@ -3870,6 +3870,7 @@ def make_web_handler(
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     auth_enabled_fn: Callable[[], bool] | None = None,
     auth_check: Callable[[str], bool] | None = None,
+    setup_mode_fn: Callable[[], bool] | None = None,
     login_provider: Callable[[str], tuple[bool, str, dict[str, str]]] | None = None,
     logout_provider: Callable[[], dict[str, str]] | None = None,
     dashboard_auth_provider: Callable[[dict], tuple[bool, str]] | None = None,
@@ -3906,6 +3907,7 @@ def make_web_handler(
             body = self.rfile.read(length) if length else b""
             path, _, query = self.path.partition("?")
             auth_enabled = bool(auth_enabled_fn()) if auth_enabled_fn else False
+            setup_mode = bool(setup_mode_fn()) if setup_mode_fn else False
             resp = web.handle_request(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
@@ -3925,6 +3927,10 @@ def make_web_handler(
                 reauth_code_provider=reauth_code_provider,
                 auth_enabled=auth_enabled and auth_check is not None,
                 auth_check=auth_check,
+                # web.handle_request's gate checks auth_enabled first (elif
+                # setup_mode second), so CORRUPT/ENABLED always wins even if
+                # setup_mode is also true here — no extra guard needed.
+                setup_mode=setup_mode,
                 login_provider=login_provider,
                 logout_provider=logout_provider,
                 dashboard_auth_provider=dashboard_auth_provider,
@@ -4312,6 +4318,15 @@ def _cmd_web(args: argparse.Namespace) -> int:
                 "Auth store is corrupted — repair or delete "
                 "dashboard_auth.json on the server."
             ), {}
+        # UNDECIDED or OPTED_OUT (spec 2026-08-26 revision): no passphrase
+        # has ever been set, so there is nothing to verify against. Checked
+        # before the rate limiter for the same reason as the corrupt check
+        # above — this isn't a guessed passphrase, so it must not consume a
+        # rate-limit slot or pay the backoff delay, and "Incorrect
+        # passphrase" (what a bare `verify()` failure would say — no hash
+        # ever compares equal) would misname the real cause.
+        if auth_store.signing_secret() is None:
+            return False, "Login not configured", {}
         # Delay-then-verify, not delay-then-reject: the correct passphrase
         # must still succeed once the rate limit engages, or 5 wrong guesses
         # permanently lock the real owner out (only a service restart used
@@ -4349,6 +4364,28 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # raise: web.handle_request turns that into a plain-text 400,
         # which the fixed set of ops this UI sends should never trigger.
         op = data.get("op")
+        # Corrupt store: defense in depth. The gate already makes this
+        # endpoint unreachable while corrupt (auth_enabled_fn is True and
+        # /api/dashboard-auth is not in the ENABLED branch's exempt set, so
+        # an unauthenticated request never gets here — and auth_check can
+        # never succeed against a corrupt store, so neither does an
+        # authenticated one). This check documents that a corrupt store
+        # must never be overwritable through this provider even if the gate
+        # above it changes shape later.
+        if auth_store.is_corrupt():
+            return False, (
+                "Auth store is corrupted — repair or delete "
+                "dashboard_auth.json on the server."
+            )
+        # UNDECIDED (spec 2026-08-26 revision): the setup gate lets this
+        # endpoint through unauthenticated ONLY for "enable"/"dismiss-
+        # bootstrap" — web.py's gate is path-only, so the op restriction is
+        # enforced here. Without this, "change"/"disable" would already
+        # fail via verify() finding no hash (raises PassphraseError,
+        # "current passphrase is incorrect") — this makes the rejection
+        # explicit and independent of that incidental side effect.
+        if op in ("change", "disable") and not auth_store.login_enabled():
+            return False, "login is not enabled; nothing to " + op
         try:
             if op == "enable":
                 auth_store.enable(data.get("passphrase", ""), data.get("confirm", ""))
@@ -4367,14 +4404,18 @@ def _cmd_web(args: argparse.Namespace) -> int:
         raise ValueError(f"unknown op: {op}")
 
     def bootstrap_state_provider() -> dict:
+        # Merged into /api/sessions for the Settings modal's login section
+        # (renderLoginSection in page.html), which reads `login_enabled` to
+        # decide between "Login is enabled" and "Set passphrase". The
+        # blocking setup gate itself (setup_mode_fn) is what actually keeps
+        # an unauthenticated visitor off the dashboard in UNDECIDED — this
+        # payload only feeds the settings UI once inside.
+        #
         # Corrupt store (fail-closed, spec 2026-08-26 revision): report
-        # login_enabled=True, never False. page.html only shows the
-        # bootstrap prompt when login_enabled===false AND
-        # bootstrap_dismissed===false — reporting the store's real
-        # (disabled) login_enabled here would invite the bootstrap flow on
-        # top of a gate that already rejects every login attempt. The gate
-        # itself (auth_enabled_fn) blocks /api/sessions regardless; this
-        # only keeps the reported state from being misleading.
+        # login_enabled=True, never False, so a corrupt store never
+        # misreports as "not enabled" here. Moot in practice — the gate
+        # (auth_enabled_fn) already blocks /api/sessions entirely while
+        # corrupt — but keeps this payload's own contract honest.
         if auth_store.is_corrupt():
             return {
                 "login_enabled": True,
@@ -4771,6 +4812,17 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # False on corrupt (see dashboard_auth.DashboardAuthStore._read).
         auth_enabled_fn=lambda: auth_store.login_enabled() or auth_store.is_corrupt(),
         auth_check=auth_check,
+        # UNDECIDED (default-secure bootstrap, spec 2026-08-26 revision):
+        # true only when the store is neither corrupt, nor enabled, nor
+        # opted out — i.e. a fresh install, or one where the setup prompt
+        # was never resolved. Re-read live on every request, same as
+        # auth_enabled_fn above, so enabling or dismissing takes effect on
+        # the very next poll with no service restart.
+        setup_mode_fn=lambda: not (
+            auth_store.is_corrupt()
+            or auth_store.login_enabled()
+            or auth_store.bootstrap_dismissed()
+        ),
         login_provider=login_provider,
         logout_provider=logout_provider,
         dashboard_auth_provider=dashboard_auth_provider,
