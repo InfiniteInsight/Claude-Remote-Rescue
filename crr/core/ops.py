@@ -718,6 +718,7 @@ def set_skip_permissions(
         return OpResult(False, f"no session {sid[:8]}")
     for entry in entries:
         updated = dict(entry)
+        updated["v"] = 2
         claude = dict(updated["claude"])
         claude["skip_permissions"] = value
         updated["claude"] = claude
