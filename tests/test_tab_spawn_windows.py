@@ -186,44 +186,34 @@ def test_wt_probe_returns_true_on_zero_exit(monkeypatch):
     assert tsw.wt_probe("/fake/wt.exe", 5) is True
 
 
-def test_available_is_false_when_wt_exe_probe_fails(monkeypatch):
-    """A broken App Execution Alias or tmux/systemd context: wt.exe exists
-    and interop is registered but the binary exits non-zero. available()
-    must return False so callers refuse the operation cleanly."""
-    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
-    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
-    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: False)
-    assert tsw.WindowsTerminalSpawner(5).available() is False
-
-
-def test_available_is_true_when_wt_exe_probe_succeeds(monkeypatch):
-    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
-    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
-    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: True)
-    assert tsw.WindowsTerminalSpawner(5).available() is True
-
-
-def test_available_probe_false_skips_the_window_opening_probe(monkeypatch):
-    """probe=False (best-effort reopen / rescue re-home) must NOT call
-    wt_probe — that is the only step that opens a GUI help window
-    [/exit revival 2026-08-25]. The windowless checks still gate it."""
+def test_available_default_never_calls_the_gui_probe(monkeypatch):
+    """The default available() must NOT call wt_probe — it pops a GUI help
+    window. The tier fallthrough in open_tab makes it redundant."""
     monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
     monkeypatch.setattr(tsw, "interop_registered", lambda: True)
 
     def _boom(path, timeout):
-        raise AssertionError("wt_probe must not run when probe=False")
+        raise AssertionError("wt_probe must never run — it pops a GUI help window")
 
     monkeypatch.setattr(tsw, "wt_probe", _boom)
-    assert tsw.WindowsTerminalSpawner(5).available(probe=False) is True
+    assert tsw.WindowsTerminalSpawner(5).available() is True
 
 
-def test_available_probe_false_still_requires_wt_and_interop(monkeypatch):
-    # Skipping the probe does not skip the windowless prerequisites: a
-    # missing wt.exe or unregistered interop is still False.
+def test_available_default_still_requires_wt_and_interop(monkeypatch):
     monkeypatch.setattr(tsw, "wt_path", lambda: None)
     monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    assert tsw.WindowsTerminalSpawner(5).available() is False
+
+
+def test_available_explicit_probe_true_calls_wt_probe(monkeypatch):
+    """Explicit probe=True (no production caller uses this) exercises the
+    wt_probe path for coverage."""
+    monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/fake/wt.exe")
+    monkeypatch.setattr(tsw, "interop_registered", lambda: True)
+    monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: False)
+    assert tsw.WindowsTerminalSpawner(5).available(probe=True) is False
     monkeypatch.setattr(tsw, "wt_probe", lambda path, timeout: True)
-    assert tsw.WindowsTerminalSpawner(5).available(probe=False) is False
+    assert tsw.WindowsTerminalSpawner(5).available(probe=True) is True
 
 
 def test_available_uses_the_resolved_path_not_only_path(tmp_path, monkeypatch):
