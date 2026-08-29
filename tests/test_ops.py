@@ -1195,6 +1195,55 @@ def test_detmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path
     assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
 
 
+# --- Finding 6: reopen is the busiest _open_tab call site (serves the
+# CRASHED, GHOST, and LIVE-with-tmux branches) but had no tab-health tests
+# of its own — mirroring the detmux/untmux pair above.
+
+def test_reopen_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, tab_spawner=_TieredTabSpawner(), remote_control=True,
+                     tab_health=tab_health_store)
+    assert res.ok, res.message
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+def test_reopen_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
+    """A TabSpawnTimeout's fate is unknown (#53) — it must not clobber the
+    last known-good record with a same-shaped one from an unconfirmed
+    spawn. Mirrors the detmux/untmux timeout tests above."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = _idle_ctrl_flags()
+    ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+              grace=0.1, tab_spawner=_TimeoutSpawner(), remote_control=True,
+              tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
 # --- retrack ------------------------------------------------------------------
 #
 # The undo of untrack/detmux: read the archive record, re-journal its entry,
