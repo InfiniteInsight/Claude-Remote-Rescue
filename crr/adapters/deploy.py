@@ -12,15 +12,26 @@ import subprocess
 from pathlib import Path
 
 
-def _git(repo: Path, *args: str, timeout: float) -> str | None:
+def _run_git(repo: Path, *args: str, timeout: float) -> subprocess.CompletedProcess | None:
+    """Run ``git -C repo *args``, or None if it could not even be run (git
+    missing, timed out). The one place the command line is built and
+    ``SubprocessError``/``OSError`` is caught; ``_git`` and ``is_ancestor``
+    below both read the result, ``_git`` for stdout-on-success,
+    ``is_ancestor`` for the returncode itself (0/1/anything-else are three
+    different answers, not success-or-None).
+    """
     try:
-        result = subprocess.run(
+        return subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError):
         return None
-    if result.returncode != 0:
+
+
+def _git(repo: Path, *args: str, timeout: float) -> str | None:
+    result = _run_git(repo, *args, timeout=timeout)
+    if result is None or result.returncode != 0:
         return None
     return result.stdout.strip()
 
@@ -68,10 +79,21 @@ def build(app_dir: Path, repo: Path, sha: str | None, timeout: float = 600) -> s
     return None
 
 
-def write_marker(path: Path, sha: str | None, at: str) -> None:
-    """Record what was deployed, so drift can be reported later."""
+def write_marker(path: Path, sha: str | None, at: str, repo: str | None = None) -> None:
+    """Record what was deployed, so drift can be reported later.
+
+    ``repo`` is the source checkout deploy built from — recorded so a
+    LATER deploy, re-invoked through the very symlink this one creates,
+    can find its way back to a real checkout even though `__file__` by
+    then points into the frozen copy's site-packages. Optional and
+    omitted when unknown, so older markers (written before this field
+    existed) keep round-tripping without it.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"sha": sha, "deployed_at": at}), encoding="utf-8")
+    data: dict[str, str | None] = {"sha": sha, "deployed_at": at}
+    if repo:
+        data["repo"] = repo
+    path.write_text(json.dumps(data), encoding="utf-8")
 
 
 def read_marker(path: Path) -> str | None:
@@ -82,6 +104,64 @@ def read_marker(path: Path) -> str | None:
         return None
     sha = data.get("sha") if isinstance(data, dict) else None
     return sha if isinstance(sha, str) and sha else None
+
+
+def read_marker_repo(path: Path) -> str | None:
+    """The source checkout recorded at deploy time, or None if there isn't
+    one (an older marker predating this field) or the marker is unreadable.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    repo = data.get("repo") if isinstance(data, dict) else None
+    return repo if isinstance(repo, str) and repo else None
+
+
+def is_checkout(repo: Path) -> bool:
+    """Whether ``repo`` looks like a git checkout: a ``.git`` entry (a
+    directory for an ordinary clone, a file for a worktree). A plain
+    filesystem check — cheap enough to try before running git at all, and
+    the input to deciding WHICH candidate path deploy should even attempt
+    to probe with git.
+    """
+    try:
+        return (Path(repo) / ".git").exists()
+    except OSError:
+        return False
+
+
+def is_ancestor(repo: Path, ancestor: str, descendant: str, timeout: float = 5) -> bool | None:
+    """Whether ``ancestor`` is in ``descendant``'s history, or None if that
+    could not be determined — the sha is unknown to this repo (rebased,
+    squashed, gone), git is missing, or the probe failed/timed out. Never
+    guessed True: a wrong "behind" claim sends someone chasing a deploy for
+    a commit that was never really there.
+    """
+    result = _run_git(repo, "merge-base", "--is-ancestor", ancestor, descendant, timeout=timeout)
+    if result is None:
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None  # e.g. "not a valid object name" — unknown, not "no"
+
+
+def commits_behind(repo: Path, deployed_sha: str, head_sha: str, timeout: float = 5) -> int | None:
+    """How many commits ``head_sha`` has that ``deployed_sha`` does not, or
+    None on any failure. Only meaningful once the caller has confirmed
+    ``deployed_sha`` is an ancestor of ``head_sha`` via ``is_ancestor()`` —
+    on a diverged pair this counts the whole unshared side, not a
+    straight-line "behind" distance.
+    """
+    out = _git(repo, "rev-list", "--count", f"{deployed_sha}..{head_sha}", timeout=timeout)
+    if out is None:
+        return None
+    try:
+        return int(out)
+    except ValueError:
+        return None
 
 
 def restart_service(timeout: float = 30) -> str | None:

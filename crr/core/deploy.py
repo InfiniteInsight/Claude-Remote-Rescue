@@ -61,19 +61,83 @@ def refusal(*, dirty: bool | None, force: bool) -> str | None:
     return None
 
 
-def drift(deployed_sha: str | None, head_sha: str | None) -> str | None:
-    """A one-line warning when the services are not running HEAD, else None.
+def resolve_repo(
+    *,
+    explicit: str | None,
+    explicit_is_checkout: bool,
+    repo_root: Path,
+    repo_root_is_checkout: bool,
+    marker_repo: str | None,
+    marker_repo_is_checkout: bool,
+) -> Path | None:
+    """Which repo `crr deploy` should build from.
 
-    Not an error: running an older deploy is a legitimate state (that is the
-    point). It is only worth saying out loud, because the difference between
-    "my fix is live" and "my fix is committed" is invisible otherwise.
+    `crr deploy` re-invoked through the symlink it just created has
+    `__file__` inside a venv's site-packages, not a checkout — deploy
+    breaking its own re-invocation path is why a deployed snapshot sat 34
+    commits stale before anyone noticed. Precedence: an explicit ``--repo``
+    always wins over guessing, but only when it actually is a checkout — a
+    typo'd path must refuse on itself, never silently fall through to a
+    DIFFERENT repo the operator didn't name. Otherwise, the checkout crr
+    was imported from, if it still looks like one (the common case: running
+    from source). Otherwise, the checkout recorded the last time someone
+    deployed successfully from a real source tree (the deployed-copy case).
+    ``None`` means nothing usable was found — the caller refuses loudly
+    rather than building from a guess.
+    """
+    if explicit:
+        return Path(explicit) if explicit_is_checkout else None
+    if repo_root_is_checkout:
+        return repo_root
+    if marker_repo and marker_repo_is_checkout:
+        return Path(marker_repo)
+    return None
+
+
+def no_checkout_refusal(explicit: str | None) -> str:
+    """Why deploy has nothing to build from, phrased so the next step is
+    obvious.
+
+    The message this replaces ("is this a git checkout?") sent the
+    reporter of the underlying bug down the wrong path: it looked like a
+    question about their tree, not a statement that deploy needs a
+    checkout it currently cannot find. This one names both ways out.
+    """
+    if explicit:
+        return (f"--repo {explicit} is not a git checkout — pass the path "
+                "to a real source checkout")
+    return ("could not find a git checkout to deploy from — run `crr "
+            "deploy` from the source checkout, or pass --repo PATH")
+
+
+def deploy_status(
+    *,
+    deployed_sha: str | None,
+    head_sha: str | None,
+    is_ancestor: bool | None,
+    commits_behind: int | None,
+) -> tuple[bool | None, str]:
+    """The (``_check`` ok, detail) doctor renders for the deployed snapshot
+    vs. the source repo's HEAD.
+
+    Every input already degraded to ``None`` rather than a guess
+    (``crr.adapters.deploy``'s probes); this function only decides how to
+    say it. An unmeasurable comparison is an informational caveat, never a
+    claimed match or claimed drift — inventing either would be worse than
+    silence (spine: null-result expressibility).
     """
     if deployed_sha is None:
-        return "no deployed copy — services are running the working tree directly"
-    if head_sha is None or deployed_sha == head_sha:
-        return None
-    return (f"services are running {deployed_sha[:7]}, working tree is at "
-            f"{head_sha[:7]} — run `crr deploy` to update them")
+        return (True, "nothing deployed — services run the working tree")
+    if head_sha is None:
+        return (True, f"deployed {deployed_sha[:7]} — source checkout "
+                       "unknown, cannot compare to HEAD")
+    if deployed_sha == head_sha:
+        return (True, f"deployed {deployed_sha[:7]} — up to date")
+    if is_ancestor and commits_behind:
+        return (False, f"deployed {deployed_sha[:7]} — {commits_behind} "
+                        f"commit(s) behind {head_sha[:7]}; run crr deploy")
+    return (True, f"deployed {deployed_sha[:7]} — cannot be compared to "
+                   f"HEAD ({head_sha[:7]})")
 
 
 # The conventional per-user bin dir. A deploy puts `crr` on PATH here so the

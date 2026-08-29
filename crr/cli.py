@@ -402,6 +402,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-restart", action="store_true",
         help="skip restarting crr-web.service after the build",
     )
+    dep.add_argument(
+        "--repo", metavar="PATH",
+        help="build from this checkout instead of the one crr was imported "
+             "from or the one recorded by the last successful deploy "
+             "(needed when running the already-deployed copy, which has no "
+             "checkout of its own)",
+    )
     dep.set_defaults(func=_cmd_deploy)
 
     gc = sub.add_parser("gc", help="drop archive records past the retention window")
@@ -1175,7 +1182,25 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
     and this command is the only thing that moves it.
     """
     sd = state_dir.state_dir()
-    repo = _repo_root()
+    marker = deploy.marker_path(sd)
+    root = _repo_root()
+    marker_repo = deploy_io.read_marker_repo(marker)
+    # `crr deploy` re-invoked through the symlink it just created has
+    # `__file__` inside a venv's site-packages, not a checkout — `root`
+    # alone would leave it nothing to build from. Fall back through
+    # --repo, then the checkout crr was imported from, then the checkout a
+    # previous successful deploy recorded (#deploy-repo-resolution).
+    repo = deploy.resolve_repo(
+        explicit=args.repo,
+        explicit_is_checkout=bool(args.repo) and deploy_io.is_checkout(Path(args.repo)),
+        repo_root=root,
+        repo_root_is_checkout=deploy_io.is_checkout(root),
+        marker_repo=marker_repo,
+        marker_repo_is_checkout=bool(marker_repo) and deploy_io.is_checkout(Path(marker_repo)),
+    )
+    if repo is None:
+        print(f"crr deploy: {deploy.no_checkout_refusal(args.repo)}", file=sys.stderr)
+        return 2
     dirty = deploy_io.is_dirty(repo)
     stop = deploy.refusal(dirty=dirty, force=args.force)
     if stop:
@@ -1183,13 +1208,14 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         return 2
     sha = deploy_io.head_sha(repo)
     app = deploy.app_dir(sd)
-    print(f"crr deploy: installing {sha[:7] if sha else 'working tree'} into {app}")
+    print(f"crr deploy: installing {sha[:7] if sha else 'working tree'} "
+          f"from {repo} into {app}")
     err = deploy_io.build(app, repo, sha)
     if err:
         print(f"crr deploy: {err}", file=sys.stderr)
         return 1
-    deploy_io.write_marker(deploy.marker_path(sd), sha, _now())
-    print(f"deployed {sha[:7] if sha else '(unknown commit)'} to {app}")
+    deploy_io.write_marker(marker, sha, _now(), repo=str(repo))
+    print(f"deployed {sha[:7] if sha else '(unknown commit)'} from {repo} to {app}")
 
     # Put `crr` on PATH pointing at the copy that was just deployed, so the
     # command works from anywhere and runs the same reviewed code as the
@@ -1547,14 +1573,44 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         f"archive v{contracts.ARCHIVE_CONTRACT_VERSION}, "
         f"config-defaults v{cfg.CONFIG_DEFAULTS_VERSION}, page v{web.PAGE_VERSION}"
     )
-    # Which code the SERVICES are running (#61). Silent when it matches HEAD:
-    # a stale deploy is legitimate, it just must not be invisible — "my fix
-    # is committed" and "my fix is live" are otherwise indistinguishable.
+    # Which code the SERVICES are running (#61 / deploy-drift). Always
+    # printed, never silent-on-match: "my fix is committed" and "my fix is
+    # live" are otherwise indistinguishable, and an un-measurable
+    # comparison (repo unknown, sha rebased away) must say so rather than
+    # rendering nothing or guessing. A short 2s timeout per git probe, up
+    # to three probes here, so a slow/missing git cannot make doctor hang.
     _sd = state_dir.state_dir()
-    _drift = deploy.drift(deploy_io.read_marker(deploy.marker_path(_sd)),
-                          deploy_io.head_sha(_repo_root()))
-    if _drift:
-        print(f"deploy: {_drift}")
+    _deploy_timeout = 2
+    _deployed_sha = deploy_io.read_marker(deploy.marker_path(_sd))
+    if _deployed_sha is None:
+        _ok, _detail = deploy.deploy_status(
+            deployed_sha=None, head_sha=None, is_ancestor=None, commits_behind=None)
+    else:
+        _marker_repo = deploy_io.read_marker_repo(deploy.marker_path(_sd))
+        _root = _repo_root()
+        _deploy_repo = deploy.resolve_repo(
+            explicit=None,
+            explicit_is_checkout=False,
+            repo_root=_root,
+            repo_root_is_checkout=deploy_io.is_checkout(_root),
+            marker_repo=_marker_repo,
+            marker_repo_is_checkout=bool(_marker_repo) and deploy_io.is_checkout(Path(_marker_repo)),
+        )
+        _head_sha = None
+        _is_ancestor = None
+        _commits_behind = None
+        if _deploy_repo is not None:
+            _head_sha = deploy_io.head_sha(_deploy_repo, timeout=_deploy_timeout)
+            if _head_sha is not None and _head_sha != _deployed_sha:
+                _is_ancestor = deploy_io.is_ancestor(
+                    _deploy_repo, _deployed_sha, _head_sha, timeout=_deploy_timeout)
+                if _is_ancestor:
+                    _commits_behind = deploy_io.commits_behind(
+                        _deploy_repo, _deployed_sha, _head_sha, timeout=_deploy_timeout)
+        _ok, _detail = deploy.deploy_status(
+            deployed_sha=_deployed_sha, head_sha=_head_sha,
+            is_ancestor=_is_ancestor, commits_behind=_commits_behind)
+    _check("deploy", _ok, _detail)
 
     # Platform integration.
     try:
