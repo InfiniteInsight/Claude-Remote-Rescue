@@ -67,13 +67,23 @@ def record_from_spawner(store: "TabHealthStore | None", spawner: object,
     is unknown, and a record written from one would be indistinguishable
     from a genuine success (see the timeout tests in test_ops.py and
     test_reviver.py).
+
+    ``TIER_NONE`` (every tier failed — nothing launched at all) always
+    records an empty detail, never "launched, unconfirmed": that phrase
+    only makes sense for a tier that actually opened something (2 or 3,
+    fire-and-forget via ``Start-Process``) but couldn't confirm it landed.
+    Applying it to a total failure would have ``doctor_line`` render the
+    self-contradicting "no launcher worked: launched, unconfirmed".
     """
     if store is None:
         return
     tier = getattr(spawner, "last_tier", None)
     if tier is None:
         return
-    detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
+    if tier == TIER_NONE:
+        detail = ""
+    else:
+        detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
     store.record(tier, detail, now=now, boot_id=boot_id)
 
 

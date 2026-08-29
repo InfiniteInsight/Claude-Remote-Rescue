@@ -1626,11 +1626,24 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
 
     # Platform integration.
     adapter = None
+    current_boot_id = None
     try:
         adapter = boot_identity.detect()
         _check("boot-identity adapter", True, type(adapter).__name__)
+        current_boot_id = adapter.current()
     except NotImplementedError as exc:
         _check("boot-identity adapter", False, str(exc))
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        # detect() succeeded (the [ok] line above already printed) but
+        # current() failed — e.g. a container with no
+        # /proc/sys/kernel/random/boot_id, or a macOS host whose `sysctl`
+        # call errored or returned unparseable output. `crr doctor`'s whole
+        # job is to report problems, never crash before printing every
+        # check that follows (config, systemctl, contract versions, ...);
+        # current_boot_id simply stays None, which the tab-spawn-health
+        # line below renders exactly as it does when boot identity isn't
+        # available on this platform at all.
+        pass
     _check("tmux (revival substrate)", shutil.which("tmux") is not None,
            shutil.which("tmux") or "MISSING — revival unavailable")
     _check("journalctl (diagnose)", shutil.which("journalctl") is not None,
@@ -1650,13 +1663,15 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
 
     # Tab-spawn health: which launcher tier last opened a tab. Read from the
     # store, never probed — probing wt.exe opens a GUI window (spec
-    # 2026-08-29). current_boot_id flags a record left over from before the
+    # 2026-08-29). current_boot_id (resolved above, alongside the
+    # boot-identity adapter check) flags a record left over from before the
     # last reboot (interop registration, PATH, and the alias state can all
     # change across a reboot); None when boot identity isn't available on
-    # this platform, which doctor_line renders exactly as it does today.
+    # this platform, or its current() call failed, which doctor_line
+    # renders exactly as it does today.
     _check(*tab_health.doctor_line(
         tab_health.TabHealthStore(sd).read(),
-        current_boot_id=adapter.current() if adapter is not None else None,
+        current_boot_id=current_boot_id,
     ))
 
     # Config. Doctor's own parse attempt doubles as the source of `config`

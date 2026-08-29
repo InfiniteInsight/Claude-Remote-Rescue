@@ -980,34 +980,119 @@ def test_doctor_reports_no_tab_spawn_record(tmp_path, monkeypatch, capsys):
     assert "not yet exercised" in out
 
 
+class _FakeBootCurrent:
+    """A BootIdentity whose current() returns a fixed, injected boot id —
+    so tab-spawn-health staleness tests are deterministic regardless of
+    the real host's/container's actual boot id (never rely on incidentally
+    matching or mismatching real environment state)."""
+
+    def __init__(self, boot_id: str) -> None:
+        self._boot_id = boot_id
+
+    def current(self) -> str:
+        return self._boot_id
+
+
+class _RaisingBootCurrent:
+    """A BootIdentity whose detect() succeeds but current() raises — the
+    real failure mode of LinuxBootIdentity (missing
+    /proc/sys/kernel/random/boot_id, e.g. some containers) and
+    MacBootIdentity (subprocess.CalledProcessError from a failed sysctl
+    call). `crr doctor` must survive this and keep printing every later
+    check, never propagate a bare traceback."""
+
+    def current(self) -> str:
+        raise OSError("no boot_id available in this container")
+
+
 def test_doctor_reports_the_aumid_tier_with_the_alias_note(tmp_path, monkeypatch, capsys):
     import json
     from crr.core import contracts, tab_health
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-a"))
     (tmp_path / tab_health.FILENAME).write_text(json.dumps({
         "v": contracts.TAB_HEALTH_STORE_VERSION,
         "tier": tab_health.TIER_AUMID, "detail": "",
-        "ts": "2026-08-29T12:00:00Z", "boot_id": "b1",
+        "ts": "2026-08-29T12:00:00Z", "boot_id": "boot-a",
     }), encoding="utf-8")
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "app package" in out
     assert "App execution aliases" in out
     assert "2026-08-29T12:00:00Z" in out
+    assert "recorded before the last reboot" not in out  # same boot — not stale
 
 
 def test_doctor_warns_when_no_launcher_worked(tmp_path, monkeypatch, capsys):
     import json
     from crr.core import contracts, tab_health
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-a"))
     (tmp_path / tab_health.FILENAME).write_text(json.dumps({
         "v": contracts.TAB_HEALTH_STORE_VERSION,
         "tier": tab_health.TIER_NONE, "detail": "everything failed",
-        "ts": "2026-08-29T12:00:00Z", "boot_id": "b1",
+        "ts": "2026-08-29T12:00:00Z", "boot_id": "boot-a",
     }), encoding="utf-8")
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "everything failed" in out
+
+
+def test_doctor_does_not_flag_a_same_boot_tab_spawn_record_as_stale(tmp_path, monkeypatch, capsys):
+    """Pinning the current_boot_id threading directly: a record stamped
+    with the CURRENT boot must render with no staleness marker. Without
+    this (and the mismatch test below), deleting `current_boot_id=...`
+    from the doctor_line call entirely would pass every other doctor test
+    unchanged."""
+    import json
+    from crr.core import contracts, tab_health
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-a"))
+    (tmp_path / tab_health.FILENAME).write_text(json.dumps({
+        "v": contracts.TAB_HEALTH_STORE_VERSION,
+        "tier": tab_health.TIER_WT, "detail": "",
+        "ts": "2026-08-29T12:00:00Z", "boot_id": "boot-a",
+    }), encoding="utf-8")
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "wt.exe" in out
+    assert "recorded before the last reboot" not in out
+
+
+def test_doctor_flags_a_pre_reboot_tab_spawn_record_as_stale(tmp_path, monkeypatch, capsys):
+    """The mismatch half of the current_boot_id pin: a record stamped with
+    a DIFFERENT boot id than the current one must carry the staleness
+    marker."""
+    import json
+    from crr.core import contracts, tab_health
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-b"))
+    (tmp_path / tab_health.FILENAME).write_text(json.dumps({
+        "v": contracts.TAB_HEALTH_STORE_VERSION,
+        "tier": tab_health.TIER_WT, "detail": "",
+        "ts": "2026-08-29T12:00:00Z", "boot_id": "boot-a",
+    }), encoding="utf-8")
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "wt.exe" in out
+    assert "recorded before the last reboot" in out
+
+
+def test_doctor_survives_a_boot_identity_current_that_raises(tmp_path, monkeypatch, capsys):
+    """detect() can succeed while current() fails (a container missing
+    /proc/sys/kernel/random/boot_id, or a macOS sysctl call that errors).
+    `crr doctor`'s whole job is to report problems, not crash — every
+    later check (tab-spawn health, config, systemctl units, ...) must
+    still print rather than a bare traceback losing all of them."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _RaisingBootCurrent())
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tab spawn" in out
+    assert "not yet exercised" in out
+    assert "config.toml" in out
+    assert "crr-revive.timer" in out  # doctor reached its final check
 
 
 def test_config_effective_lists_every_key_with_origin(capsys):

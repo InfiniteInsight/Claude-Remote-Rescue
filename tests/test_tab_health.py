@@ -194,3 +194,67 @@ def test_record_then_read_round_trips_every_tier_constant(tmp_path):
         got = store.read()
         assert got["tier"] == tier
         assert got["detail"] == "some detail"
+
+
+# --- record_from_spawner (spec 2026-08-29, Task 3) --------------------------
+
+class _Spawner:
+    def __init__(self, last_tier, last_confirmed):
+        self.last_tier = last_tier
+        self.last_confirmed = last_confirmed
+
+
+def test_record_from_spawner_is_a_no_op_with_no_store():
+    # Must not raise — every ops.py/reviver.py call site passes tab_health
+    # unconditionally, and most callers have never wired a store.
+    tab_health.record_from_spawner(None, _Spawner(tab_health.TIER_WT, True),
+                                    now="2026-08-29T00:00:00Z", boot_id="b1")
+
+
+def test_record_from_spawner_skips_a_spawner_with_no_tier(tmp_path):
+    # macOS/Linux spawners have no last_tier at all — safe to call
+    # unconditionally after any spawn, on any platform.
+    store = tab_health.TabHealthStore(tmp_path)
+    record_from_spawner = tab_health.record_from_spawner
+    record_from_spawner(store, object(), now="2026-08-29T00:00:00Z", boot_id="b1")
+    assert store.read() is None
+
+
+def test_record_from_spawner_records_confirmed_tier_1_with_no_detail(tmp_path):
+    store = tab_health.TabHealthStore(tmp_path)
+    tab_health.record_from_spawner(
+        store, _Spawner(tab_health.TIER_WT, True),
+        now="2026-08-29T00:00:00Z", boot_id="b1")
+    got = store.read()
+    assert got["tier"] == tab_health.TIER_WT
+    assert got["detail"] == ""
+
+
+def test_record_from_spawner_records_unconfirmed_tier_2_as_launched(tmp_path):
+    # Tier 2/3 fire through Start-Process — a zero exit proves the launch,
+    # not the tab, so "launched, unconfirmed" is an honest, non-contradictory
+    # description of what actually happened.
+    store = tab_health.TabHealthStore(tmp_path)
+    tab_health.record_from_spawner(
+        store, _Spawner(tab_health.TIER_AUMID, False),
+        now="2026-08-29T00:00:00Z", boot_id="b1")
+    got = store.read()
+    assert got["tier"] == tab_health.TIER_AUMID
+    assert got["detail"] == "launched, unconfirmed"
+
+
+def test_record_from_spawner_tier_none_never_says_launched(tmp_path):
+    # Regression: TIER_NONE means EVERY tier failed — nothing launched at
+    # all. Recording "launched, unconfirmed" here would render doctor's
+    # self-contradicting "no launcher worked: launched, unconfirmed".
+    store = tab_health.TabHealthStore(tmp_path)
+    tab_health.record_from_spawner(
+        store, _Spawner(tab_health.TIER_NONE, False),
+        now="2026-08-29T00:00:00Z", boot_id="b1")
+    got = store.read()
+    assert got["tier"] == tab_health.TIER_NONE
+    assert got["detail"] == ""
+    _, ok, message = tab_health.doctor_line(got)
+    assert ok is False
+    assert "launched" not in message
+    assert message == "no launcher worked — last attempt 2026-08-29T00:00:00Z"
