@@ -974,8 +974,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_63():
-    """v63: skip-permissions toggle + always-show Reopen for live sessions.
+def test_page_version_is_64():
+    """v64: build version footer (page version + git short hash).
+    (v63: skip-permissions toggle + always-show Reopen for live sessions.
     (v62: remove the advisory bootstrap modal (#bootstrapModal,
     checkBootstrap/showBootstrapSetup/submitBootstrapPassphrase/
     dismissBootstrap) — superseded by the blocking setup page served
@@ -1005,7 +1006,7 @@ def test_page_version_is_63():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 63
+    assert web.PAGE_VERSION == 64
 
 
 def test_page_renders_the_parked_state():
