@@ -174,9 +174,19 @@ def reopen(
     if state == LIVE:
         name = entry.get("tmux_session")
         if name and name in live:
+            try:
+                tmux.kill_session(name)
+            except Exception as exc:
+                return OpResult(False, f"reopen {pid}: failed to kill tmux session {name}: {exc}")
+            tmux.new_detached_session(
+                name, entry["cwd"],
+                _revival_spawn_argv(entry, remote_control=remote_control, crr_bin=crr_bin),
+            )
+            entry["updated"] = now
+            store.write(entry)
             suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
                                         now=now, boot_id=boot.current())
-            return OpResult(True, f"opened tab for {name}" + suffix,
+            return OpResult(True, f"restarted {name}" + suffix,
                             degraded=tabs_expected and not landed)
         return OpResult(False, f"session {pid} is live — use kick or close")
 

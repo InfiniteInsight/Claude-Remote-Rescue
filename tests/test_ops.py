@@ -465,12 +465,11 @@ def test_opresult_defaults_to_not_degraded():
 
 # --- reopen LIVE-with-tmux (tab attach, no revival) -----------------------
 
-def test_reopen_live_with_tmux_opens_tab(tmp_path):
-    """A LIVE session with a tmux_session gets a tab, not a refusal."""
+def test_reopen_live_with_tmux_kills_and_relaunches(tmp_path):
+    """A LIVE session with a tmux_session kills the old session and relaunches."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="same-boot", claude=_claude())
     name = f"crr-{_SID}"
-    # Write tmux_session into the entry
     entry = store.read(42)
     entry["tmux_session"] = name
     store.write(entry)
@@ -480,14 +479,37 @@ def test_reopen_live_with_tmux_opens_tab(tmp_path):
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 42, _NOW,
                      grace=0.1, remote_control=True,
-                     tab_spawner=tab, tabs_expected=True)
+                     tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr")
     assert res.ok is True
-    assert tab.opened  # a tab was opened
-    assert tmux.created == []  # no new tmux session spawned
+    assert tmux.killed == [name]
+    assert len(tmux.created) == 1
+    assert tab.opened
 
 
-def test_reopen_live_with_tmux_opens_tab_even_when_pid_mismatches(tmp_path):
-    """The pid-ownership check was dropped — a tab opens even when the tmux
+def test_reopen_live_with_tmux_relaunches_with_skip_permissions(tmp_path):
+    """Reopen on LIVE+tmux with skip_permissions includes the flag in argv."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude(skip_permissions=True))
+    name = f"crr-{_SID}"
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+    tmux = FakeTmux(live={name}, session_pids={name: 42})
+    tab = FakeTabSpawner()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr")
+    assert res.ok
+    _, _, argv = tmux.created[0]
+    assert "--dangerously-skip-permissions" in argv
+
+
+def test_reopen_live_with_tmux_works_even_when_pid_mismatches(tmp_path):
+    """The pid-ownership check was dropped — reopen works even when the tmux
     session's pid doesn't match the journaled pid."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="same-boot", claude=_claude())
@@ -502,9 +524,10 @@ def test_reopen_live_with_tmux_opens_tab_even_when_pid_mismatches(tmp_path):
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 42, _NOW,
                      grace=0.1, remote_control=True,
-                     tab_spawner=tab, tabs_expected=True)
+                     tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr")
     assert res.ok is True
-    assert tab.opened  # tab opened despite pid mismatch
+    assert tab.opened
 
 
 def test_reopen_live_without_tmux_still_refused(tmp_path):
@@ -534,14 +557,15 @@ def test_reopen_live_with_tmux_degraded_when_tab_fails(tmp_path):
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 42, _NOW,
                      grace=0.1, remote_control=True,
-                     tab_spawner=tab, tabs_expected=True)
+                     tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr")
     assert res.ok is True
     assert res.degraded is True
     assert "tmux attach -t" in res.message
 
 
-def test_reopen_live_with_tmux_no_spawn_no_archive(tmp_path):
-    """LIVE-with-tmux must not spawn, kill, archive, or touch flags."""
+def test_reopen_live_with_tmux_does_not_archive_or_touch_flags(tmp_path):
+    """LIVE-with-tmux restart does not archive, touch flags, or signal groups."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="same-boot", claude=_claude())
     name = f"crr-{_SID}"
@@ -554,13 +578,13 @@ def test_reopen_live_with_tmux_no_spawn_no_archive(tmp_path):
     res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 42, _NOW,
                      grace=0.1, remote_control=True,
-                     tab_spawner=tab, tabs_expected=True)
+                     tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr")
     assert res.ok
-    assert tmux.created == []
     assert ctrl.terminated == []
     assert flags.armed == {}
     assert archive.scan().records == []
-    assert store.read(42)  # untouched
+    assert store.read(42)  # entry still exists
 
 
 def test_open_tab_failed_spawn_still_gives_the_attach_command():
@@ -1683,11 +1707,9 @@ def test_detmux_still_refuses_a_session_running_in_your_own_terminal(tmp_path):
     assert "not tmux-parked" in res.message
 
 
-def test_reopen_attaches_a_tab_to_a_parked_session(tmp_path):
-    # [#58] reopen refuses LIVE because it would race a spawn against a
-    # running shell. A parked entry IS the tmux session, so there is nothing
-    # to race — reopen takes its already-running branch and just attaches a
-    # tab. Without this the parked card loses "show me the tab" entirely.
+def test_reopen_restarts_a_parked_session(tmp_path):
+    """Reopen on a parked (LIVE+tmux) session kills and relaunches with
+    current flags, then opens a tab."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     name = f"crr-{_SID}"
     boot, probe = _parked(store, 2016, name)
@@ -1695,10 +1717,12 @@ def test_reopen_attaches_a_tab_to_a_parked_session(tmp_path):
     ctrl, flags = _idle_ctrl_flags()
     tab = FakeTabSpawner()
     res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 2016, _NOW,
-                     grace=0.1, remote_control=True, tab_spawner=tab, tabs_expected=True)
+                     grace=0.1, remote_control=True, tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr")
     assert res.ok, res.message
-    assert tmux.created == []                 # never respawn a live conversation
-    assert tab.opened and tab.opened[0][0][-1] == name
+    assert tmux.killed == [name]
+    assert len(tmux.created) == 1
+    assert tab.opened
 
 
 def test_reopen_still_refuses_a_live_session_in_your_own_terminal(tmp_path):
