@@ -98,3 +98,99 @@ def test_doctor_line_unknown_tier_does_not_crash():
     label, ok, detail = tab_health.doctor_line(
         {"tier": "martian", "detail": "", "ts": "2026-08-29T00:00:00Z"})
     assert ok is None
+
+
+# --- Finding 1: empty detail must not render a dangling colon/double space -
+
+def test_doctor_line_none_tier_with_empty_detail_renders_cleanly():
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_NONE, "detail": "",
+         "ts": "2026-08-29T00:00:00Z"})
+    assert ok is False
+    assert "  " not in detail
+    assert ": " not in detail
+    assert " —" in detail  # the timestamp clause is still attached
+
+
+# --- Finding 2: current_boot_id marks a record from before the last reboot -
+
+def test_doctor_line_matching_boot_id_has_no_staleness_marker():
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_WT, "detail": "", "ts": "2026-08-29T00:00:00Z",
+         "boot_id": "b1"},
+        current_boot_id="b1")
+    assert "reboot" not in detail
+
+
+def test_doctor_line_differing_boot_id_adds_staleness_marker():
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_WT, "detail": "", "ts": "2026-08-29T00:00:00Z",
+         "boot_id": "b1"},
+        current_boot_id="b2")
+    assert "reboot" in detail
+
+
+def test_doctor_line_no_current_boot_id_has_no_staleness_marker():
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_WT, "detail": "", "ts": "2026-08-29T00:00:00Z",
+         "boot_id": "b1"})
+    assert "reboot" not in detail
+
+
+def test_doctor_line_staleness_marker_appears_for_every_tier():
+    for tier in (tab_health.TIER_WT, tab_health.TIER_AUMID,
+                 tab_health.TIER_CONSOLE, tab_health.TIER_NONE):
+        _, _, detail = tab_health.doctor_line(
+            {"tier": tier, "detail": "x", "ts": "2026-08-29T00:00:00Z",
+             "boot_id": "old"},
+            current_boot_id="new")
+        assert "reboot" in detail, tier
+
+
+def test_doctor_line_staleness_marker_survives_unrecognized_tier():
+    _, ok, detail = tab_health.doctor_line(
+        {"tier": "martian", "detail": "", "ts": "2026-08-29T00:00:00Z",
+         "boot_id": "old"},
+        current_boot_id="new")
+    assert ok is None
+    assert "reboot" in detail
+
+
+# --- Finding 3: genuinely independent edge cases (not in the plan) --------
+
+def test_doctor_line_record_missing_tier_key_does_not_crash():
+    label, ok, detail = tab_health.doctor_line(
+        {"detail": "", "ts": "2026-08-29T00:00:00Z"})
+    assert ok is None
+    assert "unrecognized" in detail
+
+
+def test_doctor_line_record_missing_ts_key_does_not_crash():
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_WT, "detail": ""})
+    assert ok is True
+    assert "unknown time" in detail
+
+
+def test_doctor_line_detail_with_braces_and_newlines_is_not_mangled():
+    weird = "boom {oops} % s \n line2"
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_NONE, "detail": weird,
+         "ts": "2026-08-29T00:00:00Z"})
+    assert weird in detail
+
+
+def test_read_when_parent_directory_does_not_exist_returns_none(tmp_path):
+    missing_parent = tmp_path / "does" / "not" / "exist"
+    assert tab_health.TabHealthStore(missing_parent).read() is None
+
+
+def test_record_then_read_round_trips_every_tier_constant(tmp_path):
+    for tier in (tab_health.TIER_WT, tab_health.TIER_AUMID,
+                 tab_health.TIER_CONSOLE, tab_health.TIER_NONE):
+        store = tab_health.TabHealthStore(tmp_path)
+        store.record(tier, "some detail", now="2026-08-29T00:00:00Z",
+                     boot_id="b1")
+        got = store.read()
+        assert got["tier"] == tier
+        assert got["detail"] == "some detail"

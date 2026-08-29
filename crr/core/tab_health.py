@@ -64,13 +64,26 @@ ALIAS_NOTE = (
 )
 
 
-def doctor_line(record: dict[str, Any] | None) -> tuple[str, bool | None, str]:
+STALENESS_NOTE = " (recorded before the last reboot)"
+
+
+def doctor_line(
+    record: dict[str, Any] | None,
+    current_boot_id: str | None = None,
+) -> tuple[str, bool | None, str]:
     """Render the tab-spawn health line as ``cli._check(label, ok, detail)`` args.
 
     ``ok`` is tri-state, matching doctor's renderer: True renders [ok  ],
     False renders [WARN], None renders the unknown state. The timestamp is
     always shown because this reports history, not a live probe — the user
     may have fixed things since.
+
+    ``current_boot_id``, when given, is compared against the record's own
+    ``boot_id``: a mismatch means the record predates the current boot, so
+    a staleness marker is appended — the outcome it describes may no longer
+    reflect reality (interop registration, PATH, the alias state all reset
+    across a reboot). Omitting it (the default) or a match renders exactly
+    as before, so every existing call site and test stays valid.
     """
     if record is None:
         return LABEL, True, "not yet exercised"
@@ -81,18 +94,29 @@ def doctor_line(record: dict[str, Any] | None) -> tuple[str, bool | None, str]:
     when = f"last attempt {ts}"
 
     if tier == TIER_WT:
-        return LABEL, True, f"wt.exe — {when}"
-    if tier == TIER_AUMID:
-        return LABEL, True, (
+        ok: bool | None = True
+        message = f"wt.exe — {when}"
+    elif tier == TIER_AUMID:
+        ok = True
+        message = (
             f"via the app package rather than the wt.exe alias; tabs are "
             f"opening normally — {when}. Nothing is broken in crr either "
             f"way; {ALIAS_NOTE}"
         )
-    if tier == TIER_CONSOLE:
-        return LABEL, True, (
+    elif tier == TIER_CONSOLE:
+        ok = True
+        message = (
             f"console fallback — Windows Terminal unavailable, tabs open in "
             f"a separate window — {when}"
         )
-    if tier == TIER_NONE:
-        return LABEL, False, f"no launcher worked: {detail} — {when}"
-    return LABEL, None, f"unrecognized tab-spawn record — {when}"
+    elif tier == TIER_NONE:
+        ok = False
+        message = f"no launcher worked: {detail} — {when}" if detail else f"no launcher worked — {when}"
+    else:
+        ok = None
+        message = f"unrecognized tab-spawn record — {when}"
+
+    if current_boot_id is not None and record.get("boot_id") != current_boot_id:
+        message += STALENESS_NOTE
+
+    return LABEL, ok, message
