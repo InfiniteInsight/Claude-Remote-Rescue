@@ -471,7 +471,7 @@ def test_post_action_dispatches_and_returns_result():
 
 
 def test_post_action_gate_refusal_is_409():
-    resp = _post({"op": "dismiss", "pid": 42}, action_provider=lambda o, p: (False, "is live", False))
+    resp = _post({"op": "close", "pid": 42}, action_provider=lambda o, p: (False, "is live", False))
     assert resp.status == 409
     assert json.loads(resp.body)["ok"] is False
 
@@ -893,10 +893,10 @@ def test_page_discoverable_reports_total_and_filtered_counts():
 
 def test_page_buttons_have_explanatory_tooltips():
     """Every action button explains itself on hover — the labels alone
-    ('Kick', 'Un-tmux', 'Adopt') don't tell a new user what will happen."""
+    ('Un-tmux', 'Adopt') don't tell a new user what will happen."""
     page = web.render_page()
     assert "BUTTON_HELP" in page
-    for label in ("Reopen", "Restore", "Dismiss", "Remove", "Kick", "Close",
+    for label in ("Reopen", "Remove", "Close",
                   "Untrack", "Un-tmux", "Search", "Retrack", "Adopt", "Take over"):
         assert '"' + label + '":' in page, label
     # the helper actually applies them
@@ -974,8 +974,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_65():
-    """v65: reopen on LIVE+tmux restarts with current flags.
+def test_page_version_is_66():
+    """v66: consolidate buttons — drop Kick/Dismiss/Restore; Remove archives first.
+    (v65: reopen on LIVE+tmux restarts with current flags.
     (v64: build version footer (page version + git short hash).
     (v63: skip-permissions toggle + always-show Reopen for live sessions.
     (v62: remove the advisory bootstrap modal (#bootstrapModal,
@@ -1007,7 +1008,7 @@ def test_page_version_is_65():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 65
+    assert web.PAGE_VERSION == 66
 
 
 def test_page_renders_the_parked_state():
@@ -1026,20 +1027,15 @@ def test_key_explains_the_parked_state():
     assert "restored" in key
 
 
-def test_parked_cards_get_their_own_action_set():
-    # [#58] Was `..._the_crashed_action_set`. A parked session is no longer
-    # CRASHED operationally — the journal is re-keyed onto the claude in the
-    # pane — so it gets its own arm with the running-session controls rather
-    # than borrowing the crashed one, where Kick/Close were unavailable and
-    # Dismiss would only ever refuse.
+def test_all_non_crashed_states_share_one_button_set():
+    """After button consolidation, parked/live/ghost all get the same
+    Reopen+Close+Un-tmux set — no per-state branching needed."""
     page = web.load_page()
-    assert 'else if (s.state === "parked")' in page
+    assert 'else if (s.state === "parked")' not in page
 
 
-def test_live_cards_always_get_a_reopen_button():
-    # v63: Reopen is always shown for live sessions so the user can relaunch
-    # with corrected flags (e.g. --dangerously-skip-permissions toggled).
-    # Ghost cards still get "Restore" (same op, different label).
+def test_all_cards_get_a_reopen_button():
+    """Every card gets Reopen — the universal restart action."""
     page = web.load_page()
     assert 'addBtn("Reopen", "reopen", false, false)' in page
 
@@ -1587,17 +1583,17 @@ def test_page_offers_retry_only_when_an_action_came_back_degraded():
     assert "j.degraded" in page
 
 
-def test_a_parked_card_offers_the_running_session_controls(page_source=None):
-    # [#58] A parked conversation is operationally LIVE now (the journal is
-    # re-keyed onto the claude in the pane), so it must offer Kick and Close
-    # — the controls for "reconnect this" and "end this" — alongside the
-    # re-homing pair. Reopen stays (it attaches a tab); Dismiss goes, since
-    # it requires CRASHED and would only ever refuse.
+def test_consolidated_button_set():
+    """Crashed: Reopen + Un-tmux. Non-crashed: Reopen + Close + Un-tmux.
+    No Kick, Dismiss, or Restore buttons anywhere."""
     page = web.render_page()
-    parked_arm = page.split('else if (s.state === "parked") {')[1].split("} else")[0]
-    for label in ("Kick", "Close", "Untrack", "Un-tmux", "Reopen"):
-        assert f'"{label}"' in parked_arm, f"parked card is missing {label}"
-    assert '"Dismiss"' not in parked_arm
+    button_section = page.split('if (s.state === "crashed")')[1].split("// Read-only")[0]
+    assert '"Reopen"' in button_section
+    assert '"Close"' in button_section
+    assert '"Un-tmux"' in button_section
+    assert '"Kick"' not in button_section
+    assert '"Dismiss"' not in button_section
+    assert '"Restore"' not in button_section
 
 
 def test_the_header_counts_reachable_and_not_connected():
@@ -1653,7 +1649,7 @@ def test_both_endpoints_serve_the_SAME_envelope():
 def test_a_refusal_is_stamped_too():
     # The 409 path is a served shape as much as the 200 path.
     from crr.core import contracts
-    resp = _post({"op": "dismiss", "pid": 42},
+    resp = _post({"op": "close", "pid": 42},
                  action_provider=lambda o, p: (False, "is live", False))
     assert resp.status == 409
     contracts.validate_action_result(json.loads(resp.body))

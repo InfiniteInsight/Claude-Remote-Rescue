@@ -2300,7 +2300,7 @@ def test_archive_list_surfaces_scan_problems_on_stderr(tmp_path, monkeypatch, ca
     assert "no archived sessions" in out
 
 
-def test_remove_delists_without_archiving(tmp_path, monkeypatch):
+def test_remove_archives_then_delists(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     store.write(new_entry(
@@ -2309,7 +2309,7 @@ def test_remove_delists_without_archiving(tmp_path, monkeypatch):
     ))
     assert cli.main(["remove", "--pid", "42"]) == 0
     assert not store.tabs_dir.joinpath("42.json").exists()
-    assert archive.scan().records == []  # pure delist: nothing archived
+    assert len(archive.scan().records) == 1  # archives before delisting
     assert cli.main(["remove", "--pid", "42"]) == 0  # idempotent
 
 

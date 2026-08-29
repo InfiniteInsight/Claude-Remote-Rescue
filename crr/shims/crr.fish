@@ -203,7 +203,11 @@ function claude
         if test "$_flag[1]" = relaunch; and test -n "$_flag[2]"
             set _cur_sid $_flag[2]
             set _crashes 0
-            command claude --resume $_flag[2] $_dsp_args (_crr_rc_args)
+            set -l _relaunch_dsp
+            if contains skip_permissions $_flag
+                set _relaunch_dsp --dangerously-skip-permissions
+            end
+            command claude --resume $_flag[2] $_relaunch_dsp (_crr_rc_args)
             set _code $status
             continue
         end

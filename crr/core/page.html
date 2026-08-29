@@ -532,12 +532,9 @@ function fieldLabel(text) {
 // NOTE: title= is a desktop hover affordance; on touch the two-tap confirm on
 // destructive buttons is the real safeguard.
 var BUTTON_HELP = {
-  "Reopen": "Restart this session with current flags (skip-permissions, etc.) and open a tab. For crashed sessions, revives into tmux first.",
-  "Restore": "Rescue this orphaned session: stop the dead shell, preserve the conversation, and revive it into tmux.",
-  "Dismiss": "Clean up this crashed session WITHOUT reviving it. The conversation is archived first, so it can still be recovered.",
-  "Remove": "Delist this session from crr and touch nothing else — no process is killed and nothing is archived.",
-  "Kick": "Restart claude in place on the SAME conversation. The shell's repair loop resumes it automatically.",
-  "Close": "End this running session remotely, like typing exit. No revival — use Kick to restart it instead.",
+  "Reopen": "Restart this session with current flags (skip-permissions, etc.) and open a tab. Tmux sessions are killed and relaunched; bare-shell sessions are signalled so the shim restarts them.",
+  "Remove": "Archive this session's conversation (if any) and delist it from crr.",
+  "Close": "End this running session remotely, like typing exit. Use Reopen to restart it instead.",
   "Untrack": "Hand this session back to you: attach its tmux session in a visible tab, archive it, and stop tracking it.",
   "Un-tmux": "Kill the tmux wrapper and relaunch `claude --resume` directly in a visible tab, with no tmux underneath.",
   "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
@@ -933,34 +930,15 @@ function renderCard(s, uncertain, groupColor, latest) {
   }
   if (s.state === "crashed") {
     addBtn("Reopen", "reopen", false, false);
-    addBtn("Dismiss", "dismiss", false, false);
-    if (s.tmux_session) {        // revived into tmux: offer re-homing
-      addBtn("Untrack", "untrack", false, false);
-      // kills the tmux session and relaunches `claude --resume` directly
-      // in a visible tab -- confirm-gated (second click) since it kills.
+    if (s.tmux_session) {
       addBtn("Un-tmux", "untmux", true, true);
     }
-  } else if (s.state === "parked") {
-    // [#58] A parked conversation is operationally LIVE — the journal is
-    // re-keyed onto the claude running in the pane — so it gets the
-    // running-session controls it was previously denied. Kick is the answer
-    // to "Remote Control dropped, reconnect it"; without it the card was a
-    // dead end. Reopen stays and means "attach a tab" (it takes reopen's
-    // already-running branch). Dismiss goes: it requires CRASHED and could
-    // only ever refuse here — Close is the op that ends a running session.
+  } else {
     addBtn("Reopen", "reopen", false, false);
-    addBtn("Kick", "kick", false);
     addBtn("Close", "close", true);
-    addBtn("Untrack", "untrack", false, false);
-    addBtn("Un-tmux", "untmux", true, true);
-  } else {                       // live or ghost: a running claude to act on
-    if (s.state === "ghost") {   // orphaned shell: offer mobile rescue
-      addBtn("Restore", "reopen", false);
-    } else {                     // live: always offer Reopen so the user can
-      addBtn("Reopen", "reopen", false, false); // relaunch with corrected flags
+    if (s.tmux_session) {
+      addBtn("Un-tmux", "untmux", true, true);
     }
-    addBtn("Kick", "kick", false);
-    addBtn("Close", "close", true);
   }
   // Read-only transcript search scoped to THIS session (GET /api/recall, not
   // an action) — available in every state, uses the shared search box's text.
