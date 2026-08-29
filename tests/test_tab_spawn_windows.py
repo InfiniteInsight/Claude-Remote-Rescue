@@ -368,6 +368,73 @@ def test_all_tiers_failing_raises_and_records_none(monkeypatch):
     assert sp.last_tier == tab_health.TIER_NONE
 
 
+def test_all_tiers_failing_raises_the_underlying_error_not_a_typeerror(monkeypatch):
+    """Finding 4: the final raise must be a real error whether or not the
+    interpreter strips `assert` (python -O). Guard against a bare `raise
+    None` masquerading as a TypeError by asserting the raised exception IS
+    the underlying subprocess error, with its original message intact."""
+    runner = _runner(fail_first=3)
+    monkeypatch.setattr(tsw.subprocess, "run", runner)
+    sp = _spawner()
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        sp.open_tab(["tmux", "attach"])
+    assert excinfo.type is subprocess.CalledProcessError
+    assert excinfo.value.returncode == 1
+
+
+# --- Finding 5: tier commands are built lazily, only when attempted --------
+
+
+def test_later_tier_commands_are_not_built_when_an_earlier_tier_succeeds(monkeypatch):
+    calls = {"wt": 0, "aumid": 0, "console": 0}
+    real_wt_command = tsw.wt_command
+
+    def spy_wt(*a, **kw):
+        calls["wt"] += 1
+        return real_wt_command(*a, **kw)
+
+    def spy_aumid(*a, **kw):
+        calls["aumid"] += 1
+        raise AssertionError("aumid_command must not be built when tier 1 succeeds")
+
+    def spy_console(*a, **kw):
+        calls["console"] += 1
+        raise AssertionError("console_command must not be built when tier 1 succeeds")
+
+    monkeypatch.setattr(tsw, "wt_command", spy_wt)
+    monkeypatch.setattr(tsw, "aumid_command", spy_aumid)
+    monkeypatch.setattr(tsw, "console_command", spy_console)
+    monkeypatch.setattr(tsw, "wt_path", lambda: "wt.exe")
+    monkeypatch.setattr(tsw.subprocess, "run",
+                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""))
+    tsw.WindowsTerminalSpawner(5).open_tab(["tmux", "attach"])
+    assert calls == {"wt": 1, "aumid": 0, "console": 0}
+
+
+def test_tier2_command_is_built_only_after_tier1_is_attempted(monkeypatch):
+    order = []
+    monkeypatch.setattr(tsw, "wt_path", lambda: "wt.exe")
+
+    real_aumid_command = tsw.aumid_command
+
+    def spy_aumid(*a, **kw):
+        order.append("aumid_built")
+        return real_aumid_command(*a, **kw)
+
+    monkeypatch.setattr(tsw, "aumid_command", spy_aumid)
+
+    def run(cmd, **kwargs):
+        order.append(f"run:{cmd[0]}")
+        if len(order) == 1:  # the tier-1 attempt (built eagerly before the call)
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(tsw.subprocess, "run", run)
+    tsw.WindowsTerminalSpawner(5).open_tab(["tmux", "attach"])
+    # aumid_command must be built AFTER the tier-1 attempt fails, not before.
+    assert order.index("aumid_built") > order.index("run:wt.exe")
+
+
 def test_a_timeout_does_not_fall_through(monkeypatch):
     calls = []
 

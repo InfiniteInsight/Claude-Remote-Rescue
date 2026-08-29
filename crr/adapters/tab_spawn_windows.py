@@ -105,11 +105,14 @@ def wt_command(
     return cmd
 
 
-# The App User Model ID keyed off the package FAMILY name. Verified
-# 2026-08-29: launching through the shell bypasses the wt.exe App Execution
-# Alias entirely, and arguments pass through. The family name is stable
-# across Windows Terminal versions, so unlike a package path it never goes
-# stale on upgrade. Directly executing the real wt.exe under
+# The App User Model ID keyed off the package FAMILY name. Hand-verified on
+# a real Windows host 2026-08-29 (see the launcher matrix in the plan doc):
+# launching through the shell bypasses the wt.exe App Execution Alias
+# entirely, and arguments pass through. CI is Linux-only and cannot re-check
+# this — see the module docstring's "UNVERIFIED from Linux CI" caveat; only
+# the builder logic below is exercised by the test suite. The family name is
+# stable across Windows Terminal versions, so unlike a package path it never
+# goes stale on upgrade. Directly executing the real wt.exe under
 # C:\Program Files\WindowsApps is NOT an option — measured exit 126,
 # Permission denied, because of the WindowsApps ACLs.
 AUMID = r"shell:appsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
@@ -207,16 +210,20 @@ class WindowsTerminalSpawner:
         outrun the budget and still open the tab (#53), and a second window
         is worse than waiting.
         """
+        # Each builder is deferred to a thunk: constructing a command is
+        # cheap, but there is no reason to build tiers 2 and 3 at all when
+        # tier 1 succeeds, so only the tier actually attempted pays for it.
         attempts = (
             (tab_health.TIER_WT,
-             wt_command(argv, cwd, self._profile, self._distro), True),
+             lambda: wt_command(argv, cwd, self._profile, self._distro), True),
             (tab_health.TIER_AUMID,
-             aumid_command(argv, cwd, self._profile, self._distro), False),
+             lambda: aumid_command(argv, cwd, self._profile, self._distro), False),
             (tab_health.TIER_CONSOLE,
-             console_command(argv, self._distro), False),
+             lambda: console_command(argv, self._distro), False),
         )
         last_error: Exception | None = None
-        for tier, command, confirmable in attempts:
+        for tier, build_command, confirmable in attempts:
+            command = build_command()
             try:
                 subprocess.run(
                     command, capture_output=True, text=True,
@@ -239,5 +246,13 @@ class WindowsTerminalSpawner:
             return
         self.last_tier = tab_health.TIER_NONE
         self.last_confirmed = False
-        assert last_error is not None
+        if last_error is None:
+            # Unreachable in practice: every path that falls out of the loop
+            # above without returning has already assigned last_error. Made
+            # explicit rather than an `assert` — `python -O` strips asserts,
+            # which would turn this into a bare `raise None` and a confusing
+            # TypeError instead of a clear signal that an invariant broke.
+            raise RuntimeError(
+                "tab-spawn: every launcher tier failed but no error was captured"
+            )
         raise last_error
