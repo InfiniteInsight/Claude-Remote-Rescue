@@ -119,8 +119,28 @@ AUMID = r"shell:appsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
 
 
 def _ps_quote(value: str) -> str:
-    """Single-quote a value for PowerShell, doubling embedded single quotes."""
+    """Single-quote a value for PowerShell, doubling embedded single quotes.
+
+    Correct for the PowerShell parse alone — but ``Start-Process``'s
+    ``-ArgumentList`` joins the array items with plain spaces and does NOT
+    re-quote them when building the *target* process's command line.
+    CONFIRMED by measurement on a real host: ``-ArgumentList
+    '-e','touch','/tmp/space test/marker'`` created a stray file at
+    ``/tmp/space`` instead of the intended path, and exited 0 — silently
+    wrong (finding 3, 2026-08-29 review). A value containing a space (or an
+    empty value, which the join would otherwise drop entirely, shifting
+    every later argument — finding 10) is additionally wrapped in literal
+    double quotes: embedding them inside the PowerShell single-quoted
+    string survives the join, and the target's CreateProcess-style argv
+    splitter parses the quoted run back as ONE argument. VERIFIED fix:
+    ``-ArgumentList '-e','touch','"/tmp/space test/marker"'`` measured to
+    create the file at the right path, no stray. The two escapes compose:
+    single-quote doubling happens first (for the PowerShell parse), then
+    the whole thing is wrapped in double quotes (for the target's parse).
+    """
     escaped = value.replace("'", "''")
+    if not value or " " in value:
+        return f"'\"{escaped}\"'"
     return f"'{escaped}'"
 
 

@@ -300,8 +300,34 @@ def test_ps_quoting_escapes_embedded_single_quotes():
 
 
 def test_ps_quoting_handles_paths_with_spaces():
+    """A value containing a space must reach the target process as ONE
+    argument. `_ps_quote` correctly single-quotes for the PowerShell
+    parse, but Start-Process's -ArgumentList joins items with plain spaces
+    and does NOT re-quote them when building the target's command line —
+    measured on a real host: -ArgumentList '-e','touch','/tmp/space
+    test/marker' created a stray file at '/tmp/space' instead of the
+    intended path, and exited 0 (silently wrong). Embedding literal double
+    quotes inside the PowerShell single-quoted item survives the join and
+    is parsed back as ONE argument by the target's CreateProcess-style
+    argv splitter — measured to work correctly on a real host."""
     joined = " ".join(tsw.aumid_command(["tmux"], cwd="/home/u/my proj"))
-    assert "'/home/u/my proj'" in joined
+    assert "'\"/home/u/my proj\"'" in joined
+
+
+def test_ps_quoting_composes_space_and_single_quote_escaping():
+    # The single-quote doubling PowerShell needs and the double-quote
+    # wrapping the target process needs must compose, not clobber each
+    # other, for a value carrying both a space and an embedded quote.
+    joined = " ".join(tsw.console_command(["touch", "it's a test/marker"]))
+    assert "'\"it''s a test/marker\"'" in joined
+
+
+def test_ps_quote_of_an_empty_string_does_not_vanish():
+    # Finding 10: Start-Process's plain-space join silently drops a bare
+    # '' item, shifting every argument after it. No caller passes one
+    # today, but the same embedded-double-quote wrapping keeps an empty
+    # value a real (empty) argument instead of disappearing.
+    assert tsw._ps_quote("") == "'\"\"'"
 
 
 # --- launcher tier fallthrough ----------------------------------------------
