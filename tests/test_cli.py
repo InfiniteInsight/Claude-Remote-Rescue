@@ -801,20 +801,8 @@ def test_tab_spawner_selects_a_linux_terminal_on_a_desktop(monkeypatch):
 def test_tab_spawner_selects_windows_terminal_under_wsl(monkeypatch):
     # WSL is checked before the Linux desktop path: wt.exe wins when present
     # AND the interop handler can exec it ([live bug, 2026-08-09]).
-    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
-    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
-                        lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
-    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
-    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", lambda path, timeout: True)
-    spawner, _expected = cli._tab_spawner(cfg.Config())
-    assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
-
-
-def test_tab_spawner_probe_false_does_not_run_the_wt_window_probe(monkeypatch):
-    # The recovery paths (reopen / rescue re-home) pass probe=False so a
-    # session coming back never flashes a wt help window
-    # [/exit revival 2026-08-25]. wt_probe must not be called at all.
+    # The wt_probe is never called — the default is probe=False now that the
+    # tier fallthrough makes it redundant (and it pops a GUI help window).
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
@@ -822,10 +810,29 @@ def test_tab_spawner_probe_false_does_not_run_the_wt_window_probe(monkeypatch):
     monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
 
     def _boom(path, timeout):
-        raise AssertionError("wt_probe (opens a GUI window) ran despite probe=False")
+        raise AssertionError("wt_probe must never run — it pops a GUI help window")
 
     monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", _boom)
-    spawner, expected = cli._tab_spawner(cfg.Config(), probe=False)
+    spawner, _expected = cli._tab_spawner(cfg.Config())
+    assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
+
+
+def test_tab_spawner_default_never_runs_the_wt_window_probe(monkeypatch):
+    # The wt liveness probe (wt.exe --version) pops a GUI help window —
+    # never acceptable. The tier fallthrough in open_tab makes it redundant.
+    # Verify that the DEFAULT call (no explicit probe= kwarg) never touches
+    # wt_probe, so no call site can accidentally trigger a help popup.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.tab_spawn_windows.shutil, "which",
+                        lambda b: "/mnt/c/wt.exe" if b == "wt.exe" else None)
+    monkeypatch.setattr(cli.tab_spawn_windows, "interop_registered", lambda: True)
+
+    def _boom(path, timeout):
+        raise AssertionError("wt_probe must never run — it pops a GUI help window")
+
+    monkeypatch.setattr(cli.tab_spawn_windows, "wt_probe", _boom)
+    spawner, expected = cli._tab_spawner(cfg.Config())
     assert isinstance(spawner, cli.tab_spawn_windows.WindowsTerminalSpawner)
     assert expected is True
 

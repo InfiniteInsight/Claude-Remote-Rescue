@@ -205,22 +205,10 @@ class WindowsTerminalSpawner:
         self.last_tier: str | None = None
         self.last_confirmed: bool = False
 
-    def available(self, probe: bool = True) -> bool:
-        # wt.exe reachable, interop handler registered, AND (when probe) the
-        # binary actually runs. The third catches broken App Execution
-        # Aliases AND contexts where wt.exe cannot exec (tmux, systemd).
-        #
-        # wt_probe (`wt.exe --version`) is the ONLY step that opens a GUI
-        # window — wt is a GUI app with no console, so --version pops a
-        # dialog. It earns that cost only before a DESTRUCTIVE spawn-before-
-        # kill (untmux/detmux), where a wt that returns success without
-        # actually opening a tab would cost the user their session. The
-        # best-effort callers — reopen and the rescue re-home — pass
-        # probe=False: their tab is a convenience on an already-durable tmux
-        # session, so a failed open_tab is reported (never lost), and paying
-        # a help-window flash on every recovery is not worth it
-        # [/exit revival 2026-08-25]. The windowless checks (path + interop)
-        # still run, so a truly headless context is still caught.
+    def available(self, probe: bool = False) -> bool:
+        # wt.exe reachable and interop handler registered. The probe
+        # (wt.exe --version) is never used: it opens a GUI help window, and
+        # the tiered fallthrough in open_tab makes it redundant.
         path = wt_path()
         if path is None or not interop_registered():
             return False

@@ -2442,10 +2442,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
                 flags=FlagStore(sd),
                 # And without this a KICKED conversation comes back with nothing
                 # pointing at it (#62) — the sweep, not kick, creates the
-                # replacement, so the tab can only be opened from here. probe=False:
-                # this best-effort tab must not flash a wt help window on revival
-                # [/exit revival 2026-08-25].
-                tab_spawner=_tab_spawner(config, probe=False)[0],
+                tab_spawner=_tab_spawner(config)[0],
                 # The crr the exit-hook wrapper calls on a clean /exit [/exit revival 2026-08-24]:
                 # the deployed copy, matching the service-mutation principle.
                 crr_bin=_resolve_service_bin(None),
@@ -2947,16 +2944,15 @@ def _cmd_dismiss(args: argparse.Namespace) -> int:
     return 0 if res.ok else 2
 
 
-def _tab_spawner(config: cfg.Config, *, probe: bool = True) -> tuple[object | None, bool]:
+def _tab_spawner(config: cfg.Config, *, probe: bool = False) -> tuple[object | None, bool]:
     """Return ``(spawner, tabs_expected)`` for this host.
 
-    ``probe`` controls only the WSL/wt.exe path: True (default) runs the
-    GUI-window-opening wt liveness probe, needed before a destructive
-    spawn-before-kill (untmux/detmux). Best-effort callers (reopen, the
-    rescue re-home) pass probe=False so recovering a session no longer
-    flashes a wt help window [/exit revival 2026-08-25]; their tab is a
-    convenience on an already-durable tmux session, so open_tab reports any
-    failure rather than losing anything.
+    The wt liveness probe (``wt.exe --version``) is never run: it opens a
+    GUI help window (wt is a GUI app with no console), and the tiered
+    launcher fallthrough in ``open_tab`` makes it redundant — a broken alias
+    falls through to AUMID then console without popping any window. The
+    windowless checks (wt_path + interop_registered) still catch truly
+    headless contexts.
 
     macOS → Terminal.app / iTerm2. WSL → Windows Terminal (wt.exe). Other
     Linux (desktop) → gnome-terminal / konsole / kitty / wezterm.
@@ -3012,7 +3008,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     flags = FlagStore(sd)
-    spawner, tabs_expected = _tab_spawner(config, probe=False)
+    spawner, tabs_expected = _tab_spawner(config)
     # Capture the target session name + cwd BEFORE reopen: a GHOST reopen
     # archives + delists the entry (ops._reopen_ghost -> store.remove), so
     # reading it back by pid afterward would miss it and skip the drop-in.
@@ -3909,7 +3905,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         return 0
 
     n = len(found)
-    tab, tabs_expected = _tab_spawner(config, probe=False)
+    tab, tabs_expected = _tab_spawner(config)
 
     if not tabs_expected:
         # Genuinely headless (no GUI tabs on this host); we have a tty (this
@@ -4722,7 +4718,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             elif op == "dismiss":
                 res = ops.dismiss(store, archive, boot, probe, pid, _now())
             elif op == "reopen":
-                spawner, tabs_expected = _tab_spawner(config, probe=False)
+                spawner, tabs_expected = _tab_spawner(config)
                 res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                                   pid, _now(), grace=config.get("close_grace_seconds"),
                                   remote_control=config.get("remote_control"),

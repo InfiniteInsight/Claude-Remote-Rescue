@@ -975,34 +975,32 @@ def test_a_kicked_revival_records_the_tier_that_opened_the_tab(tmp_path):
 
 
 # --- Finding 4: the reviver must not probe (a probing available() would
-# refuse on a disabled wt.exe alias, which never runs open_tab's own
-# tiering) ------------------------------------------------------------------
+# The probe (wt.exe --version) is never called: the default is probe=False
+# now that the tier fallthrough makes it redundant. Verify that available()
+# is called with the non-probing default. ----------------------------------
 
 class _ProbeGatedTab:
-    """A spawner whose default (probing) available() refuses, mirroring
-    WindowsTerminalSpawner with a disabled App Execution Alias: `wt.exe
-    --version` fails, so a probing available() returns False even though
-    open_tab's own tier fallthrough (tier 2/3) would still succeed."""
+    """A spawner whose available() returns True only with probe=False
+    (the new default), mirroring WindowsTerminalSpawner's behavior:
+    the non-probing check (path + interop) succeeds, so open_tab's own
+    tier fallthrough handles any alias failure."""
     last_tier = "wt"
     last_confirmed = True
 
     def __init__(self):
         self.opened = []
 
-    def available(self, probe: bool = True) -> bool:
+    def available(self, probe: bool = False) -> bool:
         return not probe
 
     def open_tab(self, argv, cwd=None) -> None:
         self.opened.append(list(argv))
 
 
-def test_a_kicked_revival_still_opens_a_tab_when_a_probing_available_would_refuse(tmp_path):
-    """A probing available() (wt_probe running `wt.exe --version`) fails on
-    a disabled alias — but open_tab's own tiering can still fall through to
-    the aumid/console launchers. _try_open_tab must call available(probe=
-    False) so the reviver — the dominant way tabs open on a host that
-    reboots with many crashed sessions — actually reaches open_tab instead
-    of refusing before ever trying."""
+def test_a_kicked_revival_opens_a_tab_without_the_gui_probe(tmp_path):
+    """The reviver calls available() with the non-probing default (probe=
+    False). The probing path (wt.exe --version) pops a GUI help window and
+    is never used — the tier fallthrough in open_tab handles alias failures."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 899149, claude=_claude())
     tab = _ProbeGatedTab()
