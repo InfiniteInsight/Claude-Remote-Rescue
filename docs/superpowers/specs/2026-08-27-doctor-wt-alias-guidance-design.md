@@ -1,5 +1,20 @@
 # Doctor Guidance for a Broken Windows Terminal wt.exe Alias
 
+> **SUPERSEDED (2026-08-29)** by
+> `2026-08-29-wt-launcher-fallback-design.md`. Not implemented; kept for
+> the reasoning.
+>
+> Two things killed it. First, `wt_probe` cannot tell a disabled alias from
+> a context where `wt.exe` simply cannot exec (tmux, systemd) — the
+> adapter's own comment says so — meaning the `alias_broken` status here
+> would sometimes send a user to toggle a Settings switch that is fine.
+> Second, and more fundamental: even a correct diagnosis leaves tabs broken
+> until a human walks to the Windows machine. The replacement makes the
+> alias optional by falling through to the real `wt.exe` inside the app
+> package (same binary, same arguments), so the failure stops being an
+> outage. Guidance survives there only as a hedged note that never claims
+> the alias is broken.
+
 ## Goal
 
 Make `crr doctor` tell a WSL user when Windows Terminal tab-spawning is
