@@ -51,7 +51,9 @@ JOURNAL_SCHEMA_VERSION = 2
 # tmux state never claims "you are already in this session".
 # v15 adds `auth_state`, `auth_expires_in_seconds`, `auth_reauth_url` to the
 # sessions PAYLOAD (not the card) — global OAuth auth state for the dashboard.
-SESSIONS_CONTRACT_VERSION = 15
+# v16 adds `skip_permissions` (bool) to the card — whether the session was
+# launched with --dangerously-skip-permissions, toggleable from the dashboard.
+SESSIONS_CONTRACT_VERSION = 16
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -254,6 +256,7 @@ SESSION_CARD_KEYS = (
     # must not become a positive claim that two agents are fighting, which
     # would tell the reader to kill something on no evidence.
     "conflict",
+    "skip_permissions",
 )
 SESSIONS_PAYLOAD_KEYS = (
     "contract", "sessions",
@@ -452,6 +455,7 @@ def validate_session_card(card: Any) -> None:
     _require_type(card["waiting_for"], str, "session 'waiting_for'")
     _require_enum(card["autokick"], AUTOKICK_STATES, "session 'autokick'")
     _require_type(card["adopted"], bool, "session 'adopted'")
+    _require_type(card["skip_permissions"], bool, "session 'skip_permissions'")
 
 
 def validate_sessions_payload(payload: Any) -> None:

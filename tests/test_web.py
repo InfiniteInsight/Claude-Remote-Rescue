@@ -663,6 +663,39 @@ def test_post_sid_action_autokick_rejects_non_uuid_sid():
     assert resp.status == 400
 
 
+def test_sid_actions_include_skip_permissions_on_and_off():
+    assert "skip-permissions-on" in web.SID_ACTIONS
+    assert "skip-permissions-off" in web.SID_ACTIONS
+
+
+def test_post_sid_action_skip_permissions_on_dispatches():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, "--dangerously-skip-permissions enabled", False
+
+    resp = _post_sid({"op": "skip-permissions-on", "sid": _VALID_SID},
+                     sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("skip-permissions-on", _VALID_SID)
+    assert json.loads(resp.body)["ok"] is True
+
+
+def test_post_sid_action_skip_permissions_off_dispatches():
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, "--dangerously-skip-permissions disabled", False
+
+    resp = _post_sid({"op": "skip-permissions-off", "sid": _VALID_SID},
+                     sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("skip-permissions-off", _VALID_SID)
+    assert json.loads(resp.body)["ok"] is True
+
+
 def test_post_sid_action_adopt_dispatches_and_returns_result():
     seen = {}
 
@@ -941,8 +974,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_62():
-    """v62: remove the advisory bootstrap modal (#bootstrapModal,
+def test_page_version_is_63():
+    """v63: skip-permissions toggle + always-show Reopen for live sessions.
+    (v62: remove the advisory bootstrap modal (#bootstrapModal,
     checkBootstrap/showBootstrapSetup/submitBootstrapPassphrase/
     dismissBootstrap) — superseded by the blocking setup page served
     server-side (crr.core.dashboard_auth.setup_page) for the UNDECIDED
@@ -971,7 +1005,7 @@ def test_page_version_is_62():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 62
+    assert web.PAGE_VERSION == 63
 
 
 def test_page_renders_the_parked_state():
@@ -1000,13 +1034,12 @@ def test_parked_cards_get_their_own_action_set():
     assert 'else if (s.state === "parked")' in page
 
 
-def test_live_cards_get_a_reopen_button_when_tmux_session_present():
-    # v59: LIVE sessions with a tmux_session can be re-attached to (Task 1
-    # extended ops.reopen to handle this server-side). The button must only
-    # appear when there is a tmux session to attach to, and must not double
-    # up with Ghost's "Restore" button (same op, different label).
+def test_live_cards_always_get_a_reopen_button():
+    # v63: Reopen is always shown for live sessions so the user can relaunch
+    # with corrected flags (e.g. --dangerously-skip-permissions toggled).
+    # Ghost cards still get "Restore" (same op, different label).
     page = web.load_page()
-    assert 'else if (s.tmux_session)' in page
+    assert 'addBtn("Reopen", "reopen", false, false)' in page
 
 
 def test_parked_renders_as_restored_not_as_the_raw_enum():

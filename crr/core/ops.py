@@ -705,6 +705,28 @@ def _signal_groups(
     return landed, errors
 
 
+def set_skip_permissions(
+    store: JournalStore,
+    sid: str,
+    value: bool,
+    now: str,
+) -> OpResult:
+    """Toggle ``--dangerously-skip-permissions`` for every entry with this sid."""
+    entries = [e for e in store.scan().entries
+               if (e.get("claude") or {}).get("session_id") == sid]
+    if not entries:
+        return OpResult(False, f"no session {sid[:8]}")
+    for entry in entries:
+        updated = dict(entry)
+        claude = dict(updated["claude"])
+        claude["skip_permissions"] = value
+        updated["claude"] = claude
+        updated["updated"] = now
+        store.write(updated)
+    label = "enabled" if value else "disabled"
+    return OpResult(True, f"--dangerously-skip-permissions {label} for {sid[:8]}")
+
+
 def _open_tab(
     tab_spawner: TabSpawner | None,
     name: str,

@@ -1710,3 +1710,44 @@ def test_reopen_still_refuses_a_live_session_in_your_own_terminal(tmp_path):
                      remote_control=True)
     assert not res.ok
     assert "is live" in res.message
+
+
+# --- set_skip_permissions ---------------------------------------------------
+
+def test_set_skip_permissions_enables_flag(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude(skip_permissions=False))
+    res = ops.set_skip_permissions(store, _SID, True, _NOW)
+    assert res.ok
+    assert store.read(42)["claude"]["skip_permissions"] is True
+
+
+def test_set_skip_permissions_disables_flag(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude(skip_permissions=True))
+    res = ops.set_skip_permissions(store, _SID, False, _NOW)
+    assert res.ok
+    assert store.read(42)["claude"]["skip_permissions"] is False
+
+
+def test_set_skip_permissions_stamps_updated(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    later = "2026-08-01T12:00:00Z"
+    ops.set_skip_permissions(store, _SID, True, later)
+    assert store.read(42)["updated"] == later
+
+
+def test_set_skip_permissions_message_reports_sid8(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    res = ops.set_skip_permissions(store, _SID, True, _NOW)
+    assert _SID[:8] in res.message
+    assert "enabled" in res.message
+
+
+def test_set_skip_permissions_refuses_unknown_sid(tmp_path):
+    store = JournalStore(tmp_path)
+    res = ops.set_skip_permissions(store, _SID, True, _NOW)
+    assert not res.ok
+    assert "no session" in res.message

@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 62  # v62: remove the advisory bootstrap modal — replaced by the blocking setup page (crr.core.dashboard_auth.setup_page)
+PAGE_VERSION = 63  # v63: skip-permissions toggle + always-show Reopen for live sessions
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -218,7 +218,8 @@ ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", 
 # module docstring for why). Two explicit ops rather than one op carrying a
 # bool value, matching every other op here: the shape stays "op + sid",
 # nothing more to validate.
-SID_ACTIONS = ("retrack", "adopt", "takeover", "autokick-on", "autokick-off")
+SID_ACTIONS = ("retrack", "adopt", "takeover", "autokick-on", "autokick-off",
+               "skip-permissions-on", "skip-permissions-off")
 
 
 # Rows per page in the dashboard's discoverable modal (see crr.core.config's

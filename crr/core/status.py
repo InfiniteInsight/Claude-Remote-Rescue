@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v15).
+"""Status assembler — journal entries -> /api/sessions payload (contract v16).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -311,6 +311,7 @@ def assemble_sessions(
                     degraded=autokick_degraded,
                 ),
                 "adopted": adopted,
+                "skip_permissions": entry["claude"].get("skip_permissions", False),
             }
         )
 

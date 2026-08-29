@@ -955,8 +955,8 @@ function renderCard(s, uncertain, groupColor, latest) {
   } else {                       // live or ghost: a running claude to act on
     if (s.state === "ghost") {   // orphaned shell: offer mobile rescue
       addBtn("Restore", "reopen", false);
-    } else if (s.tmux_session) { // live with tmux: offer tab attach
-      addBtn("Reopen", "reopen", false, false);
+    } else {                     // live: always offer Reopen so the user can
+      addBtn("Reopen", "reopen", false, false); // relaunch with corrected flags
     }
     addBtn("Kick", "kick", false);
     addBtn("Close", "close", true);
@@ -997,6 +997,18 @@ function renderCard(s, uncertain, groupColor, latest) {
     });
   }
   actions.appendChild(akBtn);
+  var spBtn = el("button", "skip-perms-btn");
+  var spOn = !!s.skip_permissions;
+  spBtn.textContent = spOn
+    ? "Skip permissions: on" : "Skip permissions: off";
+  spBtn.title = spOn
+    ? "This session will relaunch with --dangerously-skip-permissions. Tap to disable."
+    : "This session will relaunch WITHOUT --dangerously-skip-permissions. Tap to enable.";
+  spBtn.addEventListener("click", function () {
+    sidAction(spOn ? "skip-permissions-off" : "skip-permissions-on",
+              s.session_id, spBtn);
+  });
+  actions.appendChild(spBtn);
   addBtn("Remove", "remove", true);
   card.appendChild(actions);
   return card;

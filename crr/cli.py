@@ -4829,6 +4829,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
         with mutation_lock(sd):
             if op == "retrack":
                 res = ops.retrack(store, archive, sid, _now())
+            elif op in ("skip-permissions-on", "skip-permissions-off"):
+                res = ops.set_skip_permissions(
+                    store, sid, op == "skip-permissions-on", _now())
             else:
                 return False, f"unknown op {op}", False
         return res.ok, res.message, res.degraded
