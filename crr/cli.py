@@ -2486,6 +2486,11 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     if outcome.gave_up:
         print(f"gave up: {outcome.gave_up}")
 
+    # --- archive stale session state files so the newest file for each
+    # session id belongs to a live process, fixing "phone: unknown" badges.
+    if config.get("remote_control_watch"):
+        session_state.archive_stale(is_alive=probe.is_alive)
+
     # --- separate pass: reconnect LIVE sessions whose Remote Control
     # bridge has dropped (spec 2026-08-07, Slice 2). Deliberately AFTER and
     # APART from the crashed-session revival above — that pass raises the

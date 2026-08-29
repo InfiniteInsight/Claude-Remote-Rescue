@@ -19,8 +19,9 @@ a corrupt file, or a missing field yields an absent entry or
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 
 class SessionState(NamedTuple):
@@ -103,3 +104,37 @@ def read_all(home: Path | None = None) -> dict[str, SessionState]:
             waiting_for=waiting_for if isinstance(waiting_for, str) else "",
         ))
     return {sid: state for sid, (_m, state) in newest.items()}
+
+
+def archive_stale(
+    *,
+    home: Path | None = None,
+    is_alive: Callable[[int], bool],
+) -> int:
+    """Move state files whose pid is dead to ``sessions/archive/``.
+
+    Returns the number of files archived. Silently skips non-numeric
+    filenames and files that fail to move.
+    """
+    home = home or Path.home()
+    sessions_dir = home / ".claude" / "sessions"
+    if not sessions_dir.is_dir():
+        return 0
+    archived = 0
+    for path in sessions_dir.glob("*.json"):
+        stem = path.stem
+        try:
+            pid = int(stem)
+        except ValueError:
+            continue
+        if is_alive(pid):
+            continue
+        archive_dir = sessions_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        dest = archive_dir / path.name
+        try:
+            os.replace(path, dest)
+            archived += 1
+        except OSError:
+            continue
+    return archived
