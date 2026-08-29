@@ -149,6 +149,15 @@ def _arg_list(items: Sequence[str]) -> str:
     return ",".join(_ps_quote(item) for item in items)
 
 
+# Cheap insurance (finding 2, 2026-08-29 review): measured on a real host,
+# an unresolvable AUMID exits 1 by default, so the tier2->tier3 fallthrough
+# already works without this — Start-Process's non-terminating-error
+# default was NOT confirmed broken. This is added purely as a safety net
+# for other failure modes that might otherwise return 0 on a non-
+# terminating error, not a restructuring of either command.
+_ERROR_ACTION_STOP = "$ErrorActionPreference='Stop'; "
+
+
 def aumid_command(
     argv: Sequence[str],
     cwd: str | None = None,
@@ -167,7 +176,7 @@ def aumid_command(
     inner += ["-e", *argv]
     return [
         "powershell.exe", "-NoProfile", "-Command",
-        f"Start-Process '{AUMID}' -ArgumentList {_arg_list(inner)}",
+        f"{_ERROR_ACTION_STOP}Start-Process '{AUMID}' -ArgumentList {_arg_list(inner)}",
     ]
 
 
@@ -179,7 +188,7 @@ def console_command(argv: Sequence[str], distro: str | None = None) -> list[str]
     inner += ["-e", *argv]
     return [
         "powershell.exe", "-NoProfile", "-Command",
-        f"Start-Process wsl.exe -ArgumentList {_arg_list(inner)}",
+        f"{_ERROR_ACTION_STOP}Start-Process wsl.exe -ArgumentList {_arg_list(inner)}",
     ]
 
 

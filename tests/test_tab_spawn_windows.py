@@ -293,6 +293,26 @@ def test_console_command_launches_wsl_without_windows_terminal():
     assert "new-tab" not in joined
 
 
+# --- Finding 2: cheap insurance against a non-terminating Start-Process
+# error going unnoticed. Measured on a real host: an unresolvable AUMID
+# exits 1 by default, so tier2->tier3 fallthrough already works without
+# this — it is added purely as insurance for other failure modes, not a
+# restructuring of the commands.
+
+def test_aumid_command_sets_error_action_preference_to_stop():
+    cmd = tsw.aumid_command(["tmux"])
+    command_str = cmd[-1]
+    assert command_str.startswith("$ErrorActionPreference='Stop'; ")
+    assert command_str.index("$ErrorActionPreference") < command_str.index("Start-Process")
+
+
+def test_console_command_sets_error_action_preference_to_stop():
+    cmd = tsw.console_command(["tmux"])
+    command_str = cmd[-1]
+    assert command_str.startswith("$ErrorActionPreference='Stop'; ")
+    assert command_str.index("$ErrorActionPreference") < command_str.index("Start-Process")
+
+
 def test_ps_quoting_escapes_embedded_single_quotes():
     joined = " ".join(tsw.console_command(["echo", "it's"]))
     # PowerShell escapes a single quote by doubling it.
