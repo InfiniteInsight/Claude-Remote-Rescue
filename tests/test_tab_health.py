@@ -261,6 +261,38 @@ def test_record_from_spawner_swallows_a_store_write_oserror():
         now="2026-08-29T00:00:00Z", boot_id="b1")  # must not raise
 
 
+def test_record_from_spawner_tier_none_uses_the_given_error(tmp_path):
+    # Finding 7: doctor's detail-bearing TIER_NONE branch was dead — no
+    # production call site ever passed a detail. Threading the caught
+    # exception through as `error` makes "[warn] naming the last error"
+    # (the spec's own words) actually reachable.
+    store = tab_health.TabHealthStore(tmp_path)
+    tab_health.record_from_spawner(
+        store, _Spawner(tab_health.TIER_NONE, False),
+        now="2026-08-29T00:00:00Z", boot_id="b1", error=OSError("ENOEXEC"))
+    assert store.read()["detail"] == "ENOEXEC"
+
+
+def test_record_from_spawner_tier_none_with_no_error_keeps_empty_detail(tmp_path):
+    store = tab_health.TabHealthStore(tmp_path)
+    tab_health.record_from_spawner(
+        store, _Spawner(tab_health.TIER_NONE, False),
+        now="2026-08-29T00:00:00Z", boot_id="b1")
+    assert store.read()["detail"] == ""
+
+
+def test_record_from_spawner_non_none_tier_ignores_a_given_error(tmp_path):
+    # `error` only matters for TIER_NONE — a confirmed/unconfirmed tier's
+    # detail must stay exactly what it was, never overwritten by a
+    # bystander exception (defensive: no call site does this today, but the
+    # parameter's contract should not silently depend on nobody trying).
+    store = tab_health.TabHealthStore(tmp_path)
+    tab_health.record_from_spawner(
+        store, _Spawner(tab_health.TIER_AUMID, False),
+        now="2026-08-29T00:00:00Z", boot_id="b1", error=OSError("irrelevant"))
+    assert store.read()["detail"] == "launched, unconfirmed"
+
+
 def test_record_from_spawner_tier_none_never_says_launched(tmp_path):
     # Regression: TIER_NONE means EVERY tier failed — nothing launched at
     # all. Recording "launched, unconfirmed" here would render doctor's

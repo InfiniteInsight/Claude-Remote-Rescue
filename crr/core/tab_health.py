@@ -54,7 +54,8 @@ class TabHealthStore:
 
 
 def record_from_spawner(store: "TabHealthStore | None", spawner: object,
-                         *, now: str, boot_id: str) -> None:
+                         *, now: str, boot_id: str,
+                         error: BaseException | str | None = None) -> None:
     """Persist which launcher tier ``spawner`` just used, if both a store was
     given and the spawner reports one.
 
@@ -75,6 +76,14 @@ def record_from_spawner(store: "TabHealthStore | None", spawner: object,
     Applying it to a total failure would have ``doctor_line`` render the
     self-contradicting "no launcher worked: launched, unconfirmed".
 
+    ``error``, when given, becomes the ``TIER_NONE`` detail (``str(error)``)
+    so the generic-failure call sites (the last exception every launcher
+    tier raised) can name it — this is what makes ``doctor_line``'s
+    "no launcher worked: <error>" branch reachable in production rather
+    than dead code only a hand-seeded record could exercise (finding 7,
+    2026-08-29 review). Ignored for every other tier: only a total failure
+    has an error worth naming here.
+
     A write failure (``store.record`` raising ``OSError`` — a read-only or
     full state dir) is swallowed, never propagated: telemetry must never
     outrank the operation it describes (finding 1, 2026-08-29 review).
@@ -85,7 +94,7 @@ def record_from_spawner(store: "TabHealthStore | None", spawner: object,
     if tier is None:
         return
     if tier == TIER_NONE:
-        detail = ""
+        detail = "" if error is None else str(error)
     else:
         detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
     try:

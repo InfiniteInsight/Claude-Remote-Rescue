@@ -444,7 +444,8 @@ def detmux(
         # dedicated clause existed); only the recording behavior differs.
         return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
     except Exception as exc:  # adapter subprocess/osascript failure
-        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now,
+                                               boot_id=boot.current(), error=exc)
         return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
     tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
     if entry.get("claude") is not None:
@@ -573,7 +574,8 @@ def untmux(
             degraded=True,
         )
     except Exception as exc:  # adapter subprocess/osascript failure
-        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now,
+                                               boot_id=boot.current(), error=exc)
         return OpResult(
             False,
             f"untmux {pid}: tmux killed but the window failed to open: {exc}; "
@@ -711,5 +713,6 @@ def _open_tab(
         # the session is attachable, so name the cause AND the way in. A bare
         # errno reads as "the whole op failed" ([live bug, 2026-08-09]: WSL
         # ENOEXEC on wt.exe when the WSLInterop binfmt handler is missing).
-        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id,
+                                               error=exc)
         return f" (tab spawn failed: {exc} — attach with: tmux attach -t {name})", False

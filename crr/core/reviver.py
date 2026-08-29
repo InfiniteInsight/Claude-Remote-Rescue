@@ -193,18 +193,38 @@ def _try_open_tab(tab_spawner, name: str, tab_health=None, *,
     used (spec 2026-08-29, Task 3), on the success path and on a genuine
     (non-timeout) failure — never on a ``TabSpawnTimeout``, whose fate is
     unknown (#53): recording one would be indistinguishable from a
-    confirmed success.
+    confirmed success. The caught exception is threaded through as
+    ``error`` so a total failure (``TIER_NONE``) names the real cause
+    instead of recording an empty detail (finding 7, 2026-08-29 review).
+
+    Checks availability with the NON-probing form (``probe=False``) where
+    the spawner supports it: the default, probing ``available()`` runs
+    ``wt.exe --version``, which fails on a disabled App Execution Alias and
+    would refuse here before ``open_tab``'s own tier fallthrough (aumid/
+    console) ever gets a chance — leaving revival, the dominant way tabs
+    open on a host that reboots with many crashed sessions, unable to
+    reach the fallback this feature exists to provide (finding 4, 2026-08-29
+    review). This aligns with the adapter's own doctrine that the
+    window-popping probe is reserved for a destructive spawn-before-kill
+    (untmux/detmux), never a best-effort one. Spawners with no ``probe``
+    parameter (macOS/Linux) raise ``TypeError`` on the keyword, which falls
+    back to the plain call.
     """
     try:
-        if not tab_spawner.available():
+        try:
+            available = tab_spawner.available(probe=False)
+        except TypeError:
+            available = tab_spawner.available()
+        if not available:
             return False
         tab_spawner.open_tab(attach_argv(name))
         tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
         return True
     except TabSpawnTimeout:
         return False  # unknown fate — never record, never treat as failure
-    except Exception:
-        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
+    except Exception as exc:
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now,
+                                               boot_id=boot_id, error=exc)
         return False  # the revival is already durable; the tab is not
 
 

@@ -359,6 +359,25 @@ def test_open_tab_success_survives_a_tab_health_write_failure(tmp_path):
     assert "opened in a new tab" in suffix
 
 
+def test_open_tab_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7: a total-failure record's detail must name the real error,
+    not stay forced-empty — that is what makes doctor's "[warn] naming the
+    last error" branch reachable in production."""
+    from crr.core import tab_health
+
+    class _FailingTieredSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store = tab_health.TabHealthStore(tmp_path)
+    ops._open_tab(_FailingTieredSpawner(), "crr-8a1b2c3d",
+                  tab_health=store, now=_NOW, boot_id="b1")
+    assert store.read()["detail"] == "wt.exe ENOEXEC"
+
+
 def test_reopen_is_degraded_when_a_tab_was_expected_and_missed(tmp_path):
     # A revival with no tab, on a host that HAS tabs, is not a plain success.
     store, archive, tmux = JournalStore(tmp_path), ArchiveStore(tmp_path), FakeTmux()
@@ -1015,6 +1034,45 @@ def test_detmux_records_the_tier_that_opened_the_tab(tmp_path):
                      42, _NOW, tab_spawner=_TieredTabSpawner(), tab_health=tab_health_store)
     assert res.ok, res.message
     assert tab_health_store.read()["tier"] == tab_health.TIER_WT
+
+
+def test_detmux_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7, detmux's generic-failure branch specifically."""
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _FailingTieredSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+               42, _NOW, tab_spawner=_FailingTieredSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["detail"] == "wt.exe ENOEXEC"
+
+
+def test_untmux_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7, untmux's generic-failure branch specifically."""
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _FailingTieredSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+               tab_spawner=_FailingTieredSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["detail"] == "wt.exe ENOEXEC"
 
 
 def test_untmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
