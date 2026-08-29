@@ -947,3 +947,52 @@ def test_a_failed_tab_never_costs_the_revival(tmp_path):
     )
     assert outcome.revived == [899149]
     assert len(tmux.created) == 1
+
+
+# --- tab-spawn health recording (spec 2026-08-29, Task 3) -------------------
+#
+# `_try_open_tab` is a second, independent `open_tab` call site (ops.py
+# cannot import this module back — see its own docstring), reached only for
+# a kicked (relaunch-flagged) revival. Skipping it here would mean revival —
+# the dominant way tabs open on a host that reboots with many crashed
+# sessions — never updates tab-spawn health.
+
+def test_a_kicked_revival_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+
+    class _TieredTab(_Tab):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_TieredTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+def test_a_kicked_revival_timeout_does_not_overwrite_an_existing_record(tmp_path):
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+
+    class _TimeoutTab:
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def available(self):
+            return True
+        def open_tab(self, argv, cwd=None):
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id=_CURRENT_BOOT)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_TimeoutTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"

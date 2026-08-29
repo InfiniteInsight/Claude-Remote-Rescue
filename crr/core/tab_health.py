@@ -53,6 +53,30 @@ class TabHealthStore:
         })
 
 
+def record_from_spawner(store: "TabHealthStore | None", spawner: object,
+                         *, now: str, boot_id: str) -> None:
+    """Persist which launcher tier ``spawner`` just used, if both a store was
+    given and the spawner reports one.
+
+    Only the Windows spawner has tiers; the macOS and Linux spawners have no
+    ``last_tier`` and are silently skipped, so this is safe to call
+    unconditionally after any successful or failed (non-timeout) spawn.
+    ``store`` is None for any caller that hasn't wired one — never probes;
+    it only records what a spawn that already happened reported. Callers
+    must NOT call this from a ``TabSpawnTimeout`` handler: a timeout's fate
+    is unknown, and a record written from one would be indistinguishable
+    from a genuine success (see the timeout tests in test_ops.py and
+    test_reviver.py).
+    """
+    if store is None:
+        return
+    tier = getattr(spawner, "last_tier", None)
+    if tier is None:
+        return
+    detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
+    store.record(tier, detail, now=now, boot_id=boot_id)
+
+
 LABEL = "tab spawn"
 
 # Shown only for TIER_AUMID. Deliberately does NOT assert the alias is

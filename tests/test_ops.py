@@ -947,6 +947,100 @@ def test_untmux_spawn_failure_after_kill_delists_to_discoverable(tmp_path):
     assert len(records) == 1 and records[0]["reason"] == "untmuxed"
 
 
+# --- tab-spawn health recording (spec 2026-08-29, Task 3) -------------------
+
+def test_untmux_records_the_tier_that_opened_the_tab(tmp_path):
+    """After untmux opens a tab, the tier it used is persisted."""
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=_TieredTabSpawner(), tab_health=tab_health_store)
+    assert res.ok, res.message
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+def test_recording_is_a_no_op_when_no_tab_health_store_is_given(tmp_path):
+    """tab_health is optional — every existing ops.py caller/test that omits
+    it keeps working exactly as before, and nothing is written to disk."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+    assert not (tmp_path / "tab_health.json").exists()
+
+
+def test_detmux_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = True
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+                     42, _NOW, tab_spawner=_TieredTabSpawner(), tab_health=tab_health_store)
+    assert res.ok, res.message
+    assert tab_health_store.read()["tier"] == tab_health.TIER_WT
+
+
+def test_untmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
+    """A TabSpawnTimeout's fate is unknown (#53) — it must not clobber the
+    last known-good record with a same-shaped one from an unconfirmed spawn."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+               tab_spawner=_TimeoutSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
+def test_detmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
+    """Same hazard as above, but against detmux's NEW except-TabSpawnTimeout
+    clause specifically — this must fail if that clause is missing or is
+    placed after the broad `except Exception`."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+               42, _NOW, tab_spawner=_TimeoutSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
 # --- retrack ------------------------------------------------------------------
 #
 # The undo of untrack/detmux: read the archive record, re-journal its entry,

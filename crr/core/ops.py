@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
 from crr.core import contracts
+from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, GHOST, LIVE, classify
 from crr.core.journal import JournalStore
@@ -30,6 +31,7 @@ from crr.core.reviver import (
 if TYPE_CHECKING:
     from crr.core.flags import FlagStore
     from crr.core.ports import ProcessController
+    from crr.core.tab_health import TabHealthStore
 
 
 class OpResult(NamedTuple):
@@ -105,6 +107,7 @@ def reopen(
     # arrives as a plain bool rather than core learning what WSL is.
     tabs_expected: bool = False,
     crr_bin: str | None = None,
+    tab_health: "TabHealthStore | None" = None,
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
 
@@ -154,7 +157,8 @@ def reopen(
     if state == LIVE:
         name = entry.get("tmux_session")
         if name and name in live:
-            suffix, landed = _open_tab(tab_spawner, name)
+            suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                        now=now, boot_id=boot.current())
             return OpResult(True, f"opened tab for {name}" + suffix,
                             degraded=tabs_expected and not landed)
         return OpResult(False, f"session {pid} is live — use kick or close")
@@ -163,7 +167,7 @@ def reopen(
         return _reopen_ghost(
             store, archive, tmux, controller, flags, boot, entry, pid, now,
             live=live, grace=grace, remote_control=remote_control, tab_spawner=tab_spawner,
-            tabs_expected=tabs_expected, crr_bin=crr_bin,
+            tabs_expected=tabs_expected, crr_bin=crr_bin, tab_health=tab_health,
         )
 
     # CRASHED — original path, unchanged.
@@ -179,7 +183,8 @@ def reopen(
         entry["updated"] = now
         store.write(entry)
         base = f"reopened {pid} as {name}"
-    suffix, landed = _open_tab(tab_spawner, name)
+    suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                now=now, boot_id=boot.current())
     return OpResult(True, base + suffix, degraded=tabs_expected and not landed)
 
 
@@ -200,6 +205,7 @@ def _reopen_ghost(
     tab_spawner: TabSpawner | None,
     tabs_expected: bool,
     crr_bin: str | None = None,
+    tab_health: "TabHealthStore | None" = None,
 ) -> OpResult:
     """The GHOST branch of ``reopen`` (see its docstring for the "why").
 
@@ -249,7 +255,8 @@ def _reopen_ghost(
     store.remove(pid)
 
     if name in live:
-        suffix, landed = _open_tab(tab_spawner, name)
+        suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                    now=now, boot_id=boot.current())
         return OpResult(
             True, f"restored {pid}'s conversation as {name} (already running){kill_suffix}"
             + suffix, degraded=tabs_expected and not landed
@@ -272,7 +279,8 @@ def _reopen_ghost(
             # still reads as plain success now that lesser ones don't.
             degraded=True,
         )
-    suffix, landed = _open_tab(tab_spawner, name)
+    suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                now=now, boot_id=boot.current())
     return OpResult(
         True, f"restored {pid}'s conversation into detached tmux as {name}{kill_suffix}"
         + suffix, degraded=tabs_expected and not landed
@@ -371,6 +379,7 @@ def detmux(
     now: str,
     *,
     tab_spawner: TabSpawner | None,
+    tab_health: "TabHealthStore | None" = None,
 ) -> OpResult:
     """Re-home a revived (detached-tmux) session into a visible tab.
 
@@ -427,8 +436,17 @@ def detmux(
         return OpResult(False, "no terminal tab spawner available on this host")
     try:
         tab_spawner.open_tab(attach_argv(name))
-    except Exception as exc:  # adapter subprocess/osascript failure
+    except TabSpawnTimeout as exc:
+        # A timeout's fate is unknown (#53) — never record it, or a spawn
+        # whose outcome we cannot confirm would persist as bit-for-bit
+        # identical to a genuine success. Same message as the generic
+        # failure branch below (unchanged in substance from before this
+        # dedicated clause existed); only the recording behavior differs.
         return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
+    except Exception as exc:  # adapter subprocess/osascript failure
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
+        return OpResult(False, f"detmux {pid} failed to open a tab: {exc}")
+    tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
     if entry.get("claude") is not None:
         # Terminology: detmux -> untrack (dashboard/CLI); "detmuxed" stays a
         # valid archive reason for pre-rename records, but new archives use
@@ -480,6 +498,7 @@ def untmux(
     now: str,
     *,
     tab_spawner: TabSpawner | None,
+    tab_health: "TabHealthStore | None" = None,
 ) -> OpResult:
     """Un-tmux a parked session: kill the tmux wrapper and relaunch the
     conversation in a crr-shimmed interactive shell — a plain window that
@@ -544,6 +563,9 @@ def untmux(
     try:
         tab_spawner.open_tab(tracked_resume_argv(entry), cwd=entry["cwd"])
     except TabSpawnTimeout:
+        # Fate unknown (#53) — never record; the prior tab-health record (if
+        # any) must survive untouched rather than be overwritten by a
+        # same-shaped, unconfirmed one.
         return OpResult(
             True,
             f"un-tmuxed {pid}: opened a terminal but could not confirm it — if it "
@@ -551,11 +573,13 @@ def untmux(
             degraded=True,
         )
     except Exception as exc:  # adapter subprocess/osascript failure
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
         return OpResult(
             False,
             f"untmux {pid}: tmux killed but the window failed to open: {exc}; "
             "the conversation is in Discoverable — adopt it there to bring it back",
         )
+    tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
     return OpResult(
         True,
         f"un-tmuxed {pid}: resumed in a tracked terminal window; "
@@ -645,23 +669,38 @@ def _signal_groups(
     return landed, errors
 
 
-def _open_tab(tab_spawner: TabSpawner | None, name: str) -> tuple[str, bool]:
+def _open_tab(
+    tab_spawner: TabSpawner | None,
+    name: str,
+    *,
+    tab_health: "TabHealthStore | None" = None,
+    now: str = "",
+    boot_id: str = "",
+) -> tuple[str, bool]:
     """Open a visible tab attaching to ``name``; return (suffix, landed).
 
     The tmux revival is already durable by the time this runs, so a failure
     here is never fatal to the session — but it is not nothing either: the
     caller asked for a tab. ``landed`` lets the caller mark the op degraded
     instead of silently reporting success ([user request, 2026-08-09]).
+
+    ``tab_health`` records which launcher tier ``tab_spawner`` reports it
+    used (spec 2026-08-29, Task 3) — on the success path and on a genuine
+    (non-timeout) failure, never on a ``TabSpawnTimeout``: that outcome's
+    fate is unknown, and a record written from it would be indistinguishable
+    from a confirmed success (#53).
     """
     if tab_spawner is None:
         return f" (no tab spawner on this host — attach with: tmux attach -t {name})", False
     try:
         tab_spawner.open_tab(attach_argv(name))
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
         return " (opened in a new tab)", True
     except TabSpawnTimeout as exc:
         # Degraded, but honestly: we do not know that no tab opened, and
         # sending the user to `tmux attach` for a tab that is already on its
-        # way would be its own kind of wrong (#53).
+        # way would be its own kind of wrong (#53). Never record here — see
+        # docstring.
         return (
             f" (no tab confirmed within {exc.seconds:g}s — the terminal may still be "
             f"starting; if none appears, attach with: tmux attach -t {name})",
@@ -672,4 +711,5 @@ def _open_tab(tab_spawner: TabSpawner | None, name: str) -> tuple[str, bool]:
         # the session is attachable, so name the cause AND the way in. A bare
         # errno reads as "the whole op failed" ([live bug, 2026-08-09]: WSL
         # ENOEXEC on wt.exe when the WSLInterop binfmt handler is missing).
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
         return f" (tab spawn failed: {exc} — attach with: tmux attach -t {name})", False
