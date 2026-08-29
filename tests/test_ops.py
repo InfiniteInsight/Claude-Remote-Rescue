@@ -337,6 +337,74 @@ def test_open_tab_reports_whether_a_tab_actually_landed():
     assert landed is False
 
 
+# --- Finding 5: unconfirmed launches must not read as verified successes --
+#
+# The spec's bolded constraint: "Do not let a fire-and-forget launch
+# masquerade as a verified success." The store already honors it
+# (launched, unconfirmed); the user-facing MESSAGE did not. landed/degraded
+# must stay unchanged — rescue-check disables the spawner after the first
+# degraded result, which would kill tabs for every remaining session.
+
+def test_open_tab_confirmed_launch_reports_plain_success():
+    class _ConfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = True
+
+    suffix, landed = ops._open_tab(_ConfirmedTabSpawner(), "crr-8a1b2c3d")
+    assert landed is True
+    assert suffix == " (opened in a new tab)"
+
+
+def test_open_tab_unconfirmed_launch_says_so_but_still_lands():
+    class _UnconfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = False
+
+    suffix, landed = ops._open_tab(_UnconfirmedTabSpawner(), "crr-8a1b2c3d")
+    assert landed is True  # NOT flipped — rescue-check would disable the spawner
+    assert "could not confirm" in suffix
+    assert "tmux attach -t crr-8a1b2c3d" in suffix
+
+
+def test_open_tab_success_survives_a_tab_health_write_failure(tmp_path):
+    """Finding 1: record_from_spawner's OSError (read-only/full state dir)
+    sat INSIDE the success try-block, so it fell into `except Exception`,
+    which recorded again (raising again, propagating) instead of reporting
+    the tab that actually opened. Swallowing OSError in record_from_spawner
+    must restore the honest "opened in a new tab" success message."""
+    from crr.core import tab_health
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = True
+
+    class _RaisingStore:
+        def record(self, tier, detail="", *, now, boot_id):
+            raise OSError("no space left on device")
+
+    suffix, landed = ops._open_tab(_TieredTabSpawner(), "crr-8a1b2c3d",
+                                    tab_health=_RaisingStore(), now=_NOW, boot_id="b1")
+    assert landed is True
+    assert "opened in a new tab" in suffix
+
+
+def test_open_tab_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7: a total-failure record's detail must name the real error,
+    not stay forced-empty — that is what makes doctor's "[warn] naming the
+    last error" branch reachable in production."""
+    from crr.core import tab_health
+
+    class _FailingTieredSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store = tab_health.TabHealthStore(tmp_path)
+    ops._open_tab(_FailingTieredSpawner(), "crr-8a1b2c3d",
+                  tab_health=store, now=_NOW, boot_id="b1")
+    assert store.read()["detail"] == "wt.exe ENOEXEC"
+
+
 def test_reopen_is_degraded_when_a_tab_was_expected_and_missed(tmp_path):
     # A revival with no tab, on a host that HAS tabs, is not a plain success.
     store, archive, tmux = JournalStore(tmp_path), ArchiveStore(tmp_path), FakeTmux()
@@ -945,6 +1013,235 @@ def test_untmux_spawn_failure_after_kill_delists_to_discoverable(tmp_path):
         store.read(42)
     records = archive.scan().records
     assert len(records) == 1 and records[0]["reason"] == "untmuxed"
+
+
+# --- tab-spawn health recording (spec 2026-08-29, Task 3) -------------------
+
+def test_untmux_records_the_tier_that_opened_the_tab(tmp_path):
+    """After untmux opens a tab, the tier it used is persisted."""
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=_TieredTabSpawner(), tab_health=tab_health_store)
+    assert res.ok, res.message
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+def test_untmux_confirmed_launch_reports_plain_success(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+    assert "resumed in a tracked terminal window" in res.message
+
+
+def test_untmux_unconfirmed_launch_says_so_but_still_succeeds(tmp_path):
+    class _UnconfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=_UnconfirmedTabSpawner())
+    assert res.ok, res.message
+    assert "could not confirm" in res.message
+
+
+def test_recording_is_a_no_op_when_no_tab_health_store_is_given(tmp_path):
+    """tab_health is optional — every existing ops.py caller/test that omits
+    it keeps working exactly as before, and nothing is written to disk."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+    assert not (tmp_path / "tab_health.json").exists()
+
+
+def test_detmux_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = True
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+                     42, _NOW, tab_spawner=_TieredTabSpawner(), tab_health=tab_health_store)
+    assert res.ok, res.message
+    assert tab_health_store.read()["tier"] == tab_health.TIER_WT
+
+
+def test_detmux_confirmed_launch_reports_plain_success(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+                     42, _NOW, tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+    assert "attached crr-8a1b2c3d in a tab" in res.message
+
+
+def test_detmux_unconfirmed_launch_says_so_but_still_succeeds(tmp_path):
+    # Finding 5: a tier 2/3 fire-and-forget launch must not read as a
+    # verified success. Only the message changes — ok/degraded stay as
+    # they are today.
+    class _UnconfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+                     42, _NOW, tab_spawner=_UnconfirmedTabSpawner())
+    assert res.ok, res.message
+    assert "could not confirm" in res.message
+
+
+def test_detmux_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7, detmux's generic-failure branch specifically."""
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _FailingTieredSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+               42, _NOW, tab_spawner=_FailingTieredSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["detail"] == "wt.exe ENOEXEC"
+
+
+def test_untmux_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7, untmux's generic-failure branch specifically."""
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _FailingTieredSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+               tab_spawner=_FailingTieredSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["detail"] == "wt.exe ENOEXEC"
+
+
+def test_untmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
+    """A TabSpawnTimeout's fate is unknown (#53) — it must not clobber the
+    last known-good record with a same-shaped one from an unconfirmed spawn."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+               tab_spawner=_TimeoutSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
+def test_detmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
+    """Same hazard as above, but against detmux's NEW except-TabSpawnTimeout
+    clause specifically — this must fail if that clause is missing or is
+    placed after the broad `except Exception`."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+               42, _NOW, tab_spawner=_TimeoutSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
+# --- Finding 6: reopen is the busiest _open_tab call site (serves the
+# CRASHED, GHOST, and LIVE-with-tmux branches) but had no tab-health tests
+# of its own — mirroring the detmux/untmux pair above.
+
+def test_reopen_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+                     grace=0.1, tab_spawner=_TieredTabSpawner(), remote_control=True,
+                     tab_health=tab_health_store)
+    assert res.ok, res.message
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+def test_reopen_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path):
+    """A TabSpawnTimeout's fate is unknown (#53) — it must not clobber the
+    last known-good record with a same-shaped one from an unconfirmed
+    spawn. Mirrors the detmux/untmux timeout tests above."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="entry-boot", claude=_claude())
+    tmux = FakeTmux()
+    ctrl, flags = _idle_ctrl_flags()
+    ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot(), FakeProbe(), 42, _NOW,
+              grace=0.1, tab_spawner=_TimeoutSpawner(), remote_control=True,
+              tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
 
 
 # --- retrack ------------------------------------------------------------------

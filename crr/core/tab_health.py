@@ -1,0 +1,177 @@
+"""Tab-spawn health — which launcher tier last opened a tab (spec 2026-08-29).
+
+Pure core. crr opens a visible tab on WSL through Windows Terminal; when the
+``wt.exe`` App Execution Alias is unusable the adapter falls through to
+alternate launchers. This module remembers which tier last worked so
+``crr doctor`` can say so, and formats that line. It records only outcomes
+of spawn attempts that already happened — it never probes, because probing
+wt.exe opens a GUI window.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from crr.core import contracts
+from crr.core.journal import read_json_file, write_json_atomic
+
+FILENAME = "tab_health.json"
+
+# Launcher tiers, best first. Values are persisted — do not rename.
+TIER_WT = "wt"            # wt.exe from PATH (the App Execution Alias stub)
+TIER_AUMID = "aumid"      # Start-Process shell:appsFolder\...!App (alias bypassed)
+TIER_CONSOLE = "console"  # Start-Process wsl.exe (plain window, no Windows Terminal)
+TIER_NONE = "none"        # every tier failed
+
+
+class TabHealthStore:
+    """Read/write the last tab-spawn outcome."""
+
+    def __init__(self, state_dir: Path) -> None:
+        self._path = Path(state_dir) / FILENAME
+
+    def read(self) -> dict[str, Any] | None:
+        """The last record, or None when absent, corrupt, or a future version."""
+        try:
+            data = read_json_file(self._path)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if not contracts.store_version_ok(data, contracts.TAB_HEALTH_STORE_VERSION):
+            return None
+        return data
+
+    def record(self, tier: str, detail: str = "", *, now: str, boot_id: str) -> None:
+        write_json_atomic(self._path, {
+            "v": contracts.TAB_HEALTH_STORE_VERSION,
+            "tier": tier,
+            "detail": detail,
+            "ts": now,
+            "boot_id": boot_id,
+        })
+
+
+def record_from_spawner(store: "TabHealthStore | None", spawner: object,
+                         *, now: str, boot_id: str,
+                         error: BaseException | str | None = None) -> None:
+    """Persist which launcher tier ``spawner`` just used, if both a store was
+    given and the spawner reports one.
+
+    Only the Windows spawner has tiers; the macOS and Linux spawners have no
+    ``last_tier`` and are silently skipped, so this is safe to call
+    unconditionally after any successful or failed (non-timeout) spawn.
+    ``store`` is None for any caller that hasn't wired one — never probes;
+    it only records what a spawn that already happened reported. Callers
+    must NOT call this from a ``TabSpawnTimeout`` handler: a timeout's fate
+    is unknown, and a record written from one would be indistinguishable
+    from a genuine success (see the timeout tests in test_ops.py and
+    test_reviver.py).
+
+    ``TIER_NONE`` (every tier failed — nothing launched at all) always
+    records an empty detail, never "launched, unconfirmed": that phrase
+    only makes sense for a tier that actually opened something (2 or 3,
+    fire-and-forget via ``Start-Process``) but couldn't confirm it landed.
+    Applying it to a total failure would have ``doctor_line`` render the
+    self-contradicting "no launcher worked: launched, unconfirmed".
+
+    ``error``, when given, becomes the ``TIER_NONE`` detail (``str(error)``)
+    so the generic-failure call sites (the last exception every launcher
+    tier raised) can name it — this is what makes ``doctor_line``'s
+    "no launcher worked: <error>" branch reachable in production rather
+    than dead code only a hand-seeded record could exercise (finding 7,
+    2026-08-29 review). Ignored for every other tier: only a total failure
+    has an error worth naming here.
+
+    A write failure (``store.record`` raising ``OSError`` — a read-only or
+    full state dir) is swallowed, never propagated: telemetry must never
+    outrank the operation it describes (finding 1, 2026-08-29 review).
+    """
+    if store is None:
+        return
+    tier = getattr(spawner, "last_tier", None)
+    if tier is None:
+        return
+    if tier == TIER_NONE:
+        detail = "" if error is None else str(error)
+    else:
+        detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
+    try:
+        store.record(tier, detail, now=now, boot_id=boot_id)
+    except OSError:
+        # Telemetry must never outrank the operation it describes. A
+        # read-only or full state dir must not turn a successful spawn into
+        # a reported failure (ops._open_tab's record call sits inside the
+        # same try as the spawn it reports on) nor break reviver's
+        # documented "never raises" contract for _try_open_tab.
+        pass
+
+
+LABEL = "tab spawn"
+
+# Shown only for TIER_AUMID. Deliberately does NOT assert the alias is
+# broken: wt_probe cannot tell a disabled alias from a context where wt.exe
+# cannot exec (tmux, systemd), so a confident claim would sometimes be wrong.
+ALIAS_NOTE = (
+    "if you want the alias back: Settings -> Apps -> Advanced app settings "
+    '-> App execution aliases -> turn on "Terminal (wt.exe)"'
+)
+
+
+STALENESS_NOTE = " (recorded before the last reboot)"
+
+
+def doctor_line(
+    record: dict[str, Any] | None,
+    current_boot_id: str | None = None,
+) -> tuple[str, bool | None, str]:
+    """Render the tab-spawn health line as ``cli._check(label, ok, detail)`` args.
+
+    ``ok`` is tri-state, matching doctor's renderer: True renders [ok  ],
+    False renders [WARN], None renders the unknown state. The timestamp is
+    always shown because this reports history, not a live probe — the user
+    may have fixed things since.
+
+    ``current_boot_id``, when given, is compared against the record's own
+    ``boot_id``: a mismatch means the record predates the current boot, so
+    a staleness marker is appended — the outcome it describes may no longer
+    reflect reality (interop registration, PATH, the alias state all reset
+    across a reboot). Omitting it (the default) or a match renders exactly
+    as before, so every existing call site and test stays valid.
+    """
+    if record is None:
+        return LABEL, True, "not yet exercised"
+
+    tier = record.get("tier")
+    ts = record.get("ts", "unknown time")
+    detail = record.get("detail", "")
+    when = f"last attempt {ts}"
+
+    if tier == TIER_WT:
+        ok: bool | None = True
+        message = f"wt.exe — {when}"
+    elif tier == TIER_AUMID:
+        ok = True
+        message = (
+            f"via the app package rather than the wt.exe alias; tabs are "
+            f"opening normally — {when}. Nothing is broken in crr either "
+            f"way; {ALIAS_NOTE}"
+        )
+    elif tier == TIER_CONSOLE:
+        ok = True
+        message = (
+            f"console fallback — Windows Terminal unavailable, tabs open in "
+            f"a separate window — {when}"
+        )
+    elif tier == TIER_NONE:
+        ok = False
+        message = f"no launcher worked: {detail} — {when}" if detail else f"no launcher worked — {when}"
+    else:
+        ok = None
+        message = f"unrecognized tab-spawn record — {when}"
+
+    if current_boot_id is not None and record.get("boot_id") != current_boot_id:
+        message += STALENESS_NOTE
+
+    return LABEL, ok, message

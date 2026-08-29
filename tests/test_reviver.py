@@ -947,3 +947,141 @@ def test_a_failed_tab_never_costs_the_revival(tmp_path):
     )
     assert outcome.revived == [899149]
     assert len(tmux.created) == 1
+
+
+# --- tab-spawn health recording (spec 2026-08-29, Task 3) -------------------
+#
+# `_try_open_tab` is a second, independent `open_tab` call site (ops.py
+# cannot import this module back — see its own docstring), reached only for
+# a kicked (relaunch-flagged) revival. Skipping it here would mean revival —
+# the dominant way tabs open on a host that reboots with many crashed
+# sessions — never updates tab-spawn health.
+
+def test_a_kicked_revival_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+
+    class _TieredTab(_Tab):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_TieredTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+# --- Finding 4: the reviver must not probe (a probing available() would
+# refuse on a disabled wt.exe alias, which never runs open_tab's own
+# tiering) ------------------------------------------------------------------
+
+class _ProbeGatedTab:
+    """A spawner whose default (probing) available() refuses, mirroring
+    WindowsTerminalSpawner with a disabled App Execution Alias: `wt.exe
+    --version` fails, so a probing available() returns False even though
+    open_tab's own tier fallthrough (tier 2/3) would still succeed."""
+    last_tier = "wt"
+    last_confirmed = True
+
+    def __init__(self):
+        self.opened = []
+
+    def available(self, probe: bool = True) -> bool:
+        return not probe
+
+    def open_tab(self, argv, cwd=None) -> None:
+        self.opened.append(list(argv))
+
+
+def test_a_kicked_revival_still_opens_a_tab_when_a_probing_available_would_refuse(tmp_path):
+    """A probing available() (wt_probe running `wt.exe --version`) fails on
+    a disabled alias — but open_tab's own tiering can still fall through to
+    the aumid/console launchers. _try_open_tab must call available(probe=
+    False) so the reviver — the dominant way tabs open on a host that
+    reboots with many crashed sessions — actually reaches open_tab instead
+    of refusing before ever trying."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab = _ProbeGatedTab()
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=tab)
+    assert tab.opened, "a probing available() refused before open_tab's own tiering ran"
+
+
+def test_a_kicked_revival_generic_failure_records_the_error_as_the_detail(tmp_path):
+    """Finding 7: _try_open_tab's generic-failure branch specifically —
+    the reviver is the dominant way tabs open on a host that reboots with
+    many crashed sessions, so this call site's error must reach the
+    store too, not just ops.py's."""
+    from crr.core import tab_health
+
+    class _FailingTab(_Tab):
+        last_tier = tab_health.TIER_NONE
+        last_confirmed = False
+
+        def open_tab(self, argv, cwd=None):
+            raise OSError("wt.exe ENOEXEC")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_FailingTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["detail"] == "wt.exe ENOEXEC"
+
+
+def test_a_kicked_revival_timeout_does_not_overwrite_an_existing_record(tmp_path):
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+
+    class _TimeoutTab:
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def available(self):
+            return True
+        def open_tab(self, argv, cwd=None):
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id=_CURRENT_BOOT)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_TimeoutTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
+def test_a_kicked_revival_survives_a_tab_health_write_failure(tmp_path):
+    """Finding 1: `_try_open_tab`'s documented "Never raises" contract must
+    hold even when the tab_health store itself fails (read-only/full state
+    dir) — this is exactly the site whose double-record-then-re-raise bug
+    would abort revive_crashed mid-pass, the unattended boot-time revival."""
+    from crr.core import tab_health
+
+    class _TieredTab(_Tab):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = True
+
+    class _RaisingStore:
+        def record(self, tier, detail="", *, now, boot_id):
+            raise OSError("no space left on device")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=flags, tab_spawner=_TieredTab(), tab_health=_RaisingStore(),
+    )  # must not raise
+    assert outcome.revived == [899149]

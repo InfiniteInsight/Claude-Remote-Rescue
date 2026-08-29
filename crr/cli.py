@@ -53,7 +53,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, takeover, tailnet, transcript, web, whoami
+from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -1625,11 +1625,25 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     _check("deploy", _ok, _detail)
 
     # Platform integration.
+    adapter = None
+    current_boot_id = None
     try:
         adapter = boot_identity.detect()
         _check("boot-identity adapter", True, type(adapter).__name__)
+        current_boot_id = adapter.current()
     except NotImplementedError as exc:
         _check("boot-identity adapter", False, str(exc))
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        # detect() succeeded (the [ok] line above already printed) but
+        # current() failed — e.g. a container with no
+        # /proc/sys/kernel/random/boot_id, or a macOS host whose `sysctl`
+        # call errored or returned unparseable output. `crr doctor`'s whole
+        # job is to report problems, never crash before printing every
+        # check that follows (config, systemctl, contract versions, ...);
+        # current_boot_id simply stays None, which the tab-spawn-health
+        # line below renders exactly as it does when boot identity isn't
+        # available on this platform at all.
+        pass
     _check("tmux (revival substrate)", shutil.which("tmux") is not None,
            shutil.which("tmux") or "MISSING — revival unavailable")
     _check("journalctl (diagnose)", shutil.which("journalctl") is not None,
@@ -1646,6 +1660,29 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
           f"session, {len(archive.scan().records)} archived")
     for name, reason in scan.problems:
         _check(f"journal file {name}", False, reason)
+
+    # Tab-spawn health: which launcher tier last opened a tab. Read from the
+    # store, never probed — probing wt.exe opens a GUI window (spec
+    # 2026-08-29). current_boot_id (resolved above, alongside the
+    # boot-identity adapter check) flags a record left over from before the
+    # last reboot (interop registration, PATH, and the alias state can all
+    # change across a reboot); None when boot identity isn't available on
+    # this platform, or its current() call failed, which doctor_line
+    # renders exactly as it does today.
+    #
+    # Gated on is_wsl (finding 9, 2026-08-29 review): _tab_spawner only ever
+    # selects a tiered (last_tier-reporting) spawner on the WSL branch —
+    # macOS/native-Linux spawners never record, so an unconditional line
+    # would read "not yet exercised" forever on hosts where a record is
+    # never possible. Resolved once here and reused below for the power/
+    # harden sections (`is_wsl_host`), same convention that section already
+    # documents for itself.
+    is_wsl_host = host.is_wsl()
+    if is_wsl_host:
+        _check(*tab_health.doctor_line(
+            tab_health.TabHealthStore(sd).read(),
+            current_boot_id=current_boot_id,
+        ))
 
     # Config. Doctor's own parse attempt doubles as the source of `config`
     # for the systemctl check below — a second, independent _load_config()
@@ -1675,7 +1712,7 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     # process owns, and asking it anyway is the exact bug this file exists
     # to prevent.
     power_system = platform.system()
-    power_wsl = host.is_wsl()
+    power_wsl = is_wsl_host  # same is_wsl() fact resolved above; avoid a second call
     try:
         power_holder = _power_holder(power_system, power_wsl,
                                      config.get("power_block_max_hours"))
@@ -2412,6 +2449,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
                 # The crr the exit-hook wrapper calls on a clean /exit [/exit revival 2026-08-24]:
                 # the deployed copy, matching the service-mutation principle.
                 crr_bin=_resolve_service_bin(None),
+                tab_health=tab_health.TabHealthStore(sd),
             )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -2861,6 +2899,7 @@ def _post_reauth_recovery(
                     pid, _now(), grace=config.get("close_grace_seconds"),
                     remote_control=config.get("remote_control"),
                     tab_spawner=spawner, tabs_expected=tabs_expected,
+                    tab_health=tab_health.TabHealthStore(sd),
                 )
         elif kind == classifier.LIVE:
             state = states.get(sid)
@@ -2992,7 +3031,8 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
                          grace=config.get("close_grace_seconds"),
                          remote_control=config.get("remote_control"),
                          tab_spawner=spawner, tabs_expected=tabs_expected,
-                         crr_bin=_resolve_service_bin(None))
+                         crr_bin=_resolve_service_bin(None),
+                         tab_health=tab_health.TabHealthStore(sd))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     if res.ok and not tabs_expected and reopen_name:
         # Headless host: no GUI tab was possible. Drop the user into the now-
@@ -3060,7 +3100,8 @@ def _cmd_untrack(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
         res = ops.detmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
-                         tab_spawner=_tab_spawner(config)[0])
+                         tab_spawner=_tab_spawner(config)[0],
+                         tab_health=tab_health.TabHealthStore(sd))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
 
@@ -3080,7 +3121,8 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
         res = ops.untmux(JournalStore(sd), ArchiveStore(sd), tmux_spawner, boot, probe, args.pid, _now(),
-                         tab_spawner=_tab_spawner(config)[0])
+                         tab_spawner=_tab_spawner(config)[0],
+                         tab_health=tab_health.TabHealthStore(sd))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
     return 0 if res.ok else 1
 
@@ -3839,6 +3881,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 remote_control_enabled=config.get("remote_control"),
                 flags=FlagStore(sd),
                 crr_bin=_resolve_service_bin(None),
+                tab_health=tab_health.TabHealthStore(sd),
             )
         rescue.mark_revived(sd, boot_id)
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
@@ -3905,6 +3948,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 remote_control=config.get("remote_control"),
                 tab_spawner=tab, tabs_expected=tabs_expected,
                 crr_bin=_resolve_service_bin(None),
+                tab_health=tab_health.TabHealthStore(sd),
             )
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.
@@ -4683,7 +4727,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
                                   pid, _now(), grace=config.get("close_grace_seconds"),
                                   remote_control=config.get("remote_control"),
                                   tab_spawner=spawner, tabs_expected=tabs_expected,
-                                  crr_bin=_resolve_service_bin(None))
+                                  crr_bin=_resolve_service_bin(None),
+                                  tab_health=tab_health.TabHealthStore(sd))
             elif op == "close":
                 res = ops.close(store, controller, flags, boot, probe, pid,
                                  grace=config.get("close_grace_seconds"))
@@ -4692,10 +4737,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
                                 grace=config.get("close_grace_seconds"))
             elif op in ("untrack", "detmux"):  # detmux: deprecated alias, same op
                 res = ops.detmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
-                                  tab_spawner=_tab_spawner(config)[0])
+                                  tab_spawner=_tab_spawner(config)[0],
+                                  tab_health=tab_health.TabHealthStore(sd))
             elif op == "untmux":
                 res = ops.untmux(store, archive, tmux_spawner, boot, probe, pid, _now(),
-                                  tab_spawner=_tab_spawner(config)[0])
+                                  tab_spawner=_tab_spawner(config)[0],
+                                  tab_health=tab_health.TabHealthStore(sd))
             else:
                 return False, f"unknown op {op}", False
         return res.ok, res.message, res.degraded

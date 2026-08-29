@@ -30,10 +30,11 @@ import re
 import shlex
 from typing import Any, Mapping, NamedTuple, Sequence
 
+from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify
 from crr.core.journal import JournalStore
-from crr.core.ports import BootIdentity, ProcessProbe, TmuxSpawner
+from crr.core.ports import BootIdentity, ProcessProbe, TabSpawnTimeout, TmuxSpawner
 
 # Remote Control session names: letters, digits, dash, underscore only.
 # Runs of anything else collapse to a single dash so an odd basename (a
@@ -179,20 +180,51 @@ def attach_argv(name: str) -> list[str]:
     return ["tmux", "attach", "-t", name]
 
 
-def _try_open_tab(tab_spawner, name: str) -> bool:
+def _try_open_tab(tab_spawner, name: str, tab_health=None, *,
+                   now: str = "", boot_id: str = "") -> bool:
     """Best-effort visible tab attaching to ``name``. Never raises.
 
     Deliberately local rather than reusing ``ops._open_tab``: ``ops``
     imports this module, so importing it back would be a cycle. This one
     also has no message to build — the reviver runs unattended, so a tab
     that does not appear is not something a human is waiting to read about.
+
+    ``tab_health`` records which launcher tier ``tab_spawner`` reports it
+    used (spec 2026-08-29, Task 3), on the success path and on a genuine
+    (non-timeout) failure — never on a ``TabSpawnTimeout``, whose fate is
+    unknown (#53): recording one would be indistinguishable from a
+    confirmed success. The caught exception is threaded through as
+    ``error`` so a total failure (``TIER_NONE``) names the real cause
+    instead of recording an empty detail (finding 7, 2026-08-29 review).
+
+    Checks availability with the NON-probing form (``probe=False``) where
+    the spawner supports it: the default, probing ``available()`` runs
+    ``wt.exe --version``, which fails on a disabled App Execution Alias and
+    would refuse here before ``open_tab``'s own tier fallthrough (aumid/
+    console) ever gets a chance — leaving revival, the dominant way tabs
+    open on a host that reboots with many crashed sessions, unable to
+    reach the fallback this feature exists to provide (finding 4, 2026-08-29
+    review). This aligns with the adapter's own doctrine that the
+    window-popping probe is reserved for a destructive spawn-before-kill
+    (untmux/detmux), never a best-effort one. Spawners with no ``probe``
+    parameter (macOS/Linux) raise ``TypeError`` on the keyword, which falls
+    back to the plain call.
     """
     try:
-        if not tab_spawner.available():
+        try:
+            available = tab_spawner.available(probe=False)
+        except TypeError:
+            available = tab_spawner.available()
+        if not available:
             return False
         tab_spawner.open_tab(attach_argv(name))
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
         return True
-    except Exception:
+    except TabSpawnTimeout:
+        return False  # unknown fate — never record, never treat as failure
+    except Exception as exc:
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now,
+                                               boot_id=boot_id, error=exc)
         return False  # the revival is already durable; the tab is not
 
 
@@ -329,6 +361,7 @@ def revive_crashed(
     flags=None,
     tab_spawner=None,
     crr_bin: str | None = None,
+    tab_health=None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -422,7 +455,8 @@ def revive_crashed(
                     if flag_boot is not None and flag_boot != boot_identity.current():
                         flags.clear(pid)
                     else:
-                        _try_open_tab(tab_spawner, name)
+                        _try_open_tab(tab_spawner, name, tab_health,
+                                      now=now, boot_id=boot_identity.current())
                         flags.clear(pid)
             revived.append(pid)
 
