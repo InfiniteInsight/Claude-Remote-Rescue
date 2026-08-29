@@ -623,3 +623,16 @@ def test_owners_of_sid_names_the_processes_a_user_would_choose_between():
     assert owners_of_sid(sessions, {1687: [], 1957: [1957]}, sid) == [1957]
     assert owners_of_sid(sessions, {}, sid) == []
     assert owners_of_sid(sessions, {1687: [1]}, "another-sid") == []
+
+
+def test_card_includes_skip_permissions_default_false():
+    e = _entry(42, "aaaa1111-bbbb-4ccc-8ddd-eeeeffffaaaa")
+    payload = assemble_sessions([e], FakeBoot(), FakeProbe())
+    assert payload["sessions"][0]["skip_permissions"] is False
+
+
+def test_card_includes_skip_permissions_true_when_set():
+    e = _entry(42, "aaaa1111-bbbb-4ccc-8ddd-eeeeffffaaaa")
+    e["claude"]["skip_permissions"] = True
+    payload = assemble_sessions([e], FakeBoot(), FakeProbe())
+    assert payload["sessions"][0]["skip_permissions"] is True

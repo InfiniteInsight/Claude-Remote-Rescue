@@ -64,6 +64,7 @@ def _session_card():
         "adopted": False,
         "conflict": False,
         "attached": False,
+        "skip_permissions": False,
     }
 
 
@@ -287,7 +288,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_15():
+def test_sessions_contract_version_is_16():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -307,7 +308,9 @@ def test_sessions_contract_version_is_15():
     # session the user has already reopened), so a v13 consumer is missing it.
     # v15 adds `auth_state`, `auth_expires_in_seconds`, `auth_reauth_url` to
     # the PAYLOAD (spec 2026-08-21) — global OAuth state, not per-card.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 15
+    # v16 adds `skip_permissions` (bool) to the card — toggleable from the
+    # dashboard.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 16
 
 
 def test_states_enum_includes_parked():
@@ -512,7 +515,7 @@ def test_sessions_payload_requires_auth_fields():
 
 def test_sessions_payload_validates_auth_state_enum():
     payload = {
-        "contract": 15,
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
         "sessions": [],
         "auth_state": "bogus",
         "auth_expires_in_seconds": None,
@@ -525,7 +528,7 @@ def test_sessions_payload_validates_auth_state_enum():
 def test_sessions_payload_accepts_valid_auth_fields():
     for state in ("valid", "expiring", "expired", "unknown"):
         payload = {
-            "contract": 15,
+            "contract": contracts.SESSIONS_CONTRACT_VERSION,
             "sessions": [],
             "auth_state": state,
             "auth_expires_in_seconds": 86400 if state != "unknown" else None,
