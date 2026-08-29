@@ -8,7 +8,13 @@ Linux CI — only the builder/parse logic is; the real wt.exe integration is
 author-verified on Windows (task #8's Windows replay).
 """
 
+import subprocess
+
+import pytest
+
 from crr.adapters import tab_spawn_windows as tsw
+from crr.core import tab_health
+from crr.core.ports import TabSpawnTimeout
 
 
 _ARGV = ["tmux", "attach", "-t", "crr-abc12345"]
@@ -236,3 +242,143 @@ def test_command_uses_the_resolved_wt_path(monkeypatch):
     monkeypatch.setattr(tsw, "wt_path", lambda: "/mnt/c/Users/Other/wt.exe")
     cmd = tsw.wt_command(_ARGV)
     assert cmd[0] == "/mnt/c/Users/Other/wt.exe"
+
+
+# --- alternate launcher tiers (wt.exe alias fallthrough) -------------------
+
+
+def test_aumid_command_uses_the_stable_package_family_name():
+    cmd = tsw.aumid_command(["tmux", "attach"], distro="Ubuntu-24.04")
+    joined = " ".join(cmd)
+    assert cmd[0] == "powershell.exe"
+    assert "-NoProfile" in cmd
+    # Family name, NOT a versioned package full name — stable across upgrades.
+    assert "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App" in joined
+    assert "1.24" not in joined
+
+
+def test_aumid_command_passes_new_tab_and_the_wsl_argv():
+    cmd = tsw.aumid_command(["tmux", "attach", "-t", "crr-abc"],
+                            distro="Ubuntu-24.04")
+    joined = " ".join(cmd)
+    assert "'new-tab'" in joined
+    assert "'wsl.exe'" in joined
+    assert "'--distribution','Ubuntu-24.04'" in joined
+    assert "'-e','tmux','attach','-t','crr-abc'" in joined
+
+
+def test_aumid_command_includes_profile_and_cwd_when_given():
+    cmd = tsw.aumid_command(["tmux"], cwd="/home/u/p", profile="crr")
+    joined = " ".join(cmd)
+    assert "'-p','crr'" in joined
+    assert "'-d','/home/u/p'" in joined
+
+
+def test_aumid_command_omits_profile_and_cwd_when_absent():
+    joined = " ".join(tsw.aumid_command(["tmux"]))
+    assert "'-p'" not in joined
+    assert "'-d'" not in joined
+    assert "'--distribution'" not in joined
+
+
+def test_console_command_launches_wsl_without_windows_terminal():
+    cmd = tsw.console_command(["tmux", "attach"], distro="Ubuntu-24.04")
+    joined = " ".join(cmd)
+    assert cmd[0] == "powershell.exe"
+    assert "Start-Process wsl.exe" in joined
+    assert "'--distribution','Ubuntu-24.04'" in joined
+    assert "'-e','tmux','attach'" in joined
+    # The console fallback must not reference Windows Terminal at all.
+    assert "WindowsTerminal" not in joined
+    assert "new-tab" not in joined
+
+
+def test_ps_quoting_escapes_embedded_single_quotes():
+    joined = " ".join(tsw.console_command(["echo", "it's"]))
+    # PowerShell escapes a single quote by doubling it.
+    assert "'it''s'" in joined
+
+
+def test_ps_quoting_handles_paths_with_spaces():
+    joined = " ".join(tsw.aumid_command(["tmux"], cwd="/home/u/my proj"))
+    assert "'/home/u/my proj'" in joined
+
+
+# --- launcher tier fallthrough ----------------------------------------------
+
+
+def _spawner():
+    return tsw.WindowsTerminalSpawner(timeout_seconds=5, distro="Ubuntu-24.04")
+
+
+def _runner(fail_first: int):
+    """Fake subprocess.run: raise CalledProcessError for the first N calls."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) <= fail_first:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    run.calls = calls
+    return run
+
+
+def test_tier1_success_records_wt_and_stops(monkeypatch):
+    runner = _runner(fail_first=0)
+    monkeypatch.setattr(tsw.subprocess, "run", runner)
+    sp = _spawner()
+    sp.open_tab(["tmux", "attach"])
+    assert len(runner.calls) == 1
+    assert sp.last_tier == tab_health.TIER_WT
+    assert sp.last_confirmed is True
+
+
+def test_tier1_failure_falls_through_to_aumid(monkeypatch):
+    runner = _runner(fail_first=1)
+    monkeypatch.setattr(tsw.subprocess, "run", runner)
+    sp = _spawner()
+    sp.open_tab(["tmux", "attach"])
+    assert len(runner.calls) == 2
+    assert "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App" in " ".join(runner.calls[1])
+    assert sp.last_tier == tab_health.TIER_AUMID
+    # Start-Process is fire-and-forget: launched, not confirmed.
+    assert sp.last_confirmed is False
+
+
+def test_tier2_failure_falls_through_to_console(monkeypatch):
+    runner = _runner(fail_first=2)
+    monkeypatch.setattr(tsw.subprocess, "run", runner)
+    sp = _spawner()
+    sp.open_tab(["tmux", "attach"])
+    assert len(runner.calls) == 3
+    assert "Start-Process wsl.exe" in " ".join(runner.calls[2])
+    assert sp.last_tier == tab_health.TIER_CONSOLE
+    assert sp.last_confirmed is False
+
+
+def test_all_tiers_failing_raises_and_records_none(monkeypatch):
+    runner = _runner(fail_first=3)
+    monkeypatch.setattr(tsw.subprocess, "run", runner)
+    sp = _spawner()
+    with pytest.raises(subprocess.CalledProcessError):
+        sp.open_tab(["tmux", "attach"])
+    assert len(runner.calls) == 3
+    assert sp.last_tier == tab_health.TIER_NONE
+
+
+def test_a_timeout_does_not_fall_through(monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, 5)
+
+    monkeypatch.setattr(tsw.subprocess, "run", run)
+    sp = _spawner()
+    with pytest.raises(TabSpawnTimeout):
+        sp.open_tab(["tmux", "attach"])
+    # A cold Windows Terminal may still open the tab (#53). Trying the next
+    # tier would risk a second window; exactly one attempt must be made.
+    assert len(calls) == 1
