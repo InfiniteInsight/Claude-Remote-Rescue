@@ -996,3 +996,29 @@ def test_a_kicked_revival_timeout_does_not_overwrite_an_existing_record(tmp_path
                    archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
                    flags=flags, tab_spawner=_TimeoutTab(), tab_health=tab_health_store)
     assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
+def test_a_kicked_revival_survives_a_tab_health_write_failure(tmp_path):
+    """Finding 1: `_try_open_tab`'s documented "Never raises" contract must
+    hold even when the tab_health store itself fails (read-only/full state
+    dir) — this is exactly the site whose double-record-then-re-raise bug
+    would abort revive_crashed mid-pass, the unattended boot-time revival."""
+    from crr.core import tab_health
+
+    class _TieredTab(_Tab):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = True
+
+    class _RaisingStore:
+        def record(self, tier, detail="", *, now, boot_id):
+            raise OSError("no space left on device")
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        flags=flags, tab_spawner=_TieredTab(), tab_health=_RaisingStore(),
+    )  # must not raise
+    assert outcome.revived == [899149]

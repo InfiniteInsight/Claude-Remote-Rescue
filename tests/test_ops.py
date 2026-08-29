@@ -337,6 +337,28 @@ def test_open_tab_reports_whether_a_tab_actually_landed():
     assert landed is False
 
 
+def test_open_tab_success_survives_a_tab_health_write_failure(tmp_path):
+    """Finding 1: record_from_spawner's OSError (read-only/full state dir)
+    sat INSIDE the success try-block, so it fell into `except Exception`,
+    which recorded again (raising again, propagating) instead of reporting
+    the tab that actually opened. Swallowing OSError in record_from_spawner
+    must restore the honest "opened in a new tab" success message."""
+    from crr.core import tab_health
+
+    class _TieredTabSpawner(FakeTabSpawner):
+        last_tier = tab_health.TIER_WT
+        last_confirmed = True
+
+    class _RaisingStore:
+        def record(self, tier, detail="", *, now, boot_id):
+            raise OSError("no space left on device")
+
+    suffix, landed = ops._open_tab(_TieredTabSpawner(), "crr-8a1b2c3d",
+                                    tab_health=_RaisingStore(), now=_NOW, boot_id="b1")
+    assert landed is True
+    assert "opened in a new tab" in suffix
+
+
 def test_reopen_is_degraded_when_a_tab_was_expected_and_missed(tmp_path):
     # A revival with no tab, on a host that HAS tabs, is not a plain success.
     store, archive, tmux = JournalStore(tmp_path), ArchiveStore(tmp_path), FakeTmux()

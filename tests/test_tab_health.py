@@ -243,6 +243,24 @@ def test_record_from_spawner_records_unconfirmed_tier_2_as_launched(tmp_path):
     assert got["detail"] == "launched, unconfirmed"
 
 
+class _RaisingStore:
+    """A store whose ``record`` fails like a read-only or full state dir."""
+
+    def record(self, tier, detail="", *, now, boot_id):
+        raise OSError("no space left on device")
+
+
+def test_record_from_spawner_swallows_a_store_write_oserror():
+    # Finding 1: telemetry must never outrank the operation it describes.
+    # write_json_atomic raises OSError on a read-only/full state dir; that
+    # must not propagate out of record_from_spawner, which every ops.py and
+    # reviver.py call site invokes unconditionally after a spawn attempt —
+    # including inside reviver's "never raises" _try_open_tab.
+    tab_health.record_from_spawner(
+        _RaisingStore(), _Spawner(tab_health.TIER_WT, True),
+        now="2026-08-29T00:00:00Z", boot_id="b1")  # must not raise
+
+
 def test_record_from_spawner_tier_none_never_says_launched(tmp_path):
     # Regression: TIER_NONE means EVERY tier failed — nothing launched at
     # all. Recording "launched, unconfirmed" here would render doctor's

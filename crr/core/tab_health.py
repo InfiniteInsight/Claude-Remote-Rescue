@@ -74,6 +74,10 @@ def record_from_spawner(store: "TabHealthStore | None", spawner: object,
     fire-and-forget via ``Start-Process``) but couldn't confirm it landed.
     Applying it to a total failure would have ``doctor_line`` render the
     self-contradicting "no launcher worked: launched, unconfirmed".
+
+    A write failure (``store.record`` raising ``OSError`` — a read-only or
+    full state dir) is swallowed, never propagated: telemetry must never
+    outrank the operation it describes (finding 1, 2026-08-29 review).
     """
     if store is None:
         return
@@ -84,7 +88,15 @@ def record_from_spawner(store: "TabHealthStore | None", spawner: object,
         detail = ""
     else:
         detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
-    store.record(tier, detail, now=now, boot_id=boot_id)
+    try:
+        store.record(tier, detail, now=now, boot_id=boot_id)
+    except OSError:
+        # Telemetry must never outrank the operation it describes. A
+        # read-only or full state dir must not turn a successful spawn into
+        # a reported failure (ops._open_tab's record call sits inside the
+        # same try as the spawn it reports on) nor break reviver's
+        # documented "never raises" contract for _try_open_tab.
+        pass
 
 
 LABEL = "tab spawn"
