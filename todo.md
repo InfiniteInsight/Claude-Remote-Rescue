@@ -21,9 +21,14 @@
       `crr doctor` — PR #110, merged 2026-08-28. Deploy resolved its repo from
       its own import location, so running the deployed copy always refused;
       that is why the snapshot sat 34 commits stale.
-- [ ] `crr doctor` guidance for a broken wt.exe App Execution Alias — spec at
-      docs/superpowers/specs/2026-08-27-doctor-wt-alias-guidance-design.md,
-      branch feat/doctor-wt-alias-guidance (spec committed, not implemented)
+- [x] Windows Terminal launcher fallback — PR #111, merged 2026-08-29. A broken
+      wt.exe App Execution Alias no longer stops tabs: open_tab falls through to
+      the shell AUMID route (real WT tab, alias bypassed) then a plain console
+      window, records which tier worked, and `crr doctor` reports it. The
+      guidance-only spec (2026-08-27) is superseded — detection alone could not
+      distinguish a disabled alias from a context where wt.exe cannot exec, and
+      guidance never restores service.
+      Manual Windows verification with the alias disabled: task #112.
 
 ## Blocked / manual
 
