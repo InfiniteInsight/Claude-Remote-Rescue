@@ -1669,10 +1669,20 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     # change across a reboot); None when boot identity isn't available on
     # this platform, or its current() call failed, which doctor_line
     # renders exactly as it does today.
-    _check(*tab_health.doctor_line(
-        tab_health.TabHealthStore(sd).read(),
-        current_boot_id=current_boot_id,
-    ))
+    #
+    # Gated on is_wsl (finding 9, 2026-08-29 review): _tab_spawner only ever
+    # selects a tiered (last_tier-reporting) spawner on the WSL branch —
+    # macOS/native-Linux spawners never record, so an unconditional line
+    # would read "not yet exercised" forever on hosts where a record is
+    # never possible. Resolved once here and reused below for the power/
+    # harden sections (`is_wsl_host`), same convention that section already
+    # documents for itself.
+    is_wsl_host = host.is_wsl()
+    if is_wsl_host:
+        _check(*tab_health.doctor_line(
+            tab_health.TabHealthStore(sd).read(),
+            current_boot_id=current_boot_id,
+        ))
 
     # Config. Doctor's own parse attempt doubles as the source of `config`
     # for the systemctl check below — a second, independent _load_config()
@@ -1702,7 +1712,7 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     # process owns, and asking it anyway is the exact bug this file exists
     # to prevent.
     power_system = platform.system()
-    power_wsl = host.is_wsl()
+    power_wsl = is_wsl_host  # same is_wsl() fact resolved above; avoid a second call
     try:
         power_holder = _power_holder(power_system, power_wsl,
                                      config.get("power_block_max_hours"))

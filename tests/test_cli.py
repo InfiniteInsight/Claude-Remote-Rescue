@@ -974,10 +974,23 @@ def test_doctor_prints_all_six_declared_contract_versions(tmp_path, monkeypatch,
 
 def test_doctor_reports_no_tab_spawn_record(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)  # only WSL selects a tiered spawner
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "tab spawn" in out
     assert "not yet exercised" in out
+
+
+def test_doctor_omits_the_tab_spawn_line_on_a_non_wsl_host(tmp_path, monkeypatch, capsys):
+    # Finding 9: macOS/native-Linux spawners never record a tier, so the
+    # line would read "not yet exercised" forever — the spec says non-WSL
+    # hosts omit the section entirely rather than show a permanently
+    # meaningless line.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "tab spawn" not in out
 
 
 class _FakeBootCurrent:
@@ -1009,6 +1022,7 @@ def test_doctor_reports_the_aumid_tier_with_the_alias_note(tmp_path, monkeypatch
     import json
     from crr.core import contracts, tab_health
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-a"))
     (tmp_path / tab_health.FILENAME).write_text(json.dumps({
         "v": contracts.TAB_HEALTH_STORE_VERSION,
@@ -1027,6 +1041,7 @@ def test_doctor_warns_when_no_launcher_worked(tmp_path, monkeypatch, capsys):
     import json
     from crr.core import contracts, tab_health
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-a"))
     (tmp_path / tab_health.FILENAME).write_text(json.dumps({
         "v": contracts.TAB_HEALTH_STORE_VERSION,
@@ -1047,6 +1062,7 @@ def test_doctor_does_not_flag_a_same_boot_tab_spawn_record_as_stale(tmp_path, mo
     import json
     from crr.core import contracts, tab_health
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-a"))
     (tmp_path / tab_health.FILENAME).write_text(json.dumps({
         "v": contracts.TAB_HEALTH_STORE_VERSION,
@@ -1066,6 +1082,7 @@ def test_doctor_flags_a_pre_reboot_tab_spawn_record_as_stale(tmp_path, monkeypat
     import json
     from crr.core import contracts, tab_health
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBootCurrent("boot-b"))
     (tmp_path / tab_health.FILENAME).write_text(json.dumps({
         "v": contracts.TAB_HEALTH_STORE_VERSION,
@@ -1085,6 +1102,7 @@ def test_doctor_survives_a_boot_identity_current_that_raises(tmp_path, monkeypat
     later check (tab-spawn health, config, systemctl units, ...) must
     still print rather than a bare traceback losing all of them."""
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.boot_identity, "detect", lambda: _RaisingBootCurrent())
     rc = cli.main(["doctor"])
     out = capsys.readouterr().out
