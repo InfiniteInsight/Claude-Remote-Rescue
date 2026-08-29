@@ -65,6 +65,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _git_short() -> str:
+    """Best-effort short git hash of the running crr install."""
+    try:
+        src = Path(__file__).resolve().parent.parent
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(src), stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        return ""
+
+
 def _load_config() -> cfg.Config:
     """Load config.toml (co-located in the crr state dir) over the defaults.
 
@@ -3992,6 +4004,7 @@ def make_web_handler(
     filter_debounce_ms: int | None = None,
     diag_error_display_cap: int | None = None,
     reauth_success_display_ms: int | None = None,
+    git_short: str = "",
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
 
@@ -4055,6 +4068,7 @@ def make_web_handler(
                 flash_ms=flash_ms,
                 filter_debounce_ms=filter_debounce_ms,
                 reauth_success_display_ms=reauth_success_display_ms,
+                git_short=git_short,
             )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
@@ -4952,6 +4966,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         filter_debounce_ms=config.get("filter_debounce_ms"),
         diag_error_display_cap=config.get("diag_error_display_cap"),
         reauth_success_display_ms=config.get("reauth_success_display_ms"),
+        git_short=_git_short(),
     )
 
     # Snapshot the page template NOW ([lesson: template/code skew]) — a lazy

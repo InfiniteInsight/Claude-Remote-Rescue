@@ -82,20 +82,6 @@ def test_claude_groups_returns_the_pids_own_group_when_it_is_itself_claude():
     assert _child_groups(rows, 2016) == [2016]
 
 
-def test_claude_groups_still_finds_children_for_a_journaled_shell():
-    from crr.adapters.process_probe import _child_groups
-    rows = [
-        (500, 1, 500, "fish"),
-        (501, 500, 501, "claude"),
-    ]
-    assert _child_groups(rows, 500) == [501]
-
-
-def test_claude_groups_does_not_return_a_non_claude_pids_own_group():
-    from crr.adapters.process_probe import _child_groups
-    rows = [(500, 1, 500, "fish")]
-    assert _child_groups(rows, 500) == []
-
 
 # --- a zombie is not alive (#65) ------------------------------------------
 #

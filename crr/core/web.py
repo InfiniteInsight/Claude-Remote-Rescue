@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 63  # v63: skip-permissions toggle + always-show Reopen for live sessions
+PAGE_VERSION = 64  # v64: build version footer (page version + git short hash)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -53,6 +53,7 @@ _DIAG_ERR_CAP_PLACEHOLDER = "@DIAG_ERR_CAP@"
 _FLASH_MS_PLACEHOLDER = "@FLASH_MS@"
 _FILTER_DEBOUNCE_MS_PLACEHOLDER = "@FILTER_DEBOUNCE_MS@"
 _REAUTH_SUCCESS_MS_PLACEHOLDER = "@REAUTH_SUCCESS_MS@"
+_GIT_SHORT_PLACEHOLDER = "@GIT_SHORT@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
 
@@ -117,6 +118,7 @@ def render_page(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    git_short: str = "",
 ) -> str:
     """Serve-time substitution of version + configured intervals into the page."""
     poll = cfg.DEFAULTS["dashboard_poll_seconds"] if poll_seconds is None else poll_seconds
@@ -154,6 +156,7 @@ def render_page(
         .replace(_FLASH_MS_PLACEHOLDER, str(int(flash)))
         .replace(_FILTER_DEBOUNCE_MS_PLACEHOLDER, str(int(debounce)))
         .replace(_REAUTH_SUCCESS_MS_PLACEHOLDER, str(int(reauth_success)))
+        .replace(_GIT_SHORT_PLACEHOLDER, git_short)
     )
 
 
@@ -305,6 +308,7 @@ def handle_request(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    git_short: str = "",
 ) -> Response:
     # Host allowlist first — before any routing or work (DNS-rebinding defense).
     if not host_allowed(_header(headers, "Host"), allowed_hosts, allowed_suffixes):
@@ -360,6 +364,7 @@ def handle_request(
                 reload_delay_ms=reload_delay_ms, diag_error_display_cap=diag_error_display_cap,
                 flash_ms=flash_ms, filter_debounce_ms=filter_debounce_ms,
                 reauth_success_display_ms=reauth_success_display_ms,
+                git_short=git_short,
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))
         if path == "/api/sessions":
