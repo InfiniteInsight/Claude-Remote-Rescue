@@ -1746,6 +1746,25 @@ def test_set_skip_permissions_message_reports_sid8(tmp_path):
     assert "enabled" in res.message
 
 
+def test_set_skip_permissions_upgrades_v1_entry_to_v2(tmp_path):
+    import json
+    store = JournalStore(tmp_path)
+    v1_entry = {
+        "v": 1, "pid": 42, "boot_id": "entry-boot", "cwd": "/p42",
+        "host": "tmux", "shell": "zsh",
+        "claude": {"session_id": _SID, "sid_source": "injected", "started": _NOW},
+        "last_cmd": "claude", "tmux_session": None, "revive_strikes": 0,
+        "updated": _NOW,
+    }
+    tabs = tmp_path / "tabs"
+    tabs.mkdir(exist_ok=True)
+    (tabs / "42.json").write_text(json.dumps(v1_entry))
+    res = ops.set_skip_permissions(store, _SID, True, _NOW)
+    assert res.ok
+    assert store.read(42)["v"] == 2
+    assert store.read(42)["claude"]["skip_permissions"] is True
+
+
 def test_set_skip_permissions_refuses_unknown_sid(tmp_path):
     store = JournalStore(tmp_path)
     res = ops.set_skip_permissions(store, _SID, True, _NOW)
