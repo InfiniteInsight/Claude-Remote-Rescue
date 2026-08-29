@@ -39,25 +39,173 @@ def test_force_overrides_every_refusal():
         assert deploy.refusal(dirty=dirty, force=True) is None
 
 
-def test_no_deployed_copy_is_reported_as_running_the_working_tree():
-    msg = deploy.drift(None, "abc1234")
-    assert msg and "working tree" in msg
+# `deploy.drift()` (a bare sha == sha comparison) was superseded by
+# `deploy.deploy_status()` below, which also validates ancestry before
+# claiming "behind" — see the deploy_status tests further down.
 
 
-def test_matching_shas_are_silent():
-    assert deploy.drift("abc1234", "abc1234") is None
+# --- repo resolution (the fix: deploy can't resolve itself from the ------
+# --- deployed, PATH-linked copy — #<issue>) -------------------------------
+#
+# `crr deploy` re-invoked through the symlink it just created has `__file__`
+# in site-packages, not a git checkout, so `_repo_root()` alone leaves it
+# with nothing to build from. `resolve_repo` is the precedence pure
+# decision; the CLI supplies the "is this path a checkout" answers from
+# `crr.adapters.deploy.is_checkout`.
+
+def test_resolve_repo_prefers_an_explicit_flag_that_is_a_checkout():
+    got = deploy.resolve_repo(
+        explicit="/explicit/repo", explicit_is_checkout=True,
+        repo_root=Path("/repo/root"), repo_root_is_checkout=True,
+        marker_repo="/marker/repo", marker_repo_is_checkout=True,
+    )
+    assert got == Path("/explicit/repo")
 
 
-def test_an_unknown_head_is_silent_rather_than_alarming():
-    # Not a git checkout: nothing to compare against, so claiming drift
-    # would be inventing a discrepancy.
-    assert deploy.drift("abc1234", None) is None
+def test_resolve_repo_refuses_a_bad_explicit_path_rather_than_falling_back():
+    # The operator named a specific path; silently substituting another one
+    # would build from code they didn't point at.
+    got = deploy.resolve_repo(
+        explicit="/typo/repo", explicit_is_checkout=False,
+        repo_root=Path("/repo/root"), repo_root_is_checkout=True,
+        marker_repo="/marker/repo", marker_repo_is_checkout=True,
+    )
+    assert got is None
 
 
-def test_drift_names_both_shas_and_the_command_that_fixes_it():
-    msg = deploy.drift("aaaaaaa1111", "bbbbbbb2222")
-    assert "aaaaaaa" in msg and "bbbbbbb" in msg
-    assert "crr deploy" in msg
+def test_resolve_repo_falls_back_to_repo_root_without_an_explicit_flag():
+    got = deploy.resolve_repo(
+        explicit=None, explicit_is_checkout=False,
+        repo_root=Path("/repo/root"), repo_root_is_checkout=True,
+        marker_repo="/marker/repo", marker_repo_is_checkout=True,
+    )
+    assert got == Path("/repo/root")
+
+
+def test_resolve_repo_falls_back_to_the_marker_repo_when_repo_root_is_not_a_checkout():
+    # The deployed-copy case: `_repo_root()` lands in site-packages, but the
+    # marker recorded where a real checkout deployed from last time.
+    got = deploy.resolve_repo(
+        explicit=None, explicit_is_checkout=False,
+        repo_root=Path("/opt/venv/site-packages/crr"), repo_root_is_checkout=False,
+        marker_repo="/home/u/src/crr", marker_repo_is_checkout=True,
+    )
+    assert got == Path("/home/u/src/crr")
+
+
+def test_resolve_repo_refuses_when_nothing_is_a_checkout():
+    got = deploy.resolve_repo(
+        explicit=None, explicit_is_checkout=False,
+        repo_root=Path("/opt/venv/site-packages/crr"), repo_root_is_checkout=False,
+        marker_repo=None, marker_repo_is_checkout=False,
+    )
+    assert got is None
+
+
+def test_no_checkout_refusal_names_the_bad_explicit_path():
+    msg = deploy.no_checkout_refusal("/typo/repo")
+    assert "/typo/repo" in msg and "checkout" in msg
+
+
+def test_no_checkout_refusal_without_explicit_says_what_to_do():
+    # The message it replaces ("is this a git checkout?") sent the reporter
+    # down the wrong path; this one must name both ways out.
+    msg = deploy.no_checkout_refusal(None)
+    assert "source checkout" in msg
+    assert "--repo" in msg
+
+
+# --- deploy_status: what doctor renders about the deployed snapshot ------
+
+def test_deploy_status_nothing_deployed_is_informational():
+    ok, detail = deploy.deploy_status(
+        deployed_sha=None, repo_known=False, head_sha=None,
+        is_ancestor=None, commits_behind=None)
+    assert ok is True
+    assert "nothing deployed" in detail
+
+
+def test_deploy_status_caveats_when_the_repo_itself_is_unknown():
+    # Marker present, but the repo it was deployed from can't be found or
+    # isn't a checkout: name the deployed sha, don't claim a comparison.
+    # This must read differently from "the repo IS known but the git probe
+    # failed" below -- the checkout being unknown is a different fact from
+    # a known checkout's HEAD read failing.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=False, head_sha=None,
+        is_ancestor=None, commits_behind=None)
+    assert ok is True
+    assert "aaaaaaa" in detail
+    assert "cannot compare" in detail
+    assert "checkout" in detail and "unknown" in detail
+
+
+def test_deploy_status_caveats_differently_when_the_repo_is_known_but_the_probe_failed():
+    # The checkout WAS found; only the `head_sha()` git call failed
+    # (timeout, transient git failure). Claiming "source checkout unknown"
+    # here would be false -- the checkout is known, the probe isn't.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha=None,
+        is_ancestor=None, commits_behind=None)
+    assert ok is True
+    assert "aaaaaaa" in detail
+    assert "cannot compare" in detail
+    assert "unknown" not in detail, "checkout is known; only the probe failed"
+
+
+def test_deploy_status_matching_shas_are_up_to_date():
+    ok, detail = deploy.deploy_status(
+        deployed_sha="abc1234", repo_known=True, head_sha="abc1234",
+        is_ancestor=None, commits_behind=None)
+    assert ok is True
+    assert "up to date" in detail
+
+
+def test_deploy_status_an_ancestor_deploy_warns_with_the_count():
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
+        is_ancestor=True, commits_behind=3)
+    assert ok is False
+    assert "aaaaaaa" in detail and "bbbbbbb" in detail
+    assert "3 commit" in detail
+    assert "crr deploy" in detail
+
+
+def test_deploy_status_a_confirmed_ancestor_with_an_unknown_count_still_warns():
+    # Ancestry was confirmed (git merge-base --is-ancestor succeeded) but
+    # the count probe (git rev-list --count) then failed -- this is a REAL,
+    # confirmed staleness. Reporting "cannot be compared" here would
+    # understate a known-true fact just because one of two probes failed.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
+        is_ancestor=True, commits_behind=None)
+    assert ok is False
+    assert "aaaaaaa" in detail and "bbbbbbb" in detail
+    assert "crr deploy" in detail
+    assert "cannot be compared" not in detail
+    assert "unknown" in detail  # the count, specifically, is what's unknown
+
+
+def test_deploy_status_an_unknown_sha_is_informational_not_a_guess():
+    # Rebased/squashed away: git can't place it, so this must not claim
+    # "behind" (nor "up to date") for a sha it can't locate at all.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
+        is_ancestor=None, commits_behind=None)
+    assert ok is True
+    assert "aaaaaaa" in detail and "bbbbbbb" in detail
+    assert "cannot be compared" in detail
+
+
+def test_deploy_status_a_diverged_known_sha_is_informational_not_a_guess():
+    # A known sha that git confirms is NOT an ancestor (diverged history,
+    # e.g. after a force-push elsewhere) -- still not "behind" in the
+    # linear sense this check reports, so this must not warn either.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
+        is_ancestor=False, commits_behind=None)
+    assert ok is True
+    assert "cannot be compared" in detail
 
 
 # --- adapter: probes degrade to "unknown", never to a wrong answer --------
@@ -104,6 +252,120 @@ def test_marker_roundtrips_and_survives_junk(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     assert ad.read_marker(path) is None                 # unreadable != a sha
     assert ad.read_marker(tmp_path / "nope.json") is None
+
+
+def test_marker_records_the_source_repo_when_given(tmp_path):
+    from crr.adapters import deploy as ad
+    path = tmp_path / "app" / "deployed.json"
+    ad.write_marker(path, "abc1234", "2026-08-10T00:00:00Z", repo="/home/u/src/crr")
+    assert ad.read_marker_repo(path) == "/home/u/src/crr"
+    assert ad.read_marker(path) == "abc1234"  # sha read is unaffected
+
+
+def test_read_marker_repo_is_none_for_an_older_marker_without_the_key(tmp_path):
+    # Backward compatibility: markers written before this field existed
+    # must not crash anything that now looks for it.
+    from crr.adapters import deploy as ad
+    path = tmp_path / "deployed.json"
+    path.write_text('{"sha": "abc1234", "deployed_at": "x"}', encoding="utf-8")
+    assert ad.read_marker_repo(path) is None
+    assert ad.read_marker(path) == "abc1234"
+
+
+def test_write_marker_omits_the_repo_key_when_not_given(tmp_path):
+    from crr.adapters import deploy as ad
+    path = tmp_path / "deployed.json"
+    ad.write_marker(path, "abc1234", "x")
+    assert ad.read_marker_repo(path) is None
+
+
+def test_is_checkout_true_for_a_directory_with_a_dot_git_dir(tmp_path):
+    from crr.adapters import deploy as ad
+    (tmp_path / ".git").mkdir()
+    assert ad.is_checkout(tmp_path) is True
+
+
+def test_is_checkout_true_for_a_dot_git_file_worktree(tmp_path):
+    # A git worktree's `.git` is a file pointing at the real gitdir, not a
+    # directory — still a checkout.
+    from crr.adapters import deploy as ad
+    (tmp_path / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+    assert ad.is_checkout(tmp_path) is True
+
+
+def test_is_checkout_false_without_a_dot_git_entry(tmp_path):
+    from crr.adapters import deploy as ad
+    assert ad.is_checkout(tmp_path) is False
+
+
+def test_is_ancestor_true_when_git_says_so(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    class Ok:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: Ok())
+    assert ad.is_ancestor(tmp_path, "a", "b") is True
+
+
+def test_is_ancestor_false_when_git_says_not_an_ancestor(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    class NotAncestor:
+        returncode, stdout, stderr = 1, "", ""
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: NotAncestor())
+    assert ad.is_ancestor(tmp_path, "a", "b") is False
+
+
+def test_is_ancestor_unknown_when_the_sha_is_not_a_known_object(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    class BadObject:
+        returncode, stdout, stderr = 128, "", "fatal: not a valid object name"
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: BadObject())
+    assert ad.is_ancestor(tmp_path, "gone", "b") is None
+
+
+def test_is_ancestor_degrades_on_exceptions(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    def boom(*a, **k):
+        raise OSError("git missing")
+
+    monkeypatch.setattr(ad.subprocess, "run", boom)
+    assert ad.is_ancestor(tmp_path, "a", "b") is None
+
+
+def test_commits_behind_counts_from_git(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    class Ok:
+        returncode, stdout, stderr = 0, "3\n", ""
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: Ok())
+    assert ad.commits_behind(tmp_path, "a", "b") == 3
+
+
+def test_commits_behind_degrades_on_non_integer_output(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    class Weird:
+        returncode, stdout, stderr = 0, "not a number\n", ""
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: Weird())
+    assert ad.commits_behind(tmp_path, "a", "b") is None
+
+
+def test_commits_behind_degrades_on_git_failure(monkeypatch, tmp_path):
+    from crr.adapters import deploy as ad
+
+    class Fail:
+        returncode, stdout, stderr = 128, "", "bad revision"
+
+    monkeypatch.setattr(ad.subprocess, "run", lambda cmd, **k: Fail())
+    assert ad.commits_behind(tmp_path, "a", "b") is None
 
 
 def test_build_installs_non_editable_and_without_deps(tmp_path, monkeypatch):
@@ -183,27 +445,302 @@ def test_deploy_writes_the_marker_only_after_a_successful_build(tmp_path, monkey
     assert "install failed" in capsys.readouterr().err
 
 
-def test_doctor_names_the_code_the_services_are_running(tmp_path, monkeypatch, capsys):
+# --- the bug: deploy re-invoked through the copy it made can't resolve ---
+# --- its own source checkout -----------------------------------------------
+#
+# `_repo_root()` returns `__file__`'s grandparent. Run the deployed,
+# PATH-linked `crr` and that lands in a venv's site-packages — not a git
+# checkout — so `is_dirty()` returns None ("could not tell") and deploy
+# refused every time, even though nothing was actually dirty.
+
+def test_deploy_from_a_non_checkout_repo_root_refuses_the_old_unhelpful_way_without_a_fallback(
+        tmp_path, monkeypatch, capsys):
+    # RED: reproduces the reported bug on unfixed code — `_repo_root()`
+    # pointed at a plain directory (no marker to fall back to either), and
+    # deploy had nothing usable and no actionable way to say so.
+    from crr import cli
+    from crr.adapters import state_dir
+    fake_root = tmp_path / "site-packages" / "crr"
+    fake_root.mkdir(parents=True)
+    monkeypatch.setattr(cli, "_repo_root", lambda: fake_root)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    assert cli.main(["deploy"]) == 2
+    err = capsys.readouterr().err
+    assert "could not find a git checkout" in err
+    assert "--repo" in err
+    # The old message is gone — it sent the reporter down the wrong path.
+    assert "is this a git checkout?" not in err
+
+
+def test_deploy_force_does_not_override_a_missing_checkout(tmp_path, monkeypatch, capsys):
+    # `--force` overrides the DIRTY-tree safety gate (refusal()). Having no
+    # checkout at all to build from is a missing input, not a gate to
+    # override — there's still nothing to build, force or not.
+    from crr import cli
+    from crr.adapters import state_dir
+    fake_root = tmp_path / "site-packages" / "crr"
+    fake_root.mkdir(parents=True)
+    monkeypatch.setattr(cli, "_repo_root", lambda: fake_root)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    assert cli.main(["deploy", "--force"]) == 2
+    assert "could not find a git checkout" in capsys.readouterr().err
+
+
+def test_deploy_falls_back_to_the_repo_recorded_in_the_marker(tmp_path, monkeypatch, capsys):
+    # GREEN: the fix. `_repo_root()` is not a checkout (the deployed copy's
+    # own case), but a previous successful deploy recorded a real checkout
+    # in the marker — deploy must use it rather than refuse.
+    from crr import cli
+    from crr.core import deploy as core
+    from crr.adapters import deploy as ad, state_dir
+    fake_root = tmp_path / "site-packages" / "crr"
+    fake_root.mkdir(parents=True)
+    real_repo = tmp_path / "src" / "crr"
+    (real_repo / ".git").mkdir(parents=True)
+    sd = tmp_path / "state"
+    monkeypatch.setattr(cli, "_repo_root", lambda: fake_root)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    ad.write_marker(core.marker_path(sd), "old1234", "2026-08-01T00:00:00Z", repo=str(real_repo))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "new1234")
+    built = []
+    monkeypatch.setattr(ad, "build", lambda *a, **k: built.append(a) or None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["deploy", "--no-restart"]) == 0
+    assert built, "did not fall back to the marker-recorded checkout"
+    assert built[0][1] == real_repo
+
+
+def test_deploy_prefers_an_explicit_repo_flag(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    explicit_repo = tmp_path / "explicit"
+    (explicit_repo / ".git").mkdir(parents=True)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    built = []
+    monkeypatch.setattr(ad, "build", lambda *a, **k: built.append(a) or None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["deploy", "--repo", str(explicit_repo), "--no-restart"]) == 0
+    assert built[0][1] == explicit_repo
+
+
+def test_deploy_refuses_actionably_when_the_explicit_repo_is_not_a_checkout(
+        tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import state_dir
+    bad = tmp_path / "not-a-repo"
+    bad.mkdir()
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    assert cli.main(["deploy", "--repo", str(bad)]) == 2
+    err = capsys.readouterr().err
+    assert str(bad) in err and "checkout" in err
+
+
+def test_deploy_normalizes_a_relative_repo_flag_before_recording_it(
+        tmp_path, monkeypatch, capsys):
+    # CRITICAL: `--repo .` is an entirely ordinary invocation (deploy from
+    # the checkout you're standing in), not an adversarial one. If the
+    # literal string "." were written into the marker, the NEXT deploy --
+    # re-invoked through the PATH-linked copy, exactly the broken path
+    # this whole feature exists to fix -- would resolve "." against ITS
+    # OWN cwd (not this deploy's) and could silently build the services
+    # from a completely unrelated repo. The marker must always record an
+    # absolute path.
+    from crr import cli
+    from crr.core import deploy as core
+    from crr.adapters import deploy as ad, state_dir
+    explicit_repo = tmp_path / "explicit"
+    (explicit_repo / ".git").mkdir(parents=True)
+    sd = tmp_path / "state"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.chdir(explicit_repo)
+    assert cli.main(["deploy", "--repo", ".", "--no-restart"]) == 0
+    recorded = ad.read_marker_repo(core.marker_path(sd))
+    assert recorded == str(explicit_repo.resolve())
+    assert recorded != "."
+
+
+def test_deploy_normalizes_a_user_relative_repo_flag_before_recording_it(
+        tmp_path, monkeypatch, capsys):
+    # Same hazard, `~`-relative form: must be expanded, not written literally.
+    from crr import cli
+    from crr.core import deploy as core
+    from crr.adapters import deploy as ad, state_dir
+    home = tmp_path / "home"
+    explicit_repo = home / "src" / "crr"
+    (explicit_repo / ".git").mkdir(parents=True)
+    sd = tmp_path / "state"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    assert cli.main(["deploy", "--repo", "~/src/crr", "--no-restart"]) == 0
+    recorded = ad.read_marker_repo(core.marker_path(sd))
+    assert recorded == str(explicit_repo.resolve())
+    assert "~" not in recorded
+
+
+def test_deploy_prints_which_repo_it_deployed_from(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    repo = tmp_path / "src"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(ad, "is_dirty", lambda r, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda r, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["deploy", "--no-restart"]) == 0
+    out = capsys.readouterr().out
+    assert str(repo) in out
+
+
+def test_deploy_records_the_repo_path_in_the_marker(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.core import deploy as core
+    from crr.adapters import deploy as ad, state_dir
+    repo = tmp_path / "src"
+    (repo / ".git").mkdir(parents=True)
+    sd = tmp_path / "state"
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setattr(ad, "is_dirty", lambda r, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda r, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["deploy", "--no-restart"]) == 0
+    assert ad.read_marker_repo(core.marker_path(sd)) == str(repo)
+
+
+def test_doctor_reports_nothing_deployed(tmp_path, monkeypatch, capsys):
+    from crr import cli
+    from crr.adapters import state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)  # no marker written
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing deployed" in out
+
+
+def test_doctor_warns_when_the_deployed_sha_is_behind_head(tmp_path, monkeypatch, capsys):
     # "My fix is committed" and "my fix is live" are otherwise
     # indistinguishable — a stale deploy is legitimate, just not invisible.
     from crr import cli
     from crr.adapters import deploy as ad, state_dir
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "bbbbbbb2222")
     monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
-    cli.main(["doctor"])
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "bbbbbbb2222")
+    monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: True)
+    monkeypatch.setattr(ad, "commits_behind", lambda repo, a, b, timeout=5: 5)
+    assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
     assert "aaaaaaa" in out and "bbbbbbb" in out and "crr deploy" in out
+    assert "[WARN]" in out
 
 
-def test_doctor_is_silent_when_the_deploy_matches_head(tmp_path, monkeypatch, capsys):
+def test_doctor_reports_up_to_date_when_the_deploy_matches_head(tmp_path, monkeypatch, capsys):
     from crr import cli
     from crr.adapters import deploy as ad, state_dir
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "same111")
     monkeypatch.setattr(ad, "read_marker", lambda path: "same111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "same111")
     cli.main(["doctor"])
-    assert "crr deploy" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "up to date" in out
+    assert "[WARN]" not in out
+
+
+def test_doctor_caveats_when_the_deployed_repo_is_unknown(tmp_path, monkeypatch, capsys):
+    # Marker present, but nothing usable to compare HEAD against — must not
+    # claim drift (or "up to date") it cannot measure.
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: None)
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: False)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "aaaaaaa" in out
+    assert "cannot compare" in out
+    assert "[WARN]" not in out
+    assert "checkout" in out.lower() and "unknown" in out.lower()
+
+
+def test_doctor_caveats_differently_when_the_repo_is_known_but_head_probe_fails(
+        tmp_path, monkeypatch, capsys):
+    # The checkout IS known (is_checkout says so); only the head_sha() git
+    # call failed (timeout / transient git failure). Must not say "source
+    # checkout unknown" -- that's a different, false, statement.
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: None)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "aaaaaaa" in out
+    assert "cannot compare" in out
+    assert "[WARN]" not in out
+    assert "unknown" not in out.lower(), "checkout is known; only the HEAD probe failed"
+
+
+def test_doctor_warns_with_an_unknown_count_when_ancestry_is_confirmed_but_the_count_probe_fails(
+        tmp_path, monkeypatch, capsys):
+    # Ancestry confirmed (is_ancestor True) but the commits_behind() probe
+    # then failed -- a REAL, confirmed staleness. Must still warn, not
+    # understate it as "cannot be compared".
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "bbbbbbb2222")
+    monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: True)
+    monkeypatch.setattr(ad, "commits_behind", lambda repo, a, b, timeout=5: None)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "aaaaaaa" in out and "bbbbbbb" in out and "crr deploy" in out
+    assert "[WARN]" in out
+    assert "cannot be compared" not in out
+
+
+def test_doctor_is_informational_when_the_deployed_sha_is_unknown_to_the_repo(
+        tmp_path, monkeypatch, capsys):
+    # Rebased/squashed away: git can't place it. Must not guess "behind".
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "bbbbbbb2222")
+    monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: None)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "cannot be compared" in out
+    assert "[WARN]" not in out
 
 
 # --- deploy puts crr on PATH (#61 follow-up) ------------------------------
