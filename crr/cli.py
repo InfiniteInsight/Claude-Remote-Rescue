@@ -4998,7 +4998,7 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
     # interop PATH]) — baked as extras here, not in systemd.py, so native
     # Linux never warns about a "missing" wt.exe.
     is_wsl = host.is_wsl()
-    extras = ("wt.exe", "wsl.exe") if is_wsl else ()
+    extras = ("wt.exe", "wsl.exe", "powershell.exe") if is_wsl else ()
     path, missing = systemd.resolve_service_path(crr_bin, extra_binaries=extras)
     # XDG_STATE_HOME baked so the service watches the SAME state dir the shims
     # write to (state_dir() is <XDG_STATE_HOME>/crr; bake its parent).
