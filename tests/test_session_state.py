@@ -118,3 +118,51 @@ def test_a_file_without_a_session_id_is_skipped(tmp_path):
 
 def test_a_missing_directory_is_empty_not_an_error(tmp_path):
     assert session_state.read_all(tmp_path) == {}
+
+
+# --- archive_stale --------------------------------------------------------
+
+def test_archive_stale_moves_dead_pid_files(tmp_path):
+    _write(tmp_path, 100, SID_A, bridgeSessionId="session_a", status="idle")
+    sessions_dir = tmp_path / ".claude" / "sessions"
+    archived = session_state.archive_stale(
+        home=tmp_path, is_alive=lambda pid: False,
+    )
+    assert archived == 1
+    assert not (sessions_dir / "100.json").exists()
+    assert (sessions_dir / "archive" / "100.json").exists()
+
+
+def test_archive_stale_keeps_live_pid_files(tmp_path):
+    _write(tmp_path, 100, SID_A, bridgeSessionId="session_a", status="idle")
+    sessions_dir = tmp_path / ".claude" / "sessions"
+    archived = session_state.archive_stale(
+        home=tmp_path, is_alive=lambda pid: True,
+    )
+    assert archived == 0
+    assert (sessions_dir / "100.json").exists()
+
+
+def test_archive_stale_skips_non_numeric_filenames(tmp_path):
+    d = tmp_path / ".claude" / "sessions"
+    d.mkdir(parents=True)
+    (d / "not-a-pid.json").write_text("{}", encoding="utf-8")
+    archived = session_state.archive_stale(
+        home=tmp_path, is_alive=lambda pid: False,
+    )
+    assert archived == 0
+    assert (d / "not-a-pid.json").exists()
+
+
+def test_archive_stale_on_missing_directory_is_zero(tmp_path):
+    assert session_state.archive_stale(
+        home=tmp_path, is_alive=lambda pid: False,
+    ) == 0
+
+
+def test_archive_stale_does_not_rearchive_already_archived(tmp_path):
+    _write(tmp_path, 100, SID_A, bridgeSessionId="session_a", status="idle")
+    session_state.archive_stale(home=tmp_path, is_alive=lambda pid: False)
+    session_state.archive_stale(home=tmp_path, is_alive=lambda pid: False)
+    archive_dir = tmp_path / ".claude" / "sessions" / "archive"
+    assert len(list(archive_dir.glob("100.json"))) == 1
