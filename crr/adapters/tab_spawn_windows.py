@@ -210,6 +210,16 @@ class WindowsTerminalSpawner:
         outrun the budget and still open the tab (#53), and a second window
         is worse than waiting.
         """
+        # Reset up front: this instance is reused across many spawns
+        # (rescue-check loops one spawner over N entries; so does the
+        # reviver). Without this, an exception escaping below before the
+        # loop assigns last_tier would leave the PREVIOUS spawn's tier in
+        # place, and the caller's except-Exception handler would record it
+        # as if it belonged to THIS spawn — including a timed-out one,
+        # quietly defeating the never-record-on-timeout invariant (finding
+        # 8, 2026-08-29 review).
+        self.last_tier = None
+        self.last_confirmed = False
         # Each builder is deferred to a thunk: constructing a command is
         # cheap, but there is no reason to build tiers 2 and 3 at all when
         # tier 1 succeeds, so only the tier actually attempted pays for it.

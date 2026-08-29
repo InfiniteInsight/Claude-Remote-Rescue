@@ -435,6 +435,36 @@ def test_tier2_command_is_built_only_after_tier1_is_attempted(monkeypatch):
     assert order.index("aumid_built") > order.index("run:wt.exe")
 
 
+# --- Finding 8: a reused spawner must not launder a stale tier -------------
+#
+# rescue-check loops one spawner over N entries; so does the reviver
+# (Task 3 wiring). If an exception escapes open_tab before the loop
+# assigns last_tier (e.g. a builder itself blows up), the caller's
+# `except Exception` would otherwise record the PREVIOUS spawn's tier —
+# including a timed-out one, quietly defeating the never-record-on-timeout
+# invariant.
+
+
+def test_a_second_failing_spawn_does_not_report_the_first_spawns_tier(monkeypatch):
+    monkeypatch.setattr(tsw, "wt_path", lambda: "wt.exe")
+    monkeypatch.setattr(tsw.subprocess, "run",
+                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""))
+    sp = _spawner()
+    sp.open_tab(["tmux", "attach"])
+    assert sp.last_tier == tab_health.TIER_WT
+    assert sp.last_confirmed is True
+
+    def boom_wt_command(*a, **kw):
+        raise RuntimeError("boom before any tier is attempted")
+
+    monkeypatch.setattr(tsw, "wt_command", boom_wt_command)
+    with pytest.raises(RuntimeError):
+        sp.open_tab(["tmux", "attach"])
+    # Reset at the top of open_tab, not laundered from the first spawn.
+    assert sp.last_tier is None
+    assert sp.last_confirmed is False
+
+
 def test_a_timeout_does_not_fall_through(monkeypatch):
     calls = []
 
