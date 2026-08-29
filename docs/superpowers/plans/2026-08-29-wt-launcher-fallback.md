@@ -659,12 +659,14 @@ git commit -m "feat(tab-spawn): fall through to AUMID and console launchers when
 ### Task 3: CLI wiring — record the tier, render the doctor line
 
 **Files:**
-- Modify: `crr/cli.py` (add the doctor check in `_cmd_doctor`, which starts at line ~1576 and renders through `_check(label, ok, detail)` defined at line 1273; construct a `TabHealthStore` and pass it into the `ops` calls below)
-- Modify: `crr/core/ops.py` — **the real `open_tab` call sites are here, not in `crr/cli.py`.** cli.py never calls `open_tab`; it only builds a spawner and passes `tab_spawner=...` down into `ops` functions (`reopen`, `detmux`, `untmux`). The actual calls are: `_open_tab` at line ~648 (the helper shared by `reopen` and `_reopen_ghost`), `detmux` at line ~429, and `untmux` at line ~545. Recording must happen at these three sites, which is where success, failure, and `TabSpawnTimeout` are actually distinguished. `tab_health` is core (`crr.core.tab_health`), so `ops.py` importing it is a same-layer, not a layering violation.
-- Modify: `tests/test_cli.py`, `tests/test_ops.py`
+- Modify: `crr/cli.py` (add the doctor check in `_cmd_doctor`, which starts at line ~1576 and renders through `_check(label, ok, detail)` defined at line 1273; construct a `TabHealthStore` and pass it into the `ops`/`reviver` calls below)
+- Modify: `crr/core/tab_health.py` — add one shared free function, `record_from_spawner` (see Step 7), used by both call sites below. It lives here rather than in `ops.py` because `ops.py` and `reviver.py` cannot import each other (reviver.py's own docstring: "`ops` imports this module, so importing it back would be a cycle"), but both already import `tab_health`.
+- Modify: `crr/core/ops.py` — **one of TWO real `open_tab` call sites; cli.py itself calls neither.** cli.py only builds a spawner and passes `tab_spawner=...` down into `ops` functions (`reopen`, `detmux`, `untmux`) and into `reviver.revive_crashed` (see next bullet). The `ops.py` calls are: `_open_tab` at line ~648 (the helper shared by `reopen` and `_reopen_ghost`), `detmux` at line ~429, and `untmux` at line ~545.
+- Modify: `crr/core/reviver.py` — **the SECOND real `open_tab` call site, independent of `ops.py`.** `_try_open_tab` (line ~182) calls `tab_spawner.open_tab(...)` at line ~193; its only caller is `revive_crashed` (line ~425), invoked from `crr/cli.py` at both `_cmd_revive` (~line 2397, the manual pass, which already passes `tab_spawner=`) and `_rescue_check` (~line 3835, the boot-time/per-shell pass). Recording must happen here too, or a host where revival is the dominant way tabs open (the reporting host revives ~13 conversations at boot — see the comment at reviver.py:415) would show `crr doctor` reporting stale or empty tab-spawn health regardless of what actually opened the tabs.
+- Modify: `tests/test_cli.py`, `tests/test_ops.py`, `tests/test_reviver.py`
 
 **Interfaces:**
-- Consumes: `crr.core.tab_health.TabHealthStore`, `crr.core.tab_health.doctor_line(record, current_boot_id=None) -> tuple[str, bool | None, str]` (Task 1 — signature updated in the pre-Task-3 fix round to add `current_boot_id`, so a record from before the last reboot is flagged rather than read as live); `spawner.last_tier`, `spawner.last_confirmed` (Task 2); each `ops` function's own existing `now`/`boot: BootIdentity` parameters supply the timestamp and `boot.current()` for the recorder — no new dependency needed there
+- Consumes: `crr.core.tab_health.TabHealthStore`, `crr.core.tab_health.doctor_line(record, current_boot_id=None) -> tuple[str, bool | None, str]` (Task 1 — signature updated in the pre-Task-3 fix round to add `current_boot_id`, so a record from before the last reboot is flagged rather than read as live); `spawner.last_tier`, `spawner.last_confirmed` (Task 2); each call site's own existing `now`/boot-identity parameters supply the timestamp and boot id for the recorder — no new dependency needed there
 - Produces: nothing downstream — this is the final task
 
 - [ ] **Step 1: Write the failing doctor-rendering tests**
@@ -791,52 +793,55 @@ def test_recording_is_a_no_op_when_no_tab_health_store_is_given(tmp_path, ...):
 Run: `.venv/bin/pytest tests/test_ops.py -v -k "records_the_tier or no_op_when_no_tab_health"`
 Expected: FAIL — `TypeError: untmux() got an unexpected keyword argument 'tab_health'`
 
-- [ ] **Step 7: Implement the recorder helper and thread it through the three call sites**
+- [ ] **Step 7: Implement one shared recorder helper in `tab_health.py`, and thread it through the three `ops.py` call sites**
 
-In `crr/core/ops.py`, near the other small helpers:
+`ops.py` and `reviver.py` both need to call this, and they cannot import each other (see the Files note), so the helper is a free function in `crr/core/tab_health.py` itself rather than a private `_ops`-only helper — one implementation, no duplication, no cycle:
 
 ```python
-def _record_tab_health(tab_health: "TabHealthStore | None", spawner: object,
-                        *, now: str, boot_id: str) -> None:
-    """Persist which launcher tier the spawner just used, if both a store was
+def record_from_spawner(store: "TabHealthStore | None", spawner: object,
+                         *, now: str, boot_id: str) -> None:
+    """Persist which launcher tier ``spawner`` just used, if both a store was
     given and the spawner reports one.
 
     Only the Windows spawner has tiers; the macOS and Linux spawners have no
-    ``last_tier`` and are silently skipped, so this helper is safe to call
+    ``last_tier`` and are silently skipped, so this is safe to call
     unconditionally after any successful or failed (non-timeout) spawn.
-    ``tab_health`` is None for any caller that hasn't wired a store — never
-    probes; it only records what a spawn that already happened reported.
+    ``store`` is None for any caller that hasn't wired one — never probes;
+    it only records what a spawn that already happened reported. Callers
+    must NOT call this from a ``TabSpawnTimeout`` handler: a timeout's fate
+    is unknown, and a record written from one would be indistinguishable
+    from a genuine success (see Step 9's and Step 10's timeout tests).
     """
-    if tab_health is None:
+    if store is None:
         return
     tier = getattr(spawner, "last_tier", None)
     if tier is None:
         return
     detail = "" if getattr(spawner, "last_confirmed", False) else "launched, unconfirmed"
-    tab_health.record(tier, detail, now=now, boot_id=boot_id)
+    store.record(tier, detail, now=now, boot_id=boot_id)
 ```
 
-Add `from crr.core import tab_health as tab_health_module` (or import `TabHealthStore` directly) beside `ops.py`'s existing `crr.core` imports — this is a core-to-core import, so it does not touch the `cli -> adapters -> core` contract.
+In `crr/core/ops.py`, add `from crr.core import tab_health` beside its existing `crr.core` imports (core-to-core; does not touch the `cli -> adapters -> core` contract) and call `tab_health.record_from_spawner(...)`.
 
-Give `reopen`, `_reopen_ghost`, `detmux`, and `untmux` an optional `tab_health: TabHealthStore | None = None` keyword parameter (defaulting to `None` keeps every existing call and test in every one of these four functions valid unchanged). Thread it (along with each function's own existing `now` and `boot`) down to `_open_tab` for the `reopen`/`_reopen_ghost` paths, and call `_record_tab_health` directly in `detmux` and `untmux`.
+Give `reopen`, `_reopen_ghost`, `detmux`, and `untmux` an optional `tab_health: TabHealthStore | None = None` keyword parameter (defaulting to `None` keeps every existing call and test in every one of these four functions valid unchanged). Thread it (along with each function's own existing `now` and `boot`) down to `_open_tab` for the `reopen`/`_reopen_ghost` paths, and call `tab_health.record_from_spawner(...)` directly in `detmux` and `untmux`.
 
-**`_open_tab` and `untmux` already have a dedicated `except TabSpawnTimeout` clause** (ops.py lines ~661 and ~546) that returns before reaching their success/generic-failure paths — call `_record_tab_health` only in the success branch and in the (non-timeout) `except Exception` branch, never inside the `except TabSpawnTimeout` branch.
+**`_open_tab` and `untmux` already have a dedicated `except TabSpawnTimeout` clause** (ops.py lines ~661 and ~546) that returns before reaching their success/generic-failure paths — call the recorder only in the success branch and in the (non-timeout) `except Exception` branch, never inside the `except TabSpawnTimeout` branch.
 
-**`detmux` does not yet have that split** — its current `except Exception as exc:` at line ~430 catches `TabSpawnTimeout` too (a `TabSpawnTimeout` is-a `Exception`) and treats it identically to a hard failure. Add a dedicated `except TabSpawnTimeout:` clause *before* the existing `except Exception`, keeping `detmux`'s current timeout behavior (return `OpResult(False, ...)`, tab left unrecorded — same as today) unchanged in substance; only the generic `except Exception` branch, run for a genuine non-timeout failure, gets a `_record_tab_health` call. This is required — without it, `detmux`'s timeout path would silently violate the "never record on timeout" rule that `_open_tab` and `untmux` already respect.
+**`detmux` does not yet have that split** — its current `except Exception as exc:` at line ~430 catches `TabSpawnTimeout` too (a `TabSpawnTimeout` is-a `Exception`) and treats it identically to a hard failure. Add a dedicated `except TabSpawnTimeout:` clause *before* the existing `except Exception`, keeping `detmux`'s current timeout behavior (return `OpResult(False, ...)`, tab left unrecorded — same as today) unchanged in substance; only the generic `except Exception` branch, run for a genuine non-timeout failure, gets a recorder call. This is required — without it, `detmux`'s timeout path would silently violate the "never record on timeout" rule that `_open_tab` and `untmux` already respect.
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_ops.py -v -k "records_the_tier or no_op_when_no_tab_health"`
 Expected: PASS
 
-- [ ] **Step 9: Wire cli.py to pass a `TabHealthStore` into each `ops` call — and add the timeout-does-not-overwrite test**
+- [ ] **Step 9: Wire cli.py's `ops` calls to a `TabHealthStore` — and prove BOTH `untmux` and `detmux` refuse to record on a timeout**
 
 In `crr/cli.py`, at each of the three call sites that pass `tab_spawner=...` into `ops.reopen`/`ops.detmux`/`ops.untmux` (search `tab_spawner=`), add `tab_health=tab_health.TabHealthStore(sd)` alongside it, using whatever local name that site already has for the state dir. Do **not** introduce a new spawn or probe; only wire the store through so `ops.py` can record what the existing call already reports.
 
-Append to `tests/test_ops.py`, alongside Step 5's tests:
+Append to `tests/test_ops.py`, alongside Step 5's tests. **Both** are required: `untmux`'s `except TabSpawnTimeout` predates this plan, so a test against `untmux` alone would still pass even if `detmux`'s new clause were missing or mis-ordered — the second test is what actually exercises the change made in Step 7.
 
 ```python
-def test_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path, ...):
+def test_untmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path, ...):
     """A TabSpawnTimeout's fate is unknown (#53) — it must not clobber the
     last known-good record with a same-shaped one from an unconfirmed spawn."""
     from crr.core import tab_health
@@ -855,25 +860,126 @@ def test_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path, ...):
     ops.untmux(store, archive, tmux, boot, probe, pid, now,
                tab_spawner=_TimeoutSpawner(), tab_health=tab_health_store)
     assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+
+
+def test_detmux_a_timed_out_spawn_does_not_overwrite_an_existing_record(tmp_path, ...):
+    """Same hazard as above, but against detmux's NEW except-TabSpawnTimeout
+    clause specifically — this must fail if that clause is missing or is
+    placed after the broad `except Exception`."""
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id="b1")
+
+    class _TimeoutSpawner:
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def open_tab(self, argv, cwd=None) -> None:
+            raise TabSpawnTimeout(5)
+
+    # ... build store/archive/boot/probe fakes for a tmux-parked entry, as
+    # the existing test_detmux_* tests already do ...
+    ops.detmux(store, archive, tmux, boot, probe, pid, now,
+               tab_spawner=_TimeoutSpawner(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
 ```
 
-Run: `.venv/bin/pytest tests/test_ops.py -v -k timed_out_spawn_does_not_overwrite`
-Expected: FAIL before the `except TabSpawnTimeout` split lands (a broad `except Exception` would call `_record_tab_health` and clobber the prior record); PASS after Step 7.
+Run: `.venv/bin/pytest tests/test_ops.py -v -k "timed_out_spawn_does_not_overwrite"`
+Expected: the `untmux` variant FAILs before Step 7's shared recorder is wired in, then PASSes after. The `detmux` variant FAILs specifically if `detmux`'s `except TabSpawnTimeout` clause from Step 7 is missing or ordered after `except Exception` — that is the regression it exists to catch — and PASSes once Step 7 is implemented correctly.
 
-- [ ] **Step 10: Run the full suite**
+- [ ] **Step 10: Thread `tab_health` through `reviver.py` — the second, independent `open_tab` call site**
+
+`ops.py` is not the only place `open_tab` is called. `crr/core/reviver.py`'s `_try_open_tab` (line ~182) is a second, independent call site reached from `revive_crashed` (line ~425), which `crr/cli.py` invokes at `_cmd_revive` (~2397) and `_rescue_check` (~3835, the boot-time/per-shell pass). None of Steps 5-9 touch it. Skipping it would mean tabs opened by revival never update tab-spawn health — exactly the case the reporting host hits hardest (~13 revivals fire at boot, per the comment at reviver.py:415).
+
+In `tests/test_reviver.py`, using the file's existing `_Tab`/`FakeBoot`/`FakeProbe`/`FakeTmux`/`_Flags`/`_seed`/`_claude` fixtures (see `test_a_kicked_session_is_revived_with_a_tab` for the pattern — a tab only opens for a `relaunch`-flagged revival), write the failing tests first:
+
+```python
+def test_a_kicked_revival_records_the_tier_that_opened_the_tab(tmp_path):
+    from crr.core import tab_health
+
+    class _TieredTab(_Tab):
+        last_tier = tab_health.TIER_AUMID
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_TieredTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
+
+
+def test_a_kicked_revival_timeout_does_not_overwrite_an_existing_record(tmp_path):
+    from crr.core import tab_health
+    from crr.core.ports import TabSpawnTimeout
+
+    class _TimeoutTab:
+        last_tier = tab_health.TIER_WT
+        last_confirmed = False
+        def available(self):
+            return True
+        def open_tab(self, argv, cwd=None):
+            raise TabSpawnTimeout(5)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    tab_health_store = tab_health.TabHealthStore(tmp_path)
+    tab_health_store.record(tab_health.TIER_WT, "", now="2026-08-29T11:00:00Z",
+                             boot_id=_CURRENT_BOOT)
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_TimeoutTab(), tab_health=tab_health_store)
+    assert tab_health_store.read()["ts"] == "2026-08-29T11:00:00Z"
+```
+
+Run: `.venv/bin/pytest tests/test_reviver.py -v -k "records_the_tier_that_opened or revival_timeout_does_not_overwrite"`
+Expected: FAIL — `TypeError: revive_crashed() got an unexpected keyword argument 'tab_health'`
+
+Implement: give `revive_crashed` an optional `tab_health: TabHealthStore | None = None` keyword parameter (default keeps every existing caller — including every other test in `tests/test_reviver.py` — valid unchanged). Give `_try_open_tab` two more parameters, `tab_health` and `boot_id`, called from `revive_crashed`'s single call site (line ~425) as `_try_open_tab(tab_spawner, name, tab_health, now=now, boot_id=boot_identity.current())` (`revive_crashed` already has both `now` and `boot_identity` in scope — no new dependency).
+
+`_try_open_tab` currently has one bare `except Exception: return False` (line ~195) that, like `detmux`'s did, swallows `TabSpawnTimeout` indistinguishably from a hard failure. `reviver.py` does not import `TabSpawnTimeout` today (its `from crr.core.ports import ...` at line ~36 pulls only `BootIdentity, ProcessProbe, TmuxSpawner`) — add it there. Then split `_try_open_tab` exactly like `detmux`:
+
+```python
+def _try_open_tab(tab_spawner, name: str, tab_health=None, *, now: str = "", boot_id: str = "") -> bool:
+    try:
+        if not tab_spawner.available():
+            return False
+        tab_spawner.open_tab(attach_argv(name))
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
+        return True
+    except TabSpawnTimeout:
+        return False  # unknown fate — never record, never treat as failure
+    except Exception:
+        tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
+        return False  # the revival is already durable; the tab is not
+```
+
+(`tab_health_module` stands in for however this file names its `from crr.core import tab_health` import — match its existing import style.)
+
+In `crr/cli.py`, add `tab_health=tab_health.TabHealthStore(sd)` to both `reviver.revive_crashed(...)` calls: `_cmd_revive` (~2397, alongside its existing `tab_spawner=`) and `_rescue_check` (~3835, which passes no `tab_spawner` today — wire the store through anyway, for consistency and so a future caller that does pass one gets recording for free).
+
+Run: `.venv/bin/pytest tests/test_reviver.py -v -k "records_the_tier_that_opened or revival_timeout_does_not_overwrite"`
+Expected: PASS
+
+- [ ] **Step 11: Run the full suite**
 
 Run: `.venv/bin/pytest -q`
 Expected: all pass. If `test_power_sees_a_real_separate_awake_process_holding` fails, it is a known-flaky cross-process timing test — re-run it alone to confirm, then continue.
 
-- [ ] **Step 11: Run the layering contract**
+- [ ] **Step 12: Run the layering contract**
 
 Run: `.venv/bin/lint-imports`
 Expected: `Contracts: 1 kept, 0 broken.`
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
-git add crr/cli.py crr/core/ops.py tests/test_cli.py tests/test_ops.py
+git add crr/cli.py crr/core/ops.py crr/core/reviver.py crr/core/tab_health.py \
+        tests/test_cli.py tests/test_ops.py tests/test_reviver.py
 git commit -m "feat(doctor): record and report which tab-spawn launcher tier is in use"
 ```
 
@@ -909,6 +1015,6 @@ If step 2 fails, Tier 2 is not viable on that host and Tier 3 carries the fallba
 - No `PAGE_VERSION` bump → no task touches `page.html` ✓
 - Manual host verification → dedicated section ✓
 
-**Placeholder scan:** every code step carries real code, with two kinds of deliberate deferral, both pointing at specific files/symbols rather than an undecided question: the "match the existing local name" instructions (Task 2 Step 1 import style, Task 3 Steps 3 and 9), and Task 3 Steps 5/9's `ops.py` test sketches, which use `...` only for the fake `store`/`archive`/`boot`/`probe` construction that `tests/test_ops.py` already has an established pattern for — the assertions and the calls under test are concrete.
+**Placeholder scan:** every code step carries real code, with two kinds of deliberate deferral, both pointing at specific files/symbols rather than an undecided question: the "match the existing local name" instructions (Task 2 Step 1 import style, Task 3 Steps 3 and 9), and Task 3 Steps 5/9's `ops.py` test sketches, which use `...` only for the fake `store`/`archive`/`boot`/`probe` construction that `tests/test_ops.py` already has an established pattern for — the assertions and the calls under test are concrete. Task 3 Step 10's `reviver.py` tests are fully concrete (no `...`) because `tests/test_reviver.py`'s existing `_Tab`/`FakeBoot`/`FakeProbe`/`FakeTmux`/`_Flags`/`_seed` fixtures made that possible directly.
 
-**Type consistency:** `TIER_WT` / `TIER_AUMID` / `TIER_CONSOLE` / `TIER_NONE`, `FILENAME`, `TabHealthStore.record(tier, detail, *, now, boot_id)`, `TabHealthStore.read()`, `doctor_line(record, current_boot_id=None) -> (label, ok, detail)` matching `_check(label, ok, detail)` (signature widened in the pre-Task-3 fix round; the default keeps every Task 1/2 call site valid), `aumid_command(argv, cwd, profile, distro)`, `console_command(argv, distro)`, `last_tier`, `last_confirmed` — all used identically across Tasks 1-3. `ops.reopen` / `ops._reopen_ghost` / `ops.detmux` / `ops.untmux` gain a uniform optional `tab_health: TabHealthStore | None = None`, defaulted so every existing caller and test in `crr/cli.py` and `tests/test_ops.py` stays valid unchanged.
+**Type consistency:** `TIER_WT` / `TIER_AUMID` / `TIER_CONSOLE` / `TIER_NONE`, `FILENAME`, `TabHealthStore.record(tier, detail, *, now, boot_id)`, `TabHealthStore.read()`, `doctor_line(record, current_boot_id=None) -> (label, ok, detail)` matching `_check(label, ok, detail)` (signature widened in the pre-Task-3 fix round; the default keeps every Task 1/2 call site valid), `aumid_command(argv, cwd, profile, distro)`, `console_command(argv, distro)`, `last_tier`, `last_confirmed` — all used identically across Tasks 1-3. `tab_health.record_from_spawner(store, spawner, *, now, boot_id)` is the one recorder implementation, shared (not duplicated) by both real `open_tab` call sites: `ops.reopen` / `ops._reopen_ghost` / `ops.detmux` / `ops.untmux` gain a uniform optional `tab_health: TabHealthStore | None = None`, and `reviver.revive_crashed` / `reviver._try_open_tab` gain the same, all defaulted so every existing caller and test in `crr/cli.py`, `tests/test_ops.py`, and `tests/test_reviver.py` stays valid unchanged.
