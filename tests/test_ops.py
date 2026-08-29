@@ -337,6 +337,33 @@ def test_open_tab_reports_whether_a_tab_actually_landed():
     assert landed is False
 
 
+# --- Finding 5: unconfirmed launches must not read as verified successes --
+#
+# The spec's bolded constraint: "Do not let a fire-and-forget launch
+# masquerade as a verified success." The store already honors it
+# (launched, unconfirmed); the user-facing MESSAGE did not. landed/degraded
+# must stay unchanged — rescue-check disables the spawner after the first
+# degraded result, which would kill tabs for every remaining session.
+
+def test_open_tab_confirmed_launch_reports_plain_success():
+    class _ConfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = True
+
+    suffix, landed = ops._open_tab(_ConfirmedTabSpawner(), "crr-8a1b2c3d")
+    assert landed is True
+    assert suffix == " (opened in a new tab)"
+
+
+def test_open_tab_unconfirmed_launch_says_so_but_still_lands():
+    class _UnconfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = False
+
+    suffix, landed = ops._open_tab(_UnconfirmedTabSpawner(), "crr-8a1b2c3d")
+    assert landed is True  # NOT flipped — rescue-check would disable the spawner
+    assert "could not confirm" in suffix
+    assert "tmux attach -t crr-8a1b2c3d" in suffix
+
+
 def test_open_tab_success_survives_a_tab_health_write_failure(tmp_path):
     """Finding 1: record_from_spawner's OSError (read-only/full state dir)
     sat INSIDE the success try-block, so it fell into `except Exception`,
@@ -1008,6 +1035,29 @@ def test_untmux_records_the_tier_that_opened_the_tab(tmp_path):
     assert tab_health_store.read()["tier"] == tab_health.TIER_AUMID
 
 
+def test_untmux_confirmed_launch_reports_plain_success(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+    assert "resumed in a tracked terminal window" in res.message
+
+
+def test_untmux_unconfirmed_launch_says_so_but_still_succeeds(tmp_path):
+    class _UnconfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    tmux = FakeTmux(live={"crr-8a1b2c3d"})
+    res = ops.untmux(store, archive, tmux, FakeBoot(), FakeProbe(), 42, _NOW,
+                     tab_spawner=_UnconfirmedTabSpawner())
+    assert res.ok, res.message
+    assert "could not confirm" in res.message
+
+
 def test_recording_is_a_no_op_when_no_tab_health_store_is_given(tmp_path):
     """tab_health is optional — every existing ops.py caller/test that omits
     it keeps working exactly as before, and nothing is written to disk."""
@@ -1034,6 +1084,30 @@ def test_detmux_records_the_tier_that_opened_the_tab(tmp_path):
                      42, _NOW, tab_spawner=_TieredTabSpawner(), tab_health=tab_health_store)
     assert res.ok, res.message
     assert tab_health_store.read()["tier"] == tab_health.TIER_WT
+
+
+def test_detmux_confirmed_launch_reports_plain_success(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+                     42, _NOW, tab_spawner=FakeTabSpawner())
+    assert res.ok, res.message
+    assert "attached crr-8a1b2c3d in a tab" in res.message
+
+
+def test_detmux_unconfirmed_launch_says_so_but_still_succeeds(tmp_path):
+    # Finding 5: a tier 2/3 fire-and-forget launch must not read as a
+    # verified success. Only the message changes — ok/degraded stay as
+    # they are today.
+    class _UnconfirmedTabSpawner(FakeTabSpawner):
+        last_confirmed = False
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed_parked(store, 42, "crr-8a1b2c3d")
+    res = ops.detmux(store, archive, FakeTmux(live={"crr-8a1b2c3d"}), FakeBoot(), FakeProbe(),
+                     42, _NOW, tab_spawner=_UnconfirmedTabSpawner())
+    assert res.ok, res.message
+    assert "could not confirm" in res.message
 
 
 def test_detmux_generic_failure_records_the_error_as_the_detail(tmp_path):

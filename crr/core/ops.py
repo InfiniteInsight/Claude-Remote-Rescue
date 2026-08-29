@@ -46,6 +46,23 @@ class OpResult(NamedTuple):
     degraded: bool = False
 
 
+def _launch_confirmed(tab_spawner: object) -> bool:
+    """Whether the spawner's most recent launch is a VERIFIED success.
+
+    Tier 1 (an exec that returned 0) has no such attribute at all — its
+    exit code IS the confirmation — so ``True`` is the correct default for
+    any spawner that doesn't track this (also every macOS/Linux spawner).
+    Only a spawner that explicitly reports ``False`` fired a fire-and-forget
+    ``Start-Process`` it could not verify landed (tiers 2/3). Message-only:
+    per the spec's bolded constraint ("do not let a fire-and-forget launch
+    masquerade as a verified success"), callers use this to word the
+    success message honestly — never to flip ``ok``/``degraded``, which
+    rescue-check reads to decide whether to disable the spawner for the
+    rest of its pass (finding 5, 2026-08-29 review).
+    """
+    return getattr(tab_spawner, "last_confirmed", True)
+
+
 def remove(store: JournalStore, pid: int) -> OpResult:
     """Pure delist — forget the session, touch nothing else. Idempotent."""
     store.remove(pid)
@@ -454,7 +471,15 @@ def detmux(
         # the current name.
         archive.archive(entry, "untracked", now)
     store.remove(pid)
-    return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab; crr no longer manages it")
+    if _launch_confirmed(tab_spawner):
+        return OpResult(True, f"de-tmuxed {pid}: attached {name} in a tab; crr no longer manages it")
+    # Finding 5: tiers 2/3's Start-Process exit proves the launch, not the
+    # tab — say so rather than claiming a verified attach. ok stays True.
+    return OpResult(
+        True,
+        f"de-tmuxed {pid}: launch requested — could not confirm {name} opened; "
+        f"if none appears: tmux attach -t {name}; crr no longer manages it",
+    )
 
 
 def tracked_resume_argv(entry: Mapping[str, Any]) -> list[str]:
@@ -582,10 +607,19 @@ def untmux(
             "the conversation is in Discoverable — adopt it there to bring it back",
         )
     tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot.current())
+    if _launch_confirmed(tab_spawner):
+        return OpResult(
+            True,
+            f"un-tmuxed {pid}: resumed in a tracked terminal window; "
+            "crr still manages it as a new (non-tmux) session",
+        )
+    # Finding 5: tiers 2/3's Start-Process exit proves the launch, not the
+    # window — say so rather than claiming a verified resume. ok stays True.
     return OpResult(
         True,
-        f"un-tmuxed {pid}: resumed in a tracked terminal window; "
-        "crr still manages it as a new (non-tmux) session",
+        f"un-tmuxed {pid}: launch requested — could not confirm the terminal "
+        "opened; if none appears, the conversation is in Discoverable — "
+        "adopt it there",
     )
 
 
@@ -697,7 +731,18 @@ def _open_tab(
     try:
         tab_spawner.open_tab(attach_argv(name))
         tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
-        return " (opened in a new tab)", True
+        if _launch_confirmed(tab_spawner):
+            return " (opened in a new tab)", True
+        # Finding 5: tiers 2/3 fire through Start-Process, which returns as
+        # soon as the process launches — a zero exit proves the launch, not
+        # the tab. landed stays True: the spec forbids flipping ok/degraded
+        # here (rescue-check would disable the spawner for every remaining
+        # session), so only the wording changes.
+        return (
+            f" (launch requested — could not confirm the tab; if none "
+            f"appears: tmux attach -t {name})",
+            True,
+        )
     except TabSpawnTimeout as exc:
         # Degraded, but honestly: we do not know that no tab opened, and
         # sending the user to `tmux attach` for a tab that is already on its
