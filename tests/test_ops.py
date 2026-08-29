@@ -100,12 +100,19 @@ class FakeTabSpawner:
 
 # --- remove ---------------------------------------------------------------
 
-def test_remove_deletes_and_is_idempotent(tmp_path):
-    store = JournalStore(tmp_path)
+def test_remove_archives_then_delists(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=_claude())
-    assert ops.remove(store, 42).ok
+    assert ops.remove(store, archive, 42, _NOW).ok
     assert not store.tabs_dir.joinpath("42.json").exists()
-    assert ops.remove(store, 42).ok  # idempotent
+    assert archive.read(_SID)["reason"] == "dismissed"
+
+
+def test_remove_is_idempotent(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    assert ops.remove(store, archive, 42, _NOW).ok
+    assert ops.remove(store, archive, 42, _NOW).ok  # idempotent
 
 
 # --- dismiss --------------------------------------------------------------
@@ -191,21 +198,30 @@ def test_reopen_refuses_claude_less(tmp_path):
     assert not res.ok
 
 
-def test_reopen_live_refused(tmp_path):
-    """LIVE has a running claude to act on — kick/close are the ops for
-    that, not reopen (which would race a spawn against the live shell)."""
+def test_reopen_live_bare_shell_signals_and_arms_flag(tmp_path):
+    """LIVE without tmux: reopen signals claude groups (like kick) and arms
+    the relaunch flag so the shim restarts with current flags."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="same-boot", claude=_claude())
     ctrl, flags = FakeController(groups=[200]), FakeFlags()
     res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 42, _NOW, grace=0.1, remote_control=True)
-    assert not res.ok
-    assert "is live" in res.message
-    assert ctrl.terminated == []
-    assert flags.armed == {}
-    with pytest.raises(KeyError):
-        archive.read(_SID)
-    assert store.read(42)  # untouched
+    assert res.ok
+    assert "restarted" in res.message
+    assert ctrl.terminated == [(200, 0.1)]
+    assert 42 in flags.armed
+    assert flags.armed[42][1] == _SID
+
+
+def test_reopen_live_bare_shell_threads_skip_permissions(tmp_path):
+    """skip_permissions from the journal is threaded into the relaunch flag."""
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude(skip_permissions=True))
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW, grace=0.1, remote_control=True)
+    assert res.ok
+    assert flags.armed[42][3] is True  # skip_permissions in flag
 
 
 def test_reopen_already_running_does_not_respawn(tmp_path):
@@ -530,17 +546,16 @@ def test_reopen_live_with_tmux_works_even_when_pid_mismatches(tmp_path):
     assert tab.opened
 
 
-def test_reopen_live_without_tmux_still_refused(tmp_path):
-    """A LIVE session with NO tmux_session is still refused (no tab target)."""
+def test_reopen_live_without_tmux_no_groups_fails(tmp_path):
+    """LIVE bare shell with no claude groups found fails gracefully."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, boot="same-boot", claude=_claude())
-    # No tmux_session field set — bare live shell
-    ctrl, flags = _idle_ctrl_flags()
+    ctrl, flags = _idle_ctrl_flags()  # groups=[]
     res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 42, _NOW,
                      grace=0.1, remote_control=True)
     assert not res.ok
-    assert "is live" in res.message
+    assert "no running claude" in res.message
 
 
 def test_reopen_live_with_tmux_degraded_when_tab_fails(tmp_path):
@@ -1454,9 +1469,9 @@ class FakeController:
 
 class FakeFlags:
     def __init__(self):
-        self.armed = {}               # pid -> (kind, sid|None, boot_id)
-    def arm_relaunch(self, pid, sid, *, boot_id):
-        self.armed[pid] = ("relaunch", sid, boot_id)
+        self.armed = {}               # pid -> (kind, sid|None, boot_id, skip_perms)
+    def arm_relaunch(self, pid, sid, *, boot_id, skip_permissions=False):
+        self.armed[pid] = ("relaunch", sid, boot_id, skip_permissions)
     def arm_close(self, pid, *, boot_id):
         self.armed[pid] = ("close", None, boot_id)
     def clear(self, pid):
@@ -1725,15 +1740,17 @@ def test_reopen_restarts_a_parked_session(tmp_path):
     assert tab.opened
 
 
-def test_reopen_still_refuses_a_live_session_in_your_own_terminal(tmp_path):
+def test_reopen_live_bare_shell_restarts_via_signal(tmp_path):
+    """LIVE session in a bare shell (no tmux) restarts via signal + flag."""
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 500, boot="same-boot", claude=_claude())
     ctrl, flags = FakeController(groups=[200]), FakeFlags()
     res = ops.reopen(store, archive, FakeTmux(), ctrl, flags, FakeBoot("same-boot"),
                      FakeProbe(alive=True, tty=True), 500, _NOW, grace=0.1,
                      remote_control=True)
-    assert not res.ok
-    assert "is live" in res.message
+    assert res.ok
+    assert "restarted" in res.message
+    assert ctrl.terminated == [(200, 0.1)]
 
 
 # --- set_skip_permissions ---------------------------------------------------

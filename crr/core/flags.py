@@ -40,18 +40,19 @@ class FlagStore:
         tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, target)  # atomic
 
-    def arm_relaunch(self, pid: int, sid: str, *, boot_id: str) -> None:
-        self._write(pid, f"{RELAUNCH} {sid}\n{boot_id}")
+    def arm_relaunch(self, pid: int, sid: str, *, boot_id: str,
+                     skip_permissions: bool = False) -> None:
+        sp = " skip_permissions" if skip_permissions else ""
+        self._write(pid, f"{RELAUNCH} {sid}{sp}\n{boot_id}")
 
     def arm_close(self, pid: int, *, boot_id: str) -> None:
         self._write(pid, f"{CLOSE}\n{boot_id}")
 
-    def read(self, pid: int) -> tuple[str, str | None, str | None] | None:
+    def read(self, pid: int) -> tuple[str, str | None, str | None, bool] | None:
         """Read the flag for ``pid``.
 
-        Returns ``(kind, sid_or_none, boot_id_or_none)`` or ``None``.
-        Legacy flags (written before boot_id was stamped) return
-        ``boot_id=None``.
+        Returns ``(kind, sid_or_none, boot_id_or_none, skip_permissions)``
+        or ``None``. Legacy flags return ``skip_permissions=False``.
         """
         try:
             content = self._path(pid).read_text(encoding="utf-8")
@@ -60,11 +61,12 @@ class FlagStore:
         lines = content.split("\n", 1)
         first_line = lines[0]
         boot_id = lines[1].strip() if len(lines) > 1 and lines[1].strip() else None
-        parts = first_line.split(None, 1)
+        parts = first_line.split()
         if not parts:
             return None
-        sid = parts[1].strip() if len(parts) > 1 else None
-        return (parts[0], sid, boot_id)
+        sid = parts[1] if len(parts) > 1 and parts[1] != "skip_permissions" else None
+        skip_permissions = "skip_permissions" in parts
+        return (parts[0], sid, boot_id, skip_permissions)
 
     def clear(self, pid: int) -> None:
         self._path(pid).unlink(missing_ok=True)

@@ -2365,8 +2365,13 @@ def _cmd_repair_check(args: argparse.Namespace) -> int:
     flag = flags.read(args.pid)
     if flag is None:
         return 0
-    kind, sid, _boot_id = flag
-    print(kind if sid is None else f"{kind} {sid}")
+    kind, sid, _boot_id, skip_perms = flag
+    parts = [kind]
+    if sid is not None:
+        parts.append(sid)
+    if skip_perms:
+        parts.append("skip_permissions")
+    print(" ".join(parts))
     return 0
 
 
@@ -2936,7 +2941,7 @@ def _post_reauth_recovery(
 def _cmd_remove(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     with mutation_lock(sd):
-        res = ops.remove(JournalStore(sd), args.pid)
+        res = ops.remove(JournalStore(sd), ArchiveStore(sd), args.pid, _now())
     print(res.message)
     return 0 if res.ok else 1
 
@@ -4728,9 +4733,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # handler threads) or a race with the revive timer can't interleave.
         with mutation_lock(sd):
             if op == "remove":
-                res = ops.remove(store, pid)
-            elif op == "dismiss":
-                res = ops.dismiss(store, archive, boot, probe, pid, _now())
+                res = ops.remove(store, archive, pid, _now())
             elif op == "reopen":
                 spawner, tabs_expected = _tab_spawner(config)
                 res = ops.reopen(store, archive, tmux_spawner, controller, flags, boot, probe,

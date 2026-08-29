@@ -63,8 +63,16 @@ def _launch_confirmed(tab_spawner: object) -> bool:
     return getattr(tab_spawner, "last_confirmed", True)
 
 
-def remove(store: JournalStore, pid: int) -> OpResult:
-    """Pure delist — forget the session, touch nothing else. Idempotent."""
+def remove(store: JournalStore, archive: ArchiveStore, pid: int,
+           now: str) -> OpResult:
+    """Delist a session — archive it first if it carries a claude entry."""
+    try:
+        entry = store.read(pid)
+    except (KeyError, contracts.ContractError):
+        pass  # already gone or corrupt — still delist
+    else:
+        if entry.get("claude") is not None:
+            archive.archive(entry, "dismissed", now)
     store.remove(pid)
     return OpResult(True, f"removed {pid}")
 
@@ -188,7 +196,21 @@ def reopen(
                                         now=now, boot_id=boot.current())
             return OpResult(True, f"restarted {name}" + suffix,
                             degraded=tabs_expected and not landed)
-        return OpResult(False, f"session {pid} is live — use kick or close")
+        # LIVE without tmux: signal claude to restart (same as kick),
+        # threading skip_permissions through the flag so the shim picks it up.
+        groups = controller.claude_groups(pid)
+        if not groups:
+            return OpResult(False, f"session {pid}: no running claude process found")
+        skip_perms = entry["claude"].get("skip_permissions", False)
+        flags.arm_relaunch(pid, entry["claude"]["session_id"],
+                           boot_id=boot.current(), skip_permissions=skip_perms)
+        landed, errors = _signal_groups(controller, groups, grace)
+        if landed == 0:
+            flags.clear(pid)
+            return OpResult(False, f"reopen {pid} failed to signal: {'; '.join(errors)}")
+        suffix = (f" ({len(errors)} group(s) failed: {'; '.join(errors)})"
+                  if errors else "")
+        return OpResult(True, f"restarted {pid} (resuming the same conversation){suffix}")
 
     if state == GHOST:
         return _reopen_ghost(
@@ -387,7 +409,8 @@ def kick(
     groups = controller.claude_groups(pid, include_shell_group=parked)
     if not groups:
         return OpResult(False, f"session {pid}: no running claude process found")
-    flags.arm_relaunch(pid, entry["claude"]["session_id"], boot_id=boot.current())
+    flags.arm_relaunch(pid, entry["claude"]["session_id"], boot_id=boot.current(),
+                       skip_permissions=entry["claude"].get("skip_permissions", False))
     landed, errors = _signal_groups(controller, groups, grace)
     if landed == 0:
         flags.clear(pid)  # no kill landed -> the flag must not linger
