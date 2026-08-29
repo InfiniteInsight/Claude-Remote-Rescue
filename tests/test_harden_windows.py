@@ -184,10 +184,17 @@ def test_harden_reports_unknown_when_events_exist_but_none_parse(monkeypatch, ca
 def test_restart_measurement_uses_in_force_hours_not_the_configured_window(monkeypatch, capsys):
     # 01:14 is INSIDE the configured want-window (8-2) but OUTSIDE the
     # in-force window (7-19) -- the exact shape that motivated this fix.
+    # The restart date is relative to now (yesterday), same fix as
+    # test_harden_reports_a_restart_that_landed_outside_the_window above --
+    # a fixed calendar date rotted out of the default 14-day lookback once
+    # "now" passed it (#deploy-repo-resolution-and-drift: found blocking
+    # the pre-commit gate for an unrelated change).
+    from datetime import datetime, timedelta
+    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     _patch_state(monkeypatch, _HS(True, 7, 19, False))
     monkeypatch.setattr(
         cli, "run_capture",
-        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+        lambda cmd, timeout: f"{recent} 01:14:24 [6008] unexpected shutdown\n")
     assert cli.main(["harden"]) == 0
     out = capsys.readouterr().out
     assert "restarts outside active hours" in out.lower()
@@ -199,10 +206,12 @@ def test_restart_measurement_uses_in_force_hours_not_the_configured_window(monke
 def test_restart_measurement_same_restart_not_outside_a_different_in_force_window(monkeypatch, capsys):
     # Same 01:14 restart, but here the in-force window IS 8-2 -- 01:14 is
     # inside it, so this is not evidence of failure.
+    from datetime import datetime, timedelta
+    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     _patch_state(monkeypatch, _HS(True, 8, 2, False))
     monkeypatch.setattr(
         cli, "run_capture",
-        lambda cmd, timeout: "2026-08-14 01:14:24 [6008] unexpected shutdown\n")
+        lambda cmd, timeout: f"{recent} 01:14:24 [6008] unexpected shutdown\n")
     assert cli.main(["harden"]) == 0
     out = capsys.readouterr().out
     assert "restarts outside active hours" in out.lower()
