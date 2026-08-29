@@ -1185,21 +1185,31 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
     marker = deploy.marker_path(sd)
     root = _repo_root()
     marker_repo = deploy_io.read_marker_repo(marker)
+    # Resolved ONCE, here, before it is either probed or persisted. A
+    # relative `--repo .` (an entirely ordinary invocation, not an
+    # adversarial one) would otherwise be written into the marker
+    # verbatim; the NEXT deploy re-invoked through the PATH-linked copy
+    # resolves the marker against ITS OWN cwd, not the cwd this deploy
+    # ran from, and can silently build from an unrelated repo that
+    # happens to be a checkout there. Matches `_repo_root()`, which
+    # already calls `.resolve()` on `__file__`.
+    explicit_repo = (str(Path(args.repo).expanduser().resolve())
+                      if args.repo else None)
     # `crr deploy` re-invoked through the symlink it just created has
     # `__file__` inside a venv's site-packages, not a checkout — `root`
     # alone would leave it nothing to build from. Fall back through
     # --repo, then the checkout crr was imported from, then the checkout a
     # previous successful deploy recorded (#deploy-repo-resolution).
     repo = deploy.resolve_repo(
-        explicit=args.repo,
-        explicit_is_checkout=bool(args.repo) and deploy_io.is_checkout(Path(args.repo)),
+        explicit=explicit_repo,
+        explicit_is_checkout=bool(explicit_repo) and deploy_io.is_checkout(Path(explicit_repo)),
         repo_root=root,
         repo_root_is_checkout=deploy_io.is_checkout(root),
         marker_repo=marker_repo,
         marker_repo_is_checkout=bool(marker_repo) and deploy_io.is_checkout(Path(marker_repo)),
     )
     if repo is None:
-        print(f"crr deploy: {deploy.no_checkout_refusal(args.repo)}", file=sys.stderr)
+        print(f"crr deploy: {deploy.no_checkout_refusal(explicit_repo)}", file=sys.stderr)
         return 2
     dirty = deploy_io.is_dirty(repo)
     stop = deploy.refusal(dirty=dirty, force=args.force)
@@ -1584,7 +1594,8 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     _deployed_sha = deploy_io.read_marker(deploy.marker_path(_sd))
     if _deployed_sha is None:
         _ok, _detail = deploy.deploy_status(
-            deployed_sha=None, head_sha=None, is_ancestor=None, commits_behind=None)
+            deployed_sha=None, repo_known=False, head_sha=None,
+            is_ancestor=None, commits_behind=None)
     else:
         _marker_repo = deploy_io.read_marker_repo(deploy.marker_path(_sd))
         _root = _repo_root()
@@ -1608,8 +1619,9 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
                     _commits_behind = deploy_io.commits_behind(
                         _deploy_repo, _deployed_sha, _head_sha, timeout=_deploy_timeout)
         _ok, _detail = deploy.deploy_status(
-            deployed_sha=_deployed_sha, head_sha=_head_sha,
-            is_ancestor=_is_ancestor, commits_behind=_commits_behind)
+            deployed_sha=_deployed_sha, repo_known=_deploy_repo is not None,
+            head_sha=_head_sha, is_ancestor=_is_ancestor,
+            commits_behind=_commits_behind)
     _check("deploy", _ok, _detail)
 
     # Platform integration.

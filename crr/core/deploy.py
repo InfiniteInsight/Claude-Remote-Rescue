@@ -113,6 +113,7 @@ def no_checkout_refusal(explicit: str | None) -> str:
 def deploy_status(
     *,
     deployed_sha: str | None,
+    repo_known: bool,
     head_sha: str | None,
     is_ancestor: bool | None,
     commits_behind: int | None,
@@ -120,22 +121,37 @@ def deploy_status(
     """The (``_check`` ok, detail) doctor renders for the deployed snapshot
     vs. the source repo's HEAD.
 
-    Every input already degraded to ``None`` rather than a guess
+    Every probe input already degraded to ``None`` rather than a guess
     (``crr.adapters.deploy``'s probes); this function only decides how to
     say it. An unmeasurable comparison is an informational caveat, never a
     claimed match or claimed drift — inventing either would be worse than
-    silence (spine: null-result expressibility).
+    silence (spine: null-result expressibility). ``repo_known`` carries a
+    fact ``head_sha is None`` alone can't: "no checkout could be found" and
+    "a checkout was found but reading its HEAD failed" both leave
+    ``head_sha`` at ``None``, but they are different true statements —
+    conflating them into one caveat line would make the "checkout unknown"
+    wording a false claim in the second case.
     """
     if deployed_sha is None:
         return (True, "nothing deployed — services run the working tree")
     if head_sha is None:
-        return (True, f"deployed {deployed_sha[:7]} — source checkout "
-                       "unknown, cannot compare to HEAD")
+        if not repo_known:
+            return (True, f"deployed {deployed_sha[:7]} — source checkout "
+                           "unknown, cannot compare to HEAD")
+        return (True, f"deployed {deployed_sha[:7]} — checkout found but its "
+                       "HEAD could not be read, cannot compare")
     if deployed_sha == head_sha:
         return (True, f"deployed {deployed_sha[:7]} — up to date")
-    if is_ancestor and commits_behind:
-        return (False, f"deployed {deployed_sha[:7]} — {commits_behind} "
-                        f"commit(s) behind {head_sha[:7]}; run crr deploy")
+    if is_ancestor:
+        # Ancestry is a confirmed, real fact even when the exact count
+        # isn't — reporting "cannot be compared" here would understate a
+        # known-true staleness just because the second of two probes
+        # failed. Never claims a false PRECISE count, only omits it.
+        if commits_behind is not None:
+            return (False, f"deployed {deployed_sha[:7]} — {commits_behind} "
+                            f"commit(s) behind {head_sha[:7]}; run crr deploy")
+        return (False, f"deployed {deployed_sha[:7]} — behind {head_sha[:7]} "
+                       "(commit count unknown); run crr deploy")
     return (True, f"deployed {deployed_sha[:7]} — cannot be compared to "
                    f"HEAD ({head_sha[:7]})")
 

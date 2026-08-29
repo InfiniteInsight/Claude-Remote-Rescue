@@ -119,31 +119,51 @@ def test_no_checkout_refusal_without_explicit_says_what_to_do():
 
 def test_deploy_status_nothing_deployed_is_informational():
     ok, detail = deploy.deploy_status(
-        deployed_sha=None, head_sha=None, is_ancestor=None, commits_behind=None)
+        deployed_sha=None, repo_known=False, head_sha=None,
+        is_ancestor=None, commits_behind=None)
     assert ok is True
     assert "nothing deployed" in detail
 
 
-def test_deploy_status_caveats_when_head_is_unknown():
+def test_deploy_status_caveats_when_the_repo_itself_is_unknown():
     # Marker present, but the repo it was deployed from can't be found or
     # isn't a checkout: name the deployed sha, don't claim a comparison.
+    # This must read differently from "the repo IS known but the git probe
+    # failed" below -- the checkout being unknown is a different fact from
+    # a known checkout's HEAD read failing.
     ok, detail = deploy.deploy_status(
-        deployed_sha="aaaaaaa1111", head_sha=None, is_ancestor=None, commits_behind=None)
+        deployed_sha="aaaaaaa1111", repo_known=False, head_sha=None,
+        is_ancestor=None, commits_behind=None)
     assert ok is True
     assert "aaaaaaa" in detail
     assert "cannot compare" in detail
+    assert "checkout" in detail and "unknown" in detail
+
+
+def test_deploy_status_caveats_differently_when_the_repo_is_known_but_the_probe_failed():
+    # The checkout WAS found; only the `head_sha()` git call failed
+    # (timeout, transient git failure). Claiming "source checkout unknown"
+    # here would be false -- the checkout is known, the probe isn't.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha=None,
+        is_ancestor=None, commits_behind=None)
+    assert ok is True
+    assert "aaaaaaa" in detail
+    assert "cannot compare" in detail
+    assert "unknown" not in detail, "checkout is known; only the probe failed"
 
 
 def test_deploy_status_matching_shas_are_up_to_date():
     ok, detail = deploy.deploy_status(
-        deployed_sha="abc1234", head_sha="abc1234", is_ancestor=None, commits_behind=None)
+        deployed_sha="abc1234", repo_known=True, head_sha="abc1234",
+        is_ancestor=None, commits_behind=None)
     assert ok is True
     assert "up to date" in detail
 
 
 def test_deploy_status_an_ancestor_deploy_warns_with_the_count():
     ok, detail = deploy.deploy_status(
-        deployed_sha="aaaaaaa1111", head_sha="bbbbbbb2222",
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
         is_ancestor=True, commits_behind=3)
     assert ok is False
     assert "aaaaaaa" in detail and "bbbbbbb" in detail
@@ -151,14 +171,40 @@ def test_deploy_status_an_ancestor_deploy_warns_with_the_count():
     assert "crr deploy" in detail
 
 
+def test_deploy_status_a_confirmed_ancestor_with_an_unknown_count_still_warns():
+    # Ancestry was confirmed (git merge-base --is-ancestor succeeded) but
+    # the count probe (git rev-list --count) then failed -- this is a REAL,
+    # confirmed staleness. Reporting "cannot be compared" here would
+    # understate a known-true fact just because one of two probes failed.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
+        is_ancestor=True, commits_behind=None)
+    assert ok is False
+    assert "aaaaaaa" in detail and "bbbbbbb" in detail
+    assert "crr deploy" in detail
+    assert "cannot be compared" not in detail
+    assert "unknown" in detail  # the count, specifically, is what's unknown
+
+
 def test_deploy_status_an_unknown_sha_is_informational_not_a_guess():
     # Rebased/squashed away: git can't place it, so this must not claim
     # "behind" (nor "up to date") for a sha it can't locate at all.
     ok, detail = deploy.deploy_status(
-        deployed_sha="aaaaaaa1111", head_sha="bbbbbbb2222",
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
         is_ancestor=None, commits_behind=None)
     assert ok is True
     assert "aaaaaaa" in detail and "bbbbbbb" in detail
+    assert "cannot be compared" in detail
+
+
+def test_deploy_status_a_diverged_known_sha_is_informational_not_a_guess():
+    # A known sha that git confirms is NOT an ancestor (diverged history,
+    # e.g. after a force-push elsewhere) -- still not "behind" in the
+    # linear sense this check reports, so this must not warn either.
+    ok, detail = deploy.deploy_status(
+        deployed_sha="aaaaaaa1111", repo_known=True, head_sha="bbbbbbb2222",
+        is_ancestor=False, commits_behind=None)
+    assert ok is True
     assert "cannot be compared" in detail
 
 
@@ -494,6 +540,58 @@ def test_deploy_refuses_actionably_when_the_explicit_repo_is_not_a_checkout(
     assert str(bad) in err and "checkout" in err
 
 
+def test_deploy_normalizes_a_relative_repo_flag_before_recording_it(
+        tmp_path, monkeypatch, capsys):
+    # CRITICAL: `--repo .` is an entirely ordinary invocation (deploy from
+    # the checkout you're standing in), not an adversarial one. If the
+    # literal string "." were written into the marker, the NEXT deploy --
+    # re-invoked through the PATH-linked copy, exactly the broken path
+    # this whole feature exists to fix -- would resolve "." against ITS
+    # OWN cwd (not this deploy's) and could silently build the services
+    # from a completely unrelated repo. The marker must always record an
+    # absolute path.
+    from crr import cli
+    from crr.core import deploy as core
+    from crr.adapters import deploy as ad, state_dir
+    explicit_repo = tmp_path / "explicit"
+    (explicit_repo / ".git").mkdir(parents=True)
+    sd = tmp_path / "state"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.chdir(explicit_repo)
+    assert cli.main(["deploy", "--repo", ".", "--no-restart"]) == 0
+    recorded = ad.read_marker_repo(core.marker_path(sd))
+    assert recorded == str(explicit_repo.resolve())
+    assert recorded != "."
+
+
+def test_deploy_normalizes_a_user_relative_repo_flag_before_recording_it(
+        tmp_path, monkeypatch, capsys):
+    # Same hazard, `~`-relative form: must be expanded, not written literally.
+    from crr import cli
+    from crr.core import deploy as core
+    from crr.adapters import deploy as ad, state_dir
+    home = tmp_path / "home"
+    explicit_repo = home / "src" / "crr"
+    (explicit_repo / ".git").mkdir(parents=True)
+    sd = tmp_path / "state"
+    monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    monkeypatch.setattr(ad, "restart_service", lambda **k: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    assert cli.main(["deploy", "--repo", "~/src/crr", "--no-restart"]) == 0
+    recorded = ad.read_marker_repo(core.marker_path(sd))
+    assert recorded == str(explicit_repo.resolve())
+    assert "~" not in recorded
+
+
 def test_deploy_prints_which_repo_it_deployed_from(tmp_path, monkeypatch, capsys):
     from crr import cli
     from crr.adapters import deploy as ad, state_dir
@@ -584,6 +682,48 @@ def test_doctor_caveats_when_the_deployed_repo_is_unknown(tmp_path, monkeypatch,
     assert "aaaaaaa" in out
     assert "cannot compare" in out
     assert "[WARN]" not in out
+    assert "checkout" in out.lower() and "unknown" in out.lower()
+
+
+def test_doctor_caveats_differently_when_the_repo_is_known_but_head_probe_fails(
+        tmp_path, monkeypatch, capsys):
+    # The checkout IS known (is_checkout says so); only the head_sha() git
+    # call failed (timeout / transient git failure). Must not say "source
+    # checkout unknown" -- that's a different, false, statement.
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: None)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "aaaaaaa" in out
+    assert "cannot compare" in out
+    assert "[WARN]" not in out
+    assert "unknown" not in out.lower(), "checkout is known; only the HEAD probe failed"
+
+
+def test_doctor_warns_with_an_unknown_count_when_ancestry_is_confirmed_but_the_count_probe_fails(
+        tmp_path, monkeypatch, capsys):
+    # Ancestry confirmed (is_ancestor True) but the commits_behind() probe
+    # then failed -- a REAL, confirmed staleness. Must still warn, not
+    # understate it as "cannot be compared".
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(ad, "read_marker", lambda path: "aaaaaaa1111")
+    monkeypatch.setattr(ad, "read_marker_repo", lambda path: "/src/crr")
+    monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "bbbbbbb2222")
+    monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: True)
+    monkeypatch.setattr(ad, "commits_behind", lambda repo, a, b, timeout=5: None)
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "aaaaaaa" in out and "bbbbbbb" in out and "crr deploy" in out
+    assert "[WARN]" in out
+    assert "cannot be compared" not in out
 
 
 def test_doctor_is_informational_when_the_deployed_sha_is_unknown_to_the_repo(
