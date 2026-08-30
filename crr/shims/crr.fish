@@ -219,6 +219,11 @@ function claude
         if test $_code -eq 0
             break
         end
+        # No conversation was ever entered (e.g. `claude rc`, `claude --help`,
+        # argument errors): nothing to resume, don't offer crash recovery.
+        if test -z "$_cur_sid"; and test $_resuming -eq 0
+            break
+        end
         if test $_crashes -ge $_CRR_MAX_RESUMES
             break
         end
