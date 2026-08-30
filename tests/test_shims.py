@@ -343,18 +343,20 @@ def _shim_text(name):
 
 @pytest.mark.parametrize("shim", ["crr.bash", "crr.zsh", "crr.fish"])
 def test_shim_enables_remote_control_on_every_launch_path(shim):
-    # Six `command claude` invocations per shim: the top-level resuming
-    # passthrough, the fresh launch's --session-id branch and its no-sid
-    # fallback, and the repair loop's three relaunch paths (silent kick,
-    # crash-retry with a known sid, crash-retry via --continue). Every one
-    # has to ask for and append the Remote Control args, or a
-    # revived/relaunched/resumed session comes back unreachable from the
-    # phone (the Goal this whole feature exists for).
+    # Seven `command claude` invocations per shim: the subcommand bypass
+    # (intentionally without RC args — subcommands are not conversations),
+    # the top-level resuming passthrough, the fresh launch's --session-id
+    # branch and its no-sid fallback, and the repair loop's three relaunch
+    # paths (silent kick, crash-retry with a known sid, crash-retry via
+    # --continue). Every conversation path has to ask for and append the
+    # Remote Control args, or a revived/relaunched/resumed session comes
+    # back unreachable from the phone.
     text = _shim_text(shim)
     assert "remote-control-args --pid" in text
     invocations = [line for line in text.splitlines() if "command claude" in line]
-    assert len(invocations) == 6, invocations
-    assert all("_crr_rc_args" in line for line in invocations), invocations
+    assert len(invocations) == 7, invocations
+    conversation_paths = [l for l in invocations if "_crr_rc_args" in l]
+    assert len(conversation_paths) == 6, conversation_paths
 
 
 _RESUME_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -1080,3 +1082,34 @@ def test_a_bare_resume_picker_is_not_conflict_checked(shell, tmp_path, capsys):
     argv, asked, result = _run_guarded(shell, tmp_path, capsys, "--resume", 3)
     assert asked == "", f"{shell}: the picker path was conflict-checked: {asked!r}"
     assert argv is not None and "--resume" in argv, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Subcommand passthrough — non-conversation commands must not get
+# --session-id or --remote-control injected, and must not trigger the
+# repair loop on a non-zero exit.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shell", list(_SHELLS))
+@pytest.mark.parametrize("subcmd", ["rc", "mcp", "doctor"])
+def test_subcommand_bypasses_injection_and_repair_loop(
+    shell, subcmd, tmp_path, capsys,
+):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim, cmdline=subcmd)
+    env = _repair_env(state, bindir, tmp_path, exits="1")
+    result = subprocess.run(
+        _SHELLS[shell]["argv"] + [script],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = _record_lines(tmp_path)
+    assert len(lines) == 1, f"expected 1 call, got {len(lines)}: {lines}"
+    assert lines[0] == subcmd, f"expected bare {subcmd!r}, got: {lines[0]!r}"
+    assert "AFTER-MARKER" in result.stdout
+    assert _OFFER not in result.stderr

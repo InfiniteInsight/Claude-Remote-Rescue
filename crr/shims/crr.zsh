@@ -80,6 +80,20 @@ claude() {
   # this launch.
   _crr repair-check --pid "$$" --clear >/dev/null
 
+  # Subcommands (rc, mcp, doctor, …) are not conversations — pass them
+  # through without session-id/remote-control injection or a repair loop.
+  local _a
+  for _a in "$@"; do
+    case "$_a" in
+      -*) continue ;;
+      agents|auth|auto-mode|doctor|gateway|install|mcp|plugin|plugins|project|setup-token|ultrareview|update|upgrade|rc|remote-control)
+        command claude "$@"
+        return $?
+        ;;
+      *) break ;;
+    esac
+  done
+
   # Element-wise flag detection: match whole arguments, never a substring
   # of prompt text (a prompt like "explain -r" is a fresh launch).
   # `--continue` is tracked separately from the rest: it is the one resume
