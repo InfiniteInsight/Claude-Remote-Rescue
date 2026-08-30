@@ -1965,7 +1965,8 @@ def _status_line(card: dict, max_strikes: int = cfg.DEFAULTS["zombie_strikes"]) 
     # Reviver hardening (spec 2026-08-29): escalation is user-visible. A
     # session climbing toward give-up says so; zero strikes stays clean.
     strikes = card.get("revive_strikes", 0)
-    strike_tag = f" ⚠ strike {strikes}/{max_strikes}" if strikes > 0 else ""
+    strike_tag = (f" ⚠ strike {strikes}/{max_strikes} — process died upon revival"
+                  if strikes > 0 else "")
     return (f"#{card['pid']} · {card['sid8']} [{shown}]{model} "
             f"{card['cwd']}{dup}{sid_tag}{strike_tag}")
 
@@ -2500,8 +2501,8 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     # session climbing toward give-up names its count and the consequence.
     max_strikes = config.get("zombie_strikes")
     for pid, count in sorted(outcome.strike_counts.items()):
-        print(f"pid {pid}: strike {count}/{max_strikes} — "
-              f"stops reviving at {max_strikes}")
+        print(f"pid {pid}: strike {count}/{max_strikes} — process died upon "
+              f"revival; stops reviving at {max_strikes}")
     if outcome.unresumable:
         print(f"unresumable (no transcript — archived, will not revive): "
               f"{outcome.unresumable}")
@@ -3999,8 +4000,9 @@ def _rescue_check(_args: argparse.Namespace) -> int:
             # open, so a session climbing toward give-up says so right here.
             strikes = e.get("revive_strikes", 0)
             max_strikes = config.get("zombie_strikes")
-            suffix = (f" · strike {strikes}/{max_strikes} — "
-                      f"stops reviving at {max_strikes}" if strikes > 0 else "")
+            suffix = (f" · strike {strikes}/{max_strikes} — process died upon "
+                      f"revival; stops reviving at {max_strikes}"
+                      if strikes > 0 else "")
             print(res.message + suffix)
             if tab is not None and res.degraded:
                 # First tab didn't land — spawner is broken (e.g. a dead
