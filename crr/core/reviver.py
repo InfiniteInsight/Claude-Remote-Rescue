@@ -33,8 +33,15 @@ from typing import Any, Mapping, NamedTuple, Sequence
 from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify
-from crr.core.journal import JournalStore
-from crr.core.ports import BootIdentity, ProcessProbe, TabSpawnTimeout, TmuxSpawner
+from crr.core.journal import JournalStore, upgrade_entry
+from crr.core.ports import (
+    BootIdentity,
+    ProcessProbe,
+    TabSpawnTimeout,
+    TmuxSpawner,
+    TranscriptProbe,
+    TranscriptSource,
+)
 
 # Remote Control session names: letters, digits, dash, underscore only.
 # Runs of anything else collapse to a single dash so an odd basename (a
@@ -51,6 +58,8 @@ class RevivalOutcome(NamedTuple):
     gave_up: list[int]   # pids abandoned to the archive past the strike limit
     reset: list[int]     # pids whose live session cleared their strikes
     skipped: bool = False  # True when the whole pass was skipped (tmux liveness unknown)
+    unresumable: list[int] = []   # pids archived by the pre-flight (no transcript)
+    strike_counts: dict[int, int] = {}  # revived pid -> its NEW strike count
 
 
 def session_name(entry: Mapping[str, Any]) -> str:
@@ -308,13 +317,49 @@ def _journal_from_archive(store, tmux, boot_identity, entry, name, now) -> bool:
     return True
 
 
-def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str):
+def _alive_counts_as_healthy(entry: Mapping[str, Any], tx: "TranscriptProbe | None",
+                             attached: set[str], name: str) -> bool:
+    """Should an observed-alive session clear its strikes?
+
+    Aliveness alone is NOT health (spec 2026-08-29 reviver hardening): a
+    broken revival routinely lingers alive — claude wedged at a trust
+    prompt in a detached session nobody sees — and the old eager reset let
+    strikes oscillate 1 → 0 forever, so give-up never engaged. Health is
+    conversation PROGRESS (transcript mtime past the revival stamp) or a
+    human ATTACHED to the session. Everything unknowable degrades to the
+    legacy eager reset — holding a reset is only justified by evidence:
+
+    - no stamp on the entry (pre-v3, or revived without a transcript
+      source): legacy behavior, reset;
+    - no probe (caller passed no transcript source): legacy, reset;
+    - probe unknown (``exists`` None): can't assess progress, reset;
+    - probe CONFIRMED absent: progress is impossible — hold;
+    - probe found but mtime not past the stamp: frozen — hold.
+    """
+    if name in attached:
+        return True
+    stamp = entry.get("revived_tx_mtime")
+    if stamp is None or tx is None:
+        return True
+    if tx.exists is False:
+        return False
+    if tx.exists is None:
+        return True
+    return tx.mtime is not None and tx.mtime > stamp
+
+
+def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str,
+            tx: "TranscriptProbe | None" = None, attached: set[str] | None = None):
     """Return (action, updated_entry, name) for one candidate.
 
-    action is one of: 'reset-nochange', 'reset', 'revive', 'give_up'.
+    action is one of: 'reset-nochange', 'reset', 'hold', 'revive', 'give_up'.
     """
     name = resolved_session_name(entry)  # legacy crr-<sid8> keeps its name (#51)
     if name in live:
+        if not _alive_counts_as_healthy(entry, tx, attached or set(), name):
+            # Alive but frozen: keep the strikes. Never destructive — the
+            # entry is untouched, and give-up still only fires when dead.
+            return "hold", entry, name
         if entry["revive_strikes"] == 0 and entry["tmux_session"] == name:
             return "reset-nochange", entry, name
         updated = dict(entry)
@@ -328,6 +373,12 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
     updated["tmux_session"] = name
     updated["revive_strikes"] = entry["revive_strikes"] + 1
     updated["updated"] = now
+    if tx is not None:
+        # Stamp the transcript's mtime at revival time so the NEXT pass can
+        # tell progress from freeze. Only when a transcript source is in
+        # play — a stampless write from a legacy caller stays pre-v3-shaped.
+        updated = upgrade_entry(updated)
+        updated["revived_tx_mtime"] = tx.mtime if tx.exists else None
     return "revive", updated, name
 
 
@@ -346,6 +397,8 @@ def revive_crashed(
     tab_spawner=None,
     crr_bin: str | None = None,
     tab_health=None,
+    transcripts: TranscriptSource | None = None,
+    attached: set[str] | None = None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -360,6 +413,21 @@ def revive_crashed(
     revived: list[int] = []
     gave_up: list[int] = []
     reset: list[int] = []
+    unresumable: list[int] = []
+    strike_counts: dict[int, int] = {}
+
+    def _tx_probe(e: Mapping[str, Any]) -> "TranscriptProbe | None":
+        if transcripts is None:
+            return None
+        sid = (e.get("claude") or {}).get("session_id")
+        if not sid:
+            return None
+        try:
+            return transcripts.probe(sid)
+        except Exception:
+            # The port promises not to raise; if an adapter does anyway,
+            # degrade to "unknown" — never let a probe break the pass.
+            return TranscriptProbe(None, None)
 
     def _spawn_argv(e: Mapping[str, Any]) -> list[str]:
         # crr_bin is injected (composition root resolves it, like
@@ -400,9 +468,13 @@ def revive_crashed(
                     store.remove(entry["pid"])
                     flags.clear(entry["pid"])
                     continue
-        action, updated, name = _decide(entry, live, max_strikes, now)
+        tx = _tx_probe(entry)
+        action, updated, name = _decide(entry, live, max_strikes, now,
+                                        tx=tx, attached=attached)
         pid = entry["pid"]
-        if action == "reset-nochange":
+        if action == "hold":
+            pass  # alive but frozen: strikes kept, nothing written
+        elif action == "reset-nochange":
             # Already parked and healthy — but possibly never journaled under
             # its live pid (every session revived before #58 is in this
             # state). Adopt it now rather than waiting for a re-revival.
@@ -417,6 +489,15 @@ def revive_crashed(
             archive.archive(entry, "gave-up", now)
             store.remove(pid)
             gave_up.append(pid)
+        elif action == "revive" and tx is not None and tx.exists is False:
+            # Pre-flight: a CONFIRMED-absent transcript can never resume —
+            # reviving it spawns a claude that dies (or wedges) every boot,
+            # forever (the `claude rc` zombie class, spec 2026-08-29).
+            # Terminal home, same shape as give-up. Only a confirmed False
+            # gates; unknown (None) falls through and revives.
+            archive.archive(entry, "unresumable", now)
+            store.remove(pid)
+            unresumable.append(pid)
         else:  # revive
             tmux.new_detached_session(name, entry["cwd"], _spawn_argv(entry))
             live.add(name)  # dedupe within the pass: a shared sid is now "live"
@@ -443,6 +524,7 @@ def revive_crashed(
                                       now=now, boot_id=boot_identity.current())
                         flags.clear(pid)
             revived.append(pid)
+            strike_counts[pid] = updated["revive_strikes"]
 
     # 2. Archived records awaiting revival (skip the terminal ones: 'gave-up'
     #    is abandoned for good, 'untracked' (formerly 'detmuxed' — terminology
@@ -460,13 +542,17 @@ def revive_crashed(
     #    purpose: their archives exist to preserve revival data.)
     for record in archive.scan().records:
         if record["reason"] in ("gave-up", "detmuxed", "untracked", "untmuxed",
-                                "dismissed", "closed"):
+                                "dismissed", "closed", "unresumable"):
             continue
         entry = record["entry"]
-        action, updated, name = _decide(entry, live, max_strikes, now)
+        tx = _tx_probe(entry)
+        action, updated, name = _decide(entry, live, max_strikes, now,
+                                        tx=tx, attached=attached)
         pid = entry["pid"]
         sid = (entry.get("claude") or {}).get("session_id")
-        if action == "reset-nochange":
+        if action == "hold":
+            pass  # alive but frozen: strikes kept, record untouched
+        elif action == "reset-nochange":
             if _journal_from_archive(store, tmux, boot_identity, entry, name, now):
                 if sid:
                     archive.remove(sid)
@@ -480,6 +566,12 @@ def revive_crashed(
             record["reason"] = "gave-up"
             archive.write(record)
             gave_up.append(pid)
+        elif action == "revive" and tx is not None and tx.exists is False:
+            # Pre-flight, archive flavor: rewrite the record's reason in
+            # place — it stays preserved but stops being a candidate.
+            record["reason"] = "unresumable"
+            archive.write(record)
+            unresumable.append(pid)
         else:  # revive
             tmux.new_detached_session(name, entry["cwd"], _spawn_argv(entry))
             live.add(name)  # dedupe within the pass (shared sid)
@@ -487,5 +579,7 @@ def revive_crashed(
                 if sid:
                     archive.remove(sid)
             revived.append(pid)
+            strike_counts[pid] = updated["revive_strikes"]
 
-    return RevivalOutcome(revived, gave_up, reset)
+    return RevivalOutcome(revived, gave_up, reset,
+                          unresumable=unresumable, strike_counts=strike_counts)

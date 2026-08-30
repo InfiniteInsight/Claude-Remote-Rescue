@@ -58,6 +58,7 @@ from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
+from crr.core import journal
 from crr.core.journal import JournalStore, new_entry
 
 
@@ -1933,11 +1934,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        _print_status_human(payload)
+        _print_status_human(payload, max_strikes=config.get("zombie_strikes"))
     return 0
 
 
-def _status_line(card: dict) -> str:
+def _status_line(card: dict, max_strikes: int = cfg.DEFAULTS["zombie_strikes"]) -> str:
     if card["duplicate_group"]:
         # A guessed duplicate is a weaker claim than a verified/injected
         # one — collapsing both into the same [dup] tag would hide that
@@ -1961,10 +1962,16 @@ def _status_line(card: dict) -> str:
         shown = "attached" if card.get("attached") else "restored"
     else:
         shown = card["state"]
-    return f"#{card['pid']} · {card['sid8']} [{shown}]{model} {card['cwd']}{dup}{sid_tag}"
+    # Reviver hardening (spec 2026-08-29): escalation is user-visible. A
+    # session climbing toward give-up says so; zero strikes stays clean.
+    strikes = card.get("revive_strikes", 0)
+    strike_tag = f" ⚠ strike {strikes}/{max_strikes}" if strikes > 0 else ""
+    return (f"#{card['pid']} · {card['sid8']} [{shown}]{model} "
+            f"{card['cwd']}{dup}{sid_tag}{strike_tag}")
 
 
-def _print_status_human(payload: dict) -> None:
+def _print_status_human(payload: dict,
+                        max_strikes: int = cfg.DEFAULTS["zombie_strikes"]) -> None:
     sessions = payload["sessions"]
     if not sessions:
         print("no journaled sessions")
@@ -1976,7 +1983,7 @@ def _print_status_human(payload: dict) -> None:
     for card in sessions:
         (worktrees if discovery.worktree_repo_and_name(card["cwd"]) else mains).append(card)
     for card in mains:
-        print(_status_line(card))
+        print(_status_line(card, max_strikes))
     by_repo: dict[str, list[dict]] = {}
     for card in worktrees:
         repo, _name = discovery.worktree_repo_and_name(card["cwd"])
@@ -1985,7 +1992,7 @@ def _print_status_human(payload: dict) -> None:
         print(f"\n{repo} · worktrees ({len(cards)})")
         for card in cards:
             _repo, name = discovery.worktree_repo_and_name(card["cwd"])
-            print(f"  {_status_line(card)} [worktree:{name}]")
+            print(f"  {_status_line(card, max_strikes)} [worktree:{name}]")
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
@@ -2167,7 +2174,7 @@ def _attach_claude_session(
             "session_id": sid, "sid_source": sid_source, "started": _now(),
             "skip_permissions": skip_permissions,
         }
-        entry["v"] = contracts.JOURNAL_SCHEMA_VERSION
+        entry = journal.upgrade_entry(entry)
         entry["updated"] = _now()
         store.write(entry)
 
@@ -2464,6 +2471,10 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
                 # the deployed copy, matching the service-mutation principle.
                 crr_bin=_resolve_service_bin(None),
                 tab_health=tab_health.TabHealthStore(sd),
+                # Reviver hardening (spec 2026-08-29): the pre-flight and the
+                # activity-keyed strike reset are dormant without these.
+                transcripts=transcript_source.RealTranscriptSource(),
+                attached=tmux_spawner.attached_sessions(),
             )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -2485,6 +2496,15 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     )
     if outcome.gave_up:
         print(f"gave up: {outcome.gave_up}")
+    # Reviver hardening (spec 2026-08-29): escalation is user-visible — a
+    # session climbing toward give-up names its count and the consequence.
+    max_strikes = config.get("zombie_strikes")
+    for pid, count in sorted(outcome.strike_counts.items()):
+        print(f"pid {pid}: strike {count}/{max_strikes} — "
+              f"stops reviving at {max_strikes}")
+    if outcome.unresumable:
+        print(f"unresumable (no transcript — archived, will not revive): "
+              f"{outcome.unresumable}")
 
     # --- archive stale session state files so the newest file for each
     # session id belongs to a live process, fixing "phone: unknown" badges.
@@ -3900,6 +3920,10 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 flags=FlagStore(sd),
                 crr_bin=_resolve_service_bin(None),
                 tab_health=tab_health.TabHealthStore(sd),
+                # Reviver hardening (spec 2026-08-29): same wiring as
+                # _cmd_revive — dormant without it.
+                transcripts=transcript_source.RealTranscriptSource(),
+                attached=tmux_spawner.attached_sessions(),
             )
         rescue.mark_revived(sd, boot_id)
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
@@ -3970,7 +3994,14 @@ def _rescue_check(_args: argparse.Namespace) -> int:
             )
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.
-            print(res.message)
+            # Strike escalation rides the restore line (spec 2026-08-29): the
+            # boot-time restore is where the user actually sees zombie tabs
+            # open, so a session climbing toward give-up says so right here.
+            strikes = e.get("revive_strikes", 0)
+            max_strikes = config.get("zombie_strikes")
+            suffix = (f" · strike {strikes}/{max_strikes} — "
+                      f"stops reviving at {max_strikes}" if strikes > 0 else "")
+            print(res.message + suffix)
             if tab is not None and res.degraded:
                 # First tab didn't land — spawner is broken (e.g. a dead
                 # wt.exe alias). Don't keep trying for the remaining

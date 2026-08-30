@@ -1787,7 +1787,7 @@ def test_set_skip_permissions_message_reports_sid8(tmp_path):
     assert "enabled" in res.message
 
 
-def test_set_skip_permissions_upgrades_v1_entry_to_v2(tmp_path):
+def test_set_skip_permissions_upgrades_v1_entry_to_current_schema(tmp_path):
     import json
     store = JournalStore(tmp_path)
     v1_entry = {
@@ -1802,7 +1802,7 @@ def test_set_skip_permissions_upgrades_v1_entry_to_v2(tmp_path):
     (tabs / "42.json").write_text(json.dumps(v1_entry))
     res = ops.set_skip_permissions(store, _SID, True, _NOW)
     assert res.ok
-    assert store.read(42)["v"] == 2
+    assert store.read(42)["v"] == contracts.JOURNAL_SCHEMA_VERSION
     assert store.read(42)["claude"]["skip_permissions"] is True
 
 

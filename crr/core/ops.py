@@ -19,6 +19,7 @@ from crr.core import contracts
 from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, GHOST, LIVE, classify
+from crr.core import journal as journal_module
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TabSpawnTimeout, TmuxSpawner
 from crr.core.reviver import (
@@ -750,8 +751,7 @@ def set_skip_permissions(
     if not entries:
         return OpResult(False, f"no session {sid[:8]}")
     for entry in entries:
-        updated = dict(entry)
-        updated["v"] = 2
+        updated = journal_module.upgrade_entry(entry)
         claude = dict(updated["claude"])
         claude["skip_permissions"] = value
         updated["claude"] = claude

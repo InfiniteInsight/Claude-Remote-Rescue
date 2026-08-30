@@ -18,6 +18,37 @@ from typing import Any, Iterator
 
 from crr.core import contracts, discovery, transcript
 from crr.core.config import DEFAULTS
+from crr.core.ports import TranscriptProbe
+
+
+class RealTranscriptSource:
+    """The reviver's TranscriptSource port over the real ~/.claude/projects.
+
+    Tri-state per the port contract (spec 2026-08-29 reviver hardening):
+    ``exists`` is False ONLY when the projects dir was readable and no
+    transcript matched — a CONFIRMED absence. A missing projects dir is
+    None (unknown), not False: claude may never have run under this HOME,
+    or it is not mounted, and neither is proof the conversation never
+    existed. The pre-flight destroys revival data on False, so the
+    difference is load-bearing. Never raises — failures degrade to
+    ``TranscriptProbe(None, None)``.
+    """
+
+    def __init__(self, home: Path | None = None):
+        self._home = home
+
+    def probe(self, session_id: str) -> TranscriptProbe:
+        try:
+            home = self._home or Path.home()
+            projects = home / ".claude" / "projects"
+            if not projects.is_dir():
+                return TranscriptProbe(None, None)
+            path = find_transcript(session_id, home=home)
+            if path is None:
+                return TranscriptProbe(False, None)
+            return TranscriptProbe(True, path.stat().st_mtime)
+        except Exception:
+            return TranscriptProbe(None, None)
 
 
 def find_transcript(session_id: str, home: Path | None = None) -> Path | None:

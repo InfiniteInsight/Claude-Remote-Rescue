@@ -603,3 +603,46 @@ def test_search_all_zero_budget_means_unlimited(tmp_path):
         "fox", snippet_cap=100, match_cap=10, byte_budget=0, home=tmp_path)
     assert res["scanned"] == 3 and res["skipped"] == 0
     assert len(res["matches"]) == 3
+
+
+# --- RealTranscriptSource: the reviver's TranscriptSource port ------------
+#
+# Tri-state is the whole point (spec 2026-08-29 reviver hardening): the
+# unresumable pre-flight destroys revival data on a CONFIRMED absence and
+# must never do so on an unknown.
+
+def test_probe_found_reports_exists_and_mtime(tmp_path):
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    path = _write_transcript(tmp_path, sid, [_user("hi")])
+    src = transcript_source.RealTranscriptSource(home=tmp_path)
+    probe = src.probe(sid)
+    assert probe.exists is True
+    assert probe.mtime == path.stat().st_mtime
+
+
+def test_probe_readable_projects_dir_without_file_is_confirmed_absent(tmp_path):
+    (tmp_path / ".claude" / "projects" / "-home-u-proj").mkdir(parents=True)
+    src = transcript_source.RealTranscriptSource(home=tmp_path)
+    probe = src.probe("8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
+    assert probe.exists is False
+    assert probe.mtime is None
+
+
+def test_probe_missing_projects_dir_is_unknown_not_absent(tmp_path):
+    # No ~/.claude/projects at all: claude may never have run under this
+    # HOME (or it is not mounted) — that is NOT proof this conversation
+    # never existed. Unknown, so the pre-flight never gates on it.
+    src = transcript_source.RealTranscriptSource(home=tmp_path)
+    probe = src.probe("8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
+    assert probe.exists is None
+    assert probe.mtime is None
+
+
+def test_probe_never_raises_on_a_broken_home(tmp_path):
+    # A file where the projects DIR should be: glob/stat error territory.
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "projects").write_text("not a dir")
+    src = transcript_source.RealTranscriptSource(home=tmp_path)
+    probe = src.probe("8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
+    assert probe.exists is None
+    assert probe.mtime is None

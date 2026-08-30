@@ -70,6 +70,7 @@ def new_entry(
     tmux_session: str | None = None,
     revive_strikes: int = 0,
     claude: Mapping[str, Any] | None = None,
+    revived_tx_mtime: float | None = None,
 ) -> dict[str, Any]:
     """Build a journal entry at the current schema version, validated before return.
 
@@ -90,9 +91,29 @@ def new_entry(
         "tmux_session": tmux_session,
         "revive_strikes": revive_strikes,
         "updated": now,
+        "revived_tx_mtime": revived_tx_mtime,
     }
     contracts.validate_journal_entry(entry)
     return entry
+
+
+def upgrade_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of ``entry`` at the current schema version.
+
+    The one sanctioned way to add a current-schema field to an older
+    on-disk entry: every writer that bumps ``v`` by hand risks producing a
+    version/keys mismatch (a v3 stamp on a v2 entry, or a v3 bump without
+    the stamp — both contract errors). Fills each newer field with its
+    schema default and never overwrites a value already present.
+    """
+    up = dict(entry)
+    up["v"] = contracts.JOURNAL_SCHEMA_VERSION
+    if up.get("claude") is not None:
+        claude = dict(up["claude"])
+        claude.setdefault("skip_permissions", False)  # v2 default
+        up["claude"] = claude
+    up.setdefault("revived_tx_mtime", None)  # v3 default
+    return up
 
 
 class JournalScan(NamedTuple):

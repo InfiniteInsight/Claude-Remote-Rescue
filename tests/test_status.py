@@ -636,3 +636,15 @@ def test_card_includes_skip_permissions_true_when_set():
     e["claude"]["skip_permissions"] = True
     payload = assemble_sessions([e], FakeBoot(), FakeProbe())
     assert payload["sessions"][0]["skip_permissions"] is True
+
+
+def test_card_carries_revive_strikes():
+    # Reviver hardening (spec 2026-08-29): strike escalation must be
+    # visible, so the card reports the journal's revive_strikes verbatim.
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    entry = _entry(42, sid)
+    entry["revive_strikes"] = 2
+    payload = assemble_sessions([entry], FakeBoot(), FakeProbe())
+    contracts.validate_sessions_payload(payload)
+    (card,) = payload["sessions"]
+    assert card["revive_strikes"] == 2
