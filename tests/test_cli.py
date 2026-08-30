@@ -6481,6 +6481,7 @@ def test_revive_prints_strike_counts_and_unresumable(tmp_path, monkeypatch, caps
     assert rc == 0
     out = capsys.readouterr().out
     assert "strike 2/5" in out          # count over the configured limit
+    assert "process died upon revival" in out  # ...why it was struck
     assert "stops reviving at 5" in out  # ...and what will happen at it
     assert "unresumable" in out and "[7]" in out
 
@@ -6513,6 +6514,7 @@ def test_rescue_check_shows_strikes_on_restored_sessions(tmp_path, monkeypatch, 
     lines = {l.split(" ")[1].removeprefix("crr-"): l for l in out.splitlines()
              if l.startswith("restarted")}
     assert "strike 2/5" in lines["42"]
+    assert "process died upon revival" in lines["42"]
     assert "stops reviving at 5" in lines["42"]
     assert "strike" not in lines["43"]  # zero strikes stays clean
 
@@ -6524,7 +6526,7 @@ def test_status_line_shows_strikes_when_present():
         "sid_source": "injected", "revive_strikes": 2,
     }
     line = cli._status_line(card)
-    assert "strike 2/5" in line
+    assert "strike 2/5 — process died upon revival" in line
 
 
 def test_status_line_omits_strikes_at_zero():
