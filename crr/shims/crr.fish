@@ -80,6 +80,20 @@ function claude
     # on this launch.
     _crr repair-check --pid $fish_pid --clear >/dev/null
 
+    # Subcommands (rc, mcp, doctor, …) are not conversations — pass them
+    # through without session-id/remote-control injection or a repair loop.
+    for _arg in $argv
+        switch $_arg
+            case '-*'
+                continue
+            case agents auth auto-mode doctor gateway install mcp plugin plugins project setup-token ultrareview update upgrade rc remote-control
+                command claude $argv
+                return $status
+            case '*'
+                break
+        end
+    end
+
     # Element-wise flag detection: whole arguments only, never a substring
     # of prompt text (a prompt like "explain -r" is a fresh launch).
     # `--continue` is tracked separately from the rest: it is the one
