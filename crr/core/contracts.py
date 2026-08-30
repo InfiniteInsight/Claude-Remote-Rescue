@@ -21,7 +21,11 @@ from typing import Any, Iterable, Mapping
 # --------------------------------------------------------------------------
 
 # v2 adds skip_permissions to claude sub-object (persist --dangerously-skip-permissions).
-JOURNAL_SCHEMA_VERSION = 2
+# v3 adds revived_tx_mtime — transcript mtime stamped at each revival, so the
+#    reviver can tell "alive and progressing" from "alive but frozen" (an
+#    observed-alive session only clears its strikes when the conversation
+#    actually advanced; spec 2026-08-29 reviver hardening).
+JOURNAL_SCHEMA_VERSION = 3
 # v3 adds `tmux_session` (nullable per-session field; `detmux` op — 57195a5).
 #    Restored 2026-08-08 (#38): this line was DELETED by a later edit rather
 #    than superseded, which is how a ledger silently loses its own history.
@@ -53,7 +57,10 @@ JOURNAL_SCHEMA_VERSION = 2
 # sessions PAYLOAD (not the card) — global OAuth auth state for the dashboard.
 # v16 adds `skip_permissions` (bool) to the card — whether the session was
 # launched with --dangerously-skip-permissions, toggleable from the dashboard.
-SESSIONS_CONTRACT_VERSION = 16
+# v17 adds `revive_strikes` (int) to the card — reviver hardening (spec
+# 2026-08-29): strike escalation is user-visible, so a session climbing
+# toward give-up says so instead of silently vanishing at the limit.
+SESSIONS_CONTRACT_VERSION = 17
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -200,7 +207,8 @@ AUTH_STATES = ("valid", "expiring", "expired", "unknown")
 # Canonical key lists.
 # --------------------------------------------------------------------------
 
-JOURNAL_KEYS = (
+# v1/v2 entries predate the revival stamp; their on-disk shape stays valid.
+_JOURNAL_KEYS_V12 = (
     "v",
     "pid",
     "boot_id",
@@ -213,6 +221,7 @@ JOURNAL_KEYS = (
     "revive_strikes",
     "updated",
 )
+JOURNAL_KEYS = _JOURNAL_KEYS_V12 + ("revived_tx_mtime",)
 _JOURNAL_CLAUDE_KEYS_V1 = ("session_id", "sid_source", "started")
 JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started", "skip_permissions")
 
@@ -249,6 +258,9 @@ SESSION_CARD_KEYS = (
     "waiting_for",
     "autokick",
     "adopted",
+    # Reviver strike count (v17): how close this session is to give-up.
+    # Verbatim from the journal — display-only, nothing decides on it.
+    "revive_strikes",
     # Two entries for this conversation each own a LIVE claude, so two
     # agents are writing to one transcript (#48). NOT `duplicate_group`,
     # which also fires for the benign shell-beside-its-revived-claude pair.
@@ -295,6 +307,10 @@ ARCHIVE_REASONS = (
     # #99: shell SIGHUP fires deregister before claude may have exited.
     # Revivable — the reviver picks these up like superseded-* records.
     "shell-exited",
+    # Terminal (spec 2026-08-29 reviver hardening): the pre-flight found the
+    # conversation's transcript CONFIRMED absent — it can never resume, so
+    # reviving it would spawn a claude that dies/wedges every boot forever.
+    "unresumable",
 )
 
 
@@ -367,13 +383,14 @@ def _require_enum(value: Any, allowed: Iterable[str], what: str) -> None:
 def validate_journal_entry(entry: Any) -> None:
     """Raise ContractError unless ``entry`` is a valid journal entry (v1 or v2)."""
     entry = _require_mapping(entry, "journal entry")
-    _require_exact_keys(entry, JOURNAL_KEYS, "journal entry")
-
-    _require_type(entry["v"], int, "journal 'v'")
-    if entry["v"] not in (1, JOURNAL_SCHEMA_VERSION):
+    # 'v' selects the key set, so it is checked before the exact-keys pass.
+    _require_type(entry.get("v"), int, "journal 'v'")
+    if entry["v"] not in (1, 2, JOURNAL_SCHEMA_VERSION):
         raise ContractError(
             f"journal 'v' is {entry['v']}, this build understands 1..{JOURNAL_SCHEMA_VERSION}"
         )
+    keys = JOURNAL_KEYS if entry["v"] >= 3 else _JOURNAL_KEYS_V12
+    _require_exact_keys(entry, keys, "journal entry")
 
     _require_type(entry["pid"], int, "journal 'pid'")
     _require_type(entry["boot_id"], str, "journal 'boot_id'")
@@ -400,6 +417,12 @@ def validate_journal_entry(entry: Any) -> None:
         _require_type(claude["started"], str, "journal 'claude.started'")
         if entry["v"] >= 2:
             _require_type(claude["skip_permissions"], bool, "journal 'claude.skip_permissions'")
+
+    # v3: nullable numeric revival stamp (transcript mtime at last revival).
+    if entry["v"] >= 3 and entry["revived_tx_mtime"] is not None:
+        if isinstance(entry["revived_tx_mtime"], bool):
+            raise ContractError("journal 'revived_tx_mtime' must be int/float, got bool")
+        _require_type(entry["revived_tx_mtime"], (int, float), "journal 'revived_tx_mtime'")
 
 
 # --------------------------------------------------------------------------
@@ -456,6 +479,7 @@ def validate_session_card(card: Any) -> None:
     _require_enum(card["autokick"], AUTOKICK_STATES, "session 'autokick'")
     _require_type(card["adopted"], bool, "session 'adopted'")
     _require_type(card["skip_permissions"], bool, "session 'skip_permissions'")
+    _require_type(card["revive_strikes"], int, "session 'revive_strikes'")
 
 
 def validate_sessions_payload(payload: Any) -> None:

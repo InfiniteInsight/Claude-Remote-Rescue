@@ -95,7 +95,18 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # page timing prior).
     # v23 (2026-08-26): dashboard_session_hours (dashboard login — session
     # cookie Max-Age; see crr.core.dashboard_auth).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 23
+    # v24 (2026-08-29): zombie_strikes default 3 -> 5 (reviver hardening —
+    # activity-keyed strikes now accumulate against alive-but-frozen
+    # sessions, so healthy-but-idle ones deserve more runway before
+    # give-up; user decision on the 2026-08-29 spec).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 24
+
+
+def test_zombie_strikes_default_is_five():
+    # Reviver hardening (spec 2026-08-29): strikes now accumulate against
+    # alive-but-frozen sessions too, so the default gives an idle-but-
+    # healthy session five reboots of runway instead of three.
+    assert cfg.DEFAULTS["zombie_strikes"] == 5
 
 
 def test_context_pressure_fraction_defaults():

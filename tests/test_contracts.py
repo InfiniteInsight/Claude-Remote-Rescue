@@ -65,6 +65,7 @@ def _session_card():
         "conflict": False,
         "attached": False,
         "skip_permissions": False,
+        "revive_strikes": 0,
     }
 
 
@@ -274,6 +275,80 @@ def test_journal_v1_claude_rejects_extra_key():
         contracts.validate_journal_entry(e)
 
 
+def _journal_entry_v3():
+    e = _journal_entry_v2()
+    e["v"] = 3
+    e["revived_tx_mtime"] = None
+    return e
+
+
+def test_journal_v3_entry_accepted():
+    contracts.validate_journal_entry(_journal_entry_v3())
+
+
+def test_journal_v3_accepts_float_revived_tx_mtime():
+    e = _journal_entry_v3()
+    e["revived_tx_mtime"] = 1724900000.5
+    contracts.validate_journal_entry(e)
+
+
+def test_journal_v3_rejects_missing_revived_tx_mtime():
+    e = _journal_entry_v3()
+    del e["revived_tx_mtime"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_v3_rejects_non_numeric_revived_tx_mtime():
+    e = _journal_entry_v3()
+    e["revived_tx_mtime"] = "yesterday"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_v3_rejects_bool_revived_tx_mtime():
+    # bool is an int subclass; a True here is a bug, not a timestamp.
+    e = _journal_entry_v3()
+    e["revived_tx_mtime"] = True
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_journal_v2_rejects_revived_tx_mtime():
+    # The stamp is a v3 concept; a v2 entry carrying it has drifted.
+    e = _journal_entry_v2()
+    e["revived_tx_mtime"] = None
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_new_entry_is_v3_with_null_stamp(tmp_path):
+    from crr.core.journal import new_entry
+    e = new_entry(pid=7, cwd="/home/u/p", host="tmux", shell="zsh",
+                  boot_id="b", now="2026-08-29T00:00:00Z")
+    assert e["v"] == contracts.JOURNAL_SCHEMA_VERSION == 3
+    assert e["revived_tx_mtime"] is None
+
+
+def test_upgrade_entry_brings_v1_to_current_schema():
+    from crr.core.journal import upgrade_entry
+    up = upgrade_entry(_journal_entry())
+    contracts.validate_journal_entry(up)
+    assert up["v"] == contracts.JOURNAL_SCHEMA_VERSION
+    assert up["revived_tx_mtime"] is None
+    assert up["claude"]["skip_permissions"] is False
+
+
+def test_upgrade_entry_preserves_existing_values():
+    from crr.core.journal import upgrade_entry
+    e = _journal_entry_v3()
+    e["revived_tx_mtime"] = 123.0
+    e["claude"]["skip_permissions"] = True
+    up = upgrade_entry(e)
+    assert up["revived_tx_mtime"] == 123.0
+    assert up["claude"]["skip_permissions"] is True
+
+
 def test_archive_with_v1_embedded_entry_still_validates():
     record = _archive_record()
     assert record["entry"]["v"] == 1
@@ -288,7 +363,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_16():
+def test_sessions_contract_version_is_17():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -310,7 +385,9 @@ def test_sessions_contract_version_is_16():
     # the PAYLOAD (spec 2026-08-21) — global OAuth state, not per-card.
     # v16 adds `skip_permissions` (bool) to the card — toggleable from the
     # dashboard.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 16
+    # v17 adds `revive_strikes` (int) to the card — reviver hardening (spec
+    # 2026-08-29): strike escalation is user-visible.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 17
 
 
 def test_states_enum_includes_parked():
@@ -853,3 +930,17 @@ def test_machines_payload_wrong_version_rejected():
 
 def test_machines_payload_empty_list_passes():
     contracts.validate_machines_payload({"contract": 1, "machines": []})
+
+
+def test_session_card_requires_revive_strikes():
+    card = _session_card()
+    del card["revive_strikes"]
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)
+
+
+def test_session_card_revive_strikes_must_be_int():
+    card = _session_card()
+    card["revive_strikes"] = "two"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)

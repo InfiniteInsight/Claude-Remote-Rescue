@@ -34,11 +34,12 @@ def _claude(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", skip_permissions=False):
             "skip_permissions": skip_permissions}
 
 
-def _seed(store, pid, *, boot=_ENTRY_BOOT, claude=None, tmux_session=None, strikes=0):
+def _seed(store, pid, *, boot=_ENTRY_BOOT, claude=None, tmux_session=None, strikes=0,
+          tx_stamp=None):
     store.write(new_entry(
         pid=pid, cwd=f"/home/u/p{pid}", host="tmux", shell="zsh",
         boot_id=boot, now=_NOW, claude=claude, tmux_session=tmux_session,
-        revive_strikes=strikes,
+        revive_strikes=strikes, revived_tx_mtime=tx_stamp,
     ))
 
 
@@ -78,13 +79,15 @@ class FakeTmux:
         return None
 
 
-def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enabled=True):
+def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enabled=True,
+         transcripts=None, attached=None):
     scan = entries_store.scan()
     return revive_crashed(
         scan.entries, FakeBoot(), FakeProbe(), tmux, entries_store,
         archive if archive is not None else ArchiveStore(entries_store._state_dir),
         max_strikes=max_strikes, now=_NOW,
         remote_control_enabled=remote_control_enabled,
+        transcripts=transcripts, attached=attached,
     )
 
 
@@ -641,7 +644,7 @@ def test_revive_skips_the_entire_pass_when_tmux_liveness_is_unknown(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())  # would ordinarily be revived
     outcome = _run(store, FakeTmux(live=None))
-    assert outcome == ([], [], [], True)
+    assert outcome == ([], [], [], True, [], {})
     assert outcome.skipped is True
     entry = store.read(42)
     assert entry["revive_strikes"] == 0          # no strike accrued
@@ -657,7 +660,7 @@ def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_
     )
     archive.archive(entry, "superseded-on-register", _NOW)  # a revival candidate
     outcome = _run(store, FakeTmux(live=None), archive=archive)
-    assert outcome == ([], [], [], True)
+    assert outcome == ([], [], [], True, [], {})
     assert outcome.skipped is True
     assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched
 
@@ -1083,3 +1086,242 @@ def test_a_kicked_revival_survives_a_tab_health_write_failure(tmp_path):
         flags=flags, tab_spawner=_TieredTab(), tab_health=_RaisingStore(),
     )  # must not raise
     assert outcome.revived == [899149]
+
+
+# --- reviver hardening (spec 2026-08-29): unresumable pre-flight ----------
+#
+# A conversation whose transcript is CONFIRMED absent can never resume;
+# reviving it spawns a claude that dies (or wedges at a prompt) every boot,
+# forever. The pre-flight archives it terminally as 'unresumable' instead.
+# Tri-state discipline: only a confirmed absence gates — unknown never does.
+
+from crr.core.ports import TranscriptProbe
+
+
+class FakeTranscripts:
+    """probe() by sid: tests map each sid to a TranscriptProbe."""
+
+    def __init__(self, probes=None):
+        self._probes = dict(probes or {})
+
+    def probe(self, session_id):
+        return self._probes.get(session_id, TranscriptProbe(None, None))
+
+
+def test_confirmed_absent_transcript_is_archived_unresumable_not_revived(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    sid = _claude()["session_id"]
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux(live=set())
+    tx = FakeTranscripts({sid: TranscriptProbe(False, None)})
+
+    outcome = _run(store, tmux, archive=archive, transcripts=tx)
+
+    assert tmux.created == []
+    assert outcome.revived == []
+    assert outcome.unresumable == [42]
+    with pytest.raises(KeyError):
+        store.read(42)
+    assert archive.read(sid)["reason"] == "unresumable"
+
+
+def test_unknown_transcript_probe_never_blocks_revival(tmp_path):
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux(live=set())
+    tx = FakeTranscripts({sid: TranscriptProbe(None, None)})
+
+    outcome = _run(store, tmux, transcripts=tx)
+
+    assert outcome.revived == [42]
+    assert outcome.unresumable == []
+
+
+def test_no_transcript_source_behaves_exactly_as_before(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux)  # transcripts omitted (legacy callers)
+    assert outcome.revived == [42]
+    assert outcome.unresumable == []
+
+
+def test_archived_record_with_absent_transcript_marked_unresumable(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    sid = _claude()["session_id"]
+    tmux = FakeTmux(live=set())
+    tx = FakeTranscripts({sid: TranscriptProbe(False, None)})
+
+    outcome = _run(store, tmux, archive=archive, transcripts=tx)
+
+    assert tmux.created == []
+    assert outcome.unresumable == [99]
+    assert archive.read(sid)["reason"] == "unresumable"
+    with pytest.raises(KeyError):
+        store.read(99)  # never journaled
+
+
+def test_unresumable_archive_records_are_terminal(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/p99", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "unresumable", _NOW)
+    tmux = FakeTmux(live=set())
+
+    outcome = _run(store, tmux, archive=archive)
+
+    assert outcome.revived == []
+    assert tmux.created == []
+
+
+# --- reviver hardening (spec 2026-08-29): activity-keyed strike reset -----
+#
+# THE HOLE THIS CLOSES: observed-alive used to reset strikes, but a broken
+# revival routinely lingers alive (claude wedged at a trust prompt in a
+# detached session nobody sees), so strikes oscillated 1 -> 0 forever and
+# give-up never engaged. Aliveness is not health; conversation PROGRESS
+# (transcript mtime advancing past the revival stamp) or a human attached
+# is.
+
+
+def _live_name():
+    return session_name({"claude": _claude()})
+
+
+def test_alive_with_frozen_transcript_holds_strikes(tmp_path):
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=2, tx_stamp=100.0)
+    tmux = FakeTmux(live={name})
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})  # no progress
+
+    outcome = _run(store, tmux, transcripts=tx)
+
+    assert outcome.reset == []
+    assert store.read(42)["revive_strikes"] == 2  # held, not reset
+
+
+def test_alive_with_advanced_transcript_resets_strikes(tmp_path):
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=2, tx_stamp=100.0)
+    tmux = FakeTmux(live={name})
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 250.0)})  # progressed
+
+    outcome = _run(store, tmux, transcripts=tx)
+
+    assert outcome.reset == [42]
+    assert store.read(42)["revive_strikes"] == 0
+
+
+def test_alive_and_attached_resets_strikes_even_when_frozen(tmp_path):
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=2, tx_stamp=100.0)
+    tmux = FakeTmux(live={name})
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})
+
+    outcome = _run(store, tmux, transcripts=tx, attached={name})
+
+    assert outcome.reset == [42]
+    assert store.read(42)["revive_strikes"] == 0
+
+
+def test_alive_without_stamp_keeps_legacy_eager_reset(tmp_path):
+    # Pre-v3 entries carry no stamp; they keep the old behavior untouched.
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=2)  # stamp None
+    tmux = FakeTmux(live={name})
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})
+
+    outcome = _run(store, tmux, transcripts=tx)
+
+    assert outcome.reset == [42]
+    assert store.read(42)["revive_strikes"] == 0
+
+
+def test_alive_with_vanished_transcript_holds_strikes(tmp_path):
+    # Transcript deleted after revival: confirmed absent means no progress
+    # is possible — hold, and the next death hits the unresumable pre-flight.
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=1, tx_stamp=100.0)
+    tmux = FakeTmux(live={name})
+    tx = FakeTranscripts({sid: TranscriptProbe(False, None)})
+
+    outcome = _run(store, tmux, transcripts=tx)
+
+    assert outcome.reset == []
+    assert store.read(42)["revive_strikes"] == 1
+
+
+def test_alive_at_max_strikes_is_never_archived(tmp_path):
+    # Give-up must only fire on a DEAD session — an alive one, however
+    # frozen, is never destroyed out from under the user.
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=3, tx_stamp=100.0)
+    tmux = FakeTmux(live={name})
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})
+
+    outcome = _run(store, tmux, max_strikes=3, transcripts=tx)
+
+    assert outcome.gave_up == []
+    assert store.read(42)["revive_strikes"] == 3
+
+
+def test_revival_stamps_transcript_mtime_and_reports_strike_count(tmp_path):
+    store = JournalStore(tmp_path)
+    sid = _claude()["session_id"]
+    _seed(store, 42, claude=_claude(), strikes=1)
+    tmux = FakeTmux(live=set())
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 123.5)})
+
+    outcome = _run(store, tmux, transcripts=tx)
+
+    assert outcome.revived == [42]
+    assert outcome.strike_counts == {42: 2}
+    entry = store.read(42)
+    assert entry["revived_tx_mtime"] == 123.5
+    assert entry["v"] == 3
+
+
+def test_held_strikes_accumulate_to_give_up_across_boots(tmp_path):
+    # The end-to-end arc the hardening exists for: revive -> alive-but-frozen
+    # (hold) -> dead -> revive ... strikes climb instead of oscillating, and
+    # the session finally gives up.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = _live_name()
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})
+    _seed(store, 42, claude=_claude(), strikes=0, tx_stamp=100.0)
+
+    for expected in (1, 2, 3):
+        outcome = _run(store, tmux := FakeTmux(live=set()), max_strikes=3,
+                       archive=archive, transcripts=tx)
+        assert outcome.revived == [42]
+        assert store.read(42)["revive_strikes"] == expected
+        # Watchdog passes while it sits alive-but-frozen: strikes held.
+        held = _run(store, FakeTmux(live={name}), max_strikes=3,
+                    archive=archive, transcripts=tx)
+        assert held.reset == []
+        assert store.read(42)["revive_strikes"] == expected
+
+    final = _run(store, FakeTmux(live=set()), max_strikes=3,
+                 archive=archive, transcripts=tx)
+    assert final.gave_up == [42]
+    assert archive.read(sid)["reason"] == "gave-up"

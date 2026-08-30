@@ -101,13 +101,16 @@ from typing import Any, Mapping
 # page.html; see tests/test_priors.py::test_no_bare_numeric_delay_in_page_timers)
 # v23: added dashboard_session_hours (dashboard login — optional passphrase
 # auth gate; see crr.core.dashboard_auth)
-CONFIG_DEFAULTS_VERSION = 23
+# v24: zombie_strikes default 3 -> 5 (reviver hardening, spec 2026-08-29 —
+# strikes now accumulate against alive-but-frozen sessions, so a healthy
+# idle session gets more reboots of runway before give-up)
+CONFIG_DEFAULTS_VERSION = 24
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
 DEFAULTS: dict[str, Any] = {
     # watchdog / revival
-    "zombie_strikes": 3,             # strikes before a re-dying session is archived
+    "zombie_strikes": 5,             # strikes before a re-dying session is archived
     "watchdog_interval_seconds": 30, # how often the systemd timer sweeps for revivals
     # session operations
     "close_grace_seconds": 5,     # wait after a polite close before force

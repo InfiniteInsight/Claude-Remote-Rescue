@@ -913,7 +913,7 @@ def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 as crr-abc12345",
                                                           degraded=True))
-    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True})())
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     rc = cli.main(["reopen", "--pid", "42"])
     out, err = capsys.readouterr()
     assert rc == 0
@@ -926,7 +926,7 @@ def test_cmd_reopen_stays_quiet_when_the_tab_opened(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 (opened in a new tab)"))
-    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True})())
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["reopen", "--pid", "42"]) == 0
     assert "WARNING" not in capsys.readouterr().err
 
@@ -1157,6 +1157,7 @@ def _live_entry(pid, boot_id):
         "tmux_session": None,
         "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
+        "revived_tx_mtime": None,
     }
 
 
@@ -1984,6 +1985,9 @@ def test_revive_names_gave_up_pids(tmp_path, monkeypatch, capsys):
         def list_sessions(self):
             return set()
 
+
+        def attached_sessions(self):
+            return set()
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -2014,6 +2018,9 @@ def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
         def list_sessions(self):
             return set()
 
+
+        def attached_sessions(self):
+            return set()
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -2052,6 +2059,9 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
         def list_sessions(self):
             return set()
 
+
+        def attached_sessions(self):
+            return set()
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -2096,6 +2106,9 @@ def test_revive_skips_revival_when_auth_expired(tmp_path, monkeypatch, capsys):
         def list_sessions(self):
             return set()
 
+
+        def attached_sessions(self):
+            return set()
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -2140,6 +2153,9 @@ def test_revive_proceeds_when_auth_valid(tmp_path, monkeypatch, capsys):
         def list_sessions(self):
             return set()
 
+
+        def attached_sessions(self):
+            return set()
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -2178,6 +2194,9 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
         def list_sessions(self):
             return set()
 
+
+        def attached_sessions(self):
+            return set()
         def new_detached_session(self, name, cwd, argv):
             pass
 
@@ -2501,6 +2520,9 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
         def list_sessions(self):
             return {name}
 
+
+        def attached_sessions(self):
+            return set()
     class _FakeTab:
         def available(self):
             return True
@@ -2560,6 +2582,9 @@ def test_untmux_kills_and_relaunches_via_cli(tmp_path, monkeypatch, capsys):
         def list_sessions(self):
             return {name}
 
+
+        def attached_sessions(self):
+            return set()
         def kill_session(self, session_name):
             pass
 
@@ -3659,7 +3684,21 @@ class _FakeTmuxRevive:
         return None
 
 
+
+class _UnknownTranscripts:
+    """Probe stub for tests that exercise revival MECHANICS: 'unknown'
+    never gates the pre-flight, so these tests keep their pre-hardening
+    behavior. (The pre-flight has its own tests in test_reviver.py; without
+    this stub they would read the REAL ~/.claude/projects — a machine-state
+    leak that archives the fixture sid as unresumable.)"""
+
+    def probe(self, session_id):
+        from crr.core.ports import TranscriptProbe
+        return TranscriptProbe(None, None)
+
+
 def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.transcript_source, "RealTranscriptSource", _UnknownTranscripts)
     """#100: shell startup must trigger a revive pass so archived sessions
     (superseded-on-register after reboot) get tmux sessions even without
     the watchdog running. The revived entry must then be re-journaled so
@@ -3714,6 +3753,7 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
 
 
 def test_rescue_check_fires_after_deregister_clears_markers(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.transcript_source, "RealTranscriptSource", _UnknownTranscripts)
     """End-to-end: a claude-bearing shell exits (deregister), clearing rescue
     markers. The next shell startup (rescue-check) re-scans, revives the
     archived session, and offers it to the user. This is the chain that was
@@ -3873,6 +3913,7 @@ def test_repair_check_clear_unlinks_the_flag(tmp_path, monkeypatch, capsys):
     reason="needs Linux boot adapter + tmux",
 )
 def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.transcript_source, "RealTranscriptSource", _UnknownTranscripts)
     # Fake claude that stays alive, so the revived session persists.
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -4890,10 +4931,16 @@ def test_live_tmux_sessions_passes_the_unknown_tri_state_through(monkeypatch):
         def available(self): return True
         def list_sessions(self): return None
 
+
+        def attached_sessions(self):
+            return set()
     class NoTmux:
         def available(self): return False
         def list_sessions(self): raise AssertionError("must not be queried")
 
+
+        def attached_sessions(self):
+            return set()
     config = cfg.Config()
     monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: UnknownTmux())
     assert cli._live_tmux_sessions(config) is None
@@ -6041,7 +6088,7 @@ def test_revive_passes_the_flag_store_so_close_actually_sticks(tmp_path, monkeyp
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
     monkeypatch.setattr(cli.tmux, "RealTmux",
-                        lambda t: type("T", (), {"available": lambda s: True})())
+                        lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["revive"]) == 0
     assert seen["flags"] is not None, "revive ran without a flag store"
 
@@ -6062,7 +6109,7 @@ def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: ("SPAWNER", True))
     monkeypatch.setattr(cli.tmux, "RealTmux",
-                        lambda t: type("T", (), {"available": lambda s: True})())
+                        lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["revive"]) == 0
     assert seen["tab_spawner"] == "SPAWNER"
 
@@ -6395,3 +6442,134 @@ def test_qr_degrades_with_hint_when_serve_not_live(tmp_path, monkeypatch, capsys
     assert rc == 0
     assert "tailscale serve" in out           # the hint
     assert "127.0.0.1" in out or "loopback" in out
+
+
+# --- reviver hardening (spec 2026-08-29): strike visibility in the CLI ----
+
+def test_revive_prints_strike_counts_and_unresumable(tmp_path, monkeypatch, capsys):
+    # A user watching `crr revive` must SEE escalation: which pids climbed
+    # to which strike, and which were archived as unresumable — silence
+    # here is how the old strike oscillation went unnoticed for weeks.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def attached_sessions(self):
+            return set()
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+        def session_pid(self, name):
+            return None
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome(
+            [42], [], [], unresumable=[7], strike_counts={42: 2}),
+    )
+    rc = cli.main(["revive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "strike 2/5" in out          # count over the configured limit
+    assert "stops reviving at 5" in out  # ...and what will happen at it
+    assert "unresumable" in out and "[7]" in out
+
+
+def test_rescue_check_shows_strikes_on_restored_sessions(tmp_path, monkeypatch, capsys):
+    # The boot-time restore is where the user actually sees zombie tabs
+    # open; a session carrying strikes must say so on its restore line.
+    _rescue_check_setup(monkeypatch, tmp_path,
+                        [{"pid": 42, "revive_strikes": 2},
+                         {"pid": 43, "revive_strikes": 0}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
+
+    def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
+                    pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
+                    crr_bin=None, tab_health=None):
+        return SimpleNamespace(ok=True, degraded=False, message=f"restarted crr-{pid}")
+
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+
+    rc = cli.main(["rescue-check"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = {l.split(" ")[1].removeprefix("crr-"): l for l in out.splitlines()
+             if l.startswith("restarted")}
+    assert "strike 2/5" in lines["42"]
+    assert "stops reviving at 5" in lines["42"]
+    assert "strike" not in lines["43"]  # zero strikes stays clean
+
+
+def test_status_line_shows_strikes_when_present():
+    card = {
+        "pid": 42, "sid8": "8a1b2c3d", "state": "parked", "attached": False,
+        "cwd": "/home/u/p", "model": "", "duplicate_group": None,
+        "sid_source": "injected", "revive_strikes": 2,
+    }
+    line = cli._status_line(card)
+    assert "strike 2/5" in line
+
+
+def test_status_line_omits_strikes_at_zero():
+    card = {
+        "pid": 42, "sid8": "8a1b2c3d", "state": "live", "attached": False,
+        "cwd": "/home/u/p", "model": "", "duplicate_group": None,
+        "sid_source": "injected", "revive_strikes": 0,
+    }
+    assert "strike" not in cli._status_line(card)
+
+
+def test_revive_wires_transcripts_and_attached_into_the_sweep(tmp_path, monkeypatch):
+    # The hardening is dormant unless the composition root passes the real
+    # TranscriptSource and the attached-session set — a forgotten wire-up
+    # silently reverts to eternal revival, so this pin is load-bearing.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def attached_sessions(self):
+            return {"crr-attached"}
+
+        def new_detached_session(self, name, cwd, argv):
+            pass
+
+        def session_pid(self, name):
+            return None
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    seen = {}
+
+    def fake_revive(*a, **k):
+        seen.update(k)
+        return cli.reviver.RevivalOutcome([], [], [])
+
+    monkeypatch.setattr(cli.reviver, "revive_crashed", fake_revive)
+    rc = cli.main(["revive"])
+    assert rc == 0
+    assert isinstance(seen.get("transcripts"), cli.transcript_source.RealTranscriptSource)
+    assert seen.get("attached") == {"crr-attached"}

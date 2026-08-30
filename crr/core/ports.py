@@ -241,6 +241,36 @@ class TabSpawner(Protocol):
         ...
 
 
+class TranscriptProbe(NamedTuple):
+    """What a TranscriptSource learned about one session's transcript.
+
+    ``exists`` is TRI-STATE (F16): True (found), False (CONFIRMED absent —
+    the projects dir was readable and no file matched), or None (could not
+    determine: unreadable dir, IO error). The distinction is load-bearing:
+    the reviver's unresumable pre-flight destroys revival data on False and
+    must never do so on None. ``mtime`` is the file's st_mtime when
+    ``exists`` is True, else None.
+    """
+
+    exists: bool | None
+    mtime: float | None
+
+
+class TranscriptSource(Protocol):
+    """Locates a session's Claude Code transcript and reports its state.
+
+    The reviver uses this two ways (spec 2026-08-29 reviver hardening):
+    a CONFIRMED-absent transcript means the conversation can never resume
+    (pre-flight archives it ``unresumable`` instead of reviving), and an
+    mtime that has not advanced past the revival stamp means the session
+    is alive-but-frozen (strikes hold instead of resetting).
+    """
+
+    def probe(self, session_id: str) -> TranscriptProbe:
+        """Never raises — failures degrade to ``TranscriptProbe(None, None)``."""
+        ...
+
+
 class DiagnosticsSource(Protocol):
     """Platform "why did it die" source (journald / log+pmset / winevent).
 
