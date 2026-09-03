@@ -95,3 +95,44 @@ def _forbid_unstubbed_exec(monkeypatch):
         )
 
     monkeypatch.setattr(cli, "_exec", _forbidden)
+
+
+@pytest.fixture(autouse=True)
+def _forbid_unstubbed_tab_spawn(monkeypatch):
+    """Default the tab-spawn adapters' subprocess seam to a loud raise.
+
+    A test that reaches a REAL tab spawn opens an actual Windows Terminal /
+    desktop terminal tab on the developer's machine — one leaked tab per
+    suite run (the tab outlives its dead `tmux attach` because WT's default
+    closeOnExit=graceful keeps nonzero-exit tabs open). That is exactly how
+    `crr reopen`'s e2e test papered the user's terminal with dead tabs
+    (bug 2026-09-03). Same failure class and same remedy as
+    `_forbid_unstubbed_exec` above: convert the escape into a named failure.
+
+    Each adapter module's ``subprocess`` NAME is rebound to a per-module
+    shim — never ``subprocess.run`` on the global module object, which every
+    test file shares (the tmux e2e tests shell out for real). Tab-spawn unit
+    tests keep working unchanged: their ``monkeypatch.setattr(tsw.subprocess,
+    "run", ...)`` now lands on the shim instance, replacing the raise for the
+    duration of the test. The exception/type attributes the adapters name in
+    ``except`` clauses are forwarded so those clauses still resolve.
+    """
+    import subprocess as _real_subprocess
+
+    from crr.adapters import tab_spawn, tab_spawn_linux, tab_spawn_windows
+
+    class _NoSpawnSubprocess:
+        TimeoutExpired = _real_subprocess.TimeoutExpired
+        CalledProcessError = _real_subprocess.CalledProcessError
+        CompletedProcess = _real_subprocess.CompletedProcess
+
+        def run(self, *args, **kwargs):
+            raise RuntimeError(
+                "a tab-spawn adapter reached subprocess.run without being "
+                "stubbed: this test would open a real terminal tab. Stub the "
+                "spawner (monkeypatch cli._tab_spawner, or the adapter "
+                "module's subprocess.run — see tests/test_tab_spawn_windows.py)."
+            )
+
+    for module in (tab_spawn, tab_spawn_linux, tab_spawn_windows):
+        monkeypatch.setattr(module, "subprocess", _NoSpawnSubprocess())

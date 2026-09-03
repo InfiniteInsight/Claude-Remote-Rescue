@@ -2373,6 +2373,11 @@ def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    # No visible tab: unstubbed, reopen's real spawner opened an actual
+    # Windows Terminal tab per suite run whose dead `tmux attach` outlived
+    # the test (bug 2026-09-03; see conftest._forbid_unstubbed_tab_spawn).
+    # The tmux revival below is the behavior under test, not the tab.
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
 
     store = JournalStore(tmp_path)
     sid = "dddddddd-4444-4444-8444-444444444444"
