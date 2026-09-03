@@ -104,7 +104,10 @@ from typing import Any, Mapping
 # v24: zombie_strikes default 3 -> 5 (reviver hardening, spec 2026-08-29 —
 # strikes now accumulate against alive-but-frozen sessions, so a healthy
 # idle session gets more reboots of runway before give-up)
-CONFIG_DEFAULTS_VERSION = 24
+# v25: tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname
+# (pluggable tunnel support, spec 2026-09-02 — provider default
+# "tailscale" preserves pre-tunnel behavior byte-for-byte)
+CONFIG_DEFAULTS_VERSION = 25
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -131,6 +134,12 @@ DEFAULTS: dict[str, Any] = {
     "version_check_seconds": 30,   # page self-heal version poll cadence
     "last_prompt_display_cap": 280,  # chars of last prompt shown on a card
     "host_allowlist_extras": [],   # extra Host values the dashboard accepts
+    # tunnels (spec 2026-09-02): which provider fronts the dashboard.
+    # "tailscale" | "cloudflare" | "none" — validated where consumed
+    # (crr.core.tunnel), since Config only type-checks against defaults.
+    "tunnel_provider": "tailscale",
+    "cloudflare_tunnel_name": "",    # `cloudflared tunnel create <name>`
+    "cloudflare_hostname": "",       # e.g. "crr.example.com" (DNS-routed)
     # retention
     "archive_retention_days": 14,  # gc drops archive records older than this
     # tab spawn (macOS/desktop): which terminal a visible reopen uses.
