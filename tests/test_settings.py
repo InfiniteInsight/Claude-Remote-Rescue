@@ -296,6 +296,33 @@ def test_tunnel_write_preserves_autokick_state(tmp_path):
     assert store.read_tunnel()["provider"] == "none"
 
 
+def test_tunnel_write_preserves_session_autokick_state(tmp_path):
+    # Same requirement as test_tunnel_write_preserves_autokick_state, for
+    # the OTHER autokick writer: write_session_autokick must not discard a
+    # stored tunnel override, and write_tunnel must not discard a stored
+    # per-session override, in either direction.
+    store = settings.SettingsStore(tmp_path)
+
+    # tunnel -> session autokick: tunnel state must survive.
+    store.write_tunnel(provider="cloudflare",
+                       cloudflare_tunnel_name="crr",
+                       cloudflare_hostname="crr.example.com")
+    store.write_session_autokick(_SID, False)
+    assert store.read_session_autokick(_SID) is False
+    assert store.read_tunnel() == {
+        "provider": "cloudflare",
+        "cloudflare_tunnel_name": "crr",
+        "cloudflare_hostname": "crr.example.com",
+    }
+
+    # session autokick -> tunnel: session override must survive.
+    store.write_tunnel(provider="none",
+                       cloudflare_tunnel_name=None,
+                       cloudflare_hostname=None)
+    assert store.read_session_autokick(_SID) is False
+    assert store.read_tunnel()["provider"] == "none"
+
+
 def test_tunnel_rejects_unknown_provider_string(tmp_path):
     store = settings.SettingsStore(tmp_path)
     with pytest.raises(settings.SettingsError):
