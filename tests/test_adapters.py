@@ -750,3 +750,42 @@ def test_serve_status_none_when_unconfigured_nonzero(monkeypatch):
     monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
     monkeypatch.setattr(tailscale.subprocess, "run", lambda *a, **k: _Result(1, stdout=""))
     assert ts.serve_status() is None
+
+
+def test_tailscale_provider_name_and_start_stop_argv(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        class R: returncode = 0; stdout = ""; stderr = ""
+        return R()
+
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: "/usr/bin/tailscale")
+    monkeypatch.setattr(tailscale.subprocess, "run", fake_run)
+    ts = tailscale.RealTailscale(2.0)
+    assert ts.name() == "tailscale"
+    ok, _msg = ts.start(8377)
+    assert ok
+    assert calls[-1] == ["tailscale", "serve", "--bg", "8377"]
+    ok, _msg = ts.stop()
+    assert ok
+    # Non-destructive: only the 443 handler is turned off — NEVER `serve
+    # reset`, which clobbers unrelated serve config (spec 2026-09-02).
+    assert calls[-1] == ["tailscale", "serve", "--https=443", "off"]
+
+
+def test_tailscale_provider_health_tri_state(monkeypatch):
+    ts = tailscale.RealTailscale(2.0)
+    monkeypatch.setattr(ts, "serve_status", lambda: {"TCP": {"443": {}}})
+    assert ts.health().state == "up"
+    monkeypatch.setattr(ts, "serve_status", lambda: {})
+    assert ts.health().state == "down"
+    monkeypatch.setattr(ts, "serve_status", lambda: None)
+    assert ts.health().state == "unknown"
+
+
+def test_tailscale_provider_start_fails_without_binary(monkeypatch):
+    monkeypatch.setattr(tailscale.shutil, "which", lambda _: None)
+    ts = tailscale.RealTailscale(2.0)
+    ok, msg = ts.start(8377)
+    assert not ok and "tailscale" in msg

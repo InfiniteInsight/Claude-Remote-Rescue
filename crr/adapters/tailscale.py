@@ -16,6 +16,9 @@ import json
 import shutil
 import subprocess
 
+from crr.core import tailnet
+from crr.core.ports import TunnelHealth
+
 
 def _status_cmd() -> list[str]:
     return ["tailscale", "status", "--json"]
@@ -26,8 +29,12 @@ def _serve_status_cmd() -> list[str]:
 
 
 class RealTailscale:
-    def __init__(self, timeout: float) -> None:
+    def __init__(self, timeout: float, dashboard_port: int = 8377) -> None:
         self._timeout = timeout
+        self._dashboard_port = dashboard_port
+
+    def name(self) -> str:
+        return "tailscale"
 
     def available(self) -> bool:
         return shutil.which("tailscale") is not None
@@ -54,3 +61,40 @@ class RealTailscale:
 
     def serve_status(self) -> dict | None:
         return self._run_json(_serve_status_cmd())
+
+    def _run_ok(self, argv: list[str]) -> tuple[bool, str]:
+        """Tri-state command runner for the lifecycle verbs: (ok, message).
+        Never raises — same degrade contract as _run_json."""
+        if shutil.which("tailscale") is None:
+            return False, "tailscale binary not found on PATH"
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True,
+                                    timeout=self._timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"{argv[0]} failed: {exc}"
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout or "").strip() or \
+                f"{' '.join(argv)} exited {result.returncode}"
+        return True, "ok"
+
+    def start(self, port: int) -> tuple[bool, str]:
+        return self._run_ok(["tailscale", "serve", "--bg", str(port)])
+
+    def stop(self) -> tuple[bool, str]:
+        # Only the 443 handler — `serve reset` would clobber unrelated
+        # serve config on this node (spec 2026-09-02).
+        return self._run_ok(["tailscale", "serve", "--https=443", "off"])
+
+    def health(self) -> TunnelHealth:
+        serve = self.serve_status()
+        if serve is None:
+            return TunnelHealth("unknown", "tailscale serve status unavailable")
+        if serve:
+            return TunnelHealth("up", "tailscale serve is live")
+        return TunnelHealth("down", "tailscale serve not configured")
+
+    def advertise_url(self) -> str | None:
+        return tailnet.self_dashboard_url(self.status(), self.serve_status())
+
+    def setup_hint(self) -> str | None:
+        return f"tailscale serve --bg {self._dashboard_port}"

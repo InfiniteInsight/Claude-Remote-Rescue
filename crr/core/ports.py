@@ -241,6 +241,35 @@ class TabSpawner(Protocol):
         ...
 
 
+class TunnelHealth(NamedTuple):
+    """A tunnel provider's liveness, TRI-STATE (F16 — same discipline as
+    ``TranscriptProbe.exists`` and ``PowerSource.on_ac``): ``"up"`` (confirmed
+    serving), ``"down"`` (confirmed not serving), or ``"unknown"`` (the probe
+    itself failed — binary missing, timeout, unparseable output). Callers
+    must not collapse ``"unknown"`` into either confirmed state. ``health()``
+    and the probes it calls never raise."""
+
+    state: str   # "up" | "down" | "unknown"  (F16 tri-state)
+    detail: str  # human-readable ("serve not live", "cloudflared not found")
+
+
+class TunnelProvider(Protocol):
+    """A pluggable remote-access tunnel (tailscale serve, cloudflared, …).
+
+    Mirrors the adapter tri-state discipline used elsewhere in this module:
+    lifecycle verbs (``start``/``stop``) report ``(ok, message)`` rather than
+    raising, and ``health()`` is F16 tri-state via ``TunnelHealth``.
+    """
+
+    def name(self) -> str: ...
+    def available(self) -> bool: ...
+    def start(self, port: int) -> tuple[bool, str]: ...
+    def stop(self) -> tuple[bool, str]: ...
+    def health(self) -> TunnelHealth: ...
+    def advertise_url(self) -> str | None: ...
+    def setup_hint(self) -> str | None: ...
+
+
 class TranscriptProbe(NamedTuple):
     """What a TranscriptSource learned about one session's transcript.
 
