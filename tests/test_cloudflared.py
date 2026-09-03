@@ -107,6 +107,30 @@ def test_health_tri_state(monkeypatch, tmp_path):
     assert cf.health().state == "unknown"
 
 
+def test_start_and_stop_refuse_without_systemd(monkeypatch, tmp_path):
+    # No systemd --user on this host (e.g. macOS/Windows): start() must
+    # refuse honestly BEFORE writing a unit file or touching cloudflared
+    # at all, and stop() must refuse the same way rather than raising a
+    # raw errno from a missing systemctl binary.
+    def fake_which(name):
+        if name == "systemctl":
+            return None
+        return "/usr/bin/cloudflared"
+
+    monkeypatch.setattr(cloudflared.shutil, "which", fake_which)
+    cf = cloudflared.RealCloudflared(2.0, "crr", "crr.example.com", home=tmp_path)
+
+    ok, msg = cf.start(8377)
+    assert not ok
+    assert "not supported on this host yet" in msg
+    unit = tmp_path / ".config" / "systemd" / "user" / cloudflared.UNIT_NAME
+    assert not unit.exists()
+
+    ok, msg = cf.stop()
+    assert not ok
+    assert "not supported on this host yet" in msg
+
+
 def test_advertise_url_is_static_from_hostname():
     cf = cloudflared.RealCloudflared(2.0, "crr", "crr.example.com")
     assert cf.advertise_url() == "https://crr.example.com/"

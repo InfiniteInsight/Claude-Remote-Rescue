@@ -24,6 +24,9 @@ from crr.core.ports import TunnelHealth
 
 UNIT_NAME = "crr-tunnel.service"
 
+_NO_SYSTEMD_MSG = ("cloudflare tunnel lifecycle needs systemd --user (Linux) — "
+                   "not supported on this host yet")
+
 _SETUP_STEPS = (
     "one-time Cloudflare setup:\n"
     "  1. cloudflared tunnel login\n"
@@ -80,6 +83,8 @@ class RealCloudflared:
         return unit_dir(self._home) / UNIT_NAME
 
     def start(self, port: int) -> tuple[bool, str]:
+        if shutil.which("systemctl") is None:
+            return False, _NO_SYSTEMD_MSG
         cf_bin = shutil.which("cloudflared")
         if cf_bin is None:
             return False, "cloudflared binary not found on PATH — install it first"
@@ -103,6 +108,8 @@ class RealCloudflared:
         return True, f"{UNIT_NAME} enabled and started"
 
     def stop(self) -> tuple[bool, str]:
+        if shutil.which("systemctl") is None:
+            return False, _NO_SYSTEMD_MSG
         return self._run(["systemctl", "--user", "disable", "--now", UNIT_NAME])
 
     def health(self) -> TunnelHealth:

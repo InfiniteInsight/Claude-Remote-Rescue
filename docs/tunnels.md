@@ -2,7 +2,8 @@
 
 The dashboard binds loopback only; a tunnel provider proxies it out.
 Pick the provider in `config.toml` (`tunnel_provider = "tailscale" |
-"cloudflare" | "none"`) or the dashboard Settings (override wins).
+"cloudflare" | "none"`). A dashboard Settings override is planned
+(slice 2); today config.toml is the configuration surface.
 
 ## Tailscale (default)
 
@@ -18,7 +19,7 @@ One-time setup (manual — crr never drives Cloudflare auth):
 2. `cloudflared tunnel create <name>`
 3. `cloudflared tunnel route dns <name> <hostname>`
 4. Set `cloudflare_tunnel_name` + `cloudflare_hostname` (+
-   `tunnel_provider = "cloudflare"`) in config.toml or the dashboard.
+   `tunnel_provider = "cloudflare"`) in config.toml.
 5. `crr tunnel up` — installs and enables the `crr-tunnel.service`
    systemd --user unit running
    `cloudflared tunnel --url http://127.0.0.1:<port> run <name>`.
@@ -35,5 +36,6 @@ either way.
   run `crr tunnel down` first if you want it gone.
 - The Cloudflare hostname is admitted to the dashboard's Host allowlist
   automatically.
-- Cloudflare lifecycle is Linux (systemd --user) for now; macOS/Windows
-  report an honest "not supported yet".
+- Cloudflare lifecycle is Linux (systemd --user) for now; other hosts
+  get an honest "not supported on this host yet" instead of a raw
+  systemctl error.
