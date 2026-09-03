@@ -6763,3 +6763,28 @@ def test_qr_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "ngrok" in err
+
+
+# --- host allowlist admits the Cloudflare hostname (spec 2026-09-02) -------
+
+def test_effective_cloudflare_hostname_joins_allowlist(tmp_path, monkeypatch):
+    # The dashboard must accept Host: <cloudflare_hostname> without a
+    # manual host_allowlist_extras edit (spec 2026-09-02).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="CRR.Example.Com")
+    allowed = cli._web_allowed_hosts(cli.cfg.Config(), tmp_path)
+    assert "crr.example.com" in allowed          # lowercased
+    assert "127.0.0.1" in allowed                # baseline intact
+
+
+def test_web_allowed_hosts_ignores_bad_tunnel_config(tmp_path, monkeypatch):
+    # A bad/corrupt tunnel override must never break web startup: selection
+    # errors are swallowed here (the tunnel commands report them loudly).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    allowed = cli._web_allowed_hosts(cli.cfg.Config(), tmp_path)
+    assert "127.0.0.1" in allowed
+    assert "localhost" in allowed

@@ -1608,6 +1608,22 @@ def _tunnel_selection(config: cfg.Config, sd) -> tunnel.TunnelSelection:
     )
 
 
+def _web_allowed_hosts(config: cfg.Config, sd) -> set[str]:
+    """Host allowlist: loopback + hostname + config extras + the effective
+    cloudflare hostname (spec 2026-09-02 — no manual extras edit needed).
+    A bad tunnel config never breaks web startup: selection errors are
+    ignored here (the tunnel commands report them loudly)."""
+    allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
+    allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError:
+        return allowed
+    if sel.hostname:
+        allowed.add(sel.hostname.lower())
+    return allowed
+
+
 def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection):
     """The adapter for ``sel.provider`` — None for "none"."""
     timeout = config.get("interop_timeout_seconds")
@@ -5039,9 +5055,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return out
 
     # Host allowlist: loopback + this host's name + tailnet suffix + any
-    # config.toml extras.
-    allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
-    allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
+    # config.toml extras + the effective cloudflare hostname.
+    allowed = _web_allowed_hosts(config, sd)
     handler = make_web_handler(
         provider, allowed, (".ts.net",),
         action_provider=action_provider,
