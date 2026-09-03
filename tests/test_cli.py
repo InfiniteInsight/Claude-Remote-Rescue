@@ -6575,3 +6575,122 @@ def test_revive_wires_transcripts_and_attached_into_the_sweep(tmp_path, monkeypa
     assert rc == 0
     assert isinstance(seen.get("transcripts"), cli.transcript_source.RealTranscriptSource)
     assert seen.get("attached") == {"crr-attached"}
+
+
+# --- crr tunnel (spec 2026-09-02) -----------------------------------------
+
+class _FakeTunnelProvider:
+    def __init__(self, name="cloudflare", health_state="up",
+                 url="https://crr.example.com/", start_ok=True):
+        self._name, self._state, self._url = name, health_state, url
+        self._start_ok = start_ok
+        self.started_with = None
+        self.stopped = False
+
+    def name(self):
+        return self._name
+
+    def available(self):
+        return True
+
+    def start(self, port):
+        self.started_with = port
+        return (self._start_ok, "started" if self._start_ok else "missing prereqs")
+
+    def stop(self):
+        self.stopped = True
+        return True, "stopped"
+
+    def health(self):
+        from crr.core.ports import TunnelHealth
+        return TunnelHealth(self._state, f"fake {self._state}")
+
+    def advertise_url(self):
+        return self._url
+
+    def setup_hint(self):
+        return "run the setup"
+
+
+def test_tunnel_up_starts_active_provider_and_prints_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider()
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "up"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert fake.started_with == cli.cfg.DEFAULTS["dashboard_port"]
+    assert "https://crr.example.com/" in out
+
+
+def test_tunnel_up_refusal_prints_message_and_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(start_ok=False)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "up"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "missing prereqs" in err
+
+
+def test_tunnel_status_reports_provider_health_and_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(health_state="down", url=None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "cloudflare" in out and "down" in out
+
+
+def test_tunnel_down_stops_provider(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider()
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "down"])
+    assert rc == 0
+    assert fake.stopped
+
+
+def test_tunnel_none_provider_says_so(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "x").mkdir()  # ensure tmp_path usable as sd
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "none" in out
+
+
+def test_tunnel_settings_override_reaches_selection(tmp_path, monkeypatch):
+    # The GUI-written override must actually flow into selection: write
+    # provider=cloudflare into the settings store, then check the resolver.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="crr.example.com")
+    sel = cli._tunnel_selection(cli.cfg.Config(), tmp_path)
+    assert sel.provider == "cloudflare"
+    assert sel.hostname == "crr.example.com"
+    assert sel.origin == "override"
+
+
+def test_tunnel_status_names_the_other_provider_when_it_is_also_up(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    active = _FakeTunnelProvider(name="cloudflare")
+    other = _FakeTunnelProvider(name="tailscale", health_state="up")
+
+    def pick(config, sel):
+        return active if sel.provider == "cloudflare" else other
+
+    monkeypatch.setattr(cli, "_tunnel_provider", pick)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="crr.example.com")
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tailscale is also up" in out
