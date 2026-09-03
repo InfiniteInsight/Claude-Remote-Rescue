@@ -6722,6 +6722,24 @@ def test_tunnel_status_names_the_other_provider_when_it_is_also_up(
     assert "tailscale is also up" in out
 
 
+def test_tunnel_status_with_none_still_names_a_live_provider(tmp_path, monkeypatch, capsys):
+    # Switching to "none" is exactly when a still-serving tunnel is most
+    # deceptive — status must name it rather than say nothing is running.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    live = _FakeTunnelProvider(name="cloudflare", health_state="up")
+
+    def pick(config, sel):
+        return None if sel.provider == "none" else live
+
+    monkeypatch.setattr(cli, "_tunnel_provider", pick)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(provider="none")
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "cloudflare is also up" in out
+
+
 # --- crr qr follows the active tunnel provider (spec 2026-09-02) -----------
 
 def test_qr_uses_active_tunnel_provider_url(tmp_path, monkeypatch, capsys):

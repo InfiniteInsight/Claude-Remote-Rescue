@@ -1646,6 +1646,8 @@ def _cmd_tunnel(args: argparse.Namespace) -> int:
     provider = _tunnel_provider(config, sel)
     if provider is None:
         print(f"tunnel provider: none ({sel.origin}) — nothing to manage")
+        if args.action == "status":
+            _warn_other_providers_still_up(config, sel)
         return 0
     if args.action == "up":
         ok, msg = provider.start(config.get("dashboard_port"))
@@ -1668,6 +1670,16 @@ def _cmd_tunnel(args: argparse.Namespace) -> int:
     print(f"health: {h.state} — {h.detail}")
     url = provider.advertise_url()
     print(f"url: {url}" if url else "url: (not derivable)")
+    _warn_other_providers_still_up(config, sel)
+    return 0
+
+
+def _warn_other_providers_still_up(config: cfg.Config,
+                                   sel: tunnel.TunnelSelection) -> None:
+    """Print a note for any tunnel provider OTHER than the active/selected
+    one (including when the selection is "none") that is still healthy, so
+    `crr tunnel status` never claims nothing is running while something
+    still is (spec 2026-09-02)."""
     for other_name in ("tailscale", "cloudflare"):
         if other_name == sel.provider:
             continue
@@ -1677,7 +1689,6 @@ def _cmd_tunnel(args: argparse.Namespace) -> int:
         if other is not None and other.available() and other.health().state == "up":
             print(f"note: {other_name} is also up — `crr tunnel down` does not "
                   f"touch it; switch tunnel_provider and run down to stop it")
-    return 0
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

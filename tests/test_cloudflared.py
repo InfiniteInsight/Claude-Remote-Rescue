@@ -77,6 +77,7 @@ def test_stop_disables_unit(monkeypatch, tmp_path):
         class R: returncode = 0; stdout = ""; stderr = ""
         return R()
 
+    monkeypatch.setattr(cloudflared.shutil, "which", lambda _: "/usr/bin/systemctl")
     monkeypatch.setattr(cloudflared.subprocess, "run", fake_run)
     cf = cloudflared.RealCloudflared(2.0, "crr", "crr.example.com", home=tmp_path)
     ok, _ = cf.stop()
