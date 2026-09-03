@@ -1572,19 +1572,24 @@ def _cmd_harden(args: argparse.Namespace) -> int:
 
 
 def _cmd_qr(_args: argparse.Namespace) -> int:
-    """Print a scannable QR of this machine's tailnet dashboard URL.
-
-    Degrades informationally (rc 0) when tailscale serve isn't live: the
-    loopback URL still works from this machine, it just isn't reachable
-    from a phone yet.
-    """
+    """Print a scannable QR of this machine's dashboard URL via the ACTIVE
+    tunnel provider (spec 2026-09-02) — tailscale by default, so the
+    pre-tunnel behavior is unchanged. Degrades informationally (rc 0)."""
     config = _load_config()
-    ts = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
-    url = tailnet.self_dashboard_url(ts.status(), ts.serve_status())
+    sd = state_dir.state_dir()
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        print(f"crr qr: {exc}", file=sys.stderr)
+        return 2
+    provider = _tunnel_provider(config, sel)
+    url = provider.advertise_url() if provider is not None else None
     if url is None:
         port = config.get("dashboard_port")
         print(f"http://127.0.0.1:{port}/  (loopback only)")
-        print(f"To reach it from your phone, run:  tailscale serve --bg {port}")
+        hint = provider.setup_hint() if provider is not None else None
+        if hint:
+            print(f"To reach it from your phone:  {hint}")
         return 0
     print(qr.to_terminal(url))
     print(url)
@@ -4667,12 +4672,14 @@ def _cmd_web(args: argparse.Namespace) -> int:
         }
 
     def qr_svg_provider() -> str | None:
-        # Lazy, like diagnostics/discoverable: tailscale status + serve
-        # status are real subprocess calls, so this only runs when the
-        # dashboard's "Add a device" affordance is opened, never on the
-        # poll path. None (serve not live, or no tailnet) degrades to a
-        # 404 in web.handle_request — the <img> just fails to load.
-        url = tailnet.self_dashboard_url(ts_adapter.status(), ts_adapter.serve_status())
+        # Lazy (real subprocess probes) — only runs when "Add a device"
+        # is opened. Follows the ACTIVE tunnel provider (spec 2026-09-02).
+        try:
+            sel = _tunnel_selection(config, sd)
+        except ValueError:
+            return None
+        provider = _tunnel_provider(config, sel)
+        url = provider.advertise_url() if provider is not None else None
         return qr.to_svg(url) if url else None
 
     def machines_provider() -> dict:

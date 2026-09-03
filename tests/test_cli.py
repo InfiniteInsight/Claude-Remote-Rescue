@@ -6404,10 +6404,13 @@ def test_conflict_check_needs_something_to_check(capsys):
 def test_qr_prints_code_and_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
 
-    class _FakeTS:
-        def __init__(self, *_a):
-            pass
-
+    # Subclass RealTailscale (not a from-scratch fake): this class
+    # statement runs before the monkeypatch below rebinds the name, so
+    # the base here is still the real class — no recursion. Overriding
+    # only the two subprocess seams means __init__(timeout,
+    # dashboard_port=...) and advertise_url()/setup_hint() stay
+    # production code, exercised as before (Task 6/7, spec 2026-09-02).
+    class _FakeTS(cli.tailscale.RealTailscale):
         def status(self):
             return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
 
@@ -6426,10 +6429,10 @@ def test_qr_prints_code_and_url(tmp_path, monkeypatch, capsys):
 def test_qr_degrades_with_hint_when_serve_not_live(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
 
-    class _FakeTS:
-        def __init__(self, *_a):
-            pass
-
+    # Subclass RealTailscale — see test_qr_prints_code_and_url for why:
+    # keeps __init__/advertise_url()/setup_hint() as production code,
+    # overriding only the two subprocess seams (Task 6/7, spec 2026-09-02).
+    class _FakeTS(cli.tailscale.RealTailscale):
         def status(self):
             return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
 
@@ -6694,3 +6697,35 @@ def test_tunnel_status_names_the_other_provider_when_it_is_also_up(
     out = capsys.readouterr().out
     assert rc == 0
     assert "tailscale is also up" in out
+
+
+# --- crr qr follows the active tunnel provider (spec 2026-09-02) -----------
+
+def test_qr_uses_active_tunnel_provider_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(url="https://crr.example.com/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "https://crr.example.com/" in out
+
+
+def test_qr_falls_back_to_provider_setup_hint(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(url=None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "run the setup" in out          # provider.setup_hint()
+    assert "127.0.0.1" in out              # loopback line survives
+
+
+def test_qr_provider_none_prints_loopback_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "127.0.0.1" in out
