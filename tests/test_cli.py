@@ -6679,6 +6679,29 @@ def test_tunnel_settings_override_reaches_selection(tmp_path, monkeypatch):
     assert sel.origin == "override"
 
 
+def _write_bad_tunnel_provider(tmp_path):
+    # SettingsStore.write_tunnel() validates against TUNNEL_PROVIDERS and
+    # would refuse "ngrok" outright — writing the store file directly is
+    # the honest way to simulate a hand-edited/corrupted override that
+    # reaches tunnel.select() unvalidated. read_tunnel()'s _normalize_tunnel
+    # only filters non-string/empty values, so a non-empty bogus string
+    # like "ngrok" passes through untouched and select() raises ValueError.
+    (tmp_path / "settings.json").write_text(json.dumps(
+        {"v": 1, "sessions": {}, "tunnel": {"provider": "ngrok"}}), encoding="utf-8")
+
+
+def test_tunnel_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
+    # Drives the REAL selection path end-to-end (no _tunnel_selection /
+    # _tunnel_provider patching) so the ValueError -> stderr + rc 2 branch
+    # in _cmd_tunnel is actually exercised, not just compile-checked.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    rc = cli.main(["tunnel", "status"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "ngrok" in err
+
+
 def test_tunnel_status_names_the_other_provider_when_it_is_also_up(
         tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
@@ -6729,3 +6752,14 @@ def test_qr_provider_none_prints_loopback_only(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "127.0.0.1" in out
+
+
+def test_qr_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
+    # Same real-path drive as test_tunnel_unknown_provider_exits_2, for the
+    # twin ValueError -> stderr + rc 2 branch in _cmd_qr.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    rc = cli.main(["qr"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "ngrok" in err
