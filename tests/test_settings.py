@@ -247,3 +247,109 @@ def test_healthy_store_effective_read_is_the_stored_override():
         assert store.effective_global_autokick() is None   # unset -> config default
         store.write_global_autokick(True)
         assert store.effective_global_autokick() is True
+
+
+# --- tunnel overrides (spec 2026-09-02): GUI-writable, config is default ---
+
+def test_tunnel_reads_all_none_when_unset(tmp_path):
+    store = settings.SettingsStore(tmp_path)
+    assert store.read_tunnel() == {
+        "provider": None,
+        "cloudflare_tunnel_name": None,
+        "cloudflare_hostname": None,
+    }
+
+
+def test_tunnel_write_then_read_roundtrip(tmp_path):
+    store = settings.SettingsStore(tmp_path)
+    store.write_tunnel(provider="cloudflare",
+                       cloudflare_tunnel_name="crr",
+                       cloudflare_hostname="crr.example.com")
+    assert store.read_tunnel() == {
+        "provider": "cloudflare",
+        "cloudflare_tunnel_name": "crr",
+        "cloudflare_hostname": "crr.example.com",
+    }
+
+
+def test_tunnel_write_none_clears_a_field(tmp_path):
+    store = settings.SettingsStore(tmp_path)
+    store.write_tunnel(provider="cloudflare",
+                       cloudflare_tunnel_name="crr",
+                       cloudflare_hostname="crr.example.com")
+    store.write_tunnel(provider=None,
+                       cloudflare_tunnel_name="crr",
+                       cloudflare_hostname="crr.example.com")
+    assert store.read_tunnel()["provider"] is None
+
+
+def test_tunnel_write_preserves_autokick_state(tmp_path):
+    # Same survives-a-cycle requirement the autokick writers carry: one
+    # writer must never discard the other's state.
+    store = settings.SettingsStore(tmp_path)
+    store.write_global_autokick(False)
+    store.write_tunnel(provider="none",
+                       cloudflare_tunnel_name=None,
+                       cloudflare_hostname=None)
+    assert store.read_global_autokick() is False
+    store.write_global_autokick(True)
+    assert store.read_tunnel()["provider"] == "none"
+
+
+def test_tunnel_write_preserves_session_autokick_state(tmp_path):
+    # Same requirement as test_tunnel_write_preserves_autokick_state, for
+    # the OTHER autokick writer: write_session_autokick must not discard a
+    # stored tunnel override, and write_tunnel must not discard a stored
+    # per-session override, in either direction.
+    store = settings.SettingsStore(tmp_path)
+
+    # tunnel -> session autokick: tunnel state must survive.
+    store.write_tunnel(provider="cloudflare",
+                       cloudflare_tunnel_name="crr",
+                       cloudflare_hostname="crr.example.com")
+    store.write_session_autokick(_SID, False)
+    assert store.read_session_autokick(_SID) is False
+    assert store.read_tunnel() == {
+        "provider": "cloudflare",
+        "cloudflare_tunnel_name": "crr",
+        "cloudflare_hostname": "crr.example.com",
+    }
+
+    # session autokick -> tunnel: session override must survive.
+    store.write_tunnel(provider="none",
+                       cloudflare_tunnel_name=None,
+                       cloudflare_hostname=None)
+    assert store.read_session_autokick(_SID) is False
+    assert store.read_tunnel()["provider"] == "none"
+
+
+def test_tunnel_rejects_unknown_provider_string(tmp_path):
+    store = settings.SettingsStore(tmp_path)
+    with pytest.raises(settings.SettingsError):
+        store.write_tunnel(provider="ngrok",
+                           cloudflare_tunnel_name=None,
+                           cloudflare_hostname=None)
+
+
+def test_tunnel_degraded_store_reads_all_none(tmp_path):
+    (tmp_path / "settings.json").write_text("{corrupt", encoding="utf-8")
+    store = settings.SettingsStore(tmp_path)
+    assert store.read_tunnel() == {
+        "provider": None,
+        "cloudflare_tunnel_name": None,
+        "cloudflare_hostname": None,
+    }
+
+
+def test_tunnel_read_normalizes_empty_string_to_none(tmp_path):
+    # "" means unset everywhere in the tunnel design (config defaults are
+    # "" = unset); a stored "" must read back as None so the selection
+    # layer's override-wins logic never sees a falsy-but-present value.
+    import json
+    store = settings.SettingsStore(tmp_path)
+    (tmp_path / "settings.json").write_text(json.dumps(
+        {"v": 1, "sessions": {}, "tunnel": {"provider": "", "cloudflare_hostname": ""}}),
+        encoding="utf-8")
+    read = store.read_tunnel()
+    assert read["provider"] is None
+    assert read["cloudflare_hostname"] is None

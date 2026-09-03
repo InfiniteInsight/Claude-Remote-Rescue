@@ -6404,10 +6404,13 @@ def test_conflict_check_needs_something_to_check(capsys):
 def test_qr_prints_code_and_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
 
-    class _FakeTS:
-        def __init__(self, *_a):
-            pass
-
+    # Subclass RealTailscale (not a from-scratch fake): this class
+    # statement runs before the monkeypatch below rebinds the name, so
+    # the base here is still the real class — no recursion. Overriding
+    # only the two subprocess seams means __init__(timeout,
+    # dashboard_port=...) and advertise_url()/setup_hint() stay
+    # production code, exercised as before (Task 6/7, spec 2026-09-02).
+    class _FakeTS(cli.tailscale.RealTailscale):
         def status(self):
             return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
 
@@ -6426,10 +6429,10 @@ def test_qr_prints_code_and_url(tmp_path, monkeypatch, capsys):
 def test_qr_degrades_with_hint_when_serve_not_live(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
 
-    class _FakeTS:
-        def __init__(self, *_a):
-            pass
-
+    # Subclass RealTailscale — see test_qr_prints_code_and_url for why:
+    # keeps __init__/advertise_url()/setup_hint() as production code,
+    # overriding only the two subprocess seams (Task 6/7, spec 2026-09-02).
+    class _FakeTS(cli.tailscale.RealTailscale):
         def status(self):
             return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
 
@@ -6575,3 +6578,280 @@ def test_revive_wires_transcripts_and_attached_into_the_sweep(tmp_path, monkeypa
     assert rc == 0
     assert isinstance(seen.get("transcripts"), cli.transcript_source.RealTranscriptSource)
     assert seen.get("attached") == {"crr-attached"}
+
+
+# --- crr tunnel (spec 2026-09-02) -----------------------------------------
+
+class _FakeTunnelProvider:
+    def __init__(self, name="cloudflare", health_state="up",
+                 url="https://crr.example.com/", start_ok=True):
+        self._name, self._state, self._url = name, health_state, url
+        self._start_ok = start_ok
+        self.started_with = None
+        self.stopped = False
+
+    def name(self):
+        return self._name
+
+    def available(self):
+        return True
+
+    def start(self, port):
+        self.started_with = port
+        return (self._start_ok, "started" if self._start_ok else "missing prereqs")
+
+    def stop(self):
+        self.stopped = True
+        return True, "stopped"
+
+    def health(self):
+        from crr.core.ports import TunnelHealth
+        return TunnelHealth(self._state, f"fake {self._state}")
+
+    def advertise_url(self):
+        return self._url
+
+    def setup_hint(self):
+        return "run the setup"
+
+
+def test_tunnel_up_starts_active_provider_and_prints_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider()
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "up"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert fake.started_with == cli.cfg.DEFAULTS["dashboard_port"]
+    assert "https://crr.example.com/" in out
+
+
+def test_tunnel_up_refusal_prints_message_and_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(start_ok=False)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "up"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "missing prereqs" in err
+
+
+def test_tunnel_status_reports_provider_health_and_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(health_state="down", url=None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "cloudflare" in out and "down" in out
+
+
+def test_tunnel_down_stops_provider(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider()
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["tunnel", "down"])
+    assert rc == 0
+    assert fake.stopped
+
+
+def test_tunnel_none_provider_says_so(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "x").mkdir()  # ensure tmp_path usable as sd
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "none" in out
+
+
+def test_tunnel_settings_override_reaches_selection(tmp_path, monkeypatch):
+    # The GUI-written override must actually flow into selection: write
+    # provider=cloudflare into the settings store, then check the resolver.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="crr.example.com")
+    sel = cli._tunnel_selection(cli.cfg.Config(), tmp_path)
+    assert sel.provider == "cloudflare"
+    assert sel.hostname == "crr.example.com"
+    assert sel.origin == "override"
+
+
+def _write_bad_tunnel_provider(tmp_path):
+    # SettingsStore.write_tunnel() validates against TUNNEL_PROVIDERS and
+    # would refuse "ngrok" outright — writing the store file directly is
+    # the honest way to simulate a hand-edited/corrupted override that
+    # reaches tunnel.select() unvalidated. read_tunnel()'s _normalize_tunnel
+    # only filters non-string/empty values, so a non-empty bogus string
+    # like "ngrok" passes through untouched and select() raises ValueError.
+    (tmp_path / "settings.json").write_text(json.dumps(
+        {"v": 1, "sessions": {}, "tunnel": {"provider": "ngrok"}}), encoding="utf-8")
+
+
+def test_tunnel_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
+    # Drives the REAL selection path end-to-end (no _tunnel_selection /
+    # _tunnel_provider patching) so the ValueError -> stderr + rc 2 branch
+    # in _cmd_tunnel is actually exercised, not just compile-checked.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    rc = cli.main(["tunnel", "status"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "ngrok" in err
+
+
+def test_tunnel_status_names_the_other_provider_when_it_is_also_up(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    active = _FakeTunnelProvider(name="cloudflare")
+    other = _FakeTunnelProvider(name="tailscale", health_state="up")
+
+    def pick(config, sel):
+        return active if sel.provider == "cloudflare" else other
+
+    monkeypatch.setattr(cli, "_tunnel_provider", pick)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="crr.example.com")
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tailscale is also up" in out
+
+
+def test_tunnel_status_with_none_still_names_a_live_provider(tmp_path, monkeypatch, capsys):
+    # Switching to "none" is exactly when a still-serving tunnel is most
+    # deceptive — status must name it rather than say nothing is running.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    live = _FakeTunnelProvider(name="cloudflare", health_state="up")
+
+    def pick(config, sel):
+        return None if sel.provider == "none" else live
+
+    monkeypatch.setattr(cli, "_tunnel_provider", pick)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(provider="none")
+    rc = cli.main(["tunnel", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "cloudflare is also up" in out
+
+
+# --- crr qr follows the active tunnel provider (spec 2026-09-02) -----------
+
+def test_qr_uses_active_tunnel_provider_url(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(url="https://crr.example.com/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "https://crr.example.com/" in out
+
+
+def test_qr_falls_back_to_provider_setup_hint(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(url=None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "run the setup" in out          # provider.setup_hint()
+    assert "127.0.0.1" in out              # loopback line survives
+
+
+def test_qr_provider_none_prints_loopback_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "127.0.0.1" in out
+
+
+def test_qr_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
+    # Same real-path drive as test_tunnel_unknown_provider_exits_2, for the
+    # twin ValueError -> stderr + rc 2 branch in _cmd_qr.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    rc = cli.main(["qr"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "ngrok" in err
+
+
+# --- host allowlist admits the Cloudflare hostname (spec 2026-09-02) -------
+
+def test_effective_cloudflare_hostname_joins_allowlist(tmp_path, monkeypatch):
+    # The dashboard must accept Host: <cloudflare_hostname> without a
+    # manual host_allowlist_extras edit (spec 2026-09-02).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="CRR.Example.Com")
+    allowed = cli._web_allowed_hosts(cli.cfg.Config(), tmp_path)
+    assert "crr.example.com" in allowed          # lowercased
+    assert "127.0.0.1" in allowed                # baseline intact
+
+
+def test_web_allowed_hosts_ignores_bad_tunnel_config(tmp_path, monkeypatch):
+    # A bad/corrupt tunnel override must never break web startup: selection
+    # errors are swallowed here (the tunnel commands report them loudly).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    allowed = cli._web_allowed_hosts(cli.cfg.Config(), tmp_path)
+    assert "127.0.0.1" in allowed
+    assert "localhost" in allowed
+
+
+# --- reachable-at-boot names the active tunnel's health (spec 2026-09-02) --
+
+def test_reachable_at_boot_reports_tunnel_health_tri_state(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(health_state="unknown")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    # Boot-facts monkeypatching mirrored (verbatim, minus _load_config —
+    # deliberately NOT stubbed: state_dir above already points _load_config
+    # at an empty tmp_path, so it returns real cfg.Config() defaults, which
+    # is what lets the real (unpatched) _tunnel_selection resolve cleanly)
+    # from the nearest existing reachable-at-boot report test,
+    # tests/test_boot_adapters.py::test_report_says_headless_when_the_facts_show_it.
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
+    rc = cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tunnel: cloudflare — unknown" in out   # unknown stays unknown (F16)
+
+
+def test_reachable_at_boot_reports_no_tunnel(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
+    rc = cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tunnel: none" in out
+
+
+def test_reachable_at_boot_reports_misconfigured_tunnel_and_still_exits_0(
+        tmp_path, monkeypatch, capsys):
+    # A bad tunnel override must not turn a report command into a failure —
+    # unlike `crr tunnel`/`crr qr` (which exit 2), the boot report keeps
+    # reporting everything else and just names the tunnel as misconfigured.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
+    rc = cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tunnel: misconfigured" in out and "ngrok" in out

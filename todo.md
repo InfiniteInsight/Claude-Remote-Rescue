@@ -16,6 +16,7 @@
       advertise-URL) so CRR can manage Cloudflare Tunnel the same way it manages
       Tailscale. Cloudflare free tier covers tunnels + Access (Zero Trust) for
       up to 50 users.
+      Slice 1 (core + CLI) implemented on feat/tunnel-provider (PR pending); slice 2 (dashboard GUI settings panel) remains.
 
 - [x] Fix `crr deploy` from the PATH-linked binary + deploy-drift check in
       `crr doctor` — PR #110, merged 2026-08-28. Deploy resolved its repo from

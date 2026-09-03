@@ -99,7 +99,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # activity-keyed strikes now accumulate against alive-but-frozen
     # sessions, so healthy-but-idle ones deserve more runway before
     # give-up; user decision on the 2026-08-29 spec).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 24
+    # v25 (2026-09-02): tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname (pluggable tunnel spec).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 25
 
 
 def test_zombie_strikes_default_is_five():
@@ -302,3 +303,11 @@ def test_config_defaults_version_covers_the_boot_keys():
 def test_launcher_tag_default():
     assert cfg.DEFAULTS["launcher_tag"] == "tag:crr"
     assert cfg.Config().get("launcher_tag") == "tag:crr"
+
+
+def test_tunnel_provider_defaults():
+    # Tunnel spec 2026-09-02: default preserves current behavior exactly
+    # (tailscale, nothing else configured).
+    assert cfg.DEFAULTS["tunnel_provider"] == "tailscale"
+    assert cfg.DEFAULTS["cloudflare_tunnel_name"] == ""
+    assert cfg.DEFAULTS["cloudflare_hostname"] == ""

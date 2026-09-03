@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
+from crr.adapters import cloudflared
 from crr.adapters import deploy as deploy_io
 from crr.adapters import diagnostics as diag_source
 from crr.adapters import diagnostics_macos
@@ -53,7 +54,7 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, web, whoami
+from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, tunnel, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
@@ -447,6 +448,10 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--port", type=int, default=None,
                    help="dashboard bind port (default: config dashboard_port = 8377)")
     w.set_defaults(func=_cmd_web)
+
+    tun = sub.add_parser("tunnel", help="manage the dashboard tunnel (tailscale/cloudflare)")
+    tun.add_argument("action", choices=("up", "down", "status"))
+    tun.set_defaults(func=_cmd_tunnel)
 
     awake = sub.add_parser(
         "awake",
@@ -1567,23 +1572,123 @@ def _cmd_harden(args: argparse.Namespace) -> int:
 
 
 def _cmd_qr(_args: argparse.Namespace) -> int:
-    """Print a scannable QR of this machine's tailnet dashboard URL.
-
-    Degrades informationally (rc 0) when tailscale serve isn't live: the
-    loopback URL still works from this machine, it just isn't reachable
-    from a phone yet.
-    """
+    """Print a scannable QR of this machine's dashboard URL via the ACTIVE
+    tunnel provider (spec 2026-09-02) — tailscale by default, so the
+    pre-tunnel behavior is unchanged. Degrades informationally (rc 0)."""
     config = _load_config()
-    ts = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
-    url = tailnet.self_dashboard_url(ts.status(), ts.serve_status())
+    sd = state_dir.state_dir()
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        print(f"crr qr: {exc}", file=sys.stderr)
+        return 2
+    provider = _tunnel_provider(config, sel)
+    url = provider.advertise_url() if provider is not None else None
     if url is None:
         port = config.get("dashboard_port")
         print(f"http://127.0.0.1:{port}/  (loopback only)")
-        print(f"To reach it from your phone, run:  tailscale serve --bg {port}")
+        hint = provider.setup_hint() if provider is not None else None
+        if hint:
+            print(f"To reach it from your phone:  {hint}")
         return 0
     print(qr.to_terminal(url))
     print(url)
     return 0
+
+
+def _tunnel_selection(config: cfg.Config, sd) -> tunnel.TunnelSelection:
+    """Effective tunnel selection: SettingsStore override ?? config default
+    (the autokick layering pattern; spec 2026-09-02)."""
+    override = settings.SettingsStore(sd).read_tunnel()
+    return tunnel.select(
+        config.get("tunnel_provider"),
+        config.get("cloudflare_tunnel_name"),
+        config.get("cloudflare_hostname"),
+        override,
+    )
+
+
+def _web_allowed_hosts(config: cfg.Config, sd) -> set[str]:
+    """Host allowlist: loopback + hostname + config extras + the effective
+    cloudflare hostname (spec 2026-09-02 — no manual extras edit needed).
+    A bad tunnel config never breaks web startup: selection errors are
+    ignored here (the tunnel commands report them loudly)."""
+    allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
+    allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError:
+        return allowed
+    if sel.hostname:
+        allowed.add(sel.hostname.lower())
+    return allowed
+
+
+def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection):
+    """The adapter for ``sel.provider`` — None for "none"."""
+    timeout = config.get("interop_timeout_seconds")
+    if sel.provider == "tailscale":
+        return tailscale.RealTailscale(timeout,
+                                       dashboard_port=config.get("dashboard_port"))
+    if sel.provider == "cloudflare":
+        return cloudflared.RealCloudflared(timeout, sel.tunnel_name, sel.hostname)
+    return None
+
+
+def _cmd_tunnel(args: argparse.Namespace) -> int:
+    config = _load_config()
+    sd = state_dir.state_dir()
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        print(f"crr tunnel: {exc}", file=sys.stderr)
+        return 2
+    provider = _tunnel_provider(config, sel)
+    if provider is None:
+        print(f"tunnel provider: none ({sel.origin}) — nothing to manage")
+        if args.action == "status":
+            _warn_other_providers_still_up(config, sel)
+        return 0
+    if args.action == "up":
+        ok, msg = provider.start(config.get("dashboard_port"))
+        if not ok:
+            print(f"crr tunnel up: {msg}", file=sys.stderr)
+            return 2
+        url = provider.advertise_url()
+        print(msg)
+        if url:
+            print(url)
+        return 0
+    if args.action == "down":
+        ok, msg = provider.stop()
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    # status — and name any OTHER provider still up, so switching never
+    # tears something down behind the user's back (spec 2026-09-02).
+    h = provider.health()
+    print(f"provider: {provider.name()} ({sel.origin})")
+    print(f"health: {h.state} — {h.detail}")
+    url = provider.advertise_url()
+    print(f"url: {url}" if url else "url: (not derivable)")
+    _warn_other_providers_still_up(config, sel)
+    return 0
+
+
+def _warn_other_providers_still_up(config: cfg.Config,
+                                   sel: tunnel.TunnelSelection) -> None:
+    """Print a note for any tunnel provider OTHER than the active/selected
+    one (including when the selection is "none") that is still healthy, so
+    `crr tunnel status` never claims nothing is running while something
+    still is (spec 2026-09-02)."""
+    for other_name in ("tailscale", "cloudflare"):
+        if other_name == sel.provider:
+            continue
+        other = _tunnel_provider(
+            config, tunnel.TunnelSelection(other_name, sel.tunnel_name,
+                                           sel.hostname, sel.origin))
+        if other is not None and other.available() and other.health().state == "up":
+            print(f"note: {other_name} is also up — `crr tunnel down` does not "
+                  f"touch it; switch tunnel_provider and run down to stop it")
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
@@ -4594,12 +4699,14 @@ def _cmd_web(args: argparse.Namespace) -> int:
         }
 
     def qr_svg_provider() -> str | None:
-        # Lazy, like diagnostics/discoverable: tailscale status + serve
-        # status are real subprocess calls, so this only runs when the
-        # dashboard's "Add a device" affordance is opened, never on the
-        # poll path. None (serve not live, or no tailnet) degrades to a
-        # 404 in web.handle_request — the <img> just fails to load.
-        url = tailnet.self_dashboard_url(ts_adapter.status(), ts_adapter.serve_status())
+        # Lazy (real subprocess probes) — only runs when "Add a device"
+        # is opened. Follows the ACTIVE tunnel provider (spec 2026-09-02).
+        try:
+            sel = _tunnel_selection(config, sd)
+        except ValueError:
+            return None
+        provider = _tunnel_provider(config, sel)
+        url = provider.advertise_url() if provider is not None else None
         return qr.to_svg(url) if url else None
 
     def machines_provider() -> dict:
@@ -4959,9 +5066,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return out
 
     # Host allowlist: loopback + this host's name + tailnet suffix + any
-    # config.toml extras.
-    allowed = {"127.0.0.1", "localhost", "[::1]", socket.gethostname().lower()}
-    allowed.update(h.lower() for h in config.get("host_allowlist_extras"))
+    # config.toml extras + the effective cloudflare hostname.
+    allowed = _web_allowed_hosts(config, sd)
     handler = make_web_handler(
         provider, allowed, (".ts.net",),
         action_provider=action_provider,
@@ -5432,6 +5538,17 @@ def _reachable_at_boot_report(system: str, wsl: bool, config: cfg.Config) -> int
         # operator specifically, only what was actually read.
         _print_bool_fact("desktop locked", facts.locked)
         _print_bool_fact("autologin enabled", facts.autologin)
+    try:
+        sel = _tunnel_selection(config, state_dir.state_dir())
+        provider = _tunnel_provider(config, sel)
+    except ValueError as exc:
+        print(f"tunnel: misconfigured — {exc}")
+    else:
+        if provider is None:
+            print("tunnel: none")
+        else:
+            h = provider.health()
+            print(f"tunnel: {provider.name()} — {h.state} ({h.detail})")
     return 0
 
 

@@ -1,16 +1,22 @@
-"""Dashboard-managed autokick toggles (spec 2026-08-07, Slice 2 — the
-dropped-Remote-Control watchdog's settings store).
+"""Dashboard-managed settings store: autokick toggles (spec 2026-08-07,
+Slice 2 — the dropped-Remote-Control watchdog's settings store) plus tunnel
+overrides (spec 2026-09-02).
 
 A sibling to ``crr/core/exclusions.py``: same JSON-in-the-state-dir,
 atomic-write, degrade-to-default-on-read discipline (the dashboard cannot
 write ``config.toml`` — see exclusions.py's docstring for why). This one
-holds two knobs instead of one:
+holds three knobs, all under separate top-level keys in the same file so no
+writer can clobber another's key when it rewrites the store:
 
 - a GLOBAL ``autokick`` override, tri-state (unset / true / false) — the
   dashboard's override of ``config.toml``'s ``remote_control_autokick``
   default. Unset means "fall back to the config default".
 - a per-**session-id** map of bool overrides, pinning one session in or out
   regardless of the resolved global value.
+- a ``tunnel`` override (provider / cloudflare tunnel name / cloudflare
+  hostname), each field independently unset-or-set — the dashboard's
+  override of ``config.toml``'s tunnel keys. See ``read_tunnel``/
+  ``write_tunnel``.
 
 Keyed by session id, NEVER pid: a pid is recycled by the OS, and a
 pid-keyed opt-out would silently transfer to an unrelated later session
@@ -24,21 +30,32 @@ two-level truth table: global OFF (whether via an explicit override or an
 unset override falling back to a False config default) is a hard switch —
 nothing overrides it, and per-session values are RETAINED rather than
 discarded so flipping global back on restores them exactly.
+
+Every writer (``write_global_autokick``, ``write_session_autokick``,
+``write_tunnel``) rewrites the whole file, so each one carries the OTHER
+keys forward via ``_carry_autokick``/``_carry_tunnel`` rather than setting
+only the key it owns — otherwise, e.g., flipping the global autokick switch
+would silently erase a stored tunnel override.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from crr.core import contracts
 from crr.core.journal import read_json_file, write_json_atomic
+from crr.core.tunnel import TUNNEL_PROVIDERS
 
 FILENAME = "settings.json"
 
 # A malformed or hostile POST must not be able to grow the per-session map
 # without limit (mirrors exclusions.py's MAX_ENTRIES).
 MAX_SESSION_ENTRIES = 500
+
+# The tunnel override's field names (spec 2026-09-02) — shared by
+# SettingsStore.read_tunnel/write_tunnel and the carry-forward helper below.
+_TUNNEL_FIELDS = ("provider", "cloudflare_tunnel_name", "cloudflare_hostname")
 
 
 class SettingsError(ValueError):
@@ -125,8 +142,42 @@ def _normalize_sessions(value: Any) -> dict[str, bool]:
     return out
 
 
+def _normalize_tunnel(value: Any) -> dict[str, str]:
+    """Filter a stored/incoming ``tunnel`` mapping down to recognized,
+    non-empty string fields. Never raises — used only to CARRY existing
+    state forward from ``_read_raw()``, where the value has already passed
+    (or, if corrupt, simply won't survive) this filter; validation of a
+    caller-supplied value belongs to ``SettingsStore.write_tunnel``."""
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        f: value[f] for f in _TUNNEL_FIELDS
+        if isinstance(value.get(f), str) and value.get(f)
+    }
+
+
+def _carry_autokick(payload: dict[str, Any], raw: dict[str, Any]) -> None:
+    """Carry the global autokick override forward unchanged. Shared by every
+    writer that does NOT itself set autokick, so none of them can drop it —
+    the "one writer must never discard another's state" requirement."""
+    global_value = raw.get("autokick")
+    if isinstance(global_value, bool):
+        payload["autokick"] = global_value
+
+
+def _carry_tunnel(payload: dict[str, Any], raw: dict[str, Any]) -> None:
+    """Carry the tunnel override forward unchanged. Shared by every writer
+    that does NOT itself set tunnel fields, for the same reason as
+    ``_carry_autokick``: the autokick writers predate the tunnel key and
+    must not silently drop it when they rewrite the store."""
+    tunnel = _normalize_tunnel(raw.get("tunnel"))
+    if tunnel:
+        payload["tunnel"] = tunnel
+
+
 class SettingsStore:
-    """Read/write the dashboard-managed autokick toggles file."""
+    """Read/write the dashboard-managed settings file (autokick toggles and
+    tunnel overrides — see the module docstring)."""
 
     def __init__(self, state_dir: Path) -> None:
         self._path = Path(state_dir) / FILENAME
@@ -219,12 +270,14 @@ class SettingsStore:
         """
         if value is not None and not isinstance(value, bool):
             raise SettingsError("autokick must be a bool or None")
-        sessions = _normalize_sessions(self._read_raw().get("sessions", {}))
+        raw = self._read_raw()
+        sessions = _normalize_sessions(raw.get("sessions", {}))
         payload: dict[str, Any] = {
             "v": contracts.SETTINGS_STORE_VERSION, "sessions": sessions,
         }
         if value is not None:
             payload["autokick"] = value
+        _carry_tunnel(payload, raw)
         write_json_atomic(self._path, payload)
 
     def write_session_autokick(self, sid: str, value: bool) -> None:
@@ -242,7 +295,68 @@ class SettingsStore:
         payload: dict[str, Any] = {
             "v": contracts.SETTINGS_STORE_VERSION, "sessions": sessions,
         }
-        global_value = raw.get("autokick")
-        if isinstance(global_value, bool):
-            payload["autokick"] = global_value
+        _carry_autokick(payload, raw)
+        _carry_tunnel(payload, raw)
+        write_json_atomic(self._path, payload)
+
+    # --- tunnel overrides (spec 2026-09-02) -----------------------------
+    # GUI-writable overrides over config.toml's tunnel keys. None = "no
+    # override; config.toml rules". Stored under one "tunnel" key so the
+    # autokick writers and these can never clobber each other's state.
+
+    def read_tunnel(self) -> dict[str, str | None]:
+        """The dashboard's tunnel overrides, one entry per field in
+        ``_TUNNEL_FIELDS``, each ``None`` when unset (fall back to
+        ``config.toml``). A stored ``""`` reads back as ``None`` too —
+        ``""`` means "unset" everywhere in the tunnel design (it's
+        ``config.toml``'s own empty-string default), and letting a stored
+        empty string survive to the caller would hand
+        ``crr.core.tunnel.select``'s override-wins logic a value that is
+        falsy but still "present", silently defeating the config fallback.
+        Same degrade-to-unset-on-corruption behaviour as the autokick
+        reads: a missing or corrupt file (``_read_raw`` returns ``{}``)
+        reads as all-``None``, never raises.
+        """
+        raw = _normalize_tunnel(self._read_raw().get("tunnel"))
+        return {f: raw.get(f) for f in _TUNNEL_FIELDS}
+
+    def write_tunnel(
+        self,
+        provider: str | None = None,
+        cloudflare_tunnel_name: str | None = None,
+        cloudflare_hostname: str | None = None,
+    ) -> None:
+        """Replace the stored tunnel override with exactly these three
+        fields — a full overwrite, not a merge: a field passed as ``None``
+        clears it, so a caller that wants to change one field while
+        keeping another must pass the other's current value back in (mirror
+        it from a prior ``read_tunnel()``). Raises ``SettingsError`` on an
+        unrecognized ``provider`` or a non-string field value; the
+        autokick override and session map are re-validated and carried
+        forward unchanged, same "must not discard the other writer's
+        state" requirement ``write_global_autokick`` documents.
+        """
+        if provider is not None and provider not in TUNNEL_PROVIDERS:
+            raise SettingsError(
+                f"tunnel provider must be one of {TUNNEL_PROVIDERS}, got {provider!r}"
+            )
+        for label, value in (("cloudflare_tunnel_name", cloudflare_tunnel_name),
+                             ("cloudflare_hostname", cloudflare_hostname)):
+            if value is not None and not isinstance(value, str):
+                raise SettingsError(f"{label} must be a string or None")
+        raw = self._read_raw()
+        sessions = _normalize_sessions(raw.get("sessions", {}))
+        payload: dict[str, Any] = {
+            "v": contracts.SETTINGS_STORE_VERSION, "sessions": sessions,
+        }
+        _carry_autokick(payload, raw)
+        tunnel_payload = {
+            k: v for k, v in (
+                ("provider", provider),
+                ("cloudflare_tunnel_name", cloudflare_tunnel_name),
+                ("cloudflare_hostname", cloudflare_hostname),
+            ) if v is not None
+        }
+        if tunnel_payload:
+            payload["tunnel"] = tunnel_payload
         write_json_atomic(self._path, payload)
