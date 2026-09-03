@@ -5527,6 +5527,17 @@ def _reachable_at_boot_report(system: str, wsl: bool, config: cfg.Config) -> int
         # operator specifically, only what was actually read.
         _print_bool_fact("desktop locked", facts.locked)
         _print_bool_fact("autologin enabled", facts.autologin)
+    try:
+        sel = _tunnel_selection(config, state_dir.state_dir())
+        provider = _tunnel_provider(config, sel)
+    except ValueError as exc:
+        print(f"tunnel: misconfigured — {exc}")
+    else:
+        if provider is None:
+            print("tunnel: none")
+        else:
+            h = provider.health()
+            print(f"tunnel: {provider.name()} — {h.state} ({h.detail})")
     return 0
 
 

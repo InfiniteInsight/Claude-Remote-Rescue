@@ -284,13 +284,22 @@ from crr.adapters.boot_windows import BootFacts
 
 
 def _cfg():
+    # tunnel_provider: "none" (spec 2026-09-02, Task 9) — these two report
+    # tests drive _reachable_at_boot_report, which now also resolves a
+    # tunnel selection; "none" keeps that resolution a no-op so the boot
+    # verdict assertions below stay the only thing under test here.
     return {"boot_headless_window_seconds": 300, "boot_preferred_tailnet": "",
-            "interop_timeout_seconds": 5, "dashboard_port": 8765}
+            "interop_timeout_seconds": 5, "dashboard_port": 8765,
+            "tunnel_provider": "none"}
 
 
-def test_report_says_headless_when_the_facts_show_it(monkeypatch, capsys):
+def test_report_says_headless_when_the_facts_show_it(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli, "_load_config", _cfg)
+    # Task 9 added a real (unpatched) _tunnel_selection call to the report
+    # path; without this, SettingsStore would read the developer's actual
+    # state dir instead of a hermetic tmp one.
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_windows, "read_facts",
                         lambda **k: BootFacts(0.0, 39.0, None, True, False))
     assert cli.main(["reachable-at-boot"]) == 0
@@ -298,9 +307,10 @@ def test_report_says_headless_when_the_facts_show_it(monkeypatch, capsys):
     assert "headless" in out and "survivable" in out
 
 
-def test_report_never_claims_headless_on_unknown(monkeypatch, capsys):
+def test_report_never_claims_headless_on_unknown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli.state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.boot_windows, "read_facts",
                         lambda **k: BootFacts(None, None, None, None, None))
     cli.main(["reachable-at-boot"])

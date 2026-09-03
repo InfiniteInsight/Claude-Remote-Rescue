@@ -6788,3 +6788,52 @@ def test_web_allowed_hosts_ignores_bad_tunnel_config(tmp_path, monkeypatch):
     allowed = cli._web_allowed_hosts(cli.cfg.Config(), tmp_path)
     assert "127.0.0.1" in allowed
     assert "localhost" in allowed
+
+
+# --- reachable-at-boot names the active tunnel's health (spec 2026-09-02) --
+
+def test_reachable_at_boot_reports_tunnel_health_tri_state(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(health_state="unknown")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    # Boot-facts monkeypatching mirrored (verbatim, minus _load_config —
+    # deliberately NOT stubbed: state_dir above already points _load_config
+    # at an empty tmp_path, so it returns real cfg.Config() defaults, which
+    # is what lets the real (unpatched) _tunnel_selection resolve cleanly)
+    # from the nearest existing reachable-at-boot report test,
+    # tests/test_boot_adapters.py::test_report_says_headless_when_the_facts_show_it.
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
+    rc = cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tunnel: cloudflare — unknown" in out   # unknown stays unknown (F16)
+
+
+def test_reachable_at_boot_reports_no_tunnel(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
+    rc = cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tunnel: none" in out
+
+
+def test_reachable_at_boot_reports_misconfigured_tunnel_and_still_exits_0(
+        tmp_path, monkeypatch, capsys):
+    # A bad tunnel override must not turn a report command into a failure —
+    # unlike `crr tunnel`/`crr qr` (which exit 2), the boot report keeps
+    # reporting everything else and just names the tunnel as misconfigured.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.boot_windows, "read_facts",
+                        lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
+    rc = cli.main(["reachable-at-boot"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tunnel: misconfigured" in out and "ngrok" in out
