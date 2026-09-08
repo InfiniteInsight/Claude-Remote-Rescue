@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 66  # v66: consolidate buttons — drop Kick/Dismiss/Restore, Remove archives first
+PAGE_VERSION = 67  # v67: strike badge — cards climbing toward reviver give-up say so (2026-09-08)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -51,6 +51,7 @@ _NOTICE_MS_PLACEHOLDER = "@NOTICE_MS@"
 _RELOAD_DELAY_MS_PLACEHOLDER = "@RELOAD_DELAY_MS@"
 _DIAG_ERR_CAP_PLACEHOLDER = "@DIAG_ERR_CAP@"
 _FLASH_MS_PLACEHOLDER = "@FLASH_MS@"
+_ZOMBIE_STRIKES_PLACEHOLDER = "@ZOMBIE_STRIKES@"
 _FILTER_DEBOUNCE_MS_PLACEHOLDER = "@FILTER_DEBOUNCE_MS@"
 _REAUTH_SUCCESS_MS_PLACEHOLDER = "@REAUTH_SUCCESS_MS@"
 _GIT_SHORT_PLACEHOLDER = "@GIT_SHORT@"
@@ -118,6 +119,7 @@ def render_page(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    zombie_strikes: int | None = None,
     git_short: str = "",
 ) -> str:
     """Serve-time substitution of version + configured intervals into the page."""
@@ -144,6 +146,7 @@ def render_page(
         if reauth_success_display_ms is None
         else reauth_success_display_ms
     )
+    strikes_max = cfg.DEFAULTS["zombie_strikes"] if zombie_strikes is None else zombie_strikes
     return (
         load_page()
         .replace(_VERSION_PLACEHOLDER, str(version))
@@ -154,6 +157,7 @@ def render_page(
         .replace(_RELOAD_DELAY_MS_PLACEHOLDER, str(int(reload_delay)))
         .replace(_DIAG_ERR_CAP_PLACEHOLDER, str(int(diag_err_cap)))
         .replace(_FLASH_MS_PLACEHOLDER, str(int(flash)))
+        .replace(_ZOMBIE_STRIKES_PLACEHOLDER, str(int(strikes_max)))
         .replace(_FILTER_DEBOUNCE_MS_PLACEHOLDER, str(int(debounce)))
         .replace(_REAUTH_SUCCESS_MS_PLACEHOLDER, str(int(reauth_success)))
         .replace(_GIT_SHORT_PLACEHOLDER, git_short)
@@ -308,6 +312,7 @@ def handle_request(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    zombie_strikes: int | None = None,
     git_short: str = "",
 ) -> Response:
     # Host allowlist first — before any routing or work (DNS-rebinding defense).
@@ -362,7 +367,8 @@ def handle_request(
                 page_version, poll_seconds=poll_seconds, version_check_seconds=version_check_seconds,
                 confirm_arm_seconds=confirm_arm_seconds, notice_seconds=notice_seconds,
                 reload_delay_ms=reload_delay_ms, diag_error_display_cap=diag_error_display_cap,
-                flash_ms=flash_ms, filter_debounce_ms=filter_debounce_ms,
+                flash_ms=flash_ms, zombie_strikes=zombie_strikes,
+                filter_debounce_ms=filter_debounce_ms,
                 reauth_success_display_ms=reauth_success_display_ms,
                 git_short=git_short,
             )

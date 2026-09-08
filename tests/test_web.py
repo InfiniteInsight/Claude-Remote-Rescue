@@ -974,8 +974,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_66():
-    """v66: consolidate buttons — drop Kick/Dismiss/Restore; Remove archives first.
+def test_page_version_is_67():
+    """v67: strike badge — a card climbing toward reviver give-up says so
+    ("⚠ strike N/max — process died upon revival"; the max is the
+    zombie_strikes config prior injected via @ZOMBIE_STRIKES@ — during the
+    2026-09-08 crash-loop incident the escalation was visible only in the
+    CLI, invisible on the surface the user was actually watching).
+    (v66: consolidate buttons — drop Kick/Dismiss/Restore; Remove archives first.
     (v65: reopen on LIVE+tmux restarts with current flags.
     (v64: build version footer (page version + git short hash).
     (v63: skip-permissions toggle + always-show Reopen for live sessions.
@@ -1008,7 +1013,30 @@ def test_page_version_is_66():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 66
+    assert web.PAGE_VERSION == 67
+
+
+def test_page_has_a_strike_badge_wired_to_revive_strikes():
+    # Reviver hardening follow-up (2026-09-08): strike escalation must be
+    # visible on the dashboard/phone, not only in the CLI. The badge text
+    # carries the same reason wording the CLI uses.
+    page = web.load_page()
+    assert "strike-badge" in page
+    assert "revive_strikes" in page
+    assert "process died upon revival" in page
+    assert "@ZOMBIE_STRIKES@" in page  # the max is a config prior, never a bare literal
+
+
+def test_render_page_substitutes_zombie_strikes():
+    body = web.render_page(zombie_strikes=7)
+    assert "@ZOMBIE_STRIKES@" not in body
+    assert "var STRIKE_MAX = 7;" in body
+
+
+def test_render_page_defaults_zombie_strikes_from_config():
+    body = web.render_page()
+    from crr.core import config as cfg
+    assert f"var STRIKE_MAX = {cfg.DEFAULTS['zombie_strikes']};" in body
 
 
 def test_page_renders_the_parked_state():

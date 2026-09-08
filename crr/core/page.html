@@ -103,6 +103,10 @@
   .badge.dup-badge { margin-left: 8px; background: #1e2740; color: #9fb0f5; text-transform: none; letter-spacing: 0; }
   .badge.worktree-badge { margin-left: 8px; background: #23281c; color: #b7c48a; text-transform: none; letter-spacing: 0; }
   .badge.dup-badge.uncertain { background: #3a2f12; color: #e0a53b; }
+  /* Reviver strike escalation: amber, not the crashed red — the session is
+     climbing toward give-up, which is a warning about the future, not the
+     current state (the state badge already says crashed/restored). */
+  .badge.strike-badge { margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none; letter-spacing: 0; }
   .badge.pressure-tight { margin-left: 8px; background: #3a2f12; color: #e0a53b; text-transform: none; letter-spacing: 0; }
   .badge.pressure-will-compact { margin-left: 8px; background: #3a1616; color: #e05252; text-transform: none; letter-spacing: 0; }
   .badge.latest-badge { margin-left: 8px; background: #123a3a; color: #46c2b0; text-transform: none; letter-spacing: 0; }
@@ -569,6 +573,10 @@ var searchMatchSids = null;
 var flashSid = null, flashUntil = 0;
 var FLASH_MS = @FLASH_MS@;
 
+// zombie_strikes config prior (never a bare literal here): the reviver
+// abandons a session to the archive when its strikes reach this.
+var STRIKE_MAX = @ZOMBIE_STRIKES@;
+
 function passesFilter(s) {
   if (searchMatchSids && !searchMatchSids[s.session_id]) return false;
   if (filterKey === "crashed") return s.state === "crashed";
@@ -798,6 +806,16 @@ function renderCard(s, uncertain, groupColor, latest) {
     var pb3 = el("span", "badge unknown-badge");
     pb3.textContent = "context unknown";
     top.appendChild(pb3);
+  }
+  // Reviver strike escalation (2026-09-08): a session climbing toward
+  // give-up says so HERE — during the crash-loop incident the CLI's strike
+  // line existed but the dashboard (the surface actually being watched)
+  // showed the session reappearing with no explanation.
+  if (s.revive_strikes > 0) {
+    var stb = el("span", "badge strike-badge");
+    stb.textContent = "⚠ strike " + s.revive_strikes + "/" + STRIKE_MAX +
+      " — process died upon revival";
+    top.appendChild(stb);
   }
   // Can the phone reach this session? Read from Claude Code's OWN connection
   // state (spec 2026-08-09), not counted out of transcript records. A
