@@ -462,12 +462,15 @@
       <h3 style="margin:0 0 6px; font-size:12px; color:#8a93a2; font-weight:600;">Tunnel</h3>
       <label style="display:block; margin-bottom:6px;">Provider
         <select id="tunnel-provider" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
-          <option value="">default (config.toml)</option>
           <option value="tailscale">tailscale</option>
           <option value="cloudflare">cloudflare</option>
           <option value="none">none</option>
         </select>
       </label>
+      <div style="margin:0 0 6px;">
+        <span id="tunnel-default-tag" hidden class="badge dup-badge" title="This value comes from config.toml; picking anything stores a dashboard override.">using default</span>
+        <a id="tunnel-reset" href="#" hidden style="font-size:12px;">Reset to default</a>
+      </div>
       <div id="tunnel-hint" class="note" style="padding:0; margin:0 0 8px;"></div>
       <div id="tunnel-cf-fields" hidden>
         <label style="display:block; margin-bottom:6px;">Cloudflare tunnel name
@@ -2112,24 +2115,35 @@ var TUNNEL_HINTS = {
   "tailscale": "No settings needed \u2014 uses this machine's tailnet identity.",
   "cloudflare": "Needs a one-time cloudflared setup (see docs/tunnels.md), plus the tunnel name and hostname below.",
   "none": "No tunnel \u2014 the dashboard stays reachable on this machine only.",
-  "invalid": "The stored override names an unknown provider \u2014 pick a valid one and Save."
+  "invalid": "The stored provider override is not a real provider \u2014 pick one and Save to repair it."
 };
 var tunnelConfigDefault = "";
+// The provider override the NEXT Save will store (null = no override, the
+// config default rules). The picker always shows the EFFECTIVE provider —
+// GUI users see a setting, not the config/override plumbing; the plumbing
+// surfaces only as the "using default" tag and the Reset link.
+var tunnelProviderOverride = null;
+var tunnelPayloadInvalid = false;
 
 function updateTunnelVisibility() {
-  var picked = document.getElementById("tunnel-provider").value;
-  var effective = picked || tunnelConfigDefault;
+  var effective = document.getElementById("tunnel-provider").value;
   document.getElementById("tunnel-cf-fields").hidden = effective !== "cloudflare";
-  var hint = TUNNEL_HINTS[effective] || "";
-  if (!picked && tunnelConfigDefault) {
-    hint = "Following config.toml (" + tunnelConfigDefault + "). " + hint;
-  }
-  document.getElementById("tunnel-hint").textContent = hint;
+  document.getElementById("tunnel-hint").textContent =
+    tunnelPayloadInvalid ? TUNNEL_HINTS.invalid : (TUNNEL_HINTS[effective] || "");
+  document.getElementById("tunnel-default-tag").hidden = tunnelProviderOverride !== null;
+  document.getElementById("tunnel-reset").hidden = tunnelProviderOverride === null;
 }
 
 function renderTunnel(data) {
   tunnelConfigDefault = data.config_default || "";
-  document.getElementById("tunnel-provider").value = data.override || "";
+  tunnelPayloadInvalid = data.provider === "invalid";
+  // An invalid stored override cannot be shown in the picker; show the
+  // config default and treat the override as cleared, so the user's next
+  // Save repairs the store instead of preserving the bad value.
+  tunnelProviderOverride = tunnelPayloadInvalid ? null : (data.override || null);
+  document.getElementById("tunnel-provider").value =
+    tunnelPayloadInvalid ? (tunnelConfigDefault || "tailscale")
+                         : (data.provider || tunnelConfigDefault || "tailscale");
   var name = document.getElementById("tunnel-cf-name");
   var host = document.getElementById("tunnel-cf-hostname");
   name.value = data.override_tunnel_name || "";
@@ -2166,7 +2180,7 @@ function saveTunnel() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      provider: document.getElementById("tunnel-provider").value || null,
+      provider: tunnelProviderOverride,
       cloudflare_tunnel_name: document.getElementById("tunnel-cf-name").value || null,
       cloudflare_hostname: document.getElementById("tunnel-cf-hostname").value || null
     })
@@ -2200,7 +2214,20 @@ function tunnelAction(action) {
     .finally(function () { btn.disabled = false; });
 }
 
-document.getElementById("tunnel-provider").addEventListener("change", updateTunnelVisibility);
+document.getElementById("tunnel-provider").addEventListener("change", function () {
+  // An explicit pick is an override, even if it equals the config default —
+  // predictable beats clever ("I chose this" should survive a config edit).
+  tunnelProviderOverride = this.value;
+  tunnelPayloadInvalid = false;
+  updateTunnelVisibility();
+});
+document.getElementById("tunnel-reset").addEventListener("click", function (e) {
+  e.preventDefault();
+  tunnelProviderOverride = null;
+  document.getElementById("tunnel-provider").value = tunnelConfigDefault || "tailscale";
+  updateTunnelVisibility();
+  saveTunnel();  // Reset acts now, like a button — no second Save step
+});
 document.getElementById("tunnel-save").addEventListener("click", saveTunnel);
 document.getElementById("tunnel-up").addEventListener("click", function () { tunnelAction("up"); });
 document.getElementById("tunnel-down").addEventListener("click", function () { tunnelAction("down"); });
