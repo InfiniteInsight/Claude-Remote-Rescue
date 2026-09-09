@@ -1635,6 +1635,45 @@ def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection):
     return None
 
 
+def _tunnel_payload(config: cfg.Config, sd) -> dict:
+    """The /api/tunnel GET payload. Never raises: a corrupt override renders
+    provider="invalid" with the ValueError text as health_detail (the modal
+    must show the problem; a 500 would show nothing)."""
+    store = settings.SettingsStore(sd)
+    override = store.read_tunnel()
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        return {
+            "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+            "provider": "invalid", "origin": "override",
+            "override": override.get("provider"),
+            "config_default": config.get("tunnel_provider"),
+            "cloudflare_tunnel_name": override.get("cloudflare_tunnel_name")
+                or config.get("cloudflare_tunnel_name"),
+            "cloudflare_hostname": override.get("cloudflare_hostname")
+                or config.get("cloudflare_hostname"),
+            "health": "unknown", "health_detail": str(exc),
+            "url": None, "degraded": store.is_degraded(),
+        }
+    provider = _tunnel_provider(config, sel)
+    if provider is None:
+        health, detail, url = "none", "no tunnel provider selected", None
+    else:
+        h = provider.health()
+        health, detail, url = h.state, h.detail, provider.advertise_url()
+    return {
+        "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+        "provider": sel.provider, "origin": sel.origin,
+        "override": override.get("provider"),
+        "config_default": config.get("tunnel_provider"),
+        "cloudflare_tunnel_name": sel.tunnel_name,
+        "cloudflare_hostname": sel.hostname,
+        "health": health, "health_detail": detail,
+        "url": url, "degraded": store.is_degraded(),
+    }
+
+
 def _cmd_tunnel(args: argparse.Namespace) -> int:
     config = _load_config()
     sd = state_dir.state_dir()
@@ -4152,6 +4191,8 @@ def make_web_handler(
     machines_provider: Callable[[], dict] | None = None,
     reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
+    tunnel_provider_fn: Callable[[], dict] | None = None,
+    tunnel_writer: Callable[[object], dict] | None = None,
     auth_enabled_fn: Callable[[], bool] | None = None,
     auth_check: Callable[[str], bool] | None = None,
     setup_mode_fn: Callable[[], bool] | None = None,
@@ -4211,6 +4252,8 @@ def make_web_handler(
                 machines_provider=machines_provider,
                 reauth_provider=reauth_provider,
                 reauth_code_provider=reauth_code_provider,
+                tunnel_provider_fn=tunnel_provider_fn,
+                tunnel_writer=tunnel_writer,
                 auth_enabled=auth_enabled and auth_check is not None,
                 auth_check=auth_check,
                 # web.handle_request's gate checks auth_enabled first (elif
@@ -5054,6 +5097,23 @@ def _cmd_web(args: argparse.Namespace) -> int:
         _write_global_autokick_locked(sd, value)
         return settings_provider()
 
+    def tunnel_settings_provider() -> dict:
+        payload = _tunnel_payload(config, sd)
+        contracts.validate_tunnel_payload(payload)  # validate our own output
+        return payload
+
+    def tunnel_settings_writer(data: dict) -> dict:
+        # SettingsStore.write_tunnel raises SettingsError (a ValueError) on a
+        # bad provider string -> 400 with message, same as settings_writer.
+        # Full-replace by design (slice-1 ledger): the page sends all three.
+        with mutation_lock(sd):
+            settings.SettingsStore(sd).write_tunnel(
+                provider=data["provider"] or None,
+                cloudflare_tunnel_name=data["cloudflare_tunnel_name"] or None,
+                cloudflare_hostname=data["cloudflare_hostname"] or None,
+            )
+        return tunnel_settings_provider()
+
     def recall_provider(query: str, sid: str | None) -> dict:
         # Lazy GET (never the poll path): print-only transcript search, the
         # dashboard surface of `crr recall`. sid -> that one session; no sid ->
@@ -5102,6 +5162,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
+        tunnel_provider_fn=tunnel_settings_provider,
+        tunnel_writer=tunnel_settings_writer,
         # Fail-closed on a corrupt store (spec 2026-08-26 revision): the
         # gate must activate even though `login_enabled()` itself stays
         # False on corrupt (see dashboard_auth.DashboardAuthStore._read).

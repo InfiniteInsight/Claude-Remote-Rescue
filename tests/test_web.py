@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from crr.core import contracts
 from crr.core import web
 
 
@@ -61,6 +62,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
             machines_provider=None, reauth_provider=None, reauth_code_provider=None,
+            tunnel_provider=None, tunnel_writer=None,
             query="", auth_enabled=False, auth_check=None, setup_mode=False,
             login_provider=None,
             logout_provider=None, dashboard_auth_provider=None, bootstrap_state=None):
@@ -83,6 +85,8 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
+        tunnel_provider_fn=tunnel_provider,
+        tunnel_writer=tunnel_writer,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -296,6 +300,73 @@ def test_settings_post_surfaces_a_writer_rejection_as_400():
 def test_settings_post_missing_writer_is_503():
     resp = _handle(method="POST", path="/api/settings", headers=_JSON,
                    body=b'{"autokick": true}')
+    assert resp.status == 503
+
+
+def test_tunnel_get_404_without_provider():
+    assert _handle(path="/api/tunnel").status == 404
+
+
+def test_tunnel_get_returns_provider_payload():
+    payload = {
+        "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+        "provider": "tailscale", "origin": "configured", "override": None,
+        "config_default": "tailscale", "cloudflare_tunnel_name": "",
+        "cloudflare_hostname": "", "health": "up",
+        "health_detail": "tailscale serve is live",
+        "url": "https://x.ts.net/", "degraded": False,
+    }
+    contracts.validate_tunnel_payload(payload)  # the shape is contracted
+    resp = _handle(path="/api/tunnel", tunnel_provider=lambda: payload)
+    assert resp.status == 200
+    assert json.loads(resp.body)["provider"] == "tailscale"
+
+
+def test_tunnel_post_writes_and_returns_payload():
+    seen = {}
+
+    def writer(data):
+        seen.update(data)
+        return {"contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+                "provider": "cloudflare", "origin": "override", "override": "cloudflare",
+                "config_default": "tailscale", "cloudflare_tunnel_name": "crr",
+                "cloudflare_hostname": "crr.example.com", "health": "down",
+                "health_detail": "unit inactive", "url": "https://crr.example.com/",
+                "degraded": False}
+
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=json.dumps({
+                       "provider": "cloudflare", "cloudflare_tunnel_name": "crr",
+                       "cloudflare_hostname": "crr.example.com",
+                   }).encode("utf-8"),
+                   tunnel_writer=writer)
+    assert resp.status == 200
+    assert seen["provider"] == "cloudflare"
+
+
+def test_tunnel_post_rejects_bad_shape_and_bad_value():
+    def bad_writer(_data):
+        raise ValueError("bad provider")
+
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=b'{"nope": 1}', tunnel_writer=bad_writer)
+    assert resp.status == 400  # missing keys rejected before the writer runs
+
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=json.dumps({
+                       "provider": "ngrok", "cloudflare_tunnel_name": None,
+                       "cloudflare_hostname": None,
+                   }).encode("utf-8"),
+                   tunnel_writer=bad_writer)
+    assert resp.status == 400 and b"bad provider" in resp.body
+
+
+def test_tunnel_post_missing_writer_is_503():
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=json.dumps({
+                       "provider": "cloudflare", "cloudflare_tunnel_name": "crr",
+                       "cloudflare_hostname": "crr.example.com",
+                   }).encode("utf-8"))
     assert resp.status == 503
 
 

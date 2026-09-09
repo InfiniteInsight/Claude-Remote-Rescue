@@ -6707,6 +6707,36 @@ def test_tunnel_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
     assert "ngrok" in err
 
 
+def test_tunnel_settings_provider_payload_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(name="tailscale", health_state="up",
+                               url="https://x.ts.net/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_tunnel_payload(payload)
+    assert payload["provider"] == "tailscale"
+    assert payload["health"] == "up"
+    assert payload["url"] == "https://x.ts.net/"
+
+
+def test_tunnel_payload_never_raises_on_corrupt_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)  # helper exists since slice 1
+    payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_tunnel_payload(payload)
+    assert payload["provider"] == "invalid"
+    assert payload["health"] == "unknown"
+    assert "ngrok" in payload["health_detail"]
+
+
+def test_tunnel_payload_provider_none_health_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(provider="none")
+    payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
+    assert payload["provider"] == "none" and payload["health"] == "none"
+
+
 def test_tunnel_status_names_the_other_provider_when_it_is_also_up(
         tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)

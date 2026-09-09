@@ -35,7 +35,8 @@ def _untracked_row():
 
 def test_every_lazy_payload_has_a_version_constant():
     for name in ("UNTRACKED_CONTRACT_VERSION", "RECALL_CONTRACT_VERSION",
-                 "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION"):
+                 "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION",
+                 "TUNNEL_PAYLOAD_CONTRACT_VERSION"):
         assert getattr(contracts, name) == 1, name
     # discoverable moved to v2 when #34 added `cwd_source` to its rows, then
     # v3 when the same issue added worktree collapse (`dup_count`/`dup_members`).
@@ -76,10 +77,27 @@ def test_settings_payload_roundtrips():
     })
 
 
+def test_tunnel_payload_roundtrips():
+    contracts.validate_tunnel_payload({
+        "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+        "provider": "tailscale", "origin": "configured", "override": None,
+        "config_default": "tailscale", "cloudflare_tunnel_name": "",
+        "cloudflare_hostname": "", "health": "up",
+        "health_detail": "tailscale serve is live",
+        "url": "https://x.ts.net/", "degraded": False,
+    })
+
+
 @pytest.mark.parametrize("validator,payload", [
     ("validate_discoverable_payload", _rows_payload(99)),
     ("validate_untracked_payload", _rows_payload(99)),
     ("validate_recall_payload", {"contract": 99, "matches": [], "scanned": 0, "skipped": 0}),
+    ("validate_tunnel_payload", {
+        "contract": 99, "provider": "tailscale", "origin": "configured",
+        "override": None, "config_default": "tailscale",
+        "cloudflare_tunnel_name": "", "cloudflare_hostname": "", "health": "up",
+        "health_detail": "tailscale serve is live", "url": None, "degraded": False,
+    }),
 ])
 def test_wrong_contract_version_is_rejected(validator, payload):
     with pytest.raises(contracts.ContractError):
@@ -163,6 +181,7 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
         ("exclusions_provider", (), contracts.validate_exclusions_payload),
         ("settings_provider", (), contracts.validate_settings_payload),
         ("recall_provider", ("zzz-no-such-term-zzz", None), contracts.validate_recall_payload),
+        ("tunnel_provider_fn", (), contracts.validate_tunnel_payload),
     ]
     saw_rows = False
     for name, args, validate in checks:
