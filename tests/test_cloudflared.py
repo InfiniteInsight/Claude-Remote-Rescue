@@ -30,6 +30,25 @@ def test_start_refuses_without_config_fields(monkeypatch):
     assert "cloudflare_tunnel_name" in msg and "cloudflare_hostname" in msg
 
 
+def test_available_requires_systemctl_too(monkeypatch):
+    # Spec: on hosts without systemd --user the adapter reports the gap —
+    # available() must agree with start()/stop()'s gate, not contradict it.
+    monkeypatch.setattr(cloudflared.shutil, "which",
+                        lambda b: "/usr/bin/cloudflared" if b == "cloudflared" else None)
+    assert cloudflared.RealCloudflared(2.0, "crr", "crr.example.com").available() is False
+    monkeypatch.setattr(cloudflared.shutil, "which", lambda b: "/usr/bin/" + b)
+    assert cloudflared.RealCloudflared(2.0, "crr", "crr.example.com").available() is True
+
+
+def test_refusal_message_names_the_real_surfaces(monkeypatch):
+    monkeypatch.setattr(cloudflared.shutil, "which", lambda b: "/usr/bin/" + b)
+    cf = cloudflared.RealCloudflared(2.0, "", "")
+    ok, msg = cf.start(8377)
+    assert not ok
+    assert "dashboard Settings" in msg  # the GUI exists now (slice 2)
+    assert "config.toml" in msg
+
+
 def test_start_refuses_when_tunnel_info_fails(monkeypatch, tmp_path):
     # `cloudflared tunnel info <name>` nonzero = credentials/tunnel absent:
     # the one-time login/create/route setup has not been done.

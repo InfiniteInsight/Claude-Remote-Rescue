@@ -1693,6 +1693,44 @@ def _tunnel_action(config: cfg.Config, sd, action: str) -> dict:
     return {"ok": ok, "message": msg, "tunnel": _tunnel_payload(config, sd)}
 
 
+def _machines_payload(config: cfg.Config, sd) -> dict:
+    """The launcher panel's /api/machines payload, following the ACTIVE
+    tunnel provider (spec 2026-09-08, tunnel slice 2): tailscale keeps the
+    existing tagged-peer list; cloudflare has no peer concept, so the
+    launcher shows only this machine, at the tunnel's advertised URL. A
+    corrupt/unknown override (ValueError) falls through to the tailnet
+    path rather than raising — same "never break the launcher" posture as
+    the rest of this module."""
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError:
+        sel = None
+    if sel is not None and sel.provider == "cloudflare":
+        provider = _tunnel_provider(config, sel)
+        url = provider.advertise_url() if provider is not None else None
+        rows = [tailnet.MachineRow(
+            name=socket.gethostname().lower(),
+            url=url or "",
+            online=True,
+            is_self=True,
+            os="",
+        )]
+    else:
+        # Lazy, like qr_svg_provider: a real tailscale status round-trip,
+        # so this only runs when the launcher panel is opened, never on
+        # the poll path.
+        ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+        status = ts_adapter.status()
+        self_dns = ((status or {}).get("Self") or {}).get("DNSName")
+        rows = tailnet.plan_launcher(status, tag=config.get("launcher_tag"), self_dnsname=self_dns)
+    payload = {
+        "contract": contracts.MACHINES_CONTRACT_VERSION,
+        "machines": [row._asdict() for row in rows],
+    }
+    contracts.validate_machines_payload(payload)
+    return payload
+
+
 def _cmd_tunnel(args: argparse.Namespace) -> int:
     config = _load_config()
     sd = state_dir.state_dir()
@@ -4638,7 +4676,6 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # which can be missing at boot and repaired minutes later — a spawner
     # cached at startup would keep answering "no tab" for the life of the
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
-    ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
 
     # --- dashboard login (spec 2026-08-26, corrupt-store handling revised
     # to fail closed) --------------------------------------------------------
@@ -4802,18 +4839,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return qr.to_svg(url) if url else None
 
     def machines_provider() -> dict:
-        # Lazy, like qr_svg_provider: a real tailscale status round-trip,
-        # so this only runs when the launcher panel is opened, never on
-        # the poll path.
-        status = ts_adapter.status()
-        self_dns = ((status or {}).get("Self") or {}).get("DNSName")
-        rows = tailnet.plan_launcher(status, tag=config.get("launcher_tag"), self_dnsname=self_dns)
-        payload = {
-            "contract": contracts.MACHINES_CONTRACT_VERSION,
-            "machines": [row._asdict() for row in rows],
-        }
-        contracts.validate_machines_payload(payload)
-        return payload
+        return _machines_payload(config, sd)
 
     extract = _tail_facts_extractor(config)
 

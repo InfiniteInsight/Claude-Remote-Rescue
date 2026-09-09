@@ -66,7 +66,12 @@ class RealCloudflared:
         return "cloudflare"
 
     def available(self) -> bool:
-        return shutil.which("cloudflared") is not None
+        # Must agree with start()/stop()'s gate: this adapter's lifecycle is
+        # driven entirely through `systemctl --user`, so a host without
+        # systemd can't actually run it no matter how healthy `cloudflared`
+        # itself is — reporting available() here and refusing in start()
+        # would contradict this adapter's own gate.
+        return shutil.which("cloudflared") is not None and shutil.which("systemctl") is not None
 
     def _run(self, argv: list[str]) -> tuple[bool, str]:
         try:
@@ -89,8 +94,10 @@ class RealCloudflared:
         if cf_bin is None:
             return False, "cloudflared binary not found on PATH — install it first"
         if not self._tunnel_name or not self._hostname:
-            return False, ("cloudflare_tunnel_name and cloudflare_hostname must "
-                           "be set (config.toml or dashboard settings)")
+            return False, (
+                "cloudflare_tunnel_name and cloudflare_hostname must be set "
+                "(config.toml, or the dashboard Settings → Tunnel section)"
+            )
         ok, msg = self._run(["cloudflared", "tunnel", "info", self._tunnel_name])
         if not ok:
             return False, (f"tunnel {self._tunnel_name!r} not usable ({msg}) — "

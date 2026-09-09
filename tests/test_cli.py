@@ -6802,6 +6802,23 @@ def test_tunnel_settings_provider_payload_end_to_end(tmp_path, monkeypatch):
     assert payload["url"] == "https://x.ts.net/"
 
 
+def test_machines_provider_cloudflare_shows_self_url(tmp_path, monkeypatch):
+    # Spec: "with provider cloudflare it shows only this machine's URL" —
+    # Cloudflare has no peer concept, so the launcher lists just this host.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="crr.example.com")
+    fake = _FakeTunnelProvider(name="cloudflare", url="https://crr.example.com/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    payload = cli._machines_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_machines_payload(payload)
+    (row,) = payload["machines"]
+    assert row["url"] == "https://crr.example.com/"
+    assert row["is_self"] is True
+
+
 def test_tunnel_payload_never_raises_on_corrupt_override(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _write_bad_tunnel_provider(tmp_path)  # helper exists since slice 1
