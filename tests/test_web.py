@@ -313,7 +313,8 @@ def test_tunnel_get_returns_provider_payload():
         "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
         "provider": "tailscale", "origin": "configured", "override": None,
         "config_default": "tailscale", "cloudflare_tunnel_name": "",
-        "cloudflare_hostname": "", "health": "up",
+        "cloudflare_hostname": "", "override_tunnel_name": None,
+        "override_hostname": None, "health": "up",
         "health_detail": "tailscale serve is live",
         "url": "https://x.ts.net/", "degraded": False,
     }
@@ -331,7 +332,8 @@ def test_tunnel_post_writes_and_returns_payload():
         return {"contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
                 "provider": "cloudflare", "origin": "override", "override": "cloudflare",
                 "config_default": "tailscale", "cloudflare_tunnel_name": "crr",
-                "cloudflare_hostname": "crr.example.com", "health": "down",
+                "cloudflare_hostname": "crr.example.com", "override_tunnel_name": "crr",
+                "override_hostname": "crr.example.com", "health": "down",
                 "health_detail": "unit inactive", "url": "https://crr.example.com/",
                 "degraded": False}
 
@@ -1083,8 +1085,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_68():
-    """v68: Settings-modal Tunnel section (provider picker, CF fields,
+def test_page_version_is_69():
+    """v69: Tunnel section UX — CF fields shown only when cloudflare is the
+    relevant provider, per-provider hint line, fields edit the override only
+    (config.toml values render as placeholders), Save grouped with settings
+    and Up/Down with the health line (user feedback 2026-09-09: the flat
+    form read as if the CF fields belonged to every provider).
+    (v68: Settings-modal Tunnel section (provider picker, CF fields,
     health, explicit Up/Down) — spec 2026-09-08 slice 2, Task 3.
     (v67: strike badge — a card climbing toward reviver give-up says so
     ("⚠ strike N/max — process died upon revival"; the max is the
@@ -1124,7 +1131,25 @@ def test_page_version_is_68():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 68
+    assert web.PAGE_VERSION == 69
+
+
+def test_tunnel_payload_v2_carries_override_fields_separately():
+    # UX rework (2026-09-09): the page seeds the CF fields from the OVERRIDE
+    # only (config values become placeholders), so the payload must carry
+    # override_tunnel_name/override_hostname distinct from the effective pair.
+    assert contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION == 2
+    assert "override_tunnel_name" in contracts.TUNNEL_PAYLOAD_KEYS
+    assert "override_hostname" in contracts.TUNNEL_PAYLOAD_KEYS
+
+
+def test_page_tunnel_section_is_provider_conditional():
+    # UX rework (2026-09-09): CF fields hidden unless cloudflare is the
+    # relevant provider; a per-provider hint explains what each needs.
+    page = web.load_page()
+    assert 'id="tunnel-cf-fields"' in page
+    assert 'id="tunnel-hint"' in page
+    assert "No settings needed" in page  # the tailscale hint text lives in JS
 
 
 def test_page_has_a_tunnel_settings_section():

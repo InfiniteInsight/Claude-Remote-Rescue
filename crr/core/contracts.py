@@ -97,7 +97,10 @@ ACTION_CONTRACT_VERSION = 1
 MACHINES_CONTRACT_VERSION = 1
 # The Settings modal's tunnel-provider row (spec 2026-09-08, tunnel slice 2).
 # Brand new: no prior unversioned shape to backfill.
-TUNNEL_PAYLOAD_CONTRACT_VERSION = 1
+# v2 adds override_tunnel_name/override_hostname (UX rework 2026-09-09): the
+# page seeds the CF fields from the OVERRIDE only, so effective values and
+# override values must travel as distinct answers.
+TUNNEL_PAYLOAD_CONTRACT_VERSION = 2
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -614,7 +617,8 @@ MACHINE_ROW_KEYS = ("name", "url", "online", "is_self", "os")
 MACHINES_PAYLOAD_KEYS = ("contract", "machines")
 TUNNEL_PAYLOAD_KEYS = (
     "contract", "provider", "origin", "override", "config_default",
-    "cloudflare_tunnel_name", "cloudflare_hostname", "health",
+    "cloudflare_tunnel_name", "cloudflare_hostname",
+    "override_tunnel_name", "override_hostname", "health",
     "health_detail", "url", "degraded",
 )
 TUNNEL_HEALTH_STATES = ("up", "down", "unknown", "none")
@@ -756,8 +760,9 @@ def validate_tunnel_payload(payload: Any) -> None:
         _require_type(payload[field], str, f"/api/tunnel '{field}'")
     _require_enum(payload["health"], TUNNEL_HEALTH_STATES, "/api/tunnel 'health'")
     _require_type(payload["degraded"], bool, "/api/tunnel 'degraded'")
-    if payload["override"] is not None:
-        _require_type(payload["override"], str, "/api/tunnel 'override'")
+    for nullable in ("override", "override_tunnel_name", "override_hostname"):
+        if payload[nullable] is not None:
+            _require_type(payload[nullable], str, f"/api/tunnel '{nullable}'")
     if payload["url"] is not None:
         _require_type(payload["url"], str, "/api/tunnel 'url'")
 
