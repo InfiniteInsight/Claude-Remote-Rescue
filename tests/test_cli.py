@@ -6860,3 +6860,54 @@ def test_reachable_at_boot_reports_misconfigured_tunnel_and_still_exits_0(
     out = capsys.readouterr().out
     assert rc == 0
     assert "tunnel: misconfigured" in out and "ngrok" in out
+
+
+# --- user-manager fallback surfacing (2026-09-08 logind/linger outage) ----
+
+def test_doctor_reports_user_manager_fallback_on_linux(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.systemd, "user_manager_fallback_state", lambda t: "missing")
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "user-manager fallback" in out
+    assert "crr reachable-at-boot --install" in out  # names the remedy
+
+
+def test_doctor_user_manager_fallback_unknown_stays_unknown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.systemd, "user_manager_fallback_state", lambda t: "unknown")
+    rc = cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # F16: an unreadable probe is neither pass nor failure.
+    (line,) = [l for l in out.splitlines() if "user-manager fallback" in l]
+    assert "unkn" in line and "state unreadable" in line
+
+
+def test_reachable_at_boot_install_wsl_also_installs_fallback_unit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu", "evan"))
+    monkeypatch.setattr(cli, "_current_tailnet_account", lambda t: None)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    ran = []
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    rc = cli._reachable_at_boot_install_wsl(cli.cfg.Config())
+    out = capsys.readouterr().out
+    assert rc == 0
+    flat = ["\0".join(map(str, c)) for c in ran]
+    assert any("crr-user-manager.service" in f for f in flat), ran
+    assert "user-manager fallback" in out  # the prompt/summary names it
+
+
+def test_reachable_at_boot_uninstall_wsl_also_removes_fallback_unit(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    ran = []
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
+    rc = cli._reachable_at_boot_uninstall_wsl(cli.cfg.Config())
+    assert rc == 0
+    flat = ["\0".join(map(str, c)) for c in ran]
+    assert any("crr-user-manager.service" in f for f in flat), ran

@@ -1987,6 +1987,22 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
                 enabled = "unknown"
         _check(f"unit {unit}", installed,
                f"{'enabled: ' + enabled if installed else 'not installed — run crr systemd --install'}")
+    # 2026-09-08: logind silently skipped linger at boot and every user
+    # service above was down for three days. The system-level fallback unit
+    # is what makes the next such boot survivable — doctor names its absence
+    # (detect-only; the consented install lives in reachable-at-boot).
+    if platform.system() == "Linux":
+        fb_state = systemd.user_manager_fallback_state(
+            config.get("interop_timeout_seconds"))
+        _check(
+            "user-manager fallback",
+            {"installed": True, "missing": False}.get(fb_state),
+            ("enabled" if fb_state == "installed" else
+             "not installed — user services (dashboard, watchdog) won't "
+             "start at boot if logind drops linger; run "
+             "crr reachable-at-boot --install" if fb_state == "missing" else
+             "state unreadable"),
+        )
     return 0
 
 
@@ -5662,7 +5678,11 @@ def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
     print(
         f"crr reachable-at-boot --install will register {tasks} — a "
         "Windows Scheduled Task that starts this WSL distro at boot, "
-        "before any login. Windows will show a UAC prompt."
+        "before any login. Windows will show a UAC prompt.\n"
+        "It will also install the user-manager fallback unit "
+        f"({systemd.USER_MANAGER_FALLBACK_UNIT}, via wsl.exe -u root): "
+        "logind silently skipped linger at the 2026-09-05 boot and the "
+        "dashboard/watchdog stayed down for three days."
     )
     try:
         answer = input("Install? [y/N]: ").strip().lower()
@@ -5679,6 +5699,18 @@ def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
         print("crr reachable-at-boot --install: the elevated registration "
               "FAILED (see above)", file=sys.stderr)
         return 1
+    # Fallback unit rides the same consent. A root-interop failure degrades
+    # to the exact manual command rather than failing the whole install —
+    # the scheduled task above already landed.
+    fb_argv = systemd.user_manager_fallback_install_argv(os.getuid())
+    if _run_commands([fb_argv], "reachable-at-boot"):
+        print(f"installed user-manager fallback ({systemd.USER_MANAGER_FALLBACK_UNIT})")
+    else:
+        print(
+            "crr reachable-at-boot --install: user-manager fallback install "
+            "FAILED — run it manually:\n  " + " ".join(fb_argv),
+            file=sys.stderr,
+        )
     print(f"registered {tasks} — run `crr reachable-at-boot` after the next "
           "reboot to confirm it actually fired")
     return 0
@@ -5690,13 +5722,16 @@ def _reachable_at_boot_uninstall_wsl(config: cfg.Config) -> int:
         f"{boot_windows.TAILNET_TASK} -Confirm:$false -ErrorAction "
         "SilentlyContinue"
     )
-    cmds = [_elevated_powershell(f'-NoProfile -NonInteractive -Command "{inner}"')]
+    cmds = [
+        _elevated_powershell(f'-NoProfile -NonInteractive -Command "{inner}"'),
+        systemd.user_manager_fallback_uninstall_argv(),
+    ]
     if not _run_commands(cmds, "reachable-at-boot"):
         print("crr reachable-at-boot --uninstall: the elevated removal "
               "FAILED (see above)", file=sys.stderr)
         return 1
-    print(f"removed {boot_windows.WSL_BOOT_TASK} and {boot_windows.TAILNET_TASK} "
-          "(if they existed)")
+    print(f"removed {boot_windows.WSL_BOOT_TASK}, {boot_windows.TAILNET_TASK}, "
+          f"and {systemd.USER_MANAGER_FALLBACK_UNIT} (if they existed)")
     return 0
 
 

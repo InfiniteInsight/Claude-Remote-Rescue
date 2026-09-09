@@ -279,3 +279,67 @@ def test_awake_is_enabled_and_disabled_with_the_rest():
 def test_awake_can_be_stopped_on_its_own():
     assert systemd.stop_awake_command() == [
         "systemctl", "--user", "stop", systemd.AWAKE_SERVICE_NAME]
+
+
+# --- user-manager fallback unit (2026-09-08: WSL logind/linger race) ------
+#
+# logind is supposed to start user@<uid> at boot for lingering users and
+# silently did not at the 2026-09-05 boot — three days with the dashboard
+# and watchdog down. The fallback is a SYSTEM-level oneshot that starts the
+# user manager with the same ordering user@.service itself uses.
+
+def test_user_manager_fallback_unit_content():
+    text = systemd.user_manager_fallback_unit(1000)
+    assert "ExecStart=/usr/bin/systemctl start user@1000.service" in text
+    assert "Type=oneshot" in text
+    assert "RemainAfterExit=yes" in text
+    assert "WantedBy=multi-user.target" in text
+    # Same ordering user@.service itself carries — never earlier.
+    assert "After=systemd-user-sessions.service systemd-logind.service" in text
+
+
+def test_user_manager_fallback_unit_name_is_pinned():
+    assert systemd.USER_MANAGER_FALLBACK_UNIT == "crr-user-manager.service"
+
+
+def test_user_manager_fallback_state_tri_state(monkeypatch):
+    class R:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    monkeypatch.setattr(systemd.shutil, "which", lambda _: "/usr/bin/systemctl")
+    monkeypatch.setattr(systemd.subprocess, "run", lambda *a, **k: R(0, "enabled\n"))
+    assert systemd.user_manager_fallback_state(2.0) == "installed"
+    monkeypatch.setattr(systemd.subprocess, "run", lambda *a, **k: R(1, "not-found\n"))
+    assert systemd.user_manager_fallback_state(2.0) == "missing"
+    monkeypatch.setattr(systemd.subprocess, "run", lambda *a, **k: R(1, "disabled\n"))
+    # Present but not enabled will not fire at boot — that is missing, not installed.
+    assert systemd.user_manager_fallback_state(2.0) == "missing"
+
+    def boom(*a, **k):
+        raise OSError("no systemctl")
+
+    monkeypatch.setattr(systemd.subprocess, "run", boom)
+    assert systemd.user_manager_fallback_state(2.0) == "unknown"
+    monkeypatch.setattr(systemd.shutil, "which", lambda _: None)
+    assert systemd.user_manager_fallback_state(2.0) == "unknown"
+
+
+def test_user_manager_fallback_install_argv_runs_root_via_wsl_interop():
+    argv = systemd.user_manager_fallback_install_argv(1000)
+    assert argv[0].endswith("wsl.exe")
+    assert argv[1:4] == ["-u", "root", "--"]
+    script = argv[-1]
+    assert "crr-user-manager.service" in script
+    assert "daemon-reload" in script
+    assert "enable" in script
+    assert "user@1000.service" in script
+
+
+def test_user_manager_fallback_uninstall_argv_disables_and_removes():
+    argv = systemd.user_manager_fallback_uninstall_argv()
+    assert argv[0].endswith("wsl.exe")
+    assert argv[1:4] == ["-u", "root", "--"]
+    script = argv[-1]
+    assert "disable" in script and "crr-user-manager.service" in script
+    assert "rm -f" in script and "daemon-reload" in script

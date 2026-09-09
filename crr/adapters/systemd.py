@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from crr import __version__
@@ -39,6 +40,7 @@ def _stamp() -> str:
 
 SERVICE_NAME = "crr-revive.service"
 TIMER_NAME = "crr-revive.timer"
+USER_MANAGER_FALLBACK_UNIT = "crr-user-manager.service"
 WEB_SERVICE_NAME = "crr-web.service"
 AWAKE_SERVICE_NAME = "crr-awake.service"
 
@@ -271,3 +273,89 @@ def disable_commands() -> list[list[str]]:
         ["systemctl", "--user", "disable", "--now", AWAKE_SERVICE_NAME],
         ["systemctl", "--user", "daemon-reload"],
     ]
+
+# --- user-manager fallback (2026-09-08: WSL logind/linger race) -----------
+#
+# logind is supposed to start user@<uid> at boot for lingering users and
+# silently did not at the 2026-09-05 boot — three days with crr-web and the
+# revive watchdog down. The fallback is a SYSTEM-level oneshot (root's
+# systemd, not --user) that starts the user manager with the same ordering
+# user@.service itself carries; starting an already-active unit is a no-op,
+# so it never conflicts with a boot where logind behaves.
+#
+# Root is reached through Windows-side WSL interop (`wsl.exe -u root`),
+# which WSL grants without a password — the same door `crr
+# reachable-at-boot --install`'s elevated PowerShell uses on the Windows
+# side. Builders are pure so tests pin the exact argv; only the cli runs
+# them, inside --install's existing consent prompt.
+
+_WSL_EXE = "/mnt/c/Windows/System32/wsl.exe"
+
+
+def user_manager_fallback_unit(uid: int) -> str:
+    """The crr-user-manager.service unit text for ``uid``."""
+    return (
+        "[Unit]\n"
+        f"Description=Start user manager for UID {uid} at boot "
+        "(crr linger fallback — WSL logind race, 2026-09-08)\n"
+        "After=systemd-user-sessions.service systemd-logind.service\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart=/usr/bin/systemctl start user@{uid}.service\n"
+        "RemainAfterExit=yes\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def user_manager_fallback_state(timeout_seconds: float) -> str:
+    """Tri-state install probe: "installed" | "missing" | "unknown".
+
+    Querying needs no root (`systemctl is-enabled` on the SYSTEM manager).
+    Only a confident "enabled" counts as installed: a present-but-disabled
+    unit will not fire at boot, which is the failure this exists to stop.
+    Every probe failure degrades to "unknown" (F16), never a guess.
+    """
+    if shutil.which("systemctl") is None:
+        return "unknown"
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-enabled", USER_MANAGER_FALLBACK_UNIT],
+            capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return "unknown"
+    answer = (r.stdout or "").strip()
+    if answer == "enabled":
+        return "installed"
+    if answer in ("not-found", "disabled", "masked", "static", ""):
+        return "missing"
+    return "unknown"
+
+
+def user_manager_fallback_install_argv(uid: int) -> list[str]:
+    """Word-form argv installing + enabling the fallback unit as root."""
+    unit_path = f"/etc/systemd/system/{USER_MANAGER_FALLBACK_UNIT}"
+    script = (
+        f"printf '%s' {_shq(user_manager_fallback_unit(uid))} > {unit_path} "
+        f"&& systemctl daemon-reload "
+        f"&& systemctl enable --now {USER_MANAGER_FALLBACK_UNIT}"
+    )
+    return [_WSL_EXE, "-u", "root", "--", "bash", "-c", script]
+
+
+def user_manager_fallback_uninstall_argv() -> list[str]:
+    """Word-form argv disabling + removing the fallback unit as root."""
+    unit_path = f"/etc/systemd/system/{USER_MANAGER_FALLBACK_UNIT}"
+    script = (
+        f"systemctl disable {USER_MANAGER_FALLBACK_UNIT}; "
+        f"rm -f {unit_path} && systemctl daemon-reload"
+    )
+    return [_WSL_EXE, "-u", "root", "--", "bash", "-c", script]
+
+
+def _shq(text: str) -> str:
+    """Single-quote ``text`` for the bash -c script (no shlex import churn)."""
+    return "'" + text.replace("'", "'\\''") + "'"
