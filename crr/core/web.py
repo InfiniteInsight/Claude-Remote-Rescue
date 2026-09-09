@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 69  # v69: Tunnel section UX — CF fields provider-conditional, per-provider hints, override-only editing
+PAGE_VERSION = 70  # v70: Tunnel picker hides the config plumbing — effective provider shown; using-default tag + Reset link
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

@@ -1085,8 +1085,8 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_69():
-    """v69: Tunnel section UX — CF fields shown only when cloudflare is the
+def test_page_version_is_70():
+    """v70: Tunnel picker hides the config plumbing — options are the three\n    real providers with the effective one selected; "using default" tag +\n    Reset-to-default link replace the "default (config.toml)" option\n    (user feedback 2026-09-09: GUI users are not thinking about files).\n    (v69: Tunnel section UX — CF fields shown only when cloudflare is the
     relevant provider, per-provider hint line, fields edit the override only
     (config.toml values render as placeholders), Save grouped with settings
     and Up/Down with the health line (user feedback 2026-09-09: the flat
@@ -1131,7 +1131,7 @@ def test_page_version_is_69():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 69
+    assert web.PAGE_VERSION == 70
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1141,6 +1141,18 @@ def test_tunnel_payload_v2_carries_override_fields_separately():
     assert contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION == 2
     assert "override_tunnel_name" in contracts.TUNNEL_PAYLOAD_KEYS
     assert "override_hostname" in contracts.TUNNEL_PAYLOAD_KEYS
+
+
+def test_page_tunnel_picker_hides_the_plumbing():
+    # UX 2026-09-09 round 2: GUI users aren't thinking about files — the
+    # picker offers only real providers with the EFFECTIVE one selected; the
+    # config layer surfaces as a "using default" tag and a Reset-to-default
+    # affordance shown only once an override exists.
+    page = web.load_page()
+    assert "default (config.toml)" not in page   # the plumbing option is gone
+    assert 'id="tunnel-default-tag"' in page
+    assert 'id="tunnel-reset"' in page
+    assert "using default" in page
 
 
 def test_page_tunnel_section_is_provider_conditional():
