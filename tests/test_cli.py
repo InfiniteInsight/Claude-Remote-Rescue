@@ -194,6 +194,48 @@ def test_web_server_serves_sessions_and_enforces_host(tmp_path):
         server.server_close()
 
 
+def test_web_server_allowed_hosts_callable_is_resolved_per_request(tmp_path):
+    """`make_web_handler`'s `allowed_hosts` may be a zero-arg callable — the
+    same live-re-read pattern as `auth_enabled_fn`/`setup_mode_fn` — so a
+    GUI hostname change (Settings-modal Tunnel section) takes effect on the
+    very next poll, with no service restart (slice-1 ledger item). Real
+    socket + real HTTP, exactly like the set-passing test above, to prove
+    the resolution happens against real code, not a stub."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    hosts = {"127.0.0.1", "localhost"}
+    payload = {"contract": 1, "sessions": []}
+    handler = cli.make_web_handler(lambda: payload, lambda: hosts, (".ts.net",))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        # Not yet in the set -> 403.
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "crr.example.com"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected 403 before the host was added"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+
+        # Mutate the underlying set the callable closes over — a stand-in
+        # for a settings-store write made after the handler was built.
+        hosts.add("crr.example.com")
+
+        # Same handler, no restart -> the very next request sees it.
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "crr.example.com"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_systemd_print_emits_all_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
@@ -5122,6 +5164,7 @@ def _web_captured(monkeypatch, tmp_path, fake_tmux=None):
 
     def fake_make_web_handler(sessions_provider, allowed, suffixes, **kw):
         captured["provider"] = sessions_provider
+        captured["allowed_hosts"] = allowed
         captured.update(kw)
         return object()
 
@@ -5183,6 +5226,26 @@ def _write_creds(path, now, *, expired):
         "expiresAt": int((now + delta) * 1000),
         "refreshTokenExpiresAt": int((now + delta) * 1000),
     }))
+
+
+def test_cmd_web_passes_a_live_allowlist_callable(tmp_path, monkeypatch):
+    """A GUI hostname change (Settings-modal Tunnel section, slice-1 ledger
+    item) must take effect without a service restart: `_cmd_web` must hand
+    `make_web_handler` a CALLABLE wrapping `_web_allowed_hosts`, never a
+    snapshot set frozen at startup."""
+    captured = _web_captured(monkeypatch, tmp_path)
+
+    allowed = captured["allowed_hosts"]
+    assert callable(allowed), "make_web_handler must receive a callable, not a frozen set"
+    assert "127.0.0.1" in allowed()
+
+    # The live part of the contract: a settings-store write made AFTER the
+    # handler was already constructed must be honored on the callable's
+    # very next call — proven against the real writer/selector, not a stub.
+    from crr.core import settings as settings_mod
+
+    settings_mod.SettingsStore(tmp_path).write_tunnel(cloudflare_hostname="crr.example.com")
+    assert "crr.example.com" in allowed()
 
 
 def test_reauth_provider_spawns_tmux_session_nonblocking(tmp_path, monkeypatch):
@@ -6620,6 +6683,26 @@ class _FakeTunnelProvider:
         return "run the setup"
 
 
+def test_tunnel_action_provider_up_down(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider()
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "up")
+    assert result["ok"] is True
+    assert fake.started_with == cli.cfg.DEFAULTS["dashboard_port"]
+    assert "tunnel" in result
+    cli.contracts.validate_tunnel_payload(result["tunnel"])   # nested payload is contracted
+    result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "down")
+    assert result["ok"] is True and fake.stopped
+
+
+def test_tunnel_action_provider_none_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "up")
+    assert result["ok"] is False and "none" in result["message"]
+
+
 def test_tunnel_up_starts_active_provider_and_prints_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider()
@@ -6705,6 +6788,94 @@ def test_tunnel_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "ngrok" in err
+
+
+def test_tunnel_settings_provider_payload_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(name="tailscale", health_state="up",
+                               url="https://x.ts.net/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_tunnel_payload(payload)
+    assert payload["provider"] == "tailscale"
+    assert payload["health"] == "up"
+    assert payload["url"] == "https://x.ts.net/"
+
+
+def test_machines_provider_cloudflare_shows_self_url(tmp_path, monkeypatch):
+    # Spec: "with provider cloudflare it shows only this machine's URL" —
+    # Cloudflare has no peer concept, so the launcher lists just this host.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="crr",
+        cloudflare_hostname="crr.example.com")
+    fake = _FakeTunnelProvider(name="cloudflare", url="https://crr.example.com/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    payload = cli._machines_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_machines_payload(payload)
+    (row,) = payload["machines"]
+    assert row["url"] == "https://crr.example.com/"
+    assert row["is_self"] is True
+
+
+def test_machines_provider_tailscale_path_unchanged(tmp_path, monkeypatch):
+    # The tailnet path predates this task's extraction into a module-level
+    # _machines_payload — this locks that plan_launcher() still gets the
+    # real status/tag/self-dnsname wiring the old inline closure body had.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTailscale:
+        def __init__(self, timeout, dashboard_port=8377):
+            pass
+
+        def status(self):
+            return {
+                "Self": {"HostName": "self-host", "DNSName": "self.tailnet.ts.net.",
+                         "Online": True, "Tags": ["tag:crr"], "OS": "linux"},
+                "Peer": {},
+            }
+
+    monkeypatch.setattr(cli.tailscale, "RealTailscale", _FakeTailscale)
+    payload = cli._machines_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_machines_payload(payload)
+    (row,) = payload["machines"]
+    assert row["name"] == "self-host"
+    assert row["url"] == "https://self.tailnet.ts.net/"
+    assert row["is_self"] is True
+
+
+def test_tunnel_payload_never_raises_on_corrupt_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)  # helper exists since slice 1
+    payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_tunnel_payload(payload)
+    assert payload["provider"] == "invalid"
+    assert payload["origin"] == "override"
+    assert payload["health"] == "unknown"
+    assert "ngrok" in payload["health_detail"]
+
+
+def test_tunnel_payload_corrupt_config_default_reports_origin_configured(tmp_path, monkeypatch):
+    # The bad value can also come from config.toml itself, with no settings-
+    # store override at all — origin must name THAT source, not "override"
+    # (review fix: _tunnel_payload previously hardcoded "override" here even
+    # though the override field reads back None).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    config = cli.cfg.Config(overrides={"tunnel_provider": "ngrok"})
+    payload = cli._tunnel_payload(config, tmp_path)
+    cli.contracts.validate_tunnel_payload(payload)
+    assert payload["provider"] == "invalid"
+    assert payload["origin"] == "configured"
+    assert payload["override"] is None
+
+
+def test_tunnel_payload_provider_none_health_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(provider="none")
+    payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
+    assert payload["provider"] == "none" and payload["health"] == "none"
 
 
 def test_tunnel_status_names_the_other_provider_when_it_is_also_up(

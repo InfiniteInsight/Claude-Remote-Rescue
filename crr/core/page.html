@@ -458,6 +458,28 @@
       </label>
       <div id="autokick-degraded" class="note" hidden style="margin: 8px 0 0; color:#e0a53b;"></div>
     </div>
+    <div style="padding: 0 16px 14px;">
+      <h3 style="margin:0 0 6px; font-size:12px; color:#8a93a2; font-weight:600;">Tunnel</h3>
+      <label style="display:block; margin-bottom:6px;">Provider
+        <select id="tunnel-provider" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+          <option value="">default (config.toml)</option>
+          <option value="tailscale">tailscale</option>
+          <option value="cloudflare">cloudflare</option>
+          <option value="none">none</option>
+        </select>
+      </label>
+      <label style="display:block; margin-bottom:6px;">Cloudflare tunnel name
+        <input type="text" id="tunnel-cf-name" placeholder="crr" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+      </label>
+      <label style="display:block; margin-bottom:6px;">Cloudflare hostname
+        <input type="text" id="tunnel-cf-hostname" placeholder="crr.example.com" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+      </label>
+      <div id="tunnel-health" style="font-size:12px; color:#8a93a2; margin:6px 0;"></div>
+      <div id="tunnel-degraded" hidden style="font-size:12px; color:#e0a53b; margin:6px 0;"></div>
+      <button id="tunnel-save">Save</button>
+      <button id="tunnel-up">Up</button>
+      <button id="tunnel-down">Down</button>
+    </div>
     <h3 style="padding: 14px 16px 0; margin:0; font-size:12px; color:#8a93a2; font-weight:600;">Excluded directories</h3>
     <div class="note" style="padding: 6px 16px 0; margin: 0;">Transcripts under these directory names never appear as <strong>Discoverable</strong>. Useful for tools that drive Claude Code themselves and leave transcripts behind (claude-mem's observer sessions are excluded by default). Matching ignores <code>-</code> vs <code>/</code> vs <code>.</code>, so <code>.claude-mem</code> and <code>claude-mem</code> both work.</div>
     <div id="admin-list"></div>
@@ -2075,6 +2097,76 @@ function loadAutokick() {
     .catch(function () { showNotice("auto-kick setting unavailable", "warn"); });
 }
 
+// Tunnel section (spec 2026-09-02, slice 2). Save writes overrides ONLY —
+// it never starts/stops anything; Up/Down are the explicit lifecycle
+// actions (spec: "Writing settings does not start/stop anything").
+function renderTunnel(data) {
+  document.getElementById("tunnel-provider").value = data.override || "";
+  document.getElementById("tunnel-cf-name").value = data.cloudflare_tunnel_name || "";
+  document.getElementById("tunnel-cf-hostname").value = data.cloudflare_hostname || "";
+  var h = document.getElementById("tunnel-health");
+  // F16: "unknown" renders as unknown, never coerced into up/down.
+  h.textContent = "provider: " + data.provider + " (" + data.origin + ") · health: "
+    + data.health + " — " + data.health_detail + (data.url ? " · " + data.url : "");
+  var warn = document.getElementById("tunnel-degraded");
+  warn.hidden = !data.degraded;
+  warn.textContent = data.degraded
+    ? "The settings file is unreadable — overrides are ignored (config.toml rules) until this is fixed."
+    : "";
+}
+
+function loadTunnel() {
+  fetch("/api/tunnel")
+    .then(function (r) { return r.json(); })
+    .then(renderTunnel)
+    .catch(function () { showNotice("tunnel settings unavailable", "warn"); });
+}
+
+function saveTunnel() {
+  var btn = document.getElementById("tunnel-save");
+  btn.disabled = true;
+  fetch("/api/tunnel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: document.getElementById("tunnel-provider").value || null,
+      cloudflare_tunnel_name: document.getElementById("tunnel-cf-name").value || null,
+      cloudflare_hostname: document.getElementById("tunnel-cf-hostname").value || null
+    })
+  })
+    .then(function (r) {
+      if (!r.ok) { return r.text().then(function (t) { throw new Error(t); }); }
+      return r.json();
+    })
+    .then(function (data) { renderTunnel(data); showNotice("tunnel settings saved", "ok"); })
+    .catch(function (e) { showNotice(String(e.message || "save failed"), "error"); loadTunnel(); })
+    .finally(function () { btn.disabled = false; });
+}
+
+function tunnelAction(action) {
+  var btn = document.getElementById("tunnel-" + action);
+  btn.disabled = true;
+  fetch("/api/tunnel-action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: action })
+  })
+    .then(function (r) {
+      if (!r.ok) { return r.text().then(function (t) { throw new Error(t); }); }
+      return r.json();
+    })
+    .then(function (data) {
+      showNotice(data.message, data.ok ? "ok" : "error");
+      if (data.tunnel && data.tunnel.provider) { renderTunnel(data.tunnel); }
+    })
+    .catch(function (e) { showNotice(String(e.message || "action failed"), "error"); })
+    .finally(function () { btn.disabled = false; });
+}
+
+document.getElementById("tunnel-save").addEventListener("click", saveTunnel);
+document.getElementById("tunnel-up").addEventListener("click", function () { tunnelAction("up"); });
+document.getElementById("tunnel-down").addEventListener("click", function () { tunnelAction("down"); });
+
 document.getElementById("autokick-toggle").addEventListener("change", function () {
   var cb = this;
   var value = cb.checked;
@@ -2104,6 +2196,7 @@ document.getElementById("admin-btn").addEventListener("click", function () {
   document.getElementById("admin-modal").classList.add("open");
   loadAdmin();
   loadAutokick();
+  loadTunnel();
 });
 document.getElementById("admin-close").addEventListener("click", function () {
   document.getElementById("admin-modal").classList.remove("open");

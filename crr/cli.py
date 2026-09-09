@@ -1635,6 +1635,102 @@ def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection):
     return None
 
 
+def _tunnel_payload(config: cfg.Config, sd) -> dict:
+    """The /api/tunnel GET payload. Never raises: a corrupt override renders
+    provider="invalid" with the ValueError text as health_detail (the modal
+    must show the problem; a 500 would show nothing)."""
+    store = settings.SettingsStore(sd)
+    override = store.read_tunnel()
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        return {
+            "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+            "provider": "invalid",
+            "origin": "override" if override.get("provider") else "configured",
+            "override": override.get("provider"),
+            "config_default": config.get("tunnel_provider"),
+            "cloudflare_tunnel_name": override.get("cloudflare_tunnel_name")
+                or config.get("cloudflare_tunnel_name"),
+            "cloudflare_hostname": override.get("cloudflare_hostname")
+                or config.get("cloudflare_hostname"),
+            "health": "unknown", "health_detail": str(exc),
+            "url": None, "degraded": store.is_degraded(),
+        }
+    provider = _tunnel_provider(config, sel)
+    if provider is None:
+        health, detail, url = "none", "no tunnel provider selected", None
+    else:
+        h = provider.health()
+        health, detail, url = h.state, h.detail, provider.advertise_url()
+    return {
+        "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+        "provider": sel.provider, "origin": sel.origin,
+        "override": override.get("provider"),
+        "config_default": config.get("tunnel_provider"),
+        "cloudflare_tunnel_name": sel.tunnel_name,
+        "cloudflare_hostname": sel.hostname,
+        "health": health, "health_detail": detail,
+        "url": url, "degraded": store.is_degraded(),
+    }
+
+
+def _tunnel_action(config: cfg.Config, sd, action: str) -> dict:
+    """Dashboard tunnel lifecycle. A refused start/stop is ok=False with the
+    provider's message — a result the modal renders, never a 4xx/500."""
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc), "tunnel": _tunnel_payload(config, sd)}
+    provider = _tunnel_provider(config, sel)
+    if provider is None:
+        return {"ok": False, "message": "tunnel provider is none — pick one first",
+                "tunnel": _tunnel_payload(config, sd)}
+    if action == "up":
+        ok, msg = provider.start(config.get("dashboard_port"))
+    else:
+        ok, msg = provider.stop()
+    return {"ok": ok, "message": msg, "tunnel": _tunnel_payload(config, sd)}
+
+
+def _machines_payload(config: cfg.Config, sd) -> dict:
+    """The launcher panel's /api/machines payload, following the ACTIVE
+    tunnel provider (spec 2026-09-08, tunnel slice 2): tailscale keeps the
+    existing tagged-peer list; cloudflare has no peer concept, so the
+    launcher shows only this machine, at the tunnel's advertised URL. A
+    corrupt/unknown override (ValueError) falls through to the tailnet
+    path rather than raising — same "never break the launcher" posture as
+    the rest of this module."""
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError:
+        sel = None
+    if sel is not None and sel.provider == "cloudflare":
+        provider = _tunnel_provider(config, sel)
+        url = provider.advertise_url() if provider is not None else None
+        rows = [tailnet.MachineRow(
+            name=socket.gethostname().lower(),
+            url=url or "",
+            online=True,
+            is_self=True,
+            os="",
+        )]
+    else:
+        # Lazy, like qr_svg_provider: a real tailscale status round-trip,
+        # so this only runs when the launcher panel is opened, never on
+        # the poll path.
+        ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
+        status = ts_adapter.status()
+        self_dns = ((status or {}).get("Self") or {}).get("DNSName")
+        rows = tailnet.plan_launcher(status, tag=config.get("launcher_tag"), self_dnsname=self_dns)
+    payload = {
+        "contract": contracts.MACHINES_CONTRACT_VERSION,
+        "machines": [row._asdict() for row in rows],
+    }
+    contracts.validate_machines_payload(payload)
+    return payload
+
+
 def _cmd_tunnel(args: argparse.Namespace) -> int:
     config = _load_config()
     sd = state_dir.state_dir()
@@ -4136,7 +4232,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
 def make_web_handler(
     sessions_provider: Callable[[], dict],
-    allowed_hosts: set[str],
+    allowed_hosts: set[str] | Callable[[], set[str]],
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
@@ -4152,6 +4248,9 @@ def make_web_handler(
     machines_provider: Callable[[], dict] | None = None,
     reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
+    tunnel_provider_fn: Callable[[], dict] | None = None,
+    tunnel_writer: Callable[[object], dict] | None = None,
+    tunnel_action_provider: Callable[[str], dict] | None = None,
     auth_enabled_fn: Callable[[], bool] | None = None,
     auth_check: Callable[[str], bool] | None = None,
     setup_mode_fn: Callable[[], bool] | None = None,
@@ -4185,6 +4284,15 @@ def make_web_handler(
     is structurally impossible for the gate to fire with no way to
     validate a cookie (spec 2026-08-26, Task 4 review: "silently fails
     open if auth_enabled=True but auth_check=None").
+
+    ``allowed_hosts`` may be a plain set or a zero-arg callable: a callable
+    is re-resolved per request, the auth_enabled_fn pattern — a Settings-
+    modal cloudflare-hostname change (SettingsStore-backed, see
+    ``_web_allowed_hosts``) takes effect on the very next poll, no service
+    restart. ``config.toml``'s ``host_allowlist_extras`` is NOT live this
+    way: ``_cmd_web``'s callable closes over one ``Config`` loaded at
+    startup, so an edit there still needs a restart to take effect — only
+    the disk-backed tunnel override is re-read every call.
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -4194,6 +4302,7 @@ def make_web_handler(
             path, _, query = self.path.partition("?")
             auth_enabled = bool(auth_enabled_fn()) if auth_enabled_fn else False
             setup_mode = bool(setup_mode_fn()) if setup_mode_fn else False
+            hosts = allowed_hosts() if callable(allowed_hosts) else allowed_hosts
             resp = web.handle_request(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
@@ -4211,6 +4320,9 @@ def make_web_handler(
                 machines_provider=machines_provider,
                 reauth_provider=reauth_provider,
                 reauth_code_provider=reauth_code_provider,
+                tunnel_provider_fn=tunnel_provider_fn,
+                tunnel_writer=tunnel_writer,
+                tunnel_action_provider=tunnel_action_provider,
                 auth_enabled=auth_enabled and auth_check is not None,
                 auth_check=auth_check,
                 # web.handle_request's gate checks auth_enabled first (elif
@@ -4222,7 +4334,7 @@ def make_web_handler(
                 dashboard_auth_provider=dashboard_auth_provider,
                 bootstrap_state=bootstrap_state_fn() if bootstrap_state_fn else None,
                 query=query,
-                allowed_hosts=allowed_hosts,
+                allowed_hosts=hosts,
                 allowed_suffixes=allowed_suffixes,
                 poll_seconds=poll_seconds,
                 version_check_seconds=version_check_seconds,
@@ -4564,7 +4676,6 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # which can be missing at boot and repaired minutes later — a spawner
     # cached at startup would keep answering "no tab" for the life of the
     # service ([live bug, 2026-08-09]). Each tab-capable action re-asks.
-    ts_adapter = tailscale.RealTailscale(config.get("interop_timeout_seconds"))
 
     # --- dashboard login (spec 2026-08-26, corrupt-store handling revised
     # to fail closed) --------------------------------------------------------
@@ -4728,18 +4839,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return qr.to_svg(url) if url else None
 
     def machines_provider() -> dict:
-        # Lazy, like qr_svg_provider: a real tailscale status round-trip,
-        # so this only runs when the launcher panel is opened, never on
-        # the poll path.
-        status = ts_adapter.status()
-        self_dns = ((status or {}).get("Self") or {}).get("DNSName")
-        rows = tailnet.plan_launcher(status, tag=config.get("launcher_tag"), self_dnsname=self_dns)
-        payload = {
-            "contract": contracts.MACHINES_CONTRACT_VERSION,
-            "machines": [row._asdict() for row in rows],
-        }
-        contracts.validate_machines_payload(payload)
-        return payload
+        return _machines_payload(config, sd)
 
     extract = _tail_facts_extractor(config)
 
@@ -5054,6 +5154,29 @@ def _cmd_web(args: argparse.Namespace) -> int:
         _write_global_autokick_locked(sd, value)
         return settings_provider()
 
+    def tunnel_settings_provider() -> dict:
+        payload = _tunnel_payload(config, sd)
+        contracts.validate_tunnel_payload(payload)  # validate our own output
+        return payload
+
+    def tunnel_settings_writer(data: dict) -> dict:
+        # SettingsStore.write_tunnel raises SettingsError (a ValueError) on a
+        # bad provider string -> 400 with message, same as settings_writer.
+        # Full-replace by design (slice-1 ledger): the page sends all three.
+        with mutation_lock(sd):
+            settings.SettingsStore(sd).write_tunnel(
+                provider=data["provider"] or None,
+                cloudflare_tunnel_name=data["cloudflare_tunnel_name"] or None,
+                cloudflare_hostname=data["cloudflare_hostname"] or None,
+            )
+        return tunnel_settings_provider()
+
+    def tunnel_action_provider(action: str) -> dict:
+        # Explicit up/down from the dashboard's Settings modal — see
+        # _tunnel_action's docstring for why a refusal is ok=False, never
+        # an exception/4xx.
+        return _tunnel_action(config, sd, action)
+
     def recall_provider(query: str, sid: str | None) -> dict:
         # Lazy GET (never the poll path): print-only transcript search, the
         # dashboard surface of `crr recall`. sid -> that one session; no sid ->
@@ -5084,10 +5207,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return out
 
     # Host allowlist: loopback + this host's name + tailnet suffix + any
-    # config.toml extras + the effective cloudflare hostname.
-    allowed = _web_allowed_hosts(config, sd)
+    # config.toml extras + the effective cloudflare hostname. Passed as a
+    # callable, not a snapshot set (make_web_handler docstring): a Settings-
+    # modal hostname change, or a tunnel override write, must take effect on
+    # the very next poll with no service restart.
     handler = make_web_handler(
-        provider, allowed, (".ts.net",),
+        provider, lambda: _web_allowed_hosts(config, sd), (".ts.net",),
         action_provider=action_provider,
         diagnostics_provider=diagnostics_provider,
         untracked_provider=untracked_provider,
@@ -5102,6 +5227,9 @@ def _cmd_web(args: argparse.Namespace) -> int:
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
+        tunnel_provider_fn=tunnel_settings_provider,
+        tunnel_writer=tunnel_settings_writer,
+        tunnel_action_provider=tunnel_action_provider,
         # Fail-closed on a corrupt store (spec 2026-08-26 revision): the
         # gate must activate even though `login_enabled()` itself stays
         # False on corrupt (see dashboard_auth.DashboardAuthStore._read).

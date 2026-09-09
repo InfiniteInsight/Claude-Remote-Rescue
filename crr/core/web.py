@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 67  # v67: strike badge — cards climbing toward reviver give-up say so (2026-09-08)
+PAGE_VERSION = 68  # v68: Settings-modal Tunnel section (provider picker, CF fields, health, Up/Down)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -292,6 +292,9 @@ def handle_request(
     machines_provider: Callable[[], dict[str, Any]] | None = None,
     reauth_provider: Callable[[], tuple[bool, str, bool]] | None = None,
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
+    tunnel_provider_fn: Callable[[], dict[str, Any]] | None = None,
+    tunnel_writer: Callable[[Any], dict[str, Any]] | None = None,
+    tunnel_action_provider: Callable[[str], dict[str, Any]] | None = None,
     auth_enabled: bool = False,
     auth_check: Callable[[str], bool] | None = None,
     setup_mode: bool = False,
@@ -453,6 +456,13 @@ def handle_request(
             if settings_provider is None:
                 return _plain(404, "not found")
             return _json(200, settings_provider())
+        if path == "/api/tunnel":
+            # Lazy like /api/machines: real subprocess probes (unit state,
+            # serve status) — fetched only when the Settings modal opens,
+            # never on the poll path.
+            if tunnel_provider_fn is None:
+                return _plain(404, "not found")
+            return _json(200, tunnel_provider_fn())
         if path == "/qr.svg":
             # Lazy, like diagnostics: the tailscale status/serve calls are
             # real subprocess round-trips, so this is never on the poll
@@ -566,6 +576,54 @@ def handle_request(
                 return _json(200, settings_writer(data["autokick"]))
             except ValueError as exc:
                 return _plain(400, str(exc))
+
+        if path == "/api/tunnel":
+            # Same CSRF posture as /api/settings (host allowlist already
+            # ran; JSON content-type gate; no CORS headers are ever
+            # emitted) — this one writes to disk too. Full-replace by
+            # design (slice-1 ledger): the page always sends all three
+            # fields. The writer (SettingsStore.write_tunnel) owns the
+            # provider/value validation and signals a rejection by raising
+            # ValueError, which becomes a 400 carrying its message — same
+            # contract as settings_writer/exclusions_writer.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            required = ("provider", "cloudflare_tunnel_name", "cloudflare_hostname")
+            if not isinstance(data, dict) or set(data) != set(required):
+                return _plain(400, 'expected {"provider", "cloudflare_tunnel_name", '
+                                   '"cloudflare_hostname"} (each string or null)')
+            if tunnel_writer is None:
+                return _plain(503, "tunnel settings unavailable")
+            try:
+                return _json(200, tunnel_writer(data))
+            except ValueError as exc:
+                return _plain(400, str(exc))
+
+        if path == "/api/tunnel-action":
+            # Same CSRF posture as /api/tunnel (host allowlist already ran;
+            # JSON content-type gate; no CORS headers are ever emitted).
+            # Explicit up/down from the dashboard — a refused start/stop is
+            # ok=False with the provider's message (a RESULT the modal
+            # renders), never a 4xx/500; only transport/shape problems here
+            # (bad content-type, bad JSON, unknown action) are 4xx, and they
+            # are all rejected BEFORE the provider ever runs.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            if not isinstance(data, dict) or data.get("action") not in ("up", "down"):
+                return _plain(400, 'expected {"action": "up"|"down"}')
+            if tunnel_action_provider is None:
+                return _plain(503, "tunnel actions unavailable")
+            return _json(200, tunnel_action_provider(data["action"]))
 
         if path == "/api/sid-action":
             # Same CSRF posture as /api/action (JSON content-type gate; the

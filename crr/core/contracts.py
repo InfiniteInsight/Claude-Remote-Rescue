@@ -95,6 +95,9 @@ ACTION_CONTRACT_VERSION = 1
 # tailnet peers running crr, each row's reachability, and which one is this
 # machine. Brand new: no prior unversioned shape to backfill.
 MACHINES_CONTRACT_VERSION = 1
+# The Settings modal's tunnel-provider row (spec 2026-09-08, tunnel slice 2).
+# Brand new: no prior unversioned shape to backfill.
+TUNNEL_PAYLOAD_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -609,6 +612,12 @@ SETTINGS_PAYLOAD_KEYS = ("contract", "autokick", "resolved", "config_default", "
 ACTION_RESULT_KEYS = ("contract", "ok", "message", "degraded")
 MACHINE_ROW_KEYS = ("name", "url", "online", "is_self", "os")
 MACHINES_PAYLOAD_KEYS = ("contract", "machines")
+TUNNEL_PAYLOAD_KEYS = (
+    "contract", "provider", "origin", "override", "config_default",
+    "cloudflare_tunnel_name", "cloudflare_hostname", "health",
+    "health_detail", "url", "degraded",
+)
+TUNNEL_HEALTH_STATES = ("up", "down", "unknown", "none")
 
 
 def _require_contract(payload: Mapping[str, Any], expected: int, what: str) -> None:
@@ -732,6 +741,25 @@ def validate_settings_payload(payload: Any) -> None:
         _require_type(payload["autokick"], bool, "/api/settings 'autokick'")
     for field in ("resolved", "config_default", "degraded"):
         _require_type(payload[field], bool, f"/api/settings '{field}'")
+
+
+def validate_tunnel_payload(payload: Any) -> None:
+    """`override` and `url` are nullable; `provider` may be "invalid" when a
+    hand-edited override names an unknown provider — the GET must render the
+    problem, never 500 on it (same never-500 posture as /api/settings)."""
+    payload = _require_mapping(payload, "/api/tunnel payload")
+    _require_exact_keys(payload, TUNNEL_PAYLOAD_KEYS, "/api/tunnel payload")
+    _require_contract(payload, TUNNEL_PAYLOAD_CONTRACT_VERSION, "/api/tunnel")
+    for field in ("provider", "origin", "config_default",
+                  "cloudflare_tunnel_name", "cloudflare_hostname",
+                  "health", "health_detail"):
+        _require_type(payload[field], str, f"/api/tunnel '{field}'")
+    _require_enum(payload["health"], TUNNEL_HEALTH_STATES, "/api/tunnel 'health'")
+    _require_type(payload["degraded"], bool, "/api/tunnel 'degraded'")
+    if payload["override"] is not None:
+        _require_type(payload["override"], str, "/api/tunnel 'override'")
+    if payload["url"] is not None:
+        _require_type(payload["url"], str, "/api/tunnel 'url'")
 
 
 # --------------------------------------------------------------------------

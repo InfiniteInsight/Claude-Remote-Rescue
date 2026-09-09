@@ -1,9 +1,11 @@
 # Tunnels: reaching the dashboard from outside
 
 The dashboard binds loopback only; a tunnel provider proxies it out.
-Pick the provider in `config.toml` (`tunnel_provider = "tailscale" |
-"cloudflare" | "none"`). A dashboard Settings override is planned
-(slice 2); today config.toml is the configuration surface.
+Pick it in `config.toml` (`tunnel_provider = "tailscale" | "cloudflare"
+| "none"`) or the dashboard's Settings → Tunnel section (the override
+wins; clearing it falls back to config.toml). Save only stores
+settings — Up/Down in the same section are the explicit lifecycle
+actions.
 
 ## Tailscale (default)
 
@@ -19,7 +21,8 @@ One-time setup (manual — crr never drives Cloudflare auth):
 2. `cloudflared tunnel create <name>`
 3. `cloudflared tunnel route dns <name> <hostname>`
 4. Set `cloudflare_tunnel_name` + `cloudflare_hostname` (+
-   `tunnel_provider = "cloudflare"`) in config.toml.
+   `tunnel_provider = "cloudflare"`) in config.toml or the
+   dashboard's Settings → Tunnel section.
 5. `crr tunnel up` — installs and enables the `crr-tunnel.service`
    systemd --user unit running
    `cloudflared tunnel --url http://127.0.0.1:<port> run <name>`.

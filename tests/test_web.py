@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from crr.core import contracts
 from crr.core import web
 
 
@@ -61,6 +62,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
             machines_provider=None, reauth_provider=None, reauth_code_provider=None,
+            tunnel_provider=None, tunnel_writer=None, tunnel_action_provider=None,
             query="", auth_enabled=False, auth_check=None, setup_mode=False,
             login_provider=None,
             logout_provider=None, dashboard_auth_provider=None, bootstrap_state=None):
@@ -83,6 +85,9 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         machines_provider=machines_provider,
         reauth_provider=reauth_provider,
         reauth_code_provider=reauth_code_provider,
+        tunnel_provider_fn=tunnel_provider,
+        tunnel_writer=tunnel_writer,
+        tunnel_action_provider=tunnel_action_provider,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -296,6 +301,110 @@ def test_settings_post_surfaces_a_writer_rejection_as_400():
 def test_settings_post_missing_writer_is_503():
     resp = _handle(method="POST", path="/api/settings", headers=_JSON,
                    body=b'{"autokick": true}')
+    assert resp.status == 503
+
+
+def test_tunnel_get_404_without_provider():
+    assert _handle(path="/api/tunnel").status == 404
+
+
+def test_tunnel_get_returns_provider_payload():
+    payload = {
+        "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+        "provider": "tailscale", "origin": "configured", "override": None,
+        "config_default": "tailscale", "cloudflare_tunnel_name": "",
+        "cloudflare_hostname": "", "health": "up",
+        "health_detail": "tailscale serve is live",
+        "url": "https://x.ts.net/", "degraded": False,
+    }
+    contracts.validate_tunnel_payload(payload)  # the shape is contracted
+    resp = _handle(path="/api/tunnel", tunnel_provider=lambda: payload)
+    assert resp.status == 200
+    assert json.loads(resp.body)["provider"] == "tailscale"
+
+
+def test_tunnel_post_writes_and_returns_payload():
+    seen = {}
+
+    def writer(data):
+        seen.update(data)
+        return {"contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
+                "provider": "cloudflare", "origin": "override", "override": "cloudflare",
+                "config_default": "tailscale", "cloudflare_tunnel_name": "crr",
+                "cloudflare_hostname": "crr.example.com", "health": "down",
+                "health_detail": "unit inactive", "url": "https://crr.example.com/",
+                "degraded": False}
+
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=json.dumps({
+                       "provider": "cloudflare", "cloudflare_tunnel_name": "crr",
+                       "cloudflare_hostname": "crr.example.com",
+                   }).encode("utf-8"),
+                   tunnel_writer=writer)
+    assert resp.status == 200
+    assert seen["provider"] == "cloudflare"
+
+
+def test_tunnel_post_rejects_bad_shape_and_bad_value():
+    def bad_writer(_data):
+        raise ValueError("bad provider")
+
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=b'{"nope": 1}', tunnel_writer=bad_writer)
+    assert resp.status == 400  # missing keys rejected before the writer runs
+
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=json.dumps({
+                       "provider": "ngrok", "cloudflare_tunnel_name": None,
+                       "cloudflare_hostname": None,
+                   }).encode("utf-8"),
+                   tunnel_writer=bad_writer)
+    assert resp.status == 400 and b"bad provider" in resp.body
+
+
+def test_tunnel_post_missing_writer_is_503():
+    resp = _handle(method="POST", path="/api/tunnel", headers=_JSON,
+                   body=json.dumps({
+                       "provider": "cloudflare", "cloudflare_tunnel_name": "crr",
+                       "cloudflare_hostname": "crr.example.com",
+                   }).encode("utf-8"))
+    assert resp.status == 503
+
+
+def test_tunnel_action_up_dispatches_and_returns_result():
+    calls = []
+
+    def actor(action):
+        calls.append(action)
+        return {"ok": True, "message": "started", "tunnel": {"provider": "cloudflare"}}
+
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "up"}).encode("utf-8"),
+                   tunnel_action_provider=actor)
+    assert resp.status == 200 and calls == ["up"]
+
+
+def test_tunnel_action_rejects_unknown_action_before_provider():
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "restart"}).encode("utf-8"),
+                   tunnel_action_provider=lambda a: (_ for _ in ()).throw(
+                       AssertionError("must not run")))
+    assert resp.status == 400
+
+
+def test_tunnel_action_failure_is_200_with_ok_false():
+    # A refused start (missing prereqs) is a RESULT, not a transport error:
+    # the modal shows the message; only transport/shape problems are 4xx.
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "up"}).encode("utf-8"),
+                   tunnel_action_provider=lambda a: {"ok": False, "message": "missing prereqs",
+                                                      "tunnel": {}})
+    assert resp.status == 200 and json.loads(resp.body)["ok"] is False
+
+
+def test_tunnel_action_missing_provider_is_503():
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "up"}).encode("utf-8"))
     assert resp.status == 503
 
 
@@ -974,8 +1083,10 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_67():
-    """v67: strike badge — a card climbing toward reviver give-up says so
+def test_page_version_is_68():
+    """v68: Settings-modal Tunnel section (provider picker, CF fields,
+    health, explicit Up/Down) — spec 2026-09-08 slice 2, Task 3.
+    (v67: strike badge — a card climbing toward reviver give-up says so
     ("⚠ strike N/max — process died upon revival"; the max is the
     zombie_strikes config prior injected via @ZOMBIE_STRIKES@ — during the
     2026-09-08 crash-loop incident the escalation was visible only in the
@@ -1013,7 +1124,20 @@ def test_page_version_is_67():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 67
+    assert web.PAGE_VERSION == 68
+
+
+def test_page_has_a_tunnel_settings_section():
+    page = web.load_page()
+    assert 'id="tunnel-provider"' in page       # the picker
+    assert 'id="tunnel-cf-name"' in page
+    assert 'id="tunnel-cf-hostname"' in page
+    assert 'id="tunnel-health"' in page
+    assert 'id="tunnel-up"' in page and 'id="tunnel-down"' in page
+    assert "/api/tunnel-action" in page
+    # Saving settings never starts/stops a tunnel (spec) — the save handler
+    # must not touch the action endpoint; pin by distinct function names.
+    assert "function saveTunnel(" in page and "function tunnelAction(" in page
 
 
 def test_page_has_a_strike_badge_wired_to_revive_strikes():
