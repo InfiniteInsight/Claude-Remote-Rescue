@@ -6819,6 +6819,32 @@ def test_machines_provider_cloudflare_shows_self_url(tmp_path, monkeypatch):
     assert row["is_self"] is True
 
 
+def test_machines_provider_tailscale_path_unchanged(tmp_path, monkeypatch):
+    # The tailnet path predates this task's extraction into a module-level
+    # _machines_payload — this locks that plan_launcher() still gets the
+    # real status/tag/self-dnsname wiring the old inline closure body had.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTailscale:
+        def __init__(self, timeout, dashboard_port=8377):
+            pass
+
+        def status(self):
+            return {
+                "Self": {"HostName": "self-host", "DNSName": "self.tailnet.ts.net.",
+                         "Online": True, "Tags": ["tag:crr"], "OS": "linux"},
+                "Peer": {},
+            }
+
+    monkeypatch.setattr(cli.tailscale, "RealTailscale", _FakeTailscale)
+    payload = cli._machines_payload(cli.cfg.Config(), tmp_path)
+    cli.contracts.validate_machines_payload(payload)
+    (row,) = payload["machines"]
+    assert row["name"] == "self-host"
+    assert row["url"] == "https://self.tailnet.ts.net/"
+    assert row["is_self"] is True
+
+
 def test_tunnel_payload_never_raises_on_corrupt_override(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _write_bad_tunnel_provider(tmp_path)  # helper exists since slice 1
