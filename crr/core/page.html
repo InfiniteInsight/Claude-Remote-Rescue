@@ -461,7 +461,7 @@
     <div style="padding: 0 16px 14px;">
       <h3 style="margin:0 0 6px; font-size:12px; color:#8a93a2; font-weight:600;">Tunnel</h3>
       <label style="display:block; margin-bottom:6px;">Provider
-        <select id="tunnel-provider">
+        <select id="tunnel-provider" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
           <option value="">default (config.toml)</option>
           <option value="tailscale">tailscale</option>
           <option value="cloudflare">cloudflare</option>
@@ -469,10 +469,10 @@
         </select>
       </label>
       <label style="display:block; margin-bottom:6px;">Cloudflare tunnel name
-        <input type="text" id="tunnel-cf-name" placeholder="crr">
+        <input type="text" id="tunnel-cf-name" placeholder="crr" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
       </label>
       <label style="display:block; margin-bottom:6px;">Cloudflare hostname
-        <input type="text" id="tunnel-cf-hostname" placeholder="crr.example.com">
+        <input type="text" id="tunnel-cf-hostname" placeholder="crr.example.com" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
       </label>
       <div id="tunnel-health" style="font-size:12px; color:#8a93a2; margin:6px 0;"></div>
       <div id="tunnel-degraded" hidden style="font-size:12px; color:#e0a53b; margin:6px 0;"></div>
