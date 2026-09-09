@@ -12,11 +12,11 @@
       with explicit opt-out (blocking setup page on first visit), fail-closed on
       corrupt store, delay-then-verify rate limiting. App-level gate independent
       of the network layer.
-- [ ] Pluggable tunnel support — abstract tunnel lifecycle (start/stop/health-check/
+- [x] Pluggable tunnel support — abstract tunnel lifecycle (start/stop/health-check/
       advertise-URL) so CRR can manage Cloudflare Tunnel the same way it manages
       Tailscale. Cloudflare free tier covers tunnels + Access (Zero Trust) for
       up to 50 users.
-      Slice 1 (core + CLI) implemented on feat/tunnel-provider (PR pending); slice 2 (dashboard GUI settings panel) remains.
+      Slice 1 (core + CLI) merged as PR #124; slice 2 (dashboard GUI) landed with this change. macOS/Windows cloudflared lifecycle remains future work.
 
 - [x] Fix `crr deploy` from the PATH-linked binary + deploy-drift check in
       `crr doctor` — PR #110, merged 2026-08-28. Deploy resolved its repo from
