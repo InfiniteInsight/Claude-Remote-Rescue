@@ -6620,6 +6620,26 @@ class _FakeTunnelProvider:
         return "run the setup"
 
 
+def test_tunnel_action_provider_up_down(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider()
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "up")
+    assert result["ok"] is True
+    assert fake.started_with == cli.cfg.DEFAULTS["dashboard_port"]
+    assert "tunnel" in result
+    cli.contracts.validate_tunnel_payload(result["tunnel"])   # nested payload is contracted
+    result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "down")
+    assert result["ok"] is True and fake.stopped
+
+
+def test_tunnel_action_provider_none_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "up")
+    assert result["ok"] is False and "none" in result["message"]
+
+
 def test_tunnel_up_starts_active_provider_and_prints_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider()

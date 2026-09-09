@@ -215,3 +215,12 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
     assert written["origin"] == "override"
     # And a fresh GET (not just the writer's own echo) sees the same state.
     assert handler_holder["tunnel_provider_fn"]()["override"] == "none"
+
+    # tunnel_action_provider drives the REAL tunnel provider's start/stop —
+    # calling it here (e.g. action "down") could tear down the operator's
+    # own live tailscale serve, so this only proves the wiring exists and
+    # is callable; it must never actually be invoked from this test.
+    tunnel_action_provider = handler_holder.get("tunnel_action_provider")
+    assert tunnel_action_provider is not None, \
+        "tunnel_action_provider was not wired into the handler"
+    assert callable(tunnel_action_provider)

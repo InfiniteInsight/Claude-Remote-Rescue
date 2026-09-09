@@ -294,6 +294,7 @@ def handle_request(
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     tunnel_provider_fn: Callable[[], dict[str, Any]] | None = None,
     tunnel_writer: Callable[[Any], dict[str, Any]] | None = None,
+    tunnel_action_provider: Callable[[str], dict[str, Any]] | None = None,
     auth_enabled: bool = False,
     auth_check: Callable[[str], bool] | None = None,
     setup_mode: bool = False,
@@ -602,6 +603,27 @@ def handle_request(
                 return _json(200, tunnel_writer(data))
             except ValueError as exc:
                 return _plain(400, str(exc))
+
+        if path == "/api/tunnel-action":
+            # Same CSRF posture as /api/tunnel (host allowlist already ran;
+            # JSON content-type gate; no CORS headers are ever emitted).
+            # Explicit up/down from the dashboard — a refused start/stop is
+            # ok=False with the provider's message (a RESULT the modal
+            # renders), never a 4xx/500; only transport/shape problems here
+            # (bad content-type, bad JSON, unknown action) are 4xx, and they
+            # are all rejected BEFORE the provider ever runs.
+            ctype = _header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                return _plain(415, "content-type must be application/json")
+            try:
+                data = json.loads(body or b"")
+            except (ValueError, TypeError):
+                return _plain(400, "invalid JSON")
+            if not isinstance(data, dict) or data.get("action") not in ("up", "down"):
+                return _plain(400, 'expected {"action": "up"|"down"}')
+            if tunnel_action_provider is None:
+                return _plain(503, "tunnel actions unavailable")
+            return _json(200, tunnel_action_provider(data["action"]))
 
         if path == "/api/sid-action":
             # Same CSRF posture as /api/action (JSON content-type gate; the

@@ -62,7 +62,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
             recall_provider=None, exclusions_provider=None, exclusions_writer=None,
             settings_provider=None, settings_writer=None, qr_svg_provider=None,
             machines_provider=None, reauth_provider=None, reauth_code_provider=None,
-            tunnel_provider=None, tunnel_writer=None,
+            tunnel_provider=None, tunnel_writer=None, tunnel_action_provider=None,
             query="", auth_enabled=False, auth_check=None, setup_mode=False,
             login_provider=None,
             logout_provider=None, dashboard_auth_provider=None, bootstrap_state=None):
@@ -87,6 +87,7 @@ def _handle(method="GET", path="/", host="localhost", provider=None,
         reauth_code_provider=reauth_code_provider,
         tunnel_provider_fn=tunnel_provider,
         tunnel_writer=tunnel_writer,
+        tunnel_action_provider=tunnel_action_provider,
         query=query,
         allowed_hosts=ALLOWED,
         allowed_suffixes=SUFFIXES,
@@ -367,6 +368,43 @@ def test_tunnel_post_missing_writer_is_503():
                        "provider": "cloudflare", "cloudflare_tunnel_name": "crr",
                        "cloudflare_hostname": "crr.example.com",
                    }).encode("utf-8"))
+    assert resp.status == 503
+
+
+def test_tunnel_action_up_dispatches_and_returns_result():
+    calls = []
+
+    def actor(action):
+        calls.append(action)
+        return {"ok": True, "message": "started", "tunnel": {"provider": "cloudflare"}}
+
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "up"}).encode("utf-8"),
+                   tunnel_action_provider=actor)
+    assert resp.status == 200 and calls == ["up"]
+
+
+def test_tunnel_action_rejects_unknown_action_before_provider():
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "restart"}).encode("utf-8"),
+                   tunnel_action_provider=lambda a: (_ for _ in ()).throw(
+                       AssertionError("must not run")))
+    assert resp.status == 400
+
+
+def test_tunnel_action_failure_is_200_with_ok_false():
+    # A refused start (missing prereqs) is a RESULT, not a transport error:
+    # the modal shows the message; only transport/shape problems are 4xx.
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "up"}).encode("utf-8"),
+                   tunnel_action_provider=lambda a: {"ok": False, "message": "missing prereqs",
+                                                      "tunnel": {}})
+    assert resp.status == 200 and json.loads(resp.body)["ok"] is False
+
+
+def test_tunnel_action_missing_provider_is_503():
+    resp = _handle(method="POST", path="/api/tunnel-action", headers=_JSON,
+                   body=json.dumps({"action": "up"}).encode("utf-8"))
     assert resp.status == 503
 
 

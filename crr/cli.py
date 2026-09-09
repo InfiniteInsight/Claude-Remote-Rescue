@@ -1675,6 +1675,24 @@ def _tunnel_payload(config: cfg.Config, sd) -> dict:
     }
 
 
+def _tunnel_action(config: cfg.Config, sd, action: str) -> dict:
+    """Dashboard tunnel lifecycle. A refused start/stop is ok=False with the
+    provider's message — a result the modal renders, never a 4xx/500."""
+    try:
+        sel = _tunnel_selection(config, sd)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc), "tunnel": _tunnel_payload(config, sd)}
+    provider = _tunnel_provider(config, sel)
+    if provider is None:
+        return {"ok": False, "message": "tunnel provider is none — pick one first",
+                "tunnel": _tunnel_payload(config, sd)}
+    if action == "up":
+        ok, msg = provider.start(config.get("dashboard_port"))
+    else:
+        ok, msg = provider.stop()
+    return {"ok": ok, "message": msg, "tunnel": _tunnel_payload(config, sd)}
+
+
 def _cmd_tunnel(args: argparse.Namespace) -> int:
     config = _load_config()
     sd = state_dir.state_dir()
@@ -4194,6 +4212,7 @@ def make_web_handler(
     reauth_code_provider: Callable[[str], tuple[bool, str, bool]] | None = None,
     tunnel_provider_fn: Callable[[], dict] | None = None,
     tunnel_writer: Callable[[object], dict] | None = None,
+    tunnel_action_provider: Callable[[str], dict] | None = None,
     auth_enabled_fn: Callable[[], bool] | None = None,
     auth_check: Callable[[str], bool] | None = None,
     setup_mode_fn: Callable[[], bool] | None = None,
@@ -4255,6 +4274,7 @@ def make_web_handler(
                 reauth_code_provider=reauth_code_provider,
                 tunnel_provider_fn=tunnel_provider_fn,
                 tunnel_writer=tunnel_writer,
+                tunnel_action_provider=tunnel_action_provider,
                 auth_enabled=auth_enabled and auth_check is not None,
                 auth_check=auth_check,
                 # web.handle_request's gate checks auth_enabled first (elif
@@ -5115,6 +5135,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
             )
         return tunnel_settings_provider()
 
+    def tunnel_action_provider(action: str) -> dict:
+        # Explicit up/down from the dashboard's Settings modal — see
+        # _tunnel_action's docstring for why a refusal is ok=False, never
+        # an exception/4xx.
+        return _tunnel_action(config, sd, action)
+
     def recall_provider(query: str, sid: str | None) -> dict:
         # Lazy GET (never the poll path): print-only transcript search, the
         # dashboard surface of `crr recall`. sid -> that one session; no sid ->
@@ -5165,6 +5191,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         reauth_code_provider=reauth_code_provider,
         tunnel_provider_fn=tunnel_settings_provider,
         tunnel_writer=tunnel_settings_writer,
+        tunnel_action_provider=tunnel_action_provider,
         # Fail-closed on a corrupt store (spec 2026-08-26 revision): the
         # gate must activate even though `login_enabled()` itself stays
         # False on corrupt (see dashboard_auth.DashboardAuthStore._read).
