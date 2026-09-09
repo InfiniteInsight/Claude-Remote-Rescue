@@ -1646,7 +1646,8 @@ def _tunnel_payload(config: cfg.Config, sd) -> dict:
     except ValueError as exc:
         return {
             "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
-            "provider": "invalid", "origin": "override",
+            "provider": "invalid",
+            "origin": "override" if override.get("provider") else "configured",
             "override": override.get("provider"),
             "config_default": config.get("tunnel_provider"),
             "cloudflare_tunnel_name": override.get("cloudflare_tunnel_name")

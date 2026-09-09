@@ -6725,8 +6725,23 @@ def test_tunnel_payload_never_raises_on_corrupt_override(tmp_path, monkeypatch):
     payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
     cli.contracts.validate_tunnel_payload(payload)
     assert payload["provider"] == "invalid"
+    assert payload["origin"] == "override"
     assert payload["health"] == "unknown"
     assert "ngrok" in payload["health_detail"]
+
+
+def test_tunnel_payload_corrupt_config_default_reports_origin_configured(tmp_path, monkeypatch):
+    # The bad value can also come from config.toml itself, with no settings-
+    # store override at all — origin must name THAT source, not "override"
+    # (review fix: _tunnel_payload previously hardcoded "override" here even
+    # though the override field reads back None).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    config = cli.cfg.Config(overrides={"tunnel_provider": "ngrok"})
+    payload = cli._tunnel_payload(config, tmp_path)
+    cli.contracts.validate_tunnel_payload(payload)
+    assert payload["provider"] == "invalid"
+    assert payload["origin"] == "configured"
+    assert payload["override"] is None
 
 
 def test_tunnel_payload_provider_none_health_none(tmp_path, monkeypatch):

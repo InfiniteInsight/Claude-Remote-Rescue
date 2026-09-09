@@ -197,3 +197,21 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
     # Guard the guard: if no endpoint returned a row, the row validators
     # above never ran and this test proved far less than it appears to.
     assert saw_rows, "no endpoint returned rows — the row contracts went unchecked"
+
+    # The writer closures are captured above but never CALLED by the checks
+    # loop (it only reads GET-style providers) — a renamed kwarg or a wrong
+    # SettingsStore.write_tunnel argument would still ship green without
+    # this. Drive the real tunnel_writer end to end: write a valid
+    # override, confirm the returned payload both satisfies the contract
+    # and shows the write actually landed.
+    tunnel_writer = handler_holder.get("tunnel_writer")
+    assert tunnel_writer is not None, "tunnel_writer was not wired into the handler"
+    written = tunnel_writer({
+        "provider": "none", "cloudflare_tunnel_name": None, "cloudflare_hostname": None,
+    })
+    contracts.validate_tunnel_payload(json.loads(json.dumps(written)))
+    assert written["override"] == "none"
+    assert written["provider"] == "none"
+    assert written["origin"] == "override"
+    # And a fresh GET (not just the writer's own echo) sees the same state.
+    assert handler_holder["tunnel_provider_fn"]()["override"] == "none"
