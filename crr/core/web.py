@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 67  # v67: strike badge — cards climbing toward reviver give-up say so (2026-09-08)
+PAGE_VERSION = 68  # v68: Settings-modal Tunnel section (provider picker, CF fields, health, Up/Down)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

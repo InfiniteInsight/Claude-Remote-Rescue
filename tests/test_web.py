@@ -1083,8 +1083,10 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_67():
-    """v67: strike badge — a card climbing toward reviver give-up says so
+def test_page_version_is_68():
+    """v68: Settings-modal Tunnel section (provider picker, CF fields,
+    health, explicit Up/Down) — spec 2026-09-08 slice 2, Task 3.
+    (v67: strike badge — a card climbing toward reviver give-up says so
     ("⚠ strike N/max — process died upon revival"; the max is the
     zombie_strikes config prior injected via @ZOMBIE_STRIKES@ — during the
     2026-09-08 crash-loop incident the escalation was visible only in the
@@ -1122,7 +1124,20 @@ def test_page_version_is_67():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 67
+    assert web.PAGE_VERSION == 68
+
+
+def test_page_has_a_tunnel_settings_section():
+    page = web.load_page()
+    assert 'id="tunnel-provider"' in page       # the picker
+    assert 'id="tunnel-cf-name"' in page
+    assert 'id="tunnel-cf-hostname"' in page
+    assert 'id="tunnel-health"' in page
+    assert 'id="tunnel-up"' in page and 'id="tunnel-down"' in page
+    assert "/api/tunnel-action" in page
+    # Saving settings never starts/stops a tunnel (spec) — the save handler
+    # must not touch the action endpoint; pin by distinct function names.
+    assert "function saveTunnel(" in page and "function tunnelAction(" in page
 
 
 def test_page_has_a_strike_badge_wired_to_revive_strikes():
