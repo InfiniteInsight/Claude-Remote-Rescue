@@ -194,6 +194,48 @@ def test_web_server_serves_sessions_and_enforces_host(tmp_path):
         server.server_close()
 
 
+def test_web_server_allowed_hosts_callable_is_resolved_per_request(tmp_path):
+    """`make_web_handler`'s `allowed_hosts` may be a zero-arg callable — the
+    same live-re-read pattern as `auth_enabled_fn`/`setup_mode_fn` — so a
+    GUI hostname change (Settings-modal Tunnel section) takes effect on the
+    very next poll, with no service restart (slice-1 ledger item). Real
+    socket + real HTTP, exactly like the set-passing test above, to prove
+    the resolution happens against real code, not a stub."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    hosts = {"127.0.0.1", "localhost"}
+    payload = {"contract": 1, "sessions": []}
+    handler = cli.make_web_handler(lambda: payload, lambda: hosts, (".ts.net",))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        # Not yet in the set -> 403.
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "crr.example.com"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected 403 before the host was added"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+
+        # Mutate the underlying set the callable closes over — a stand-in
+        # for a settings-store write made after the handler was built.
+        hosts.add("crr.example.com")
+
+        # Same handler, no restart -> the very next request sees it.
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions",
+                                     headers={"Host": "crr.example.com"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_systemd_print_emits_all_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
@@ -5122,6 +5164,7 @@ def _web_captured(monkeypatch, tmp_path, fake_tmux=None):
 
     def fake_make_web_handler(sessions_provider, allowed, suffixes, **kw):
         captured["provider"] = sessions_provider
+        captured["allowed_hosts"] = allowed
         captured.update(kw)
         return object()
 
@@ -5183,6 +5226,26 @@ def _write_creds(path, now, *, expired):
         "expiresAt": int((now + delta) * 1000),
         "refreshTokenExpiresAt": int((now + delta) * 1000),
     }))
+
+
+def test_cmd_web_passes_a_live_allowlist_callable(tmp_path, monkeypatch):
+    """A GUI hostname change (Settings-modal Tunnel section, slice-1 ledger
+    item) must take effect without a service restart: `_cmd_web` must hand
+    `make_web_handler` a CALLABLE wrapping `_web_allowed_hosts`, never a
+    snapshot set frozen at startup."""
+    captured = _web_captured(monkeypatch, tmp_path)
+
+    allowed = captured["allowed_hosts"]
+    assert callable(allowed), "make_web_handler must receive a callable, not a frozen set"
+    assert "127.0.0.1" in allowed()
+
+    # The live part of the contract: a settings-store write made AFTER the
+    # handler was already constructed must be honored on the callable's
+    # very next call — proven against the real writer/selector, not a stub.
+    from crr.core import settings as settings_mod
+
+    settings_mod.SettingsStore(tmp_path).write_tunnel(cloudflare_hostname="crr.example.com")
+    assert "crr.example.com" in allowed()
 
 
 def test_reauth_provider_spawns_tmux_session_nonblocking(tmp_path, monkeypatch):

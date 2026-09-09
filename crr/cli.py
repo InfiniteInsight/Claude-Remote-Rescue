@@ -4194,7 +4194,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
 
 def make_web_handler(
     sessions_provider: Callable[[], dict],
-    allowed_hosts: set[str],
+    allowed_hosts: set[str] | Callable[[], set[str]],
     allowed_suffixes: tuple[str, ...],
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
@@ -4246,6 +4246,12 @@ def make_web_handler(
     is structurally impossible for the gate to fire with no way to
     validate a cookie (spec 2026-08-26, Task 4 review: "silently fails
     open if auth_enabled=True but auth_check=None").
+
+    ``allowed_hosts`` may be a plain set OR a zero-arg callable — when
+    callable, a callable is re-resolved per request, the auth_enabled_fn
+    pattern: GUI-written hostnames (Settings-modal Tunnel section) take
+    effect live, with no service restart needed to pick up a new
+    cloudflare hostname or ``host_allowlist_extras`` entry.
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -4255,6 +4261,7 @@ def make_web_handler(
             path, _, query = self.path.partition("?")
             auth_enabled = bool(auth_enabled_fn()) if auth_enabled_fn else False
             setup_mode = bool(setup_mode_fn()) if setup_mode_fn else False
+            hosts = allowed_hosts() if callable(allowed_hosts) else allowed_hosts
             resp = web.handle_request(
                 method, path, self.headers, body,
                 sessions_provider=sessions_provider,
@@ -4286,7 +4293,7 @@ def make_web_handler(
                 dashboard_auth_provider=dashboard_auth_provider,
                 bootstrap_state=bootstrap_state_fn() if bootstrap_state_fn else None,
                 query=query,
-                allowed_hosts=allowed_hosts,
+                allowed_hosts=hosts,
                 allowed_suffixes=allowed_suffixes,
                 poll_seconds=poll_seconds,
                 version_check_seconds=version_check_seconds,
@@ -5171,10 +5178,12 @@ def _cmd_web(args: argparse.Namespace) -> int:
         return out
 
     # Host allowlist: loopback + this host's name + tailnet suffix + any
-    # config.toml extras + the effective cloudflare hostname.
-    allowed = _web_allowed_hosts(config, sd)
+    # config.toml extras + the effective cloudflare hostname. Passed as a
+    # callable, not a snapshot set (make_web_handler docstring): a Settings-
+    # modal hostname change, or a tunnel override write, must take effect on
+    # the very next poll with no service restart.
     handler = make_web_handler(
-        provider, allowed, (".ts.net",),
+        provider, lambda: _web_allowed_hosts(config, sd), (".ts.net",),
         action_provider=action_provider,
         diagnostics_provider=diagnostics_provider,
         untracked_provider=untracked_provider,
