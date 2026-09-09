@@ -468,15 +468,19 @@
           <option value="none">none</option>
         </select>
       </label>
-      <label style="display:block; margin-bottom:6px;">Cloudflare tunnel name
-        <input type="text" id="tunnel-cf-name" placeholder="crr" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
-      </label>
-      <label style="display:block; margin-bottom:6px;">Cloudflare hostname
-        <input type="text" id="tunnel-cf-hostname" placeholder="crr.example.com" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
-      </label>
+      <div id="tunnel-hint" class="note" style="padding:0; margin:0 0 8px;"></div>
+      <div id="tunnel-cf-fields" hidden>
+        <label style="display:block; margin-bottom:6px;">Cloudflare tunnel name
+          <input type="text" id="tunnel-cf-name" placeholder="crr" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        </label>
+        <label style="display:block; margin-bottom:6px;">Cloudflare hostname
+          <input type="text" id="tunnel-cf-hostname" placeholder="crr.example.com" style="width:100%; padding:6px; margin:0 0 6px; box-sizing:border-box; background:#1c222c; color:#cdd3dd; border:1px solid #2f3745; border-radius:6px;">
+        </label>
+      </div>
+      <button id="tunnel-save">Save</button>
+      <div style="border-top:1px solid #2f3745; margin:12px 0 8px;"></div>
       <div id="tunnel-health" style="font-size:12px; color:#8a93a2; margin:6px 0;"></div>
       <div id="tunnel-degraded" hidden style="font-size:12px; color:#e0a53b; margin:6px 0;"></div>
-      <button id="tunnel-save">Save</button>
       <button id="tunnel-up">Up</button>
       <button id="tunnel-down">Down</button>
     </div>
@@ -2100,10 +2104,43 @@ function loadAutokick() {
 // Tunnel section (spec 2026-09-02, slice 2). Save writes overrides ONLY —
 // it never starts/stops anything; Up/Down are the explicit lifecycle
 // actions (spec: "Writing settings does not start/stop anything").
+// The picker and CF fields edit the OVERRIDE only; config.toml values show
+// as placeholders, never as editable text — so Save can't silently promote
+// config values into sticky overrides (UX rework 2026-09-09). The CF fields
+// only appear when cloudflare is the relevant provider.
+var TUNNEL_HINTS = {
+  "tailscale": "No settings needed \u2014 uses this machine's tailnet identity.",
+  "cloudflare": "Needs a one-time cloudflared setup (see docs/tunnels.md), plus the tunnel name and hostname below.",
+  "none": "No tunnel \u2014 the dashboard stays reachable on this machine only.",
+  "invalid": "The stored override names an unknown provider \u2014 pick a valid one and Save."
+};
+var tunnelConfigDefault = "";
+
+function updateTunnelVisibility() {
+  var picked = document.getElementById("tunnel-provider").value;
+  var effective = picked || tunnelConfigDefault;
+  document.getElementById("tunnel-cf-fields").hidden = effective !== "cloudflare";
+  var hint = TUNNEL_HINTS[effective] || "";
+  if (!picked && tunnelConfigDefault) {
+    hint = "Following config.toml (" + tunnelConfigDefault + "). " + hint;
+  }
+  document.getElementById("tunnel-hint").textContent = hint;
+}
+
 function renderTunnel(data) {
+  tunnelConfigDefault = data.config_default || "";
   document.getElementById("tunnel-provider").value = data.override || "";
-  document.getElementById("tunnel-cf-name").value = data.cloudflare_tunnel_name || "";
-  document.getElementById("tunnel-cf-hostname").value = data.cloudflare_hostname || "";
+  var name = document.getElementById("tunnel-cf-name");
+  var host = document.getElementById("tunnel-cf-hostname");
+  name.value = data.override_tunnel_name || "";
+  host.value = data.override_hostname || "";
+  // Empty field = "using config.toml" — show that value as the placeholder
+  // so it is visible but not accidentally saved as an override.
+  name.placeholder = data.override_tunnel_name ? "crr"
+    : (data.cloudflare_tunnel_name || "crr");
+  host.placeholder = data.override_hostname ? "crr.example.com"
+    : (data.cloudflare_hostname || "crr.example.com");
+  updateTunnelVisibility();
   var h = document.getElementById("tunnel-health");
   // F16: "unknown" renders as unknown, never coerced into up/down.
   h.textContent = "provider: " + data.provider + " (" + data.origin + ") · health: "
@@ -2163,6 +2200,7 @@ function tunnelAction(action) {
     .finally(function () { btn.disabled = false; });
 }
 
+document.getElementById("tunnel-provider").addEventListener("change", updateTunnelVisibility);
 document.getElementById("tunnel-save").addEventListener("click", saveTunnel);
 document.getElementById("tunnel-up").addEventListener("click", function () { tunnelAction("up"); });
 document.getElementById("tunnel-down").addEventListener("click", function () { tunnelAction("down"); });

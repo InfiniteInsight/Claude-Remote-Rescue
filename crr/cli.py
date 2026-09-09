@@ -1649,6 +1649,8 @@ def _tunnel_payload(config: cfg.Config, sd) -> dict:
             "provider": "invalid",
             "origin": "override" if override.get("provider") else "configured",
             "override": override.get("provider"),
+            "override_tunnel_name": override.get("cloudflare_tunnel_name"),
+            "override_hostname": override.get("cloudflare_hostname"),
             "config_default": config.get("tunnel_provider"),
             "cloudflare_tunnel_name": override.get("cloudflare_tunnel_name")
                 or config.get("cloudflare_tunnel_name"),
@@ -1667,6 +1669,8 @@ def _tunnel_payload(config: cfg.Config, sd) -> dict:
         "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
         "provider": sel.provider, "origin": sel.origin,
         "override": override.get("provider"),
+            "override_tunnel_name": override.get("cloudflare_tunnel_name"),
+            "override_hostname": override.get("cloudflare_hostname"),
         "config_default": config.get("tunnel_provider"),
         "cloudflare_tunnel_name": sel.tunnel_name,
         "cloudflare_hostname": sel.hostname,

@@ -6870,6 +6870,29 @@ def test_tunnel_payload_corrupt_config_default_reports_origin_configured(tmp_pat
     assert payload["override"] is None
 
 
+def test_tunnel_payload_reports_override_fields_separately(tmp_path, monkeypatch):
+    # Effective values and override values are different answers: the page
+    # needs both (override seeds the field, effective/config feeds the
+    # placeholder). Unset override -> None, never "".
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    fake = _FakeTunnelProvider(name="cloudflare", url="https://cfg.example.com/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    config = cli.cfg.Config(overrides={"tunnel_provider": "cloudflare",
+                                       "cloudflare_tunnel_name": "cfg-name",
+                                       "cloudflare_hostname": "cfg.example.com"})
+    payload = cli._tunnel_payload(config, tmp_path)
+    assert payload["override_tunnel_name"] is None
+    assert payload["override_hostname"] is None
+    assert payload["cloudflare_tunnel_name"] == "cfg-name"  # effective, unchanged
+    from crr.core import settings as settings_mod
+    settings_mod.SettingsStore(tmp_path).write_tunnel(
+        provider="cloudflare", cloudflare_tunnel_name="ovr-name")
+    payload = cli._tunnel_payload(config, tmp_path)
+    assert payload["override_tunnel_name"] == "ovr-name"
+    assert payload["override_hostname"] is None
+    assert payload["cloudflare_tunnel_name"] == "ovr-name"
+
+
 def test_tunnel_payload_provider_none_health_none(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     from crr.core import settings as settings_mod

@@ -35,12 +35,15 @@ def _untracked_row():
 
 def test_every_lazy_payload_has_a_version_constant():
     for name in ("UNTRACKED_CONTRACT_VERSION", "RECALL_CONTRACT_VERSION",
-                 "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION",
-                 "TUNNEL_PAYLOAD_CONTRACT_VERSION"):
+                 "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION"):
         assert getattr(contracts, name) == 1, name
     # discoverable moved to v2 when #34 added `cwd_source` to its rows, then
     # v3 when the same issue added worktree collapse (`dup_count`/`dup_members`).
     assert contracts.DISCOVERABLE_CONTRACT_VERSION == 3
+    # tunnel moved to v2 when the UX rework (2026-09-09) split the override
+    # values out from the effective values so the page can seed fields from
+    # overrides only.
+    assert contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION == 2
 
 
 def test_discoverable_payload_roundtrips():
@@ -82,7 +85,8 @@ def test_tunnel_payload_roundtrips():
         "contract": contracts.TUNNEL_PAYLOAD_CONTRACT_VERSION,
         "provider": "tailscale", "origin": "configured", "override": None,
         "config_default": "tailscale", "cloudflare_tunnel_name": "",
-        "cloudflare_hostname": "", "health": "up",
+        "cloudflare_hostname": "", "override_tunnel_name": None,
+        "override_hostname": None, "health": "up",
         "health_detail": "tailscale serve is live",
         "url": "https://x.ts.net/", "degraded": False,
     })
@@ -95,7 +99,8 @@ def test_tunnel_payload_roundtrips():
     ("validate_tunnel_payload", {
         "contract": 99, "provider": "tailscale", "origin": "configured",
         "override": None, "config_default": "tailscale",
-        "cloudflare_tunnel_name": "", "cloudflare_hostname": "", "health": "up",
+        "cloudflare_tunnel_name": "", "cloudflare_hostname": "", "override_tunnel_name": None,
+        "override_hostname": None, "health": "up",
         "health_detail": "tailscale serve is live", "url": None, "degraded": False,
     }),
 ])
