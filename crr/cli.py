@@ -4247,11 +4247,14 @@ def make_web_handler(
     validate a cookie (spec 2026-08-26, Task 4 review: "silently fails
     open if auth_enabled=True but auth_check=None").
 
-    ``allowed_hosts`` may be a plain set OR a zero-arg callable — when
-    callable, a callable is re-resolved per request, the auth_enabled_fn
-    pattern: GUI-written hostnames (Settings-modal Tunnel section) take
-    effect live, with no service restart needed to pick up a new
-    cloudflare hostname or ``host_allowlist_extras`` entry.
+    ``allowed_hosts`` may be a plain set or a zero-arg callable: a callable
+    is re-resolved per request, the auth_enabled_fn pattern — a Settings-
+    modal cloudflare-hostname change (SettingsStore-backed, see
+    ``_web_allowed_hosts``) takes effect on the very next poll, no service
+    restart. ``config.toml``'s ``host_allowlist_extras`` is NOT live this
+    way: ``_cmd_web``'s callable closes over one ``Config`` loaded at
+    startup, so an edit there still needs a restart to take effect — only
+    the disk-backed tunnel override is re-read every call.
     """
 
     class _Handler(BaseHTTPRequestHandler):
