@@ -1085,8 +1085,12 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_74():
-    """v74: badges long-press to reveal an explanation (4/5 — worktree/duplicate/strike/latest badges).
+def test_page_version_is_75():
+    """v75: badges long-press to reveal an explanation (5/5 — remote-control/waiting/adopted badges).
+    Closes out the badge list from the design spec: every badge renderCard
+    creates now sets data-help, and a long-press on any of them (on a real
+    touch device) shows the explanation via showNotice.
+    (v74: badges long-press to reveal an explanation (4/5 — worktree/duplicate/strike/latest badges).
     The worktree, duplicate, strike, and latest badges now carry data-help
     so long-pressing them shows their explanations in a toast.
     (v73: badges long-press to reveal an explanation (3/5 — context-pressure badges).
@@ -1152,7 +1156,7 @@ def test_page_version_is_74():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 74
+    assert web.PAGE_VERSION == 75
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -2547,3 +2551,34 @@ def test_worktree_dup_strike_latest_badges_have_longpress_help():
     # wording, not the same sentence copy-pasted onto both branches.
     assert "crr is certain of the match" in page
     assert "wasn't certain" in page or "isn't certain" in page
+
+
+def test_remote_control_waiting_adopted_badges_have_longpress_help():
+    # These three already carry a title= for desktop hover — data-help
+    # reuses that exact string (rcb.title / rcu.title / wb.title / adb.title)
+    # rather than a second, differently-worded copy.
+    page = web.load_page()
+    assert 'rcb.setAttribute("data-help", rcb.title)' in page
+    assert 'rcu.setAttribute("data-help", rcu.title)' in page
+    assert 'wb.setAttribute("data-help", wb.title)' in page
+    assert 'adb.setAttribute("data-help", adb.title)' in page
+
+
+def test_every_card_badge_has_longpress_help_wired():
+    # Regression: every badge kind renderCard can create must be
+    # long-press-able. A new badge kind added later without data-help would
+    # pass every test above silently — this pins the full list from the
+    # design spec (docs/superpowers/specs/2026-09-17-badge-longpress-help-design.md).
+    page = web.load_page()
+    badge_vars = ["badge", "wtb", "dup", "pb", "pb2", "pb3", "stb", "rcb", "rcu", "wb", "adb", "lb"]
+    for var in badge_vars:
+        assert f'{var}.setAttribute("data-help"' in page, f"{var} badge has no data-help wired"
+
+
+def test_key_legend_tap_wiring_is_unchanged():
+    # The #key legend keeps its existing single-tap-to-toast behavior —
+    # only the per-card badges (above) gained long-press. Explicit decision
+    # in the design spec; this is the regression check for it.
+    page = web.load_page()
+    assert 'querySelectorAll("#key .kterm")' in page
+    assert 't.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });' in page

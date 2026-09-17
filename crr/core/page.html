@@ -922,11 +922,13 @@ function renderCard(s, uncertain, groupColor, latest) {
     var rcb = el("span", "badge remote-control-badge");
     rcb.textContent = "phone: not connected";
     rcb.title = "Claude Code reports no live Remote Control link for this session. Kick restarts claude so it reconnects.";
+    rcb.setAttribute("data-help", rcb.title);
     top.appendChild(rcb);
   } else if (s.remote_control === "unknown") {
     var rcu = el("span", "badge unknown-badge");
     rcu.textContent = "phone: unknown";
     rcu.title = "crr could not establish whether the phone can reach this session. It never auto-kicks a session in this state.";
+    rcu.setAttribute("data-help", rcu.title);
     top.appendChild(rcu);
   }
   // Blocked on the USER, from Claude Code's own `waitingFor`. Its OWN branch,
@@ -938,6 +940,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     var wb = el("span", "badge waiting-badge");
     wb.textContent = "waiting on you";
     wb.title = "Claude Code reports this session as blocked on you: " + s.waiting_for;
+    wb.setAttribute("data-help", wb.title);
     top.appendChild(wb);
   }
   // (#40) An adopted card never observed a shell registration, so its
@@ -947,6 +950,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     var adb = el("span", "badge unknown-badge");
     adb.textContent = "adopted";
     adb.title = "crr found this conversation's transcript on disk and adopted it — it never watched the session start, so its host and shell were never observed.";
+    adb.setAttribute("data-help", adb.title);
     top.appendChild(adb);
   }
   // T-B: latest-per-cwd marker.
