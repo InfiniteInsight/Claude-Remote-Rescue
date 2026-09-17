@@ -1085,8 +1085,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_72():
-    """v72: badges long-press to reveal an explanation (2/5 — state badge).
+def test_page_version_is_73():
+    """v73: badges long-press to reveal an explanation (3/5 — context-pressure badges).
+    The context-pressure badges (tight/will-compact/unknown) now carry
+    data-help wired to CONTEXT_PRESSURE_HELP, so long-pressing them shows
+    the pressure state's explanation in a toast. Completes the feature for
+    the session's status surface.
+    (v72: badges long-press to reveal an explanation (2/5 — state badge).
     The state badge (live/ghost/crashed/parked/attached) now carries
     data-help wired to STATE_HELP, so long-pressing it shows the state's
     explanation in a toast. Reuses the #key legend's own wording so the
@@ -1144,7 +1149,7 @@ def test_page_version_is_72():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 72
+    assert web.PAGE_VERSION == 73
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -2519,3 +2524,11 @@ def test_state_badge_has_longpress_help():
     assert "var STATE_HELP = {" in page
     assert 'badge.setAttribute("data-help", STATE_HELP[parkedAttached ? "attached" : s.state] || "")' in page
     assert "A restored session you have already reopened" in page
+
+
+def test_context_pressure_badges_have_longpress_help():
+    page = web.load_page()
+    assert "var CONTEXT_PRESSURE_HELP = {" in page
+    assert 'pb.setAttribute("data-help", CONTEXT_PRESSURE_HELP.tight)' in page
+    assert 'pb2.setAttribute("data-help", CONTEXT_PRESSURE_HELP["will-compact"])' in page
+    assert 'pb3.setAttribute("data-help", CONTEXT_PRESSURE_HELP.unknown)' in page

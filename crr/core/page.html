@@ -595,6 +595,12 @@ var STATE_HELP = {
   attached: "A restored session you have already reopened — a terminal (tmux client) is attached to it. Lets you tell, in a long restore list, which conversations are already back from those still parked."
 };
 
+var CONTEXT_PRESSURE_HELP = {
+  tight: "Estimated past 70% of this model's context window. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.",
+  "will-compact": "Estimated at or over the window, so resuming will compact and lose detail. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.",
+  unknown: "crr has no confirmed context window for this session's model — usually because no model could be read from the transcript at all (about 1 in 3 carry none). No badge would read as 'fine'; this says crr genuinely does not know."
+};
+
 // Long-press (not tap) on a session-card badge shows its explanation as a
 // toast — the same showNotice() mechanism the #key legend already uses on
 // tap. Long-press, not tap, because a plain tap in a scrollable card list
@@ -872,10 +878,12 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (s.context_pressure === "tight") {
     var pb = el("span", "badge pressure-tight");
     pb.textContent = "context tight";
+    pb.setAttribute("data-help", CONTEXT_PRESSURE_HELP.tight);
     top.appendChild(pb);
   } else if (s.context_pressure === "will-compact") {
     var pb2 = el("span", "badge pressure-will-compact");
     pb2.textContent = "will compact on revive";
+    pb2.setAttribute("data-help", CONTEXT_PRESSURE_HELP["will-compact"]);
     top.appendChild(pb2);
   } else if (s.context_pressure === "unknown") {
     // #39: no confirmed context window for this session's model (often
@@ -884,6 +892,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     // the fabricated reassurance this state exists to stop.
     var pb3 = el("span", "badge unknown-badge");
     pb3.textContent = "context unknown";
+    pb3.setAttribute("data-help", CONTEXT_PRESSURE_HELP.unknown);
     top.appendChild(pb3);
   }
   // Reviver strike escalation (2026-09-08): a session climbing toward
