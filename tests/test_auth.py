@@ -140,3 +140,111 @@ class TestAuthStateConstants:
 
     def test_window_is_3_days(self):
         assert auth.EXPIRING_WINDOW_SECONDS == 3 * 24 * 3600
+
+
+class TestResolveAuthState:
+    """The two-source resolver (spec 2026-09-17, keychain-blind reauth).
+
+    ``auth_state`` above classifies the credentials FILE. It cannot see a
+    host that keeps its OAuth tokens somewhere else (macOS Keychain, a
+    relocated ``CLAUDE_CONFIG_DIR``, an enterprise gateway), and on those
+    hosts it can only ever answer "unknown" — which the dashboard used to
+    render identically to "valid", leaving no badge and no Reauth button
+    at exactly the moment the user needed one.
+
+    ``resolve_auth_state`` adds the second source: the logged-in answer
+    that ``crr.adapters.claude_auth`` scrapes out of ``claude auth
+    status --json``. It is coarser (no timestamps, so no advance
+    "expiring" warning) but it is authoritative about the one question
+    that matters when the file is absent. ``source`` carries which one
+    spoke (P3 — confidence travels with data).
+    """
+
+    def test_file_valid_wins_without_consulting_the_probe(self):
+        # The file has real timestamps; the probe has none. When the file
+        # is readable and healthy it is the better source, and the caller
+        # is entitled to skip the subprocess entirely.
+        creds = _creds(access_expires_s=10 * 86400, refresh_expires_s=_30D_MS / 1000)
+        res = auth.resolve_auth_state(creds, now=_NOW, logged_in=None)
+        assert res.state == "valid"
+        assert res.source == "credentials_file"
+        assert res.expires_in_seconds is not None
+
+    def test_file_expiring_keeps_its_countdown(self):
+        creds = _creds(access_expires_s=2 * 86400, refresh_expires_s=28 * 86400)
+        res = auth.resolve_auth_state(creds, now=_NOW, logged_in=None)
+        assert res.state == "expiring"
+        assert res.source == "credentials_file"
+        assert res.expires_in_seconds == pytest.approx(2 * 86400, abs=1)
+
+    def test_no_file_and_probe_says_logged_out_is_expired(self):
+        # THE BUG THIS EXISTS FOR. No credentials file, so the old code
+        # said "unknown" and the dashboard drew nothing. The probe knows.
+        res = auth.resolve_auth_state(None, now=_NOW, logged_in=False)
+        assert res.state == "expired"
+        assert res.source == "cli_probe"
+        # The probe carries no timestamps, so there is no countdown to
+        # report. A fabricated one would be exactly the laundering the
+        # plumb-line principles forbid.
+        assert res.expires_in_seconds is None
+
+    def test_no_file_and_probe_says_logged_in_is_valid(self):
+        # A Mac keeping its tokens in the Keychain: no file, fully logged
+        # in. Must NOT nag with a spurious "login expired" badge.
+        res = auth.resolve_auth_state(None, now=_NOW, logged_in=True)
+        assert res.state == "valid"
+        assert res.source == "cli_probe"
+        assert res.expires_in_seconds is None
+
+    def test_no_file_and_no_probe_stays_unknown(self):
+        # Both sources silent. Honest null — never promoted to either
+        # confident answer (F16).
+        res = auth.resolve_auth_state(None, now=_NOW, logged_in=None)
+        assert res.state == "unknown"
+        assert res.source == "none"
+        assert res.expires_in_seconds is None
+
+    def test_malformed_file_falls_through_to_the_probe(self):
+        res = auth.resolve_auth_state({"expiresAt": "soon"}, now=_NOW, logged_in=False)
+        assert res.state == "expired"
+        assert res.source == "cli_probe"
+
+    def test_stale_expired_file_is_overridden_by_a_live_probe(self):
+        # A leftover .credentials.json from before the host moved to the
+        # Keychain reads as long-expired. Believing it would show a
+        # permanent "Login expired" badge on a perfectly healthy host and
+        # suppress the kick watchdog forever.
+        creds = _creds(access_expires_s=-_30D_MS / 1000, refresh_expires_s=-_30D_MS / 1000)
+        res = auth.resolve_auth_state(creds, now=_NOW, logged_in=True)
+        assert res.state == "valid"
+        assert res.source == "cli_probe"
+
+    def test_expired_file_stands_when_the_probe_agrees(self):
+        creds = _creds(access_expires_s=-86400, refresh_expires_s=-86400)
+        res = auth.resolve_auth_state(creds, now=_NOW, logged_in=False)
+        assert res.state == "expired"
+        assert res.source == "credentials_file"
+        # The file's countdown survives — it is the more informative of
+        # two sources that agree.
+        assert res.expires_in_seconds is not None
+        assert res.expires_in_seconds < 0
+
+    def test_expired_file_stands_when_the_probe_is_silent(self):
+        # An unreadable probe must not rescue a genuinely expired file.
+        creds = _creds(access_expires_s=-86400, refresh_expires_s=-86400)
+        res = auth.resolve_auth_state(creds, now=_NOW, logged_in=None)
+        assert res.state == "expired"
+        assert res.source == "credentials_file"
+
+    def test_every_resolved_state_is_a_declared_member(self):
+        from crr.core.contracts import AUTH_SOURCES, AUTH_STATES
+        creds = _creds(access_expires_s=86400, refresh_expires_s=10 * 86400)
+        for candidate in (None, {}, {"expiresAt": "x"}, creds):
+            for logged_in in (True, False, None):
+                res = auth.resolve_auth_state(candidate, now=_NOW, logged_in=logged_in)
+                assert res.state in AUTH_STATES
+                assert res.source in AUTH_SOURCES
+
+    def test_logged_in_defaults_to_silent(self):
+        # Callers that have no probe wired must not have to say so.
+        assert auth.resolve_auth_state(None, now=_NOW).state == "unknown"

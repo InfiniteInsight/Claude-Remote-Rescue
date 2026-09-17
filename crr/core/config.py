@@ -107,7 +107,10 @@ from typing import Any, Mapping
 # v25: tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname
 # (pluggable tunnel support, spec 2026-09-02 — provider default
 # "tailscale" preserves pre-tunnel behavior byte-for-byte)
-CONFIG_DEFAULTS_VERSION = 25
+# v26: added claude_auth_probe_timeout_seconds (keychain-blind reauth, spec
+# 2026-09-17 — the `claude auth status --json` fallback probe's own budget,
+# used only when the credentials file cannot answer)
+CONFIG_DEFAULTS_VERSION = 26
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -313,6 +316,14 @@ DEFAULTS: dict[str, Any] = {
     # to "valid". Same family as flash_ms — long enough to read, short
     # enough not to linger as if it were a state.
     "reauth_success_display_ms": 2000,
+    # keychain-blind reauth (spec 2026-09-17): budget for the
+    # `claude auth status --json` fallback probe. It gets its OWN key
+    # rather than borrowing interop_timeout_seconds for the same reason
+    # tab_spawn_timeout_seconds does — this spawns node, which is nothing
+    # like a ps/tmux read, and a 5s borrow produced a probe that timed out
+    # on a cold start and reported "could not tell" on a host that knew
+    # the answer. It sits on the poll path, so it is still bounded.
+    "claude_auth_probe_timeout_seconds": 15,
     # dashboard login (spec 2026-08-26): how long a login session cookie
     # stays valid. 720 hours = 30 days. Changing this does not invalidate
     # existing sessions — it only affects the Max-Age on NEW cookies and

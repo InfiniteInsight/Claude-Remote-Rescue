@@ -1085,8 +1085,16 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_70():
-    """v70: Tunnel picker hides the config plumbing — options are the three\n    real providers with the effective one selected; "using default" tag +\n    Reset-to-default link replace the "default (config.toml)" option\n    (user feedback 2026-09-09: GUI users are not thinking about files).\n    (v69: Tunnel section UX — CF fields shown only when cloudflare is the
+def test_page_version_is_71():
+    """v71: the auth badge stops treating "unknown" as healthy. `unknown`
+    shared the `valid` branch — blank badge, early return — so on every
+    host that keeps no credentials file (macOS Keychain, relocated
+    $CLAUDE_CONFIG_DIR, enterprise gateway) an expired login rendered as
+    a clean header with no Reauth button, which is the one control a user
+    away from the machine still needs. It now gets a muted badge of its
+    own plus the button, and the `expired` badge names which source
+    (credentials file vs `claude auth status`) reached the verdict.
+    (v70: Tunnel picker hides the config plumbing — options are the three\n    real providers with the effective one selected; "using default" tag +\n    Reset-to-default link replace the "default (config.toml)" option\n    (user feedback 2026-09-09: GUI users are not thinking about files).\n    (v69: Tunnel section UX — CF fields shown only when cloudflare is the
     relevant provider, per-provider hint line, fields edit the override only
     (config.toml values render as placeholders), Save grouped with settings
     and Up/Down with the health line (user feedback 2026-09-09: the flat
@@ -1131,7 +1139,7 @@ def test_page_version_is_70():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 70
+    assert web.PAGE_VERSION == 71
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -2463,3 +2471,49 @@ class TestBootstrapStateInjection:
         )
         assert json.loads(resp.body)["login_enabled"] is True
         assert "login_enabled" not in payload  # provider's dict is untouched
+
+
+# --------------------------------------------------------------------------
+# Keychain-blind reauth (spec 2026-09-17) — the page half. The backend can
+# now tell `unknown` from `valid`; these pin that the PAGE stops drawing
+# them the same way. A served page is not verifiable by curl, so the JS is
+# asserted as source (same approach as every other page test here) on top of
+# the node --check gate above.
+# --------------------------------------------------------------------------
+
+def test_unknown_auth_state_is_no_longer_folded_into_valid():
+    """The regression that made CRR useless on a Keychain host: `unknown`
+    shared `valid`'s branch, so it returned with a blank badge."""
+    page = web.render_page()
+    assert "if (state === 'valid') {" in page
+    assert "if (state === 'valid' || state === 'unknown') {" not in page
+
+
+def test_unknown_auth_state_renders_its_own_badge_and_button():
+    page = web.render_page()
+    assert "if (state === 'unknown') {" in page
+    assert "auth-badge auth-unknown" in page
+    assert "Login state unknown" in page
+    # The escape hatch is the point: a user who cannot reach the machine
+    # needs the button even when crr cannot name the problem.
+    assert "function reauthButton()" in page
+    assert page.count("badge.appendChild(reauthButton());") == 2
+
+
+def test_unknown_auth_badge_has_its_own_muted_style():
+    """Not red. `unknown` is not a confirmed expiry, and styling it as one
+    would be the mirror of the bug — a claim crr cannot support."""
+    page = web.render_page()
+    assert ".auth-unknown {" in page
+    assert ".auth-expired { background: #991b1b" in page
+    # The two must not share a rule set.
+    assert ".auth-unknown { background: #374151" in page
+
+
+def test_expired_auth_badge_names_its_source():
+    """P3 — a probe-sourced verdict carries no timestamps, and the tooltip
+    must not let the badge imply a countdown crr never read."""
+    page = web.render_page()
+    assert "var source = data.auth_source;" in page
+    assert "source === 'cli_probe'" in page
+    assert "no expiry time to show" in page

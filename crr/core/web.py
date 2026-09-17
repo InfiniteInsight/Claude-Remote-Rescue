@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 70  # v70: Tunnel picker hides the config plumbing — effective provider shown; using-default tag + Reset link
+PAGE_VERSION = 71  # v71: auth badge no longer treats "unknown" as healthy — visible muted badge + Reauth button, and the expired badge names its source
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
