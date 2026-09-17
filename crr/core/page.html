@@ -587,6 +587,14 @@ var SID_SOURCE_HELP = {
   verified: "confirmed — the guessed id's transcript has been written to since this session started"
 };
 
+var STATE_HELP = {
+  live: "The shell and its claude are running, with a terminal attached.",
+  ghost: "The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.",
+  crashed: "The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.",
+  parked: "Running inside a detached tmux session — crr restored it after a reboot. The conversation is alive; Reopen brings it back into a terminal tab, or attach with: tmux attach -t <name>.",
+  attached: "A restored session you have already reopened — a terminal (tmux client) is attached to it. Lets you tell, in a long restore list, which conversations are already back from those still parked."
+};
+
 // Long-press (not tap) on a session-card badge shows its explanation as a
 // toast — the same showNotice() mechanism the #key legend already uses on
 // tap. Long-press, not tap, because a plain tap in a scrollable card list
@@ -842,6 +850,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   badge.textContent = s.state === "parked"
     ? (s.attached ? "attached" : "restored")
     : s.state;
+  badge.setAttribute("data-help", STATE_HELP[parkedAttached ? "attached" : s.state] || "");
   top.appendChild(badge);
   // (#31) A worktree checkout is a side branch, not the main thread — tag it
   // with its worktree name so it reads as one at a glance (it is also grouped

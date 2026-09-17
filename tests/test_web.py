@@ -1085,8 +1085,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_71():
-    """v71: badges long-press to reveal an explanation (1/5 — CSS guard +
+def test_page_version_is_72():
+    """v72: badges long-press to reveal an explanation (2/5 — state badge).
+    The state badge (live/ghost/crashed/parked/attached) now carries
+    data-help wired to STATE_HELP, so long-pressing it shows the state's
+    explanation in a toast. Reuses the #key legend's own wording so the
+    badge and legend never say two different things about the same state.
+    (v71: badges long-press to reveal an explanation (1/5 — CSS guard +
     delegated detector). Long-press (not tap) on a session-card badge shows
     its explanation as a toast via the same showNotice() the #key legend
     uses on tap. Long-press because a tap in a scrollable card list is at
@@ -1139,7 +1144,7 @@ def test_page_version_is_71():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 71
+    assert web.PAGE_VERSION == 72
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -2505,3 +2510,12 @@ class TestBootstrapStateInjection:
         )
         assert json.loads(resp.body)["login_enabled"] is True
         assert "login_enabled" not in payload  # provider's dict is untouched
+
+
+def test_state_badge_has_longpress_help():
+    # Reuses the #key legend's own wording for state, so the badge and the
+    # legend never say two different things about the same state.
+    page = web.load_page()
+    assert "var STATE_HELP = {" in page
+    assert 'badge.setAttribute("data-help", STATE_HELP[parkedAttached ? "attached" : s.state] || "")' in page
+    assert "A restored session you have already reopened" in page
