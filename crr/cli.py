@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from crr import __version__
 from crr.adapters import boot_identity  # composition root may import adapters
+from crr.adapters import claude_auth
 from crr.adapters import cloudflared
 from crr.adapters import deploy as deploy_io
 from crr.adapters import diagnostics as diag_source
@@ -94,11 +95,23 @@ def _load_config() -> cfg.Config:
 
 
 def _credentials_path(config: cfg.Config) -> Path:
-    """Where Claude Code keeps its OAuth credentials.
+    """Where Claude Code keeps its OAuth credentials, when it keeps them
+    in a file at all.
 
-    Takes ``config`` in case a future config knob relocates the file;
-    the location itself is not currently configurable.
+    ``$CLAUDE_CONFIG_DIR`` relocates Claude Code's whole config directory,
+    and honouring it is not optional: reading ``~/.claude`` regardless is
+    one of the three ways CRR went permanently blind to an expired login
+    (spec 2026-09-17). The other two cannot be fixed by any path — macOS
+    keeps the tokens in the login Keychain and an enterprise gateway keeps
+    them nowhere local — which is why ``_resolve_auth`` has a second
+    source rather than a longer list of paths to try.
+
+    Takes ``config`` in case a future config knob relocates the file; the
+    location itself is not currently configurable.
     """
+    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if configured:
+        return Path(configured) / ".credentials.json"
     return Path.home() / ".claude" / ".credentials.json"
 
 
@@ -112,6 +125,84 @@ def _read_credentials(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _auth_status_source(config: cfg.Config) -> claude_auth.ClaudeAuthStatus:
+    """The `claude auth status --json` probe — auth's second source."""
+    return claude_auth.ClaudeAuthStatus(
+        config.get("claude_auth_probe_timeout_seconds"),
+    )
+
+
+def _resolve_auth_at(
+    path: Path,
+    *,
+    now: float,
+    status_source: Any = None,
+) -> auth.AuthResolution:
+    """``_resolve_auth`` against an explicit credentials path.
+
+    Split out so ``_kick_dropped_bridges`` — which takes its path as an
+    injected parameter rather than deriving it from config — shares one
+    implementation of the precedence instead of growing a second copy.
+    ``status_source=None`` means "no probe available", which degrades to
+    exactly the pre-2026-09-17 file-only behaviour.
+    """
+    creds = _read_credentials(path)
+    file_state, _ = auth.auth_state(creds, now=now)
+
+    logged_in = None
+    if file_state in ("unknown", "expired") and status_source is not None:
+        try:
+            logged_in = status_source.status().logged_in
+        except Exception:
+            # The port promises never to raise, but this is on the poll
+            # path: a third-party or future adapter that breaks that
+            # promise must degrade to "could not tell", not take the
+            # dashboard down.
+            logged_in = None
+
+    return auth.resolve_auth_state(creds, now=now, logged_in=logged_in)
+
+
+def _resolve_auth(
+    config: cfg.Config,
+    *,
+    now: float | None = None,
+    status_source: Any = None,
+) -> auth.AuthResolution:
+    """The one place that answers "what is this host's auth state?".
+
+    Both halves of the I/O live here (a file read and, conditionally, a
+    subprocess); the precedence between them is pure and lives in
+    ``crr.core.auth.resolve_auth_state``.
+
+    The probe runs ONLY when the credentials file cannot settle the
+    question — it spawns node, and this is called on the dashboard poll
+    path, so the common case (a readable, healthy file) must not pay for
+    it. That leaves exactly two cases:
+
+    - ``unknown``: the file is missing or unparseable. On a Keychain Mac
+      or a gateway host that is the *permanent* state, and it is where
+      the old single-source detector gave up and reported nothing.
+    - ``expired``: worth a second opinion, because a stale file left
+      behind by a host that has since moved its tokens elsewhere reads
+      as expired forever — a false badge plus a watchdog suppressed for
+      good.
+
+    ``auth_state`` is therefore evaluated twice on those two paths (once
+    to decide whether to probe, once inside the resolver). It is pure
+    arithmetic over two integers; the subprocess is the cost worth
+    gating.
+    """
+    return _resolve_auth_at(
+        _credentials_path(config),
+        now=time.time() if now is None else now,
+        status_source=(
+            status_source if status_source is not None
+            else _auth_status_source(config)
+        ),
+    )
 
 
 def _tail_facts_extractor(config: cfg.Config):
@@ -2662,9 +2753,11 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
 
-    creds = _read_credentials(_credentials_path(config))
-    a_state, _ = auth.auth_state(creds, now=time.time())
-    auth_expired = a_state == "expired"
+    # Resolved through BOTH auth sources (spec 2026-09-17): a host with no
+    # credentials file used to read "unknown" here, so an expired login
+    # never suppressed the pass and every revival burned a strike against
+    # a token that could not authenticate.
+    auth_expired = _resolve_auth(config).state == "expired"
 
     if auth_expired:
         print("crr revive: auth expired — skipping revival pass "
@@ -2747,6 +2840,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
         store.scan().entries, boot, probe, config, settings_store, store, sd,
         controller, flags,
         credentials_path=_credentials_path(config),
+        auth_status_source=_auth_status_source(config),
     )
     return 0
 
@@ -2768,6 +2862,7 @@ def _kick_dropped_bridges(
     clock=time.time,
     kick_store: "bridge_kicks.KickHistoryStore | None" = None,
     credentials_path: Path | None = None,
+    auth_status_source: Any = None,
 ) -> None:
     """Watchdog step (spec 2026-08-07 Slice 2; detector replaced by spec
     2026-08-09 Phase 3): restart a LIVE session the phone can no longer
@@ -2779,11 +2874,21 @@ def _kick_dropped_bridges(
     a watchdog that silently restarts things is unauditable:
 
       0. (spec 2026-08-21, dashboard reauth) if ``credentials_path`` is
-         given and ``auth.auth_state`` reads it as ``"expired"``, the whole
+         given and the resolved auth state reads ``"expired"``, the whole
          pass is suppressed before any other guard runs. A kick relaunches
          under the SAME expired OAuth token, so it would just fail to
          reconnect again — and burn one of ``kick_eligible``'s capped
-         attempts (guard 6, below) doing it. ``credentials_path=None``
+         attempts (guard 6, below) doing it.
+
+         The state is resolved through ``_resolve_auth_at``, i.e. BOTH
+         auth sources (spec 2026-09-17), not the file alone: on a host
+         that keeps no credentials file the file read can only say
+         ``"unknown"``, which is not ``"expired"``, so this guard used to
+         be dead code on exactly the hosts where an expired login is
+         hardest to notice — every sweep kicked live sessions under a
+         dead token until the attempt cap ate them. Pass
+         ``auth_status_source`` to arm the second source; ``None`` keeps
+         the pre-2026-09-17 file-only behaviour. ``credentials_path=None``
          (the default) skips this check entirely, matching every caller
          that predates this guard.
       1. ``remote_control_watch`` must be on — the whole step's gate.
@@ -2849,9 +2954,10 @@ def _kick_dropped_bridges(
     once per sweep.
     """
     if credentials_path is not None:
-        creds = _read_credentials(credentials_path)
-        state, _ = auth.auth_state(creds, now=clock())
-        if state == "expired":
+        resolved = _resolve_auth_at(
+            credentials_path, now=clock(), status_source=auth_status_source,
+        )
+        if resolved.state == "expired":
             print("crr revive: auth expired — suppressing auto-kicks "
                   "(reauth required before sessions can reconnect)",
                   file=sys.stderr)
@@ -4855,6 +4961,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
     # `_reauth_lock`, so two concurrent pollers can't both observe the
     # expired -> valid transition and double-fire recovery (double-kick,
     # double-reopen).
+    # Auth's second source, built once at server start (a `shutil.which`
+    # + argv holder — nothing to re-resolve per poll). `_resolve_auth`
+    # decides whether to actually spend the subprocess; see its docstring.
+    auth_status_source = _auth_status_source(config)
+
     _REAUTH_SESSION = "crr-reauth"
     _reauth_lock = threading.Lock()
     _reauth_active = False
@@ -4944,8 +5055,10 @@ def _cmd_web(args: argparse.Namespace) -> int:
         # Re-read and re-classify every poll, like reachability above: a
         # value cached at server start would freeze the moment credentials
         # were last valid and never reflect a later expiry or reauth.
-        creds = _read_credentials(_credentials_path(config))
-        auth_state_value, auth_expires_in_seconds = auth.auth_state(creds, now=time.time())
+        resolved_auth = _resolve_auth(config, status_source=auth_status_source)
+        auth_state_value = resolved_auth.state
+        auth_expires_in_seconds = resolved_auth.expires_in_seconds
+        auth_source_value = resolved_auth.source
 
         # At most one capture-pane attempt per poll while a reauth is
         # active and no URL has been captured yet.
@@ -4990,6 +5103,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             auth_state=auth_state_value,
             auth_expires_in_seconds=auth_expires_in_seconds,
             auth_reauth_url=_reauth_url,
+            auth_source=auth_source_value,
         )
         contracts.validate_sessions_payload(payload)
         return payload

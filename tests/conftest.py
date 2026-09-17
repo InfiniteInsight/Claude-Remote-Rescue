@@ -136,3 +136,46 @@ def _forbid_unstubbed_tab_spawn(monkeypatch):
 
     for module in (tab_spawn, tab_spawn_linux, tab_spawn_windows):
         monkeypatch.setattr(module, "subprocess", _NoSpawnSubprocess())
+
+
+@pytest.fixture(autouse=True)
+def _forbid_unstubbed_claude_auth_probe(monkeypatch):
+    """Default the `claude auth status --json` probe to a loud raise.
+
+    Same failure class and same remedy as ``_forbid_unstubbed_tab_spawn``
+    above. Two reasons this seam needs the guard:
+
+    1. It reads the DEVELOPER's real login. A test that writes an expired
+       fixture credentials file and then silently consults the live CLI
+       asserts on whatever the machine happens to be logged into — green
+       on a signed-in laptop, red in CI, for reasons nothing in the test
+       names. That is exactly how the three revive/reauth tests behaved
+       when the second auth source first landed (spec 2026-09-17).
+    2. It spawns node, per call, on the poll path. Left live it turned a
+       23-second suite into a 43-second one.
+
+    Tests that exercise the probe stub it themselves — either
+    ``monkeypatch.setattr(claude_auth.subprocess, "run", ...)``, which
+    lands on this shim instance and wins for the test's duration, or by
+    injecting their own ``status_source`` and never reaching the adapter
+    at all (the pattern the ``_resolve_auth`` tests use).
+    """
+    import subprocess as _real_subprocess
+
+    from crr.adapters import claude_auth
+
+    class _NoProbeSubprocess:
+        TimeoutExpired = _real_subprocess.TimeoutExpired
+        CalledProcessError = _real_subprocess.CalledProcessError
+        CompletedProcess = _real_subprocess.CompletedProcess
+
+        def run(self, *args, **kwargs):
+            raise RuntimeError(
+                "the claude-auth adapter reached subprocess.run without "
+                "being stubbed: this test would read the developer's real "
+                "Claude Code login and spawn node. Inject a status_source "
+                "(see tests/test_cli.py::TestResolveAuth) or stub "
+                "claude_auth.subprocess.run (see tests/test_claude_auth.py)."
+            )
+
+    monkeypatch.setattr(claude_auth, "subprocess", _NoProbeSubprocess())

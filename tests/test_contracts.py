@@ -85,6 +85,7 @@ def _sessions_payload():
         "auth_state": "unknown",
         "auth_expires_in_seconds": None,
         "auth_reauth_url": None,
+        "auth_source": "none",
     }
 
 
@@ -363,7 +364,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_17():
+def test_sessions_contract_version_is_18():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -387,7 +388,15 @@ def test_sessions_contract_version_is_17():
     # dashboard.
     # v17 adds `revive_strikes` (int) to the card — reviver hardening (spec
     # 2026-08-29): strike escalation is user-visible.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 17
+    # v18 adds `auth_source` to the PAYLOAD (keychain-blind reauth, spec
+    # 2026-09-17). `auth_state` gained a SECOND source — `claude auth
+    # status --json`, for hosts that keep no credentials file (macOS
+    # Keychain, relocated $CLAUDE_CONFIG_DIR, enterprise gateway), where
+    # detection used to be permanently blind — and the two sources are not
+    # interchangeable: only `credentials_file` carries timestamps. A v17
+    # consumer would read a `cli_probe` "expired" as if a countdown came
+    # with it.
+    assert contracts.SESSIONS_CONTRACT_VERSION == 18
 
 
 def test_states_enum_includes_parked():
@@ -597,6 +606,7 @@ def test_sessions_payload_validates_auth_state_enum():
         "auth_state": "bogus",
         "auth_expires_in_seconds": None,
         "auth_reauth_url": None,
+        "auth_source": "none",
     }
     with pytest.raises(contracts.ContractError, match="auth_state"):
         contracts.validate_sessions_payload(payload)
@@ -610,6 +620,7 @@ def test_sessions_payload_accepts_valid_auth_fields():
             "auth_state": state,
             "auth_expires_in_seconds": 86400 if state != "unknown" else None,
             "auth_reauth_url": None,
+            "auth_source": "none",
         }
         contracts.validate_sessions_payload(payload)  # should not raise
 
@@ -621,6 +632,7 @@ def test_sessions_payload_rejects_non_int_auth_expires_in_seconds():
         "auth_state": "expiring",
         "auth_expires_in_seconds": "soon",
         "auth_reauth_url": None,
+        "auth_source": "none",
     }
     with pytest.raises(contracts.ContractError, match="auth_expires_in_seconds"):
         contracts.validate_sessions_payload(payload)
@@ -633,6 +645,7 @@ def test_sessions_payload_rejects_non_str_auth_reauth_url():
         "auth_state": "expired",
         "auth_expires_in_seconds": None,
         "auth_reauth_url": 7,
+        "auth_source": "none",
     }
     with pytest.raises(contracts.ContractError, match="auth_reauth_url"):
         contracts.validate_sessions_payload(payload)
@@ -944,3 +957,46 @@ def test_session_card_revive_strikes_must_be_int():
     card["revive_strikes"] = "two"
     with pytest.raises(contracts.ContractError):
         contracts.validate_session_card(card)
+
+
+def test_sessions_payload_validates_auth_source_enum():
+    payload = {
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
+        "sessions": [],
+        "auth_state": "expired",
+        "auth_expires_in_seconds": None,
+        "auth_reauth_url": None,
+        "auth_source": "guesswork",
+    }
+    with pytest.raises(contracts.ContractError, match="auth_source"):
+        contracts.validate_sessions_payload(payload)
+
+
+def test_sessions_payload_accepts_every_auth_source():
+    for source in contracts.AUTH_SOURCES:
+        payload = {
+            "contract": contracts.SESSIONS_CONTRACT_VERSION,
+            "sessions": [],
+            "auth_state": "expired",
+            "auth_expires_in_seconds": None,
+            "auth_reauth_url": None,
+            "auth_source": source,
+        }
+        contracts.validate_sessions_payload(payload)  # should not raise
+
+
+def test_auth_sources_enum_members():
+    assert contracts.AUTH_SOURCES == ("credentials_file", "cli_probe", "none")
+
+
+def test_sessions_payload_requires_auth_source():
+    """A v17-shaped payload is now incomplete — the point of the bump."""
+    payload = {
+        "contract": contracts.SESSIONS_CONTRACT_VERSION,
+        "sessions": [],
+        "auth_state": "expired",
+        "auth_expires_in_seconds": None,
+        "auth_reauth_url": None,
+    }
+    with pytest.raises(contracts.ContractError, match="missing key"):
+        contracts.validate_sessions_payload(payload)

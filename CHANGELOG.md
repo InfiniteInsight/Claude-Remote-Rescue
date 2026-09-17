@@ -131,6 +131,43 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- **Expired-login detection was blind on any host that keeps no credentials
+  file.** The dashboard reauth feature read exactly one source,
+  `~/.claude/.credentials.json`, and treated an unreadable one as
+  `auth_state: "unknown"` — which `renderAuthBadge` drew *identically to
+  `"valid"`*: no badge, no Reauth button. That file is not universal:
+  Claude Code keeps its tokens in the login Keychain on macOS, under
+  `$CLAUDE_CONFIG_DIR` when that is set, and nowhere local behind an
+  enterprise gateway. On those hosts an expired login showed a clean
+  header and offered no way to fix it — the exact situation the feature
+  exists for, since a user at the machine can just run `claude auth
+  login` and only a remote one needs the dashboard. The same blind spot
+  silently disabled both watchdog guards: `crr revive` kept reviving
+  sessions under a dead token (one give-up strike per sweep) and
+  `_kick_dropped_bridges`' guard 0 never fired, burning its capped
+  attempts restarting sessions that could not authenticate.
+
+  Three changes: `_credentials_path` honors `$CLAUDE_CONFIG_DIR`; a second
+  source (`AuthStatusSource` port over `claude auth status --json`, new
+  adapter `crr.adapters.claude_auth`) answers when the file cannot; and
+  `crr.core.auth.resolve_auth_state` owns the precedence — the file wins
+  while it reads healthy (it alone carries timestamps, so it alone can
+  warn ahead of an expiry), the probe gets a veto over an `expired` file
+  (a stale leftover on a host that has since moved its tokens reads as
+  expired forever, which would pin a false badge and suppress the
+  watchdog for good), and a residual "neither source spoke" stays
+  `"unknown"` rather than becoming a claim. The probe runs only on those
+  two paths, so a healthy file costs no subprocess. `auth_source`
+  (sessions payload v18) carries which source spoke, because a
+  probe-derived verdict has no expiry timestamp behind it and must not be
+  rendered as though it did.
+
+  The dashboard no longer folds `unknown` into `valid`: it gets a muted
+  badge of its own — honest about not knowing, never "Login expired" —
+  carrying the same Reauth button, so the escape hatch exists even when
+  detection cannot name the problem. (PAGE_VERSION 71; sessions contract
+  v18; config defaults v26 adds `claude_auth_probe_timeout_seconds`.)
+
 - The distro name and `wt.exe` path were frozen into `crr-web.service` at
   install time (a service inherits neither `WSL_DISTRO_NAME` nor the Windows
   directories on `PATH`), so renaming the distro or moving the Windows user

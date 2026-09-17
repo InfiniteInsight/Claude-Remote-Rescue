@@ -137,6 +137,12 @@
   .auth-expiring { background: #92400e; color: #fbbf24; }
   .auth-expired { background: #991b1b; color: #fca5a5; }
   .auth-reauth { background: #78350f; color: #fbbf24; }
+  /* "Could not tell" — deliberately NOT red. It is not a confirmed
+     expiry, and dressing it as one would be the mirror of the bug this
+     state exists to fix (drawing it as nothing at all). Muted, present,
+     and it carries the same Reauth button so the escape hatch exists
+     even when detection cannot name the problem. */
+  .auth-unknown { background: #374151; color: #d1d5db; }
   /* Per-session auto-kick toggle button (spec 2026-08-07, Slice 3): visually
      distinct from the destructive/neutral action buttons so it doesn't read
      as "Kick" or "Close" at a glance. Disabled state (global switch off)
@@ -1247,10 +1253,21 @@ function renderAuthBadge(data) {
   var state = data.auth_state;
   var expires = data.auth_expires_in_seconds;
   var url = data.auth_reauth_url;
+  var source = data.auth_source;
 
-  if (state === 'valid' || state === 'unknown') {
+  // `unknown` used to be handled HERE, alongside `valid` — same blank
+  // badge, same early return. That is the bug: on any host that keeps no
+  // credentials file (macOS login Keychain, a relocated
+  // $CLAUDE_CONFIG_DIR, an enterprise gateway) `unknown` is the permanent
+  // answer, so an expired login rendered as a clean bill of health and
+  // offered no Reauth button — on the one screen a user away from the
+  // machine still has. crr now asks `claude auth status` as a second
+  // source (auth_source says which one spoke), and a residual `unknown`
+  // gets its own visible, actionable state below.
+  if (state === 'valid') {
     badge.textContent = '';
     badge.className = '';
+    badge.removeAttribute('title');
     // Auto-close reauth modal if auth just became valid
     var modal = document.getElementById('reauthModal');
     if (modal && modal.style.display === 'flex') {
@@ -1284,14 +1301,40 @@ function renderAuthBadge(data) {
   if (state === 'expired') {
     badge.className = 'auth-badge auth-expired';
     badge.innerHTML = '';
-    var text = document.createTextNode('Login expired ');
-    badge.appendChild(text);
-    var btn = document.createElement('button');
-    btn.textContent = 'Reauth';
-    btn.onclick = startReauth;
-    btn.style.cssText = 'margin-left:6px; padding:2px 8px; border-radius:3px; border:1px solid currentColor; background:transparent; color:inherit; cursor:pointer;';
-    badge.appendChild(btn);
+    badge.appendChild(document.createTextNode('Login expired '));
+    badge.appendChild(reauthButton());
+    // Provenance, not decoration (P3): a probe-sourced verdict has no
+    // timestamps behind it, and the tooltip says so rather than letting
+    // the badge imply a countdown crr never read.
+    badge.title = source === 'cli_probe'
+      ? 'claude auth status reports this host is signed out. No credentials file to read, so there is no expiry time to show.'
+      : 'The OAuth refresh token in this host\'s credentials file has expired.';
+    return;
   }
+
+  if (state === 'unknown') {
+    // Neither source could answer: no readable credentials file AND
+    // `claude auth status` did not report (missing binary, timeout, a
+    // claude too old for the subcommand). Honest about not knowing —
+    // never "Login expired", which would be a claim — but present, and
+    // carrying the button, because a user who cannot reach the machine
+    // needs the escape hatch more than a tidy header.
+    badge.className = 'auth-badge auth-unknown';
+    badge.innerHTML = '';
+    badge.appendChild(document.createTextNode('Login state unknown '));
+    badge.appendChild(reauthButton());
+    badge.title = 'crr could not read this host\'s credentials file and '
+      + '`claude auth status` did not answer, so it cannot tell whether the '
+      + 'login is still good. Reauth works regardless.';
+  }
+}
+
+function reauthButton() {
+  var btn = document.createElement('button');
+  btn.textContent = 'Reauth';
+  btn.onclick = startReauth;
+  btn.style.cssText = 'margin-left:6px; padding:2px 8px; border-radius:3px; border:1px solid currentColor; background:transparent; color:inherit; cursor:pointer;';
+  return btn;
 }
 
 function formatDuration(seconds) {
