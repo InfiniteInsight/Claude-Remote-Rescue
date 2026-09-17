@@ -92,6 +92,11 @@
   .badge {
     margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
     padding: 2px 8px; border-radius: 999px; font-weight: 600;
+    /* Long-press reveals this badge's explanation (see the detector further
+       down the page). Without this, a long-press on text triggers the
+       browser's own selection/copy bubble instead, which fights with our
+       toast. */
+    -webkit-touch-callout: none; user-select: none;
   }
   .badge.live { background: #123a22; color: #46c26a; }
   .badge.ghost { background: #3a2f12; color: #e0a53b; }
@@ -581,6 +586,42 @@ var SID_SOURCE_HELP = {
   guessed: "uncertain — inferred from the newest transcript in this directory; may be the wrong conversation",
   verified: "confirmed — the guessed id's transcript has been written to since this session started"
 };
+
+// Long-press (not tap) on a session-card badge shows its explanation as a
+// toast — the same showNotice() mechanism the #key legend already uses on
+// tap. Long-press, not tap, because a plain tap in a scrollable card list
+// is at least as likely to be a mis-tap/scroll-release as deliberate; see
+// docs/superpowers/specs/2026-09-17-badge-longpress-help-design.md.
+//
+// Delegated on #sessions rather than per-badge: cards (and their badges)
+// are torn down and rebuilt on every poll, so per-element listeners would
+// mean rewiring on every poll tick for no benefit.
+var LONGPRESS_MS = @LONGPRESS_MS@;
+var LONGPRESS_MOVE_PX = 10;
+var lpTimer = null, lpStart = null, lpBadge = null;
+
+function lpCancel() {
+  clearTimeout(lpTimer);
+  lpTimer = null; lpStart = null; lpBadge = null;
+}
+
+function lpBegin(target, x, y) {
+  var badge = target.closest && target.closest(".badge[data-help]");
+  if (!badge) return;
+  lpBadge = badge;
+  lpStart = { x: x, y: y };
+  lpTimer = setTimeout(function () {
+    var help = lpBadge.getAttribute("data-help") || "";
+    showNotice(lpBadge.textContent + ": " + help, "warn");
+    lpBadge = null;
+  }, LONGPRESS_MS);
+}
+
+function lpMove(x, y) {
+  if (!lpStart) return;
+  if (Math.abs(x - lpStart.x) > LONGPRESS_MOVE_PX ||
+      Math.abs(y - lpStart.y) > LONGPRESS_MOVE_PX) lpCancel();
+}
 
 // View state (filter/sort/group), persisted across polls so a poll keeps the view.
 var filterKey = "all", sortKey = "updated", groupKey = "none", lastSessions = [];
@@ -2386,6 +2427,28 @@ Array.prototype.forEach.call(document.querySelectorAll("#key .kterm"), function 
   t.title = help;
   t.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });
 });
+
+// Wiring for the long-press detector above: delegated on #sessions so it
+// survives every poll's card rebuild. The #key legend above keeps its own
+// tap gesture, untouched — this is deliberately separate.
+var sessionsEl = document.getElementById("sessions");
+sessionsEl.addEventListener("touchstart", function (e) {
+  var t = e.touches[0];
+  lpBegin(e.target, t.clientX, t.clientY);
+}, { passive: true });
+sessionsEl.addEventListener("touchmove", function (e) {
+  var t = e.touches[0];
+  lpMove(t.clientX, t.clientY);
+}, { passive: true });
+sessionsEl.addEventListener("touchend", lpCancel);
+sessionsEl.addEventListener("touchcancel", lpCancel);
+// Desktop click-and-hold, for parity — hover title already covers desktop
+// (each badge keeps its own title= where it has one), so this is a
+// nice-to-have there, not the primary path.
+sessionsEl.addEventListener("mousedown", function (e) { lpBegin(e.target, e.clientX, e.clientY); });
+sessionsEl.addEventListener("mousemove", function (e) { lpMove(e.clientX, e.clientY); });
+sessionsEl.addEventListener("mouseup", lpCancel);
+sessionsEl.addEventListener("mouseleave", lpCancel);
 
 document.getElementById("filter").addEventListener("change", function () { filterKey = this.value; render(null); });
 document.getElementById("sort").addEventListener("change", function () { sortKey = this.value; render(null); });

@@ -168,6 +168,7 @@ DEFAULTS: dict[str, Any] = {
     # transcripts, so firing it per keystroke is real work.
     "flash_ms": 1400,
     "filter_debounce_ms": 250,
+    "longpress_ms": 500,             # duration of badge long-press before showing its explanation toast
     # Rows per page in the dashboard's discoverable modal. Enriching every
     # untracked transcript to render one page cost ~10s on a machine with a
     # few thousand of them, which is why the panel pages server-side at all.

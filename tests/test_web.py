@@ -1085,8 +1085,16 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_70():
-    """v70: Tunnel picker hides the config plumbing — options are the three\n    real providers with the effective one selected; "using default" tag +\n    Reset-to-default link replace the "default (config.toml)" option\n    (user feedback 2026-09-09: GUI users are not thinking about files).\n    (v69: Tunnel section UX — CF fields shown only when cloudflare is the
+def test_page_version_is_71():
+    """v71: badges long-press to reveal an explanation (1/5 — CSS guard +
+    delegated detector). Long-press (not tap) on a session-card badge shows
+    its explanation as a toast via the same showNotice() the #key legend
+    uses on tap. Long-press because a tap in a scrollable card list is at
+    least as likely a mis-tap/scroll-release as deliberate (spec
+    2026-09-17). Delegated on #sessions so it survives every poll's card
+    rebuild, rather than wired per-badge (would require rewiring on every
+    poll for no benefit).
+    (v70: Tunnel picker hides the config plumbing — options are the three\n    real providers with the effective one selected; "using default" tag +\n    Reset-to-default link replace the "default (config.toml)" option\n    (user feedback 2026-09-09: GUI users are not thinking about files).\n    (v69: Tunnel section UX — CF fields shown only when cloudflare is the
     relevant provider, per-provider hint line, fields edit the override only
     (config.toml values render as placeholders), Save grouped with settings
     and Up/Down with the health line (user feedback 2026-09-09: the flat
@@ -1131,7 +1139,7 @@ def test_page_version_is_70():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 70
+    assert web.PAGE_VERSION == 71
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1462,6 +1470,28 @@ def test_page_renders_the_not_connected_badge():
     # existing groups (e.g. "will compact on revive") so the tap->toast
     # ("<term>: <help>") reads as a complete sentence.
     assert page.count("phone: not connected") >= 2
+
+
+def test_page_has_longpress_badge_detector():
+    # Long-press (not tap) on a session-card badge reveals its explanation,
+    # via the same showNotice toast the #key legend already uses for tap.
+    # Delegated on #sessions (not per-badge) because cards are rebuilt on
+    # every poll — see
+    # docs/superpowers/specs/2026-09-17-badge-longpress-help-design.md.
+    page = web.load_page()
+    assert "var LONGPRESS_MS" in page
+    assert 'closest(".badge[data-help]")' in page
+    assert 'showNotice(lpBadge.textContent + ": " + help, "warn")' in page
+    assert 'getElementById("sessions")' in page
+    assert 'addEventListener("touchstart"' in page
+    assert 'addEventListener("mousedown"' in page
+
+
+def test_badges_suppress_native_touch_callout():
+    # A long-press on text is exactly the gesture mobile browsers use for
+    # their own selection/copy bubble — it must not fight with our toast.
+    page = web.load_page()
+    assert "-webkit-touch-callout: none" in page
 
 
 def test_page_shows_what_a_waiting_session_is_blocked_on():
