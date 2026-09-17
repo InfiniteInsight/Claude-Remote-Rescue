@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 73  # v73: badges long-press to reveal an explanation (3/5 — context-pressure badges)
+PAGE_VERSION = 74  # v74: badges long-press to reveal an explanation (4/5 — worktree/duplicate/strike/latest badges)
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

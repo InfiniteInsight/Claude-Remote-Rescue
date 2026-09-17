@@ -865,11 +865,15 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (wtInfo) {
     var wtb = el("span", "badge worktree-badge");
     wtb.textContent = "worktree: " + wtInfo.name;
+    wtb.setAttribute("data-help", "A checkout of a git worktree, not the main branch — grouped under its parent repo below when there's more than one.");
     top.appendChild(wtb);
   }
   if (isDup) {
     var dup = el("span", "badge dup-badge" + (isUncertain ? " uncertain" : ""));
     dup.textContent = isUncertain ? "possible duplicate · guessed sid" : "duplicate";
+    dup.setAttribute("data-help", isUncertain
+      ? "Another session may share this id, but it was guessed rather than injected, so the match isn't certain."
+      : "Another tracked session shares this exact session id — crr is certain of the match.");
     top.appendChild(dup);
   }
   // F2: compaction badge from context_pressure. "ok" renders nothing (no
@@ -903,6 +907,9 @@ function renderCard(s, uncertain, groupColor, latest) {
     var stb = el("span", "badge strike-badge");
     stb.textContent = "⚠ strike " + s.revive_strikes + "/" + STRIKE_MAX +
       " — process died upon revival";
+    stb.setAttribute("data-help", "This session died again shortly after crr revived it — strike " +
+      s.revive_strikes + " of " + STRIKE_MAX + ". After " + STRIKE_MAX +
+      " strikes crr stops trying to revive it automatically.");
     top.appendChild(stb);
   }
   // Can the phone reach this session? Read from Claude Code's OWN connection
@@ -947,6 +954,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (cwdInfo && cwdInfo.count > 1 && recencyMs(s) === cwdInfo.max) {
     var lb = el("span", "badge latest-badge");
     lb.textContent = "latest";
+    lb.setAttribute("data-help", "The most recently active session in this directory — shown when more than one session shares the same working directory.");
     top.appendChild(lb);
   }
   card.appendChild(top);
