@@ -4273,6 +4273,7 @@ def make_web_handler(
     diag_error_display_cap: int | None = None,
     reauth_success_display_ms: int | None = None,
     longpress_ms: int | None = None,
+    longpress_move_px: int | None = None,
     git_short: str = "",
 ) -> type[BaseHTTPRequestHandler]:
     """Build an http.server handler bound to the given dependencies.
@@ -4352,6 +4353,7 @@ def make_web_handler(
                 filter_debounce_ms=filter_debounce_ms,
                 reauth_success_display_ms=reauth_success_display_ms,
                 longpress_ms=longpress_ms,
+                longpress_move_px=longpress_move_px,
                 git_short=git_short,
             )
             self.send_response(resp.status)
@@ -5267,6 +5269,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         diag_error_display_cap=config.get("diag_error_display_cap"),
         reauth_success_display_ms=config.get("reauth_success_display_ms"),
         longpress_ms=config.get("longpress_ms"),
+        longpress_move_px=config.get("longpress_move_px"),
         git_short=_git_short(),
     )
 

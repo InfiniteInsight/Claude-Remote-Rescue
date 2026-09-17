@@ -6,7 +6,9 @@ the versioned /api/sessions contract. The handler is a pure function of
 (method, path, headers) so every branch is testable with fake requests.
 """
 
+import html
 import json
+import re
 
 import pytest
 
@@ -1085,8 +1087,9 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_75():
-    """v75: badges long-press to reveal an explanation (5/5 — remote-control/waiting/adopted badges).
+def test_page_version_is_76():
+    """v76: final-review fixes — longpress re-entrancy (lpBegin now calls lpCancel() to prevent multiple timers), right-click guard (mousedown listener checks e.button !== 0), and longpress_move_px routed through config for consistency with longpress_ms.
+    (v75: badges long-press to reveal an explanation (5/5 — remote-control/waiting/adopted badges).
     Closes out the badge list from the design spec: every badge renderCard
     creates now sets data-help, and a long-press on any of them (on a real
     touch device) shows the explanation via showNotice.
@@ -1156,7 +1159,7 @@ def test_page_version_is_75():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 75
+    assert web.PAGE_VERSION == 76
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1235,6 +1238,18 @@ def test_render_page_defaults_longpress_ms_from_config():
     body = web.render_page()
     from crr.core import config as cfg
     assert f"var LONGPRESS_MS = {cfg.DEFAULTS['longpress_ms']};" in body
+
+
+def test_render_page_substitutes_longpress_move_px():
+    body = web.render_page(longpress_move_px=25)
+    assert "@LONGPRESS_MOVE_PX@" not in body
+    assert "var LONGPRESS_MOVE_PX = 25;" in body
+
+
+def test_render_page_defaults_longpress_move_px_from_config():
+    body = web.render_page()
+    from crr.core import config as cfg
+    assert f"var LONGPRESS_MOVE_PX = {cfg.DEFAULTS['longpress_move_px']};" in body
 
 
 def test_page_renders_the_parked_state():
@@ -2541,6 +2556,19 @@ def test_context_pressure_badges_have_longpress_help():
     assert 'pb3.setAttribute("data-help", CONTEXT_PRESSURE_HELP.unknown)' in page
 
 
+def test_state_and_pressure_help_match_the_key_legend_verbatim():
+    # STATE_HELP/CONTEXT_PRESSURE_HELP are a second copy of the #key
+    # legend's own wording (page.html:374-376) — this guards against the
+    # two ever drifting apart, which the state/context-pressure tests
+    # above can't catch (they only check ONE badge's string exists
+    # somewhere in the page, not that it still matches the legend).
+    page = web.load_page()
+    legend = {html.unescape(v) for v in re.findall(r'data-help="([^"]*)"', page)}
+    src = page[page.index("var STATE_HELP"):page.index("var LONGPRESS_MS")]
+    for s in re.findall(r'"([^"]{30,})"', src):
+        assert s in legend, f"badge help drifted from the #key legend: {s[:60]}"
+
+
 def test_worktree_dup_strike_latest_badges_have_longpress_help():
     page = web.load_page()
     assert 'wtb.setAttribute("data-help"' in page
@@ -2549,8 +2577,19 @@ def test_worktree_dup_strike_latest_badges_have_longpress_help():
     assert 'lb.setAttribute("data-help"' in page
     # Duplicate's two variants (certain vs guessed-id match) get different
     # wording, not the same sentence copy-pasted onto both branches.
-    assert "crr is certain of the match" in page
-    assert "wasn't certain" in page or "isn't certain" in page
+    dup_help = re.search(
+        r'dup\.setAttribute\("data-help", isUncertain\s*'
+        r'\?\s*"([^"]+)"\s*'
+        r':\s*"([^"]+)"\);',
+        page,
+    )
+    assert dup_help, "duplicate badge data-help ternary not found (may have been reformatted)"
+    assert "isn't certain" in dup_help.group(1) and "guessed" in dup_help.group(1), (
+        "isUncertain branch should explain the id was guessed, not certain"
+    )
+    assert "certain of the match" in dup_help.group(2), (
+        "certain (non-uncertain) branch should say crr is certain of the match"
+    )
 
 
 def test_remote_control_waiting_adopted_badges_have_longpress_help():
@@ -2573,6 +2612,23 @@ def test_every_card_badge_has_longpress_help_wired():
     badge_vars = ["badge", "wtb", "dup", "pb", "pb2", "pb3", "stb", "rcb", "rcu", "wb", "adb", "lb"]
     for var in badge_vars:
         assert f'{var}.setAttribute("data-help"' in page, f"{var} badge has no data-help wired"
+
+
+def test_every_badge_creation_in_render_card_sets_data_help():
+    # Stronger than the fixed-name list above: counts every badge span
+    # renderCard creates and every data-help it sets, so a 13th badge kind
+    # with a brand-new variable name is caught too — not just a regression
+    # in one of the 12 named today.
+    page = web.load_page()
+    start = page.index("function renderCard(")
+    end = page.index("function searchBtnFor(")
+    card_src = page[start:end]
+    badge_creations = re.findall(r'el\("span", "badge', card_src)
+    data_help_sets = re.findall(r'\.setAttribute\("data-help"', card_src)
+    assert len(badge_creations) == len(data_help_sets), (
+        f"{len(badge_creations)} badges created in renderCard but only "
+        f"{len(data_help_sets)} set data-help — a new badge kind is missing one"
+    )
 
 
 def test_key_legend_tap_wiring_is_unchanged():

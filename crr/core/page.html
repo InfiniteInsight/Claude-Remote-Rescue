@@ -611,7 +611,7 @@ var CONTEXT_PRESSURE_HELP = {
 // are torn down and rebuilt on every poll, so per-element listeners would
 // mean rewiring on every poll tick for no benefit.
 var LONGPRESS_MS = @LONGPRESS_MS@;
-var LONGPRESS_MOVE_PX = 10;
+var LONGPRESS_MOVE_PX = @LONGPRESS_MOVE_PX@;
 var lpTimer = null, lpStart = null, lpBadge = null;
 
 function lpCancel() {
@@ -622,6 +622,7 @@ function lpCancel() {
 function lpBegin(target, x, y) {
   var badge = target.closest && target.closest(".badge[data-help]");
   if (!badge) return;
+  lpCancel();
   lpBadge = badge;
   lpStart = { x: x, y: y };
   lpTimer = setTimeout(function () {
@@ -2475,7 +2476,7 @@ sessionsEl.addEventListener("touchcancel", lpCancel);
 // Desktop click-and-hold, for parity — hover title already covers desktop
 // (each badge keeps its own title= where it has one), so this is a
 // nice-to-have there, not the primary path.
-sessionsEl.addEventListener("mousedown", function (e) { lpBegin(e.target, e.clientX, e.clientY); });
+sessionsEl.addEventListener("mousedown", function (e) { if (e.button !== 0) return; lpBegin(e.target, e.clientX, e.clientY); });
 sessionsEl.addEventListener("mousemove", function (e) { lpMove(e.clientX, e.clientY); });
 sessionsEl.addEventListener("mouseup", lpCancel);
 sessionsEl.addEventListener("mouseleave", lpCancel);
