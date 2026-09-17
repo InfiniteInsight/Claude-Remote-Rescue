@@ -76,6 +76,7 @@ def test_page_timing_and_cap_defaults():
     assert c.get("notice_seconds") == 3
     assert c.get("reload_delay_ms") == 800
     assert c.get("diag_error_display_cap") == 20
+    assert c.get("longpress_ms") == 500
 
 
 def test_model_tail_lines_default():
@@ -100,7 +101,8 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # sessions, so healthy-but-idle ones deserve more runway before
     # give-up; user decision on the 2026-08-29 spec).
     # v25 (2026-09-02): tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname (pluggable tunnel spec).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 25
+    # v26 (2026-09-17): longpress_ms (badge long-press explanation toast delay, page timing prior).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 26
 
 
 def test_zombie_strikes_default_is_five():

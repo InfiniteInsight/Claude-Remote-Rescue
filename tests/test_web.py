@@ -1208,6 +1208,18 @@ def test_render_page_defaults_zombie_strikes_from_config():
     assert f"var STRIKE_MAX = {cfg.DEFAULTS['zombie_strikes']};" in body
 
 
+def test_render_page_substitutes_longpress_ms():
+    body = web.render_page(longpress_ms=750)
+    assert "@LONGPRESS_MS@" not in body
+    assert "var LONGPRESS_MS = 750;" in body
+
+
+def test_render_page_defaults_longpress_ms_from_config():
+    body = web.render_page()
+    from crr.core import config as cfg
+    assert f"var LONGPRESS_MS = {cfg.DEFAULTS['longpress_ms']};" in body
+
+
 def test_page_renders_the_parked_state():
     page = web.load_page()
     assert "k-parked" in page

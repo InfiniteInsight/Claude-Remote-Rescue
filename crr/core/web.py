@@ -321,6 +321,7 @@ def handle_request(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    longpress_ms: int | None = None,
     zombie_strikes: int | None = None,
     git_short: str = "",
 ) -> Response:
@@ -379,6 +380,7 @@ def handle_request(
                 flash_ms=flash_ms, zombie_strikes=zombie_strikes,
                 filter_debounce_ms=filter_debounce_ms,
                 reauth_success_display_ms=reauth_success_display_ms,
+                longpress_ms=longpress_ms,
                 git_short=git_short,
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))

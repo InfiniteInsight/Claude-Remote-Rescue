@@ -107,7 +107,11 @@ from typing import Any, Mapping
 # v25: tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname
 # (pluggable tunnel support, spec 2026-09-02 — provider default
 # "tailscale" preserves pre-tunnel behavior byte-for-byte)
-CONFIG_DEFAULTS_VERSION = 25
+# v26: added longpress_ms (badge long-press explanation duration — same
+# family as flash_ms/reauth_success_display_ms, a page timing prior
+# injected via @PLACEHOLDER@, never a bare literal in page.html; see
+# tests/test_priors.py::test_no_bare_millisecond_constant_in_page)
+CONFIG_DEFAULTS_VERSION = 26
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
