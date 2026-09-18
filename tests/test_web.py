@@ -1087,8 +1087,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_72():
-    """v72: session-card status badges (state, worktree, duplicate,
+def test_page_version_is_73():
+    """v73: explanation toasts (badge long-press, #key legend tap) are
+    sticky, not auto-dismissed after notice_seconds (3s) — user feedback
+    2026-09-18: not enough time to read a full help sentence. Both surfaces
+    share the same showNotice() call and the same text, so both got the
+    same fix rather than a per-surface timer to tune.
+    (v72: session-card status badges (state, worktree, duplicate,
     context-pressure, strike, remote-control, waiting, adopted, latest)
     long-press to reveal an explanation, via the same showNotice() toast
     the #key legend already uses on tap. Long-press, not tap, because a
@@ -1151,7 +1156,7 @@ def test_page_version_is_72():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 72
+    assert web.PAGE_VERSION == 73
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1517,7 +1522,7 @@ def test_page_has_longpress_badge_detector():
     page = web.load_page()
     assert "var LONGPRESS_MS" in page
     assert 'closest(".badge[data-help]")' in page
-    assert 'showNotice(lpBadge.textContent + ": " + help, "warn")' in page
+    assert 'showNotice(lpBadge.textContent + ": " + help, "warn", { sticky: true })' in page
     assert 'getElementById("sessions")' in page
     assert 'addEventListener("touchstart"' in page
     assert 'addEventListener("mousedown"' in page
@@ -2623,13 +2628,28 @@ def test_every_badge_creation_in_render_card_sets_data_help():
     )
 
 
-def test_key_legend_tap_wiring_is_unchanged():
-    # The #key legend keeps its existing single-tap-to-toast behavior —
-    # only the per-card badges (above) gained long-press. Explicit decision
-    # in the design spec; this is the regression check for it.
+def test_key_legend_tap_gesture_is_unchanged():
+    # The #key legend keeps its existing single-tap gesture — only the
+    # per-card badges (above) gained long-press. Explicit decision in the
+    # design spec; this is the regression check for the GESTURE staying a
+    # tap. (Its toast's dismiss behavior did change — see the sticky test
+    # below, user feedback 2026-09-18: 3s wasn't enough to read a help
+    # sentence, on either surface, so both became sticky together.)
     page = web.load_page()
     assert 'querySelectorAll("#key .kterm")' in page
-    assert 't.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });' in page
+    assert 't.addEventListener("click", function () {' in page
+
+
+def test_explanation_toasts_are_sticky_not_auto_dismissed():
+    # User feedback 2026-09-18: the help toast (badge long-press, and the
+    # #key legend's identical-text tap) auto-dismissed after notice_seconds
+    # (3s) — too fast to read a full explanation sentence. Both share the
+    # same showNotice() mechanism and the same text, so both get the same
+    # fix: sticky (dismissed via the × every notice already has, per
+    # showNotice's opts.sticky), not a longer timer to tune.
+    page = web.load_page()
+    assert 'showNotice(lpBadge.textContent + ": " + help, "warn", { sticky: true })' in page
+    assert 't.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn", { sticky: true }); });' in page
 
 
 # --------------------------------------------------------------------------
