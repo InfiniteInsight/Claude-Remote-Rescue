@@ -110,7 +110,11 @@ from typing import Any, Mapping
 # v26: added claude_auth_probe_timeout_seconds (keychain-blind reauth, spec
 # 2026-09-17 — the `claude auth status --json` fallback probe's own budget,
 # used only when the credentials file cannot answer)
-CONFIG_DEFAULTS_VERSION = 26
+# v27: added longpress_ms + longpress_move_px (badge long-press explanation
+# duration and movement-cancel radius — same family as flash_ms, page
+# timing/geometry priors injected via @PLACEHOLDER@, never bare literals in
+# page.html; see tests/test_priors.py::test_no_bare_millisecond_constant_in_page)
+CONFIG_DEFAULTS_VERSION = 27
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -171,6 +175,8 @@ DEFAULTS: dict[str, Any] = {
     # transcripts, so firing it per keystroke is real work.
     "flash_ms": 1400,
     "filter_debounce_ms": 250,
+    "longpress_ms": 500,             # duration of badge long-press before showing its explanation toast
+    "longpress_move_px": 10,         # pixels of movement that cancels a pending badge long-press
     # Rows per page in the dashboard's discoverable modal. Enriching every
     # untracked transcript to render one page cost ~10s on a machine with a
     # few thousand of them, which is why the panel pages server-side at all.

@@ -6,7 +6,9 @@ the versioned /api/sessions contract. The handler is a pure function of
 (method, path, headers) so every branch is testable with fake requests.
 """
 
+import html
 import json
+import re
 
 import pytest
 
@@ -1085,8 +1087,18 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_71():
-    """v71: the auth badge stops treating "unknown" as healthy. `unknown`
+def test_page_version_is_72():
+    """v72: session-card status badges (state, worktree, duplicate,
+    context-pressure, strike, remote-control, waiting, adopted, latest)
+    long-press to reveal an explanation, via the same showNotice() toast
+    the #key legend already uses on tap. Long-press, not tap, because a
+    tap in a scrollable card list is at least as likely a mis-tap/scroll-
+    release as deliberate (spec 2026-09-17). One delegated detector on
+    #sessions, not per-badge, so it survives every poll's card rebuild.
+    State/context-pressure badges reuse the #key legend's own wording
+    (guarded against drift); remote-control/waiting/adopted reuse their
+    existing title=; worktree/duplicate/strike/latest get new copy.
+    (v71: the auth badge stops treating "unknown" as healthy. `unknown`
     shared the `valid` branch — blank badge, early return — so on every
     host that keeps no credentials file (macOS Keychain, relocated
     $CLAUDE_CONFIG_DIR, enterprise gateway) an expired login rendered as
@@ -1139,7 +1151,7 @@ def test_page_version_is_71():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 71
+    assert web.PAGE_VERSION == 72
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1206,6 +1218,30 @@ def test_render_page_defaults_zombie_strikes_from_config():
     body = web.render_page()
     from crr.core import config as cfg
     assert f"var STRIKE_MAX = {cfg.DEFAULTS['zombie_strikes']};" in body
+
+
+def test_render_page_substitutes_longpress_ms():
+    body = web.render_page(longpress_ms=750)
+    assert "@LONGPRESS_MS@" not in body
+    assert "var LONGPRESS_MS = 750;" in body
+
+
+def test_render_page_defaults_longpress_ms_from_config():
+    body = web.render_page()
+    from crr.core import config as cfg
+    assert f"var LONGPRESS_MS = {cfg.DEFAULTS['longpress_ms']};" in body
+
+
+def test_render_page_substitutes_longpress_move_px():
+    body = web.render_page(longpress_move_px=25)
+    assert "@LONGPRESS_MOVE_PX@" not in body
+    assert "var LONGPRESS_MOVE_PX = 25;" in body
+
+
+def test_render_page_defaults_longpress_move_px_from_config():
+    body = web.render_page()
+    from crr.core import config as cfg
+    assert f"var LONGPRESS_MOVE_PX = {cfg.DEFAULTS['longpress_move_px']};" in body
 
 
 def test_page_renders_the_parked_state():
@@ -1470,6 +1506,28 @@ def test_page_renders_the_not_connected_badge():
     # existing groups (e.g. "will compact on revive") so the tap->toast
     # ("<term>: <help>") reads as a complete sentence.
     assert page.count("phone: not connected") >= 2
+
+
+def test_page_has_longpress_badge_detector():
+    # Long-press (not tap) on a session-card badge reveals its explanation,
+    # via the same showNotice toast the #key legend already uses for tap.
+    # Delegated on #sessions (not per-badge) because cards are rebuilt on
+    # every poll — see
+    # docs/superpowers/specs/2026-09-17-badge-longpress-help-design.md.
+    page = web.load_page()
+    assert "var LONGPRESS_MS" in page
+    assert 'closest(".badge[data-help]")' in page
+    assert 'showNotice(lpBadge.textContent + ": " + help, "warn")' in page
+    assert 'getElementById("sessions")' in page
+    assert 'addEventListener("touchstart"' in page
+    assert 'addEventListener("mousedown"' in page
+
+
+def test_badges_suppress_native_touch_callout():
+    # A long-press on text is exactly the gesture mobile browsers use for
+    # their own selection/copy bubble — it must not fight with our toast.
+    page = web.load_page()
+    assert "-webkit-touch-callout: none" in page
 
 
 def test_page_shows_what_a_waiting_session_is_blocked_on():
@@ -2471,6 +2529,107 @@ class TestBootstrapStateInjection:
         )
         assert json.loads(resp.body)["login_enabled"] is True
         assert "login_enabled" not in payload  # provider's dict is untouched
+
+
+def test_state_badge_has_longpress_help():
+    # Reuses the #key legend's own wording for state, so the badge and the
+    # legend never say two different things about the same state.
+    page = web.load_page()
+    assert "var STATE_HELP = {" in page
+    assert 'badge.setAttribute("data-help", STATE_HELP[parkedAttached ? "attached" : s.state] || "")' in page
+    assert "A restored session you have already reopened" in page
+
+
+def test_context_pressure_badges_have_longpress_help():
+    page = web.load_page()
+    assert "var CONTEXT_PRESSURE_HELP = {" in page
+    assert 'pb.setAttribute("data-help", CONTEXT_PRESSURE_HELP.tight)' in page
+    assert 'pb2.setAttribute("data-help", CONTEXT_PRESSURE_HELP["will-compact"])' in page
+    assert 'pb3.setAttribute("data-help", CONTEXT_PRESSURE_HELP.unknown)' in page
+
+
+def test_state_and_pressure_help_match_the_key_legend_verbatim():
+    # STATE_HELP/CONTEXT_PRESSURE_HELP are a second copy of the #key
+    # legend's own wording (page.html:374-376) — this guards against the
+    # two ever drifting apart, which the state/context-pressure tests
+    # above can't catch (they only check ONE badge's string exists
+    # somewhere in the page, not that it still matches the legend).
+    page = web.load_page()
+    legend = {html.unescape(v) for v in re.findall(r'data-help="([^"]*)"', page)}
+    src = page[page.index("var STATE_HELP"):page.index("var LONGPRESS_MS")]
+    for s in re.findall(r'"([^"]{30,})"', src):
+        assert s in legend, f"badge help drifted from the #key legend: {s[:60]}"
+
+
+def test_worktree_dup_strike_latest_badges_have_longpress_help():
+    page = web.load_page()
+    assert 'wtb.setAttribute("data-help"' in page
+    assert 'dup.setAttribute("data-help"' in page
+    assert 'stb.setAttribute("data-help"' in page
+    assert 'lb.setAttribute("data-help"' in page
+    # Duplicate's two variants (certain vs guessed-id match) get different
+    # wording, not the same sentence copy-pasted onto both branches.
+    dup_help = re.search(
+        r'dup\.setAttribute\("data-help", isUncertain\s*'
+        r'\?\s*"([^"]+)"\s*'
+        r':\s*"([^"]+)"\);',
+        page,
+    )
+    assert dup_help, "duplicate badge data-help ternary not found (may have been reformatted)"
+    assert "isn't certain" in dup_help.group(1) and "guessed" in dup_help.group(1), (
+        "isUncertain branch should explain the id was guessed, not certain"
+    )
+    assert "certain of the match" in dup_help.group(2), (
+        "certain (non-uncertain) branch should say crr is certain of the match"
+    )
+
+
+def test_remote_control_waiting_adopted_badges_have_longpress_help():
+    # These three already carry a title= for desktop hover — data-help
+    # reuses that exact string (rcb.title / rcu.title / wb.title / adb.title)
+    # rather than a second, differently-worded copy.
+    page = web.load_page()
+    assert 'rcb.setAttribute("data-help", rcb.title)' in page
+    assert 'rcu.setAttribute("data-help", rcu.title)' in page
+    assert 'wb.setAttribute("data-help", wb.title)' in page
+    assert 'adb.setAttribute("data-help", adb.title)' in page
+
+
+def test_every_card_badge_has_longpress_help_wired():
+    # Regression: every badge kind renderCard can create must be
+    # long-press-able. A new badge kind added later without data-help would
+    # pass every test above silently — this pins the full list from the
+    # design spec (docs/superpowers/specs/2026-09-17-badge-longpress-help-design.md).
+    page = web.load_page()
+    badge_vars = ["badge", "wtb", "dup", "pb", "pb2", "pb3", "stb", "rcb", "rcu", "wb", "adb", "lb"]
+    for var in badge_vars:
+        assert f'{var}.setAttribute("data-help"' in page, f"{var} badge has no data-help wired"
+
+
+def test_every_badge_creation_in_render_card_sets_data_help():
+    # Stronger than the fixed-name list above: counts every badge span
+    # renderCard creates and every data-help it sets, so a 13th badge kind
+    # with a brand-new variable name is caught too — not just a regression
+    # in one of the 12 named today.
+    page = web.load_page()
+    start = page.index("function renderCard(")
+    end = page.index("function searchBtnFor(")
+    card_src = page[start:end]
+    badge_creations = re.findall(r'el\("span", "badge', card_src)
+    data_help_sets = re.findall(r'\.setAttribute\("data-help"', card_src)
+    assert len(badge_creations) == len(data_help_sets), (
+        f"{len(badge_creations)} badges created in renderCard but only "
+        f"{len(data_help_sets)} set data-help — a new badge kind is missing one"
+    )
+
+
+def test_key_legend_tap_wiring_is_unchanged():
+    # The #key legend keeps its existing single-tap-to-toast behavior —
+    # only the per-card badges (above) gained long-press. Explicit decision
+    # in the design spec; this is the regression check for it.
+    page = web.load_page()
+    assert 'querySelectorAll("#key .kterm")' in page
+    assert 't.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });' in page
 
 
 # --------------------------------------------------------------------------

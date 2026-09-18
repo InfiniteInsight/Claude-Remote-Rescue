@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 71  # v71: auth badge no longer treats "unknown" as healthy — visible muted badge + Reauth button, and the expired badge names its source
+PAGE_VERSION = 72  # v72: session-card status badges long-press to reveal an explanation, via the same showNotice toast the #key legend already uses on tap; v71: auth badge no longer treats "unknown" as healthy — visible muted badge + Reauth button, and the expired badge names its source
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -54,6 +54,8 @@ _FLASH_MS_PLACEHOLDER = "@FLASH_MS@"
 _ZOMBIE_STRIKES_PLACEHOLDER = "@ZOMBIE_STRIKES@"
 _FILTER_DEBOUNCE_MS_PLACEHOLDER = "@FILTER_DEBOUNCE_MS@"
 _REAUTH_SUCCESS_MS_PLACEHOLDER = "@REAUTH_SUCCESS_MS@"
+_LONGPRESS_MS_PLACEHOLDER = "@LONGPRESS_MS@"
+_LONGPRESS_MOVE_PX_PLACEHOLDER = "@LONGPRESS_MOVE_PX@"
 _GIT_SHORT_PLACEHOLDER = "@GIT_SHORT@"
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
@@ -119,6 +121,8 @@ def render_page(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    longpress_ms: int | None = None,
+    longpress_move_px: int | None = None,
     zombie_strikes: int | None = None,
     git_short: str = "",
 ) -> str:
@@ -146,6 +150,12 @@ def render_page(
         if reauth_success_display_ms is None
         else reauth_success_display_ms
     )
+    longpress = (
+        cfg.DEFAULTS["longpress_ms"] if longpress_ms is None else longpress_ms
+    )
+    longpress_px = (
+        cfg.DEFAULTS["longpress_move_px"] if longpress_move_px is None else longpress_move_px
+    )
     strikes_max = cfg.DEFAULTS["zombie_strikes"] if zombie_strikes is None else zombie_strikes
     return (
         load_page()
@@ -160,6 +170,8 @@ def render_page(
         .replace(_ZOMBIE_STRIKES_PLACEHOLDER, str(int(strikes_max)))
         .replace(_FILTER_DEBOUNCE_MS_PLACEHOLDER, str(int(debounce)))
         .replace(_REAUTH_SUCCESS_MS_PLACEHOLDER, str(int(reauth_success)))
+        .replace(_LONGPRESS_MS_PLACEHOLDER, str(int(longpress)))
+        .replace(_LONGPRESS_MOVE_PX_PLACEHOLDER, str(int(longpress_px)))
         .replace(_GIT_SHORT_PLACEHOLDER, git_short)
     )
 
@@ -315,6 +327,8 @@ def handle_request(
     flash_ms: int | None = None,
     filter_debounce_ms: int | None = None,
     reauth_success_display_ms: int | None = None,
+    longpress_ms: int | None = None,
+    longpress_move_px: int | None = None,
     zombie_strikes: int | None = None,
     git_short: str = "",
 ) -> Response:
@@ -373,6 +387,8 @@ def handle_request(
                 flash_ms=flash_ms, zombie_strikes=zombie_strikes,
                 filter_debounce_ms=filter_debounce_ms,
                 reauth_success_display_ms=reauth_success_display_ms,
+                longpress_ms=longpress_ms,
+                longpress_move_px=longpress_move_px,
                 git_short=git_short,
             )
             return _resp(200, "text/html; charset=utf-8", page.encode("utf-8"))

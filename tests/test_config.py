@@ -76,6 +76,8 @@ def test_page_timing_and_cap_defaults():
     assert c.get("notice_seconds") == 3
     assert c.get("reload_delay_ms") == 800
     assert c.get("diag_error_display_cap") == 20
+    assert c.get("longpress_ms") == 500
+    assert c.get("longpress_move_px") == 10
 
 
 def test_model_tail_lines_default():
@@ -104,7 +106,10 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # reauth — the `claude auth status --json` fallback probe's own budget,
     # named rather than borrowing interop_timeout_seconds, because it
     # spawns node and a 5s borrow times out on a cold start).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 26
+    # v27 (2026-09-17): longpress_ms + longpress_move_px (badge long-press
+    # explanation toast delay and movement-cancel radius, page timing/
+    # geometry priors).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 27
 
 
 def test_zombie_strikes_default_is_five():

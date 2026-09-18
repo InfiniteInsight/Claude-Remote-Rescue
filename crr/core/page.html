@@ -92,6 +92,11 @@
   .badge {
     margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
     padding: 2px 8px; border-radius: 999px; font-weight: 600;
+    /* Long-press reveals this badge's explanation (see the detector further
+       down the page). Without this, a long-press on text triggers the
+       browser's own selection/copy bubble instead, which fights with our
+       toast. */
+    -webkit-touch-callout: none; user-select: none;
   }
   .badge.live { background: #123a22; color: #46c26a; }
   .badge.ghost { background: #3a2f12; color: #e0a53b; }
@@ -588,6 +593,57 @@ var SID_SOURCE_HELP = {
   verified: "confirmed — the guessed id's transcript has been written to since this session started"
 };
 
+var STATE_HELP = {
+  live: "The shell and its claude are running, with a terminal attached.",
+  ghost: "The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.",
+  crashed: "The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.",
+  parked: "Running inside a detached tmux session — crr restored it after a reboot. The conversation is alive; Reopen brings it back into a terminal tab, or attach with: tmux attach -t <name>.",
+  attached: "A restored session you have already reopened — a terminal (tmux client) is attached to it. Lets you tell, in a long restore list, which conversations are already back from those still parked."
+};
+
+var CONTEXT_PRESSURE_HELP = {
+  tight: "Estimated past 70% of this model's context window. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.",
+  "will-compact": "Estimated at or over the window, so resuming will compact and lose detail. An estimate: transcript bytes ÷ 4 against a known window size, not a real token count.",
+  unknown: "crr has no confirmed context window for this session's model — usually because no model could be read from the transcript at all (about 1 in 3 carry none). No badge would read as 'fine'; this says crr genuinely does not know."
+};
+
+// Long-press (not tap) on a session-card badge shows its explanation as a
+// toast — the same showNotice() mechanism the #key legend already uses on
+// tap. Long-press, not tap, because a plain tap in a scrollable card list
+// is at least as likely to be a mis-tap/scroll-release as deliberate; see
+// docs/superpowers/specs/2026-09-17-badge-longpress-help-design.md.
+//
+// Delegated on #sessions rather than per-badge: cards (and their badges)
+// are torn down and rebuilt on every poll, so per-element listeners would
+// mean rewiring on every poll tick for no benefit.
+var LONGPRESS_MS = @LONGPRESS_MS@;
+var LONGPRESS_MOVE_PX = @LONGPRESS_MOVE_PX@;
+var lpTimer = null, lpStart = null, lpBadge = null;
+
+function lpCancel() {
+  clearTimeout(lpTimer);
+  lpTimer = null; lpStart = null; lpBadge = null;
+}
+
+function lpBegin(target, x, y) {
+  var badge = target.closest && target.closest(".badge[data-help]");
+  if (!badge) return;
+  lpCancel();
+  lpBadge = badge;
+  lpStart = { x: x, y: y };
+  lpTimer = setTimeout(function () {
+    var help = lpBadge.getAttribute("data-help") || "";
+    showNotice(lpBadge.textContent + ": " + help, "warn");
+    lpBadge = null;
+  }, LONGPRESS_MS);
+}
+
+function lpMove(x, y) {
+  if (!lpStart) return;
+  if (Math.abs(x - lpStart.x) > LONGPRESS_MOVE_PX ||
+      Math.abs(y - lpStart.y) > LONGPRESS_MOVE_PX) lpCancel();
+}
+
 // View state (filter/sort/group), persisted across polls so a poll keeps the view.
 var filterKey = "all", sortKey = "updated", groupKey = "none", lastSessions = [];
 
@@ -807,6 +863,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   badge.textContent = s.state === "parked"
     ? (s.attached ? "attached" : "restored")
     : s.state;
+  badge.setAttribute("data-help", STATE_HELP[parkedAttached ? "attached" : s.state] || "");
   top.appendChild(badge);
   // (#31) A worktree checkout is a side branch, not the main thread — tag it
   // with its worktree name so it reads as one at a glance (it is also grouped
@@ -815,11 +872,15 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (wtInfo) {
     var wtb = el("span", "badge worktree-badge");
     wtb.textContent = "worktree: " + wtInfo.name;
+    wtb.setAttribute("data-help", "A checkout of a git worktree, not the main branch — grouped under its parent repo below when there's more than one.");
     top.appendChild(wtb);
   }
   if (isDup) {
     var dup = el("span", "badge dup-badge" + (isUncertain ? " uncertain" : ""));
     dup.textContent = isUncertain ? "possible duplicate · guessed sid" : "duplicate";
+    dup.setAttribute("data-help", isUncertain
+      ? "Another session may share this id, but it was guessed rather than injected, so the match isn't certain."
+      : "Another tracked session shares this exact session id — crr is certain of the match.");
     top.appendChild(dup);
   }
   // F2: compaction badge from context_pressure. "ok" renders nothing (no
@@ -828,10 +889,12 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (s.context_pressure === "tight") {
     var pb = el("span", "badge pressure-tight");
     pb.textContent = "context tight";
+    pb.setAttribute("data-help", CONTEXT_PRESSURE_HELP.tight);
     top.appendChild(pb);
   } else if (s.context_pressure === "will-compact") {
     var pb2 = el("span", "badge pressure-will-compact");
     pb2.textContent = "will compact on revive";
+    pb2.setAttribute("data-help", CONTEXT_PRESSURE_HELP["will-compact"]);
     top.appendChild(pb2);
   } else if (s.context_pressure === "unknown") {
     // #39: no confirmed context window for this session's model (often
@@ -840,6 +903,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     // the fabricated reassurance this state exists to stop.
     var pb3 = el("span", "badge unknown-badge");
     pb3.textContent = "context unknown";
+    pb3.setAttribute("data-help", CONTEXT_PRESSURE_HELP.unknown);
     top.appendChild(pb3);
   }
   // Reviver strike escalation (2026-09-08): a session climbing toward
@@ -850,6 +914,9 @@ function renderCard(s, uncertain, groupColor, latest) {
     var stb = el("span", "badge strike-badge");
     stb.textContent = "⚠ strike " + s.revive_strikes + "/" + STRIKE_MAX +
       " — process died upon revival";
+    stb.setAttribute("data-help", "This session died again shortly after crr revived it — strike " +
+      s.revive_strikes + " of " + STRIKE_MAX + ". After " + STRIKE_MAX +
+      " strikes crr stops trying to revive it automatically.");
     top.appendChild(stb);
   }
   // Can the phone reach this session? Read from Claude Code's OWN connection
@@ -862,11 +929,13 @@ function renderCard(s, uncertain, groupColor, latest) {
     var rcb = el("span", "badge remote-control-badge");
     rcb.textContent = "phone: not connected";
     rcb.title = "Claude Code reports no live Remote Control link for this session. Kick restarts claude so it reconnects.";
+    rcb.setAttribute("data-help", rcb.title);
     top.appendChild(rcb);
   } else if (s.remote_control === "unknown") {
     var rcu = el("span", "badge unknown-badge");
     rcu.textContent = "phone: unknown";
     rcu.title = "crr could not establish whether the phone can reach this session. It never auto-kicks a session in this state.";
+    rcu.setAttribute("data-help", rcu.title);
     top.appendChild(rcu);
   }
   // Blocked on the USER, from Claude Code's own `waitingFor`. Its OWN branch,
@@ -878,6 +947,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     var wb = el("span", "badge waiting-badge");
     wb.textContent = "waiting on you";
     wb.title = "Claude Code reports this session as blocked on you: " + s.waiting_for;
+    wb.setAttribute("data-help", wb.title);
     top.appendChild(wb);
   }
   // (#40) An adopted card never observed a shell registration, so its
@@ -887,6 +957,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     var adb = el("span", "badge unknown-badge");
     adb.textContent = "adopted";
     adb.title = "crr found this conversation's transcript on disk and adopted it — it never watched the session start, so its host and shell were never observed.";
+    adb.setAttribute("data-help", adb.title);
     top.appendChild(adb);
   }
   // T-B: latest-per-cwd marker.
@@ -894,6 +965,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (cwdInfo && cwdInfo.count > 1 && recencyMs(s) === cwdInfo.max) {
     var lb = el("span", "badge latest-badge");
     lb.textContent = "latest";
+    lb.setAttribute("data-help", "The most recently active session in this directory — shown when more than one session shares the same working directory.");
     top.appendChild(lb);
   }
   card.appendChild(top);
@@ -2429,6 +2501,28 @@ Array.prototype.forEach.call(document.querySelectorAll("#key .kterm"), function 
   t.title = help;
   t.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });
 });
+
+// Wiring for the long-press detector above: delegated on #sessions so it
+// survives every poll's card rebuild. The #key legend above keeps its own
+// tap gesture, untouched — this is deliberately separate.
+var sessionsEl = document.getElementById("sessions");
+sessionsEl.addEventListener("touchstart", function (e) {
+  var t = e.touches[0];
+  lpBegin(e.target, t.clientX, t.clientY);
+}, { passive: true });
+sessionsEl.addEventListener("touchmove", function (e) {
+  var t = e.touches[0];
+  lpMove(t.clientX, t.clientY);
+}, { passive: true });
+sessionsEl.addEventListener("touchend", lpCancel);
+sessionsEl.addEventListener("touchcancel", lpCancel);
+// Desktop click-and-hold, for parity — hover title already covers desktop
+// (each badge keeps its own title= where it has one), so this is a
+// nice-to-have there, not the primary path.
+sessionsEl.addEventListener("mousedown", function (e) { if (e.button !== 0) return; lpBegin(e.target, e.clientX, e.clientY); });
+sessionsEl.addEventListener("mousemove", function (e) { lpMove(e.clientX, e.clientY); });
+sessionsEl.addEventListener("mouseup", lpCancel);
+sessionsEl.addEventListener("mouseleave", lpCancel);
 
 document.getElementById("filter").addEventListener("change", function () { filterKey = this.value; render(null); });
 document.getElementById("sort").addEventListener("change", function () { sortKey = this.value; render(null); });
