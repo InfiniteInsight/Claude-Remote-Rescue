@@ -2250,8 +2250,8 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
     calls = []
 
     def fake_watchdog(entries, boot, probe, config, settings_store, store, sd, controller, flags,
-                       *, credentials_path=None):
-        calls.append((sd, store, credentials_path))
+                       *, credentials_path=None, auth_status_source=None):
+        calls.append((sd, store, credentials_path, auth_status_source))
         print("watchdog pass ran")
 
     monkeypatch.setattr(cli, "_kick_dropped_bridges", fake_watchdog)
@@ -2260,13 +2260,19 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
     out = capsys.readouterr().out
     assert rc == 0
     assert len(calls) == 1
-    sd, store, credentials_path = calls[0]
+    sd, store, credentials_path, auth_status_source = calls[0]
     assert sd == tmp_path
     assert isinstance(store, JournalStore)
     # [dashboard reauth] the watchdog must see the same credentials path the
     # dashboard poll reads, so a systemd-timer sweep and a browser poll agree
     # on whether auth is expired.
     assert credentials_path == cli._credentials_path(cfg.Config())
+    # [keychain-blind reauth] and it must get the SECOND source too, or the
+    # suppression guard stays dead on every host that keeps no credentials
+    # file — where the dashboard poll would see "expired" and the sweep
+    # would see "unknown" and keep kicking under a dead token.
+    from crr.core.ports import AuthStatusSource
+    assert isinstance(auth_status_source, AuthStatusSource)
     lines = out.splitlines()
     assert lines.index("revived 0, gave up 0, already running 0") < lines.index("watchdog pass ran")
 
@@ -7105,3 +7111,337 @@ def test_reachable_at_boot_uninstall_wsl_also_removes_fallback_unit(tmp_path, mo
     assert rc == 0
     flat = ["\0".join(map(str, c)) for c in ran]
     assert any("crr-user-manager.service" in f for f in flat), ran
+
+
+# --------------------------------------------------------------------------
+# Keychain-blind reauth (spec 2026-09-17). The credentials FILE was the only
+# auth source, so on every host that keeps its tokens somewhere else — macOS
+# login Keychain, a relocated $CLAUDE_CONFIG_DIR, an enterprise gateway —
+# `auth_state` could only ever answer "unknown", the dashboard drew no badge,
+# and an expired login offered no Reauth button on the one screen a mobile
+# user had left. These cover the second source and the path that picks it.
+# --------------------------------------------------------------------------
+
+class _StubAuthStatus:
+    """An AuthStatusSource returning a fixed answer, counting its calls."""
+
+    def __init__(self, logged_in, detail="stub"):
+        from crr.core.ports import AuthStatus
+        self._status = AuthStatus(logged_in, detail)
+        self.calls = 0
+
+    def available(self):
+        return True
+
+    def status(self):
+        self.calls += 1
+        return self._status
+
+
+def _creds_file(path, now, *, access_offset_s, refresh_offset_s):
+    path.write_text(json.dumps({
+        "expiresAt": int((now + access_offset_s) * 1000),
+        "refreshTokenExpiresAt": int((now + refresh_offset_s) * 1000),
+    }))
+    return path
+
+
+class TestCredentialsPath:
+    def test_defaults_to_dot_claude_under_home(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+        assert cli._credentials_path(cli.cfg.Config()) == (
+            tmp_path / ".claude" / ".credentials.json"
+        )
+
+    def test_honours_claude_config_dir(self, monkeypatch, tmp_path):
+        """Claude Code relocates its whole config dir via this env var. Reading
+        ~/.claude regardless is how CRR went blind on a relocated install."""
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+        assert cli._credentials_path(cli.cfg.Config()) == (
+            tmp_path / "elsewhere" / ".credentials.json"
+        )
+
+    def test_ignores_a_blank_claude_config_dir(self, monkeypatch, tmp_path):
+        # An exported-but-empty var must not resolve the file to "/.credentials.json".
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "   ")
+        monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+        assert cli._credentials_path(cli.cfg.Config()) == (
+            tmp_path / ".claude" / ".credentials.json"
+        )
+
+
+class TestResolveAuth:
+    def test_healthy_file_does_not_spend_a_subprocess(self, tmp_path, monkeypatch):
+        """The probe spawns node. On the overwhelmingly common path — a
+        readable, healthy credentials file — it must not run at all."""
+        now = 1_700_000_000.0
+        creds = _creds_file(tmp_path / "c.json", now,
+                            access_offset_s=10 * 86400, refresh_offset_s=30 * 86400)
+        monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds)
+        stub = _StubAuthStatus(False)
+        res = cli._resolve_auth(cli.cfg.Config(), now=now, status_source=stub)
+        assert res.state == "valid"
+        assert res.source == "credentials_file"
+        assert stub.calls == 0
+
+    def test_missing_file_consults_the_probe(self, tmp_path, monkeypatch):
+        # THE KEYCHAIN CASE: no file at all, and the user is signed out.
+        now = 1_700_000_000.0
+        monkeypatch.setattr(cli, "_credentials_path",
+                            lambda _cfg: tmp_path / "nope.json")
+        stub = _StubAuthStatus(False)
+        res = cli._resolve_auth(cli.cfg.Config(), now=now, status_source=stub)
+        assert res.state == "expired"
+        assert res.source == "cli_probe"
+        assert stub.calls == 1
+
+    def test_missing_file_and_signed_in_is_valid(self, tmp_path, monkeypatch):
+        now = 1_700_000_000.0
+        monkeypatch.setattr(cli, "_credentials_path",
+                            lambda _cfg: tmp_path / "nope.json")
+        res = cli._resolve_auth(cli.cfg.Config(), now=now,
+                                status_source=_StubAuthStatus(True))
+        assert res.state == "valid"
+        assert res.source == "cli_probe"
+
+    def test_missing_file_and_unusable_probe_stays_unknown(self, tmp_path, monkeypatch):
+        now = 1_700_000_000.0
+        monkeypatch.setattr(cli, "_credentials_path",
+                            lambda _cfg: tmp_path / "nope.json")
+        res = cli._resolve_auth(cli.cfg.Config(), now=now,
+                                status_source=_StubAuthStatus(None))
+        assert res.state == "unknown"
+        assert res.source == "none"
+
+    def test_expired_file_is_double_checked(self, tmp_path, monkeypatch):
+        """A stale .credentials.json on a host that has since moved to the
+        Keychain reads as long-expired forever. Left unchecked it pins a
+        false badge and suppresses the kick watchdog permanently."""
+        now = 1_700_000_000.0
+        creds = _creds_file(tmp_path / "c.json", now,
+                            access_offset_s=-86400, refresh_offset_s=-86400)
+        monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds)
+        stub = _StubAuthStatus(True)
+        res = cli._resolve_auth(cli.cfg.Config(), now=now, status_source=stub)
+        assert res.state == "valid"
+        assert res.source == "cli_probe"
+        assert stub.calls == 1
+
+    def test_expired_file_confirmed_by_the_probe_stays_expired(self, tmp_path, monkeypatch):
+        now = 1_700_000_000.0
+        creds = _creds_file(tmp_path / "c.json", now,
+                            access_offset_s=-86400, refresh_offset_s=-86400)
+        monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds)
+        res = cli._resolve_auth(cli.cfg.Config(), now=now,
+                                status_source=_StubAuthStatus(False))
+        assert res.state == "expired"
+        assert res.source == "credentials_file"
+
+    def test_never_raises_when_the_probe_blows_up(self, tmp_path, monkeypatch):
+        """The port promises not to raise, but this sits on the poll path and
+        a broken adapter must not take the whole dashboard down with it."""
+        now = 1_700_000_000.0
+        monkeypatch.setattr(cli, "_credentials_path",
+                            lambda _cfg: tmp_path / "nope.json")
+
+        class _Exploding:
+            def available(self): return True
+            def status(self): raise RuntimeError("boom")
+
+        res = cli._resolve_auth(cli.cfg.Config(), now=now, status_source=_Exploding())
+        assert res.state == "unknown"
+        assert res.source == "none"
+
+
+class TestReviveUsesBothAuthSources:
+    """`crr revive`'s guard-0 suppression on a host with no credentials file.
+
+    Before the second source this was dead code there: the file read said
+    "unknown", "unknown" is not "expired", so every sweep revived sessions
+    under a token that could not authenticate and burned a give-up strike
+    per pass — on exactly the hosts (macOS Keychain, relocated config,
+    gateway) where nothing else would tell the user why.
+    """
+
+    def _fake_tmux(self, monkeypatch):
+        class _FakeTmux:
+            def __init__(self, *a, **k): pass
+            def available(self): return True
+            def list_sessions(self): return set()
+            def attached_sessions(self): return set()
+            def new_detached_session(self, name, cwd, argv): pass
+            def session_pid(self, name): return None
+
+        monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+
+    def _no_watchdog(self, monkeypatch):
+        monkeypatch.setattr(cli, "_kick_dropped_bridges", lambda *a, **k: None)
+
+    def test_skips_when_no_file_and_the_probe_says_signed_out(
+            self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+        monkeypatch.setattr(cli, "_credentials_path",
+                            lambda _cfg: tmp_path / "absent.json")
+        monkeypatch.setattr(cli, "_auth_status_source",
+                            lambda _cfg: _StubAuthStatus(False))
+        self._fake_tmux(monkeypatch)
+        self._no_watchdog(monkeypatch)
+        revived = []
+        monkeypatch.setattr(
+            cli.reviver, "revive_crashed",
+            lambda *a, **k: revived.append(True) or cli.reviver.RevivalOutcome([], [], []),
+        )
+
+        assert cli.main(["revive"]) == 0
+        assert revived == [], "no file + signed out must still suppress the pass"
+        assert "auth expired" in capsys.readouterr().err
+
+    def test_proceeds_when_a_stale_expired_file_is_contradicted(
+            self, tmp_path, monkeypatch, capsys):
+        """The mirror risk: a leftover file must not freeze revival forever
+        on a host whose real tokens are elsewhere and perfectly healthy."""
+        monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+        now = 1_700_000_000.0
+        creds = _creds_file(tmp_path / "stale.json", now,
+                            access_offset_s=-30 * 86400, refresh_offset_s=-30 * 86400)
+        monkeypatch.setattr(cli, "_credentials_path", lambda _cfg: creds)
+        monkeypatch.setattr(cli, "_auth_status_source",
+                            lambda _cfg: _StubAuthStatus(True))
+        monkeypatch.setattr(cli.time, "time", lambda: now)
+        self._fake_tmux(monkeypatch)
+        self._no_watchdog(monkeypatch)
+        revived = []
+        monkeypatch.setattr(
+            cli.reviver, "revive_crashed",
+            lambda *a, **k: revived.append(True) or cli.reviver.RevivalOutcome([], [], []),
+        )
+
+        assert cli.main(["revive"]) == 0
+        assert revived == [True], "a live probe must override a stale expired file"
+        assert "auth expired" not in capsys.readouterr().err
+
+
+class TestKickSuppressionUsesBothAuthSources:
+    def test_suppressed_when_no_file_and_the_probe_says_signed_out(
+            self, tmp_path, capsys):
+        """Guard 0 on a keychain host. Without the second source this pass
+        ran, kicked live sessions under a dead token, and ate the capped
+        attempts that exist to stop exactly that loop."""
+        kicked = []
+        cli._kick_dropped_bridges(
+            [], _FakeBoot(), None, cfg.Config(), cli.settings.SettingsStore(tmp_path),
+            JournalStore(tmp_path), tmp_path, None, cli.FlagStore(tmp_path),
+            kick=lambda *a, **k: kicked.append(True),
+            clock=lambda: 1_700_000_000.0,
+            credentials_path=tmp_path / "absent.json",
+            auth_status_source=_StubAuthStatus(False),
+        )
+        assert kicked == []
+        err = capsys.readouterr().err
+        assert "auth expired" in err
+        assert "suppressing auto-kicks" in err
+
+    def test_not_suppressed_when_the_probe_says_signed_in(self, tmp_path, capsys):
+        # No file and a healthy login: the guard must not fire. (The pass
+        # then stops at the `remote_control_watch` gate, which is off by
+        # default — what matters here is that guard 0 let it through.)
+        cli._kick_dropped_bridges(
+            [], _FakeBoot(), None, cfg.Config(), cli.settings.SettingsStore(tmp_path),
+            JournalStore(tmp_path), tmp_path, None, cli.FlagStore(tmp_path),
+            clock=lambda: 1_700_000_000.0,
+            credentials_path=tmp_path / "absent.json",
+            auth_status_source=_StubAuthStatus(True),
+        )
+        assert "auth expired" not in capsys.readouterr().err
+
+
+def test_web_provider_reports_expired_from_the_probe_when_there_is_no_file(
+        tmp_path, monkeypatch):
+    """The served payload on a keychain/gateway host with the login gone.
+
+    This is the whole bug in one assertion: the credentials file cannot
+    answer, so `auth_state` used to be "unknown" — which `renderAuthBadge`
+    drew identically to "valid". No badge, no Reauth button, nothing to tap
+    from a phone. It must now read "expired", and must say that the answer
+    came from the probe rather than from timestamps it never saw.
+    """
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    monkeypatch.setattr("crr.cli._credentials_path",
+                        lambda _cfg: tmp_path / "absent.json")
+    monkeypatch.setattr("crr.cli._auth_status_source",
+                        lambda _cfg: _StubAuthStatus(False))
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return set()
+        def attached_sessions(self): return set()
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    captured = {}
+
+    def fake_make_web_handler(provider, allowed, suffixes, **kw):
+        captured["provider"] = provider
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler): pass
+        def serve_forever(self): raise KeyboardInterrupt
+        def server_close(self): pass
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
+
+    payload = captured["provider"]()
+    assert payload["auth_state"] == "expired"
+    assert payload["auth_source"] == "cli_probe"
+    # No timestamps behind a probe answer, so no countdown may be claimed.
+    assert payload["auth_expires_in_seconds"] is None
+
+
+def test_web_provider_labels_a_file_sourced_answer(tmp_path, monkeypatch):
+    """The common path still says `credentials_file`, and still carries the
+    countdown that only that source can justify."""
+    from crr.adapters import tmux
+
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    _parked_journal_entry(tmp_path, sid)
+
+    now = 1_700_000_000.0
+    creds = _creds_file(tmp_path / "c.json", now,
+                        access_offset_s=4 * 86400, refresh_offset_s=30 * 86400)
+    monkeypatch.setattr("crr.cli._credentials_path", lambda _cfg: creds)
+    monkeypatch.setattr("time.time", lambda: now)
+
+    class FakeTmux:
+        def available(self): return True
+        def list_sessions(self): return set()
+        def attached_sessions(self): return set()
+
+    monkeypatch.setattr(tmux, "RealTmux", lambda *a, **k: FakeTmux())
+    captured = {}
+
+    def fake_make_web_handler(provider, allowed, suffixes, **kw):
+        captured["provider"] = provider
+        return object()
+
+    class _FakeServer:
+        def __init__(self, addr, handler): pass
+        def serve_forever(self): raise KeyboardInterrupt
+        def server_close(self): pass
+
+    monkeypatch.setattr(cli, "make_web_handler", fake_make_web_handler)
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeServer)
+    assert cli.main(["web", "--port", "1"]) == 0
+
+    payload = captured["provider"]()
+    assert payload["auth_state"] == "valid"
+    assert payload["auth_source"] == "credentials_file"
+    assert isinstance(payload["auth_expires_in_seconds"], int)

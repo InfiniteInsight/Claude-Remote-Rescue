@@ -102,8 +102,13 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # sessions, so healthy-but-idle ones deserve more runway before
     # give-up; user decision on the 2026-08-29 spec).
     # v25 (2026-09-02): tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname (pluggable tunnel spec).
-    # v26 (2026-09-17): longpress_ms (badge long-press explanation toast delay, page timing prior).
-    # v27 (2026-09-17): longpress_move_px (badge long-press movement-cancel radius, page geometry prior).
+    # v26 (2026-09-17): claude_auth_probe_timeout_seconds (keychain-blind
+    # reauth — the `claude auth status --json` fallback probe's own budget,
+    # named rather than borrowing interop_timeout_seconds, because it
+    # spawns node and a 5s borrow times out on a cold start).
+    # v27 (2026-09-17): longpress_ms + longpress_move_px (badge long-press
+    # explanation toast delay and movement-cancel radius, page timing/
+    # geometry priors).
     assert cfg.CONFIG_DEFAULTS_VERSION == 27
 
 

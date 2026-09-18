@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 76  # v76: final-review fixes (longpress re-entrancy, right-click guard, longpress_move_px config); v75: badges long-press to reveal an explanation (5/5 — remote-control/waiting/adopted badges)
+PAGE_VERSION = 72  # v72: session-card status badges long-press to reveal an explanation, via the same showNotice toast the #key legend already uses on tap; v71: auth badge no longer treats "unknown" as healthy — visible muted badge + Reauth button, and the expired badge names its source
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"

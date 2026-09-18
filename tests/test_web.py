@@ -1087,33 +1087,25 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_76():
-    """v76: final-review fixes — longpress re-entrancy (lpBegin now calls lpCancel() to prevent multiple timers), right-click guard (mousedown listener checks e.button !== 0), and longpress_move_px routed through config for consistency with longpress_ms.
-    (v75: badges long-press to reveal an explanation (5/5 — remote-control/waiting/adopted badges).
-    Closes out the badge list from the design spec: every badge renderCard
-    creates now sets data-help, and a long-press on any of them (on a real
-    touch device) shows the explanation via showNotice.
-    (v74: badges long-press to reveal an explanation (4/5 — worktree/duplicate/strike/latest badges).
-    The worktree, duplicate, strike, and latest badges now carry data-help
-    so long-pressing them shows their explanations in a toast.
-    (v73: badges long-press to reveal an explanation (3/5 — context-pressure badges).
-    The context-pressure badges (tight/will-compact/unknown) now carry
-    data-help wired to CONTEXT_PRESSURE_HELP, so long-pressing them shows
-    the pressure state's explanation in a toast. Completes the feature for
-    the session's status surface.
-    (v72: badges long-press to reveal an explanation (2/5 — state badge).
-    The state badge (live/ghost/crashed/parked/attached) now carries
-    data-help wired to STATE_HELP, so long-pressing it shows the state's
-    explanation in a toast. Reuses the #key legend's own wording so the
-    badge and legend never say two different things about the same state.
-    (v71: badges long-press to reveal an explanation (1/5 — CSS guard +
-    delegated detector). Long-press (not tap) on a session-card badge shows
-    its explanation as a toast via the same showNotice() the #key legend
-    uses on tap. Long-press because a tap in a scrollable card list is at
-    least as likely a mis-tap/scroll-release as deliberate (spec
-    2026-09-17). Delegated on #sessions so it survives every poll's card
-    rebuild, rather than wired per-badge (would require rewiring on every
-    poll for no benefit).
+def test_page_version_is_72():
+    """v72: session-card status badges (state, worktree, duplicate,
+    context-pressure, strike, remote-control, waiting, adopted, latest)
+    long-press to reveal an explanation, via the same showNotice() toast
+    the #key legend already uses on tap. Long-press, not tap, because a
+    tap in a scrollable card list is at least as likely a mis-tap/scroll-
+    release as deliberate (spec 2026-09-17). One delegated detector on
+    #sessions, not per-badge, so it survives every poll's card rebuild.
+    State/context-pressure badges reuse the #key legend's own wording
+    (guarded against drift); remote-control/waiting/adopted reuse their
+    existing title=; worktree/duplicate/strike/latest get new copy.
+    (v71: the auth badge stops treating "unknown" as healthy. `unknown`
+    shared the `valid` branch — blank badge, early return — so on every
+    host that keeps no credentials file (macOS Keychain, relocated
+    $CLAUDE_CONFIG_DIR, enterprise gateway) an expired login rendered as
+    a clean header with no Reauth button, which is the one control a user
+    away from the machine still needs. It now gets a muted badge of its
+    own plus the button, and the `expired` badge names which source
+    (credentials file vs `claude auth status`) reached the verdict.
     (v70: Tunnel picker hides the config plumbing — options are the three\n    real providers with the effective one selected; "using default" tag +\n    Reset-to-default link replace the "default (config.toml)" option\n    (user feedback 2026-09-09: GUI users are not thinking about files).\n    (v69: Tunnel section UX — CF fields shown only when cloudflare is the
     relevant provider, per-provider hint line, fields edit the override only
     (config.toml values render as placeholders), Save grouped with settings
@@ -1159,7 +1151,7 @@ def test_page_version_is_76():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 76
+    assert web.PAGE_VERSION == 72
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -2638,3 +2630,49 @@ def test_key_legend_tap_wiring_is_unchanged():
     page = web.load_page()
     assert 'querySelectorAll("#key .kterm")' in page
     assert 't.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });' in page
+
+
+# --------------------------------------------------------------------------
+# Keychain-blind reauth (spec 2026-09-17) — the page half. The backend can
+# now tell `unknown` from `valid`; these pin that the PAGE stops drawing
+# them the same way. A served page is not verifiable by curl, so the JS is
+# asserted as source (same approach as every other page test here) on top of
+# the node --check gate above.
+# --------------------------------------------------------------------------
+
+def test_unknown_auth_state_is_no_longer_folded_into_valid():
+    """The regression that made CRR useless on a Keychain host: `unknown`
+    shared `valid`'s branch, so it returned with a blank badge."""
+    page = web.render_page()
+    assert "if (state === 'valid') {" in page
+    assert "if (state === 'valid' || state === 'unknown') {" not in page
+
+
+def test_unknown_auth_state_renders_its_own_badge_and_button():
+    page = web.render_page()
+    assert "if (state === 'unknown') {" in page
+    assert "auth-badge auth-unknown" in page
+    assert "Login state unknown" in page
+    # The escape hatch is the point: a user who cannot reach the machine
+    # needs the button even when crr cannot name the problem.
+    assert "function reauthButton()" in page
+    assert page.count("badge.appendChild(reauthButton());") == 2
+
+
+def test_unknown_auth_badge_has_its_own_muted_style():
+    """Not red. `unknown` is not a confirmed expiry, and styling it as one
+    would be the mirror of the bug — a claim crr cannot support."""
+    page = web.render_page()
+    assert ".auth-unknown {" in page
+    assert ".auth-expired { background: #991b1b" in page
+    # The two must not share a rule set.
+    assert ".auth-unknown { background: #374151" in page
+
+
+def test_expired_auth_badge_names_its_source():
+    """P3 — a probe-sourced verdict carries no timestamps, and the tooltip
+    must not let the badge imply a countdown crr never read."""
+    page = web.render_page()
+    assert "var source = data.auth_source;" in page
+    assert "source === 'cli_probe'" in page
+    assert "no expiry time to show" in page

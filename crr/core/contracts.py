@@ -60,7 +60,15 @@ JOURNAL_SCHEMA_VERSION = 3
 # v17 adds `revive_strikes` (int) to the card — reviver hardening (spec
 # 2026-08-29): strike escalation is user-visible, so a session climbing
 # toward give-up says so instead of silently vanishing at the limit.
-SESSIONS_CONTRACT_VERSION = 17
+# v18 adds `auth_source` to the PAYLOAD (keychain-blind reauth, spec
+# 2026-09-17) — WHICH source produced `auth_state`. `auth_state` gained a
+# second source (`claude auth status --json`) so hosts keeping no
+# credentials file are no longer invisible, and the two are not
+# interchangeable: only `credentials_file` carries timestamps, so only it
+# can populate `auth_expires_in_seconds` or justify an "expiring" warning.
+# A v17 consumer would read a `cli_probe` "expired" as if it came with a
+# countdown. See AUTH_SOURCES.
+SESSIONS_CONTRACT_VERSION = 18
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -209,6 +217,25 @@ CWD_SOURCES = ("verified", "decoded")
 #                REMOTE_CONTROL_STATES above.
 AUTH_STATES = ("valid", "expiring", "expired", "unknown")
 
+# WHICH source produced the `auth_state` above (spec 2026-09-17,
+# keychain-blind reauth) — P3, confidence travels with data. The two
+# sources are not interchangeable and the dashboard must not present them
+# as one:
+#   "credentials_file" - `~/.claude/.credentials.json` (or
+#                        $CLAUDE_CONFIG_DIR's copy) parsed. The only
+#                        source carrying real timestamps, so the only one
+#                        that can ever say "expiring" or report a
+#                        countdown.
+#   "cli_probe"        - `claude auth status --json` answered `loggedIn`.
+#                        Authoritative about logged-in-or-not on hosts
+#                        that keep no credentials file at all (macOS
+#                        Keychain, enterprise gateway), but timestamp-free:
+#                        `auth_expires_in_seconds` is always null here, and
+#                        inventing one would be laundering.
+#   "none"             - neither source spoke. The honest null that pairs
+#                        with `auth_state == "unknown"`.
+AUTH_SOURCES = ("credentials_file", "cli_probe", "none")
+
 # --------------------------------------------------------------------------
 # Canonical key lists.
 # --------------------------------------------------------------------------
@@ -279,6 +306,7 @@ SESSION_CARD_KEYS = (
 SESSIONS_PAYLOAD_KEYS = (
     "contract", "sessions",
     "auth_state", "auth_expires_in_seconds", "auth_reauth_url",
+    "auth_source",
 )
 
 DIAGNOSTICS_PAYLOAD_KEYS = (
@@ -506,6 +534,8 @@ def validate_sessions_payload(payload: Any) -> None:
 
     # Auth state fields (v15) — global, not per-card.
     _require_enum(payload["auth_state"], AUTH_STATES, "/api/sessions 'auth_state'")
+    # v18: which source spoke (P3 — confidence travels with data).
+    _require_enum(payload["auth_source"], AUTH_SOURCES, "/api/sessions 'auth_source'")
     if payload["auth_expires_in_seconds"] is not None:
         _require_type(
             payload["auth_expires_in_seconds"], int,

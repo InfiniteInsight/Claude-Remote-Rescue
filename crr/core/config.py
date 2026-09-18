@@ -107,14 +107,13 @@ from typing import Any, Mapping
 # v25: tunnel_provider + cloudflare_tunnel_name + cloudflare_hostname
 # (pluggable tunnel support, spec 2026-09-02 — provider default
 # "tailscale" preserves pre-tunnel behavior byte-for-byte)
-# v26: added longpress_ms (badge long-press explanation duration — same
-# family as flash_ms/reauth_success_display_ms, a page timing prior
-# injected via @PLACEHOLDER@, never a bare literal in page.html; see
-# tests/test_priors.py::test_no_bare_millisecond_constant_in_page)
-# v27: added longpress_move_px (badge long-press movement-cancel radius,
-# in pixels — same family as longpress_ms, a page timing/geometry prior
-# injected via @PLACEHOLDER@, never a bare literal in page.html, added
-# for consistency with its sibling constant)
+# v26: added claude_auth_probe_timeout_seconds (keychain-blind reauth, spec
+# 2026-09-17 — the `claude auth status --json` fallback probe's own budget,
+# used only when the credentials file cannot answer)
+# v27: added longpress_ms + longpress_move_px (badge long-press explanation
+# duration and movement-cancel radius — same family as flash_ms, page
+# timing/geometry priors injected via @PLACEHOLDER@, never bare literals in
+# page.html; see tests/test_priors.py::test_no_bare_millisecond_constant_in_page)
 CONFIG_DEFAULTS_VERSION = 27
 
 # The audit "config floor": each of these was a hardcoded prior the audit
@@ -323,6 +322,14 @@ DEFAULTS: dict[str, Any] = {
     # to "valid". Same family as flash_ms — long enough to read, short
     # enough not to linger as if it were a state.
     "reauth_success_display_ms": 2000,
+    # keychain-blind reauth (spec 2026-09-17): budget for the
+    # `claude auth status --json` fallback probe. It gets its OWN key
+    # rather than borrowing interop_timeout_seconds for the same reason
+    # tab_spawn_timeout_seconds does — this spawns node, which is nothing
+    # like a ps/tmux read, and a 5s borrow produced a probe that timed out
+    # on a cold start and reported "could not tell" on a host that knew
+    # the answer. It sits on the poll path, so it is still bounded.
+    "claude_auth_probe_timeout_seconds": 15,
     # dashboard login (spec 2026-08-26): how long a login session cookie
     # stays valid. 720 hours = 30 days. Changing this does not invalidate
     # existing sessions — it only affects the Max-Age on NEW cookies and

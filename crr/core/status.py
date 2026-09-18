@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v17).
+"""Status assembler — journal entries -> /api/sessions payload (contract v18).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -170,6 +170,7 @@ def assemble_sessions(
     auth_state: str = "unknown",
     auth_expires_in_seconds: int | None = None,
     auth_reauth_url: str | None = None,
+    auth_source: str = "none",
 ) -> dict[str, Any]:
     """Build the /api/sessions payload for ``entries``.
 
@@ -216,13 +217,21 @@ def assemble_sessions(
     ``None`` is F16's honest "could not determine" and never promotes an
     entry — an unconfirmed query may not assert that a session is running.
 
-    ``auth_state``/``auth_expires_in_seconds``/``auth_reauth_url`` (v15) are
-    the dashboard's GLOBAL OAuth auth fields, injected the same way as
-    every other classification here: the cli reads
-    ``~/.claude/.credentials.json`` (a filesystem read core must not do)
-    and feeds it through ``crr.core.auth.auth_state``, then passes the
-    resolved triple in. Defaults are the honest "not resolved" values, not
-    a positive claim about credentials this call never saw.
+    ``auth_state``/``auth_expires_in_seconds``/``auth_reauth_url`` (v15)
+    and ``auth_source`` (v18) are the dashboard's GLOBAL OAuth auth
+    fields, injected the same way as every other classification here: the
+    cli reads the credentials file (a filesystem read core must not do)
+    AND, when that file cannot answer, runs the ``AuthStatusSource``
+    probe, feeds both through ``crr.core.auth.resolve_auth_state``, and
+    passes the resolved values in. Defaults are the honest "not resolved"
+    values, not a positive claim about credentials this call never saw.
+
+    ``auth_source`` is why v18 exists (P3 — confidence travels with
+    data). ``auth_state`` now has two possible origins and they are not
+    equivalent: only ``"credentials_file"`` carries expiry timestamps, so
+    only it can populate ``auth_expires_in_seconds`` or justify an
+    ``"expiring"`` warning. A ``"cli_probe"`` answer is a bare
+    signed-in-or-not, and the page must not dress it up as a countdown.
     """
     autokick_session_overrides = autokick_session_overrides or {}
     reachability_by_sid = reachability_by_sid or {}
@@ -322,4 +331,5 @@ def assemble_sessions(
         "auth_state": auth_state,
         "auth_expires_in_seconds": auth_expires_in_seconds,
         "auth_reauth_url": auth_reauth_url,
+        "auth_source": auth_source,
     }

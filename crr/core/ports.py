@@ -318,6 +318,53 @@ class DiagnosticsSource(Protocol):
     def collect(self, config: Any) -> tuple[list, list, list, list]: ...
 
 
+class AuthStatus(NamedTuple):
+    """What an AuthStatusSource learned about Claude Code's login.
+
+    ``logged_in`` is TRI-STATE (F16, same discipline as
+    ``TranscriptProbe.exists`` and ``PowerSource.on_ac``): True (signed
+    in), False (CONFIRMED signed out), or None (the probe itself failed —
+    binary missing, timeout, unparseable output, a ``claude`` too old to
+    have the subcommand). None must never be collapsed into either
+    confident answer: ``crr.core.auth.resolve_auth_state`` leaves a None
+    on whatever the credentials file said, and a None that became a False
+    would put a "Login expired" badge on a healthy host.
+
+    ``detail`` is human-readable provenance for `crr doctor` and the
+    dashboard tooltip ("claude not found", "auth status timed out").
+    """
+
+    logged_in: bool | None
+    detail: str
+
+
+@runtime_checkable
+class AuthStatusSource(Protocol):
+    """Claude Code's OWN answer to "am I signed in?".
+
+    The second auth source (spec 2026-09-17, keychain-blind reauth).
+    ``crr.core.auth.auth_state`` parses ``.credentials.json`` and is the
+    only source with expiry timestamps — but that file is absent on
+    macOS (login Keychain), under a relocated ``$CLAUDE_CONFIG_DIR``, and
+    behind an enterprise gateway, and on those hosts the file read can
+    only ever say "unknown". This port asks the CLI instead. Coarser (no
+    timestamps, so it can never justify an "expiring" warning) and
+    authoritative about the one question that matters once the login is
+    already gone.
+
+    It sits on the dashboard poll path, so implementations must be
+    bounded by a timeout and must never raise.
+    """
+
+    def available(self) -> bool:
+        """Return True if the ``claude`` binary can be located."""
+        ...
+
+    def status(self) -> AuthStatus:
+        """Never raises — failures degrade to ``AuthStatus(None, ...)``."""
+        ...
+
+
 @runtime_checkable
 class PowerSource(Protocol):
     """Is this machine on mains power?
