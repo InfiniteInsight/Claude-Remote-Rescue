@@ -1087,8 +1087,33 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_74():
-    """v74: Settings moved from the "Other views" toolbar to a bare gear
+def test_page_version_is_77():
+    """v77: final-review fixes for the header-declutter feature — a page-wide
+    [hidden] { display: none !important; } CSS reset (the v76 compact/expand
+    key-legend toggle set el.hidden but #key-compact/#key-full's own
+    display: flex silently overrode the browser's built-in [hidden] rule, so
+    it had no visual effect at all — measured in a real browser: #key
+    rendered 141.78px tall, permanently, both rows stacked, instead of the
+    intended 32.8px collapsed / 106.98px expanded); the Settings modal's
+    Devices section now scrolls when the QR box is open (previously it could
+    push the excluded-directories section and its Add button below the
+    visible area with no way to reach them); aria-expanded added to the
+    key-legend toggle buttons; #adddev-box's stray left indent inside the
+    Devices section removed.
+    (v76: The #key legend starts as one compact row — 5 colored state dots
+    (live/ghost/crashed/restored/attached, reusing the existing .k-live etc.
+    colour classes) plus 3 bare group-name pills (context/remote control/sid)
+    — and expands to the exact same, unchanged full legend on click (user
+    feedback 2026-09-19: the always-visible 4-row legend took ~90px before a
+    single session card renders). Always starts collapsed on load; no
+    persistence, by explicit choice over remembering the expanded state.
+    (v75: Add a device + Tailnet Members moved from the "Other views" toolbar
+    into a new "Devices" section inside Settings, grouped with Dashboard
+    Login — both are about reaching this dashboard, not about the sessions on
+    screen (user feedback 2026-09-19). No JS/behavior change: same ids, same
+    click handlers, which already looked their targets up by getElementById,
+    never by DOM position.
+    (v74: Settings moved from the "Other views" toolbar to a bare gear
     icon in the header (top right) — user feedback 2026-09-18 that its old
     spot wasn't intuitive. Excluded-directories rows now wrap instead of
     overflowing on narrow screens (missing flex-wrap/min-width: 0 let a
@@ -1161,7 +1186,7 @@ def test_page_version_is_74():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 74
+    assert web.PAGE_VERSION == 77
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1410,6 +1435,27 @@ def test_settings_button_lives_in_the_header_as_a_gear_icon():
     btn_tag = btn[:btn.index("</button>")]
     assert "⚙" in btn_tag
     assert ">Settings<" not in btn_tag
+
+
+def test_devices_section_lives_in_settings_not_tools():
+    # User feedback 2026-09-19: Add a device + Tailnet Members moved out of
+    # the "Other views" toolbar into a new "Devices" section inside Settings,
+    # grouped with Dashboard Login (both are about reaching this dashboard),
+    # ahead of the more advanced Auto-kick/Tunnel/Excluded-directories config.
+    page = web.render_page()
+    login_i = page.index('id="login-section"')
+    devices_i = page.index('id="devices-section"')
+    autokick_i = page.index('id="autokick-section"')
+    assert login_i < devices_i < autokick_i, (
+        "Devices section must sit between Dashboard Login and Auto-kick"
+    )
+    devices = page[devices_i:autokick_i]
+    for needle in ('id="adddev-btn"', 'id="adddev-box"', 'id="adddev-qr"',
+                   'id="machines-btn"', 'id="machines-panel"'):
+        assert needle in devices, f"{needle} must live in the Devices section"
+    tools = page[page.index('id="tools"'):page.index("</div>", page.index('id="tools"'))]
+    assert 'id="adddev-btn"' not in tools, "Add a device must no longer be in #tools"
+    assert 'id="machines-btn"' not in tools, "Tailnet Members must no longer be in #tools"
 
 
 def test_excluded_dirs_row_does_not_overflow_on_narrow_screens():
@@ -1861,6 +1907,65 @@ def test_page_key_help_works_on_touch_not_just_hover():
     page = web.render_page()
     assert '#key .kterm' in page
     assert 'showNotice(t.textContent + ": " + help' in page
+
+
+def test_key_legend_has_a_compact_row_that_expands():
+    # User feedback 2026-09-19: the 4-row legend was always fully visible,
+    # ~90px of permanent vertical space before a single session card
+    # renders. Now it starts as one compact row (5 colored state dots +
+    # 3 bare group-name pills for context/remote control/sid) and expands
+    # to the exact same full legend on click. Always starts collapsed —
+    # no persistence (explicit user choice over remembering the state).
+    page = web.render_page()
+    assert 'id="key-compact"' in page
+    assert 'id="key-full" hidden' in page
+    compact = page[page.index('id="key-compact"'):page.index('id="key-full"')]
+    # State dots reuse the existing colour classes, WITHOUT kterm — the
+    # compact row has exactly one behaviour (click anywhere to expand), not
+    # a second per-dot tap-to-explain competing with it.
+    for cls in ("k-live", "k-ghost", "k-crashed", "k-parked", "k-attached"):
+        assert f'class="{cls}"' in compact, f"{cls} dot missing from the compact row"
+        assert f'{cls} kterm' not in compact, f"{cls} must not carry kterm in the compact row"
+    # The other three groups collapse to bare labels, not their term lists.
+    for label in (">context<", ">remote control<", ">sid<"):
+        assert label in compact
+    assert "phone: not connected" not in compact  # a term, not a group label
+
+    full = page[page.index('id="key-full"'):]
+    assert 'id="key-less"' in full
+    # The exact same full legend content still lives here, unchanged.
+    assert "kgroup" in full and "klabel" in full and "kterm" in full
+    assert "A restored session you have already reopened" in full
+    assert "[hidden] { display: none !important; }" in page
+
+
+def test_key_legend_toggle_wiring():
+    page = web.render_page()
+    assert 'getElementById("key-compact").addEventListener("click"' in page
+    assert 'getElementById("key-less").addEventListener("click"' in page
+    # Toggling flips both elements' hidden state in opposite directions.
+    assert 'document.getElementById("key-full").hidden = false' in page
+    assert 'document.getElementById("key-compact").hidden = false' in page
+
+
+def test_hidden_attribute_actually_hides_elements():
+    # Regression for a real bug: #key-compact/#key-full each declare their
+    # own display: flex, which — without this reset — silently overrides
+    # the browser's built-in [hidden] { display: none }, so el.hidden=true
+    # had ZERO visual effect and the toggle did nothing (verified in a
+    # real browser: #key rendered 141.78px tall instead of 106.98px, both
+    # rows permanently stacked). A page-wide reset fixes every current and
+    # future .hidden toggle, not just this one.
+    page = web.render_page()
+    assert "[hidden] { display: none !important; }" in page
+
+
+def test_key_legend_toggle_has_aria_expanded():
+    page = web.render_page()
+    assert 'id="key-compact" type="button" aria-expanded="false"' in page
+    assert 'id="key-less" type="button" aria-expanded="true"' in page
+    assert 'setAttribute("aria-expanded", "true")' in page
+    assert 'setAttribute("aria-expanded", "false")' in page
 
 
 # --- cold start: in-flight feedback + manual retry (#53) ------------------
