@@ -1087,8 +1087,20 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_76():
-    """v76: The #key legend starts as one compact row — 5 colored state dots
+def test_page_version_is_77():
+    """v77: final-review fixes for the header-declutter feature — a page-wide
+    [hidden] { display: none !important; } CSS reset (the v76 compact/expand
+    key-legend toggle set el.hidden but #key-compact/#key-full's own
+    display: flex silently overrode the browser's built-in [hidden] rule, so
+    it had no visual effect at all — measured in a real browser: #key
+    rendered 141.78px tall, permanently, both rows stacked, instead of the
+    intended 32.8px collapsed / 106.98px expanded); the Settings modal's
+    Devices section now scrolls when the QR box is open (previously it could
+    push the excluded-directories section and its Add button below the
+    visible area with no way to reach them); aria-expanded added to the
+    key-legend toggle buttons; #adddev-box's stray left indent inside the
+    Devices section removed.
+    (v76: The #key legend starts as one compact row — 5 colored state dots
     (live/ghost/crashed/restored/attached, reusing the existing .k-live etc.
     colour classes) plus 3 bare group-name pills (context/remote control/sid)
     — and expands to the exact same, unchanged full legend on click (user
@@ -1174,7 +1186,7 @@ def test_page_version_is_76():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 76
+    assert web.PAGE_VERSION == 77
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1924,6 +1936,7 @@ def test_key_legend_has_a_compact_row_that_expands():
     # The exact same full legend content still lives here, unchanged.
     assert "kgroup" in full and "klabel" in full and "kterm" in full
     assert "A restored session you have already reopened" in full
+    assert "[hidden] { display: none !important; }" in page
 
 
 def test_key_legend_toggle_wiring():
@@ -1933,6 +1946,26 @@ def test_key_legend_toggle_wiring():
     # Toggling flips both elements' hidden state in opposite directions.
     assert 'document.getElementById("key-full").hidden = false' in page
     assert 'document.getElementById("key-compact").hidden = false' in page
+
+
+def test_hidden_attribute_actually_hides_elements():
+    # Regression for a real bug: #key-compact/#key-full each declare their
+    # own display: flex, which — without this reset — silently overrides
+    # the browser's built-in [hidden] { display: none }, so el.hidden=true
+    # had ZERO visual effect and the toggle did nothing (verified in a
+    # real browser: #key rendered 141.78px tall instead of 106.98px, both
+    # rows permanently stacked). A page-wide reset fixes every current and
+    # future .hidden toggle, not just this one.
+    page = web.render_page()
+    assert "[hidden] { display: none !important; }" in page
+
+
+def test_key_legend_toggle_has_aria_expanded():
+    page = web.render_page()
+    assert 'id="key-compact" type="button" aria-expanded="false"' in page
+    assert 'id="key-less" type="button" aria-expanded="true"' in page
+    assert 'setAttribute("aria-expanded", "true")' in page
+    assert 'setAttribute("aria-expanded", "false")' in page
 
 
 # --- cold start: in-flight feedback + manual retry (#53) ------------------
