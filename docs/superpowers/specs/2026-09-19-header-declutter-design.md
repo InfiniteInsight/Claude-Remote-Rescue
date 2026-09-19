@@ -69,7 +69,12 @@ compact chips / hybrid) — the user picked the **hybrid**.
     5 dots render every time, regardless of which states any card actually
     has right now (matching how the full legend behaves today).
   - The **context**, **remote control**, and **sid** groups collapse to
-    bare group-name pills (just the label, no term list) in the same row.
+    bare group-name labels (just the label text, reusing the existing
+    `.klabel` style — no background/border shape, no term list) in the
+    same row. (Corrected 2026-09-19: the mocked-up options called these
+    "pills," but the approved mockup's `.chip` class never actually
+    rendered a pill shape either — this wording just matches what was
+    shown and approved.)
   - No `data-help`/tap-to-toast on anything in the compact row — seeing an
     individual term's explanation is only available once expanded (see
     below), so the compact row has exactly one behavior, not two competing
@@ -97,8 +102,8 @@ assertions against the served page source (`web.load_page()`/
 - `#adddev-box` and `#machines-panel` also moved into `#devices-section` (not
   left behind at their old top-level location) — assert their ids appear
   within that section's slice too.
-- The compact-row markup exists (5 state dots/labels + 3 group pills) and the
-  full legend's existing content/ids are unchanged.
+- The compact-row markup exists (5 state dots/labels + 3 bare group-name
+  labels) and the full legend's existing content/ids are unchanged.
 - A click handler exists that toggles between compact and expanded (structural
   assertion on the toggle function/class, matching how existing toggle logic
   — e.g. the worktree-collapse expander (`#34`) — is tested elsewhere in this
