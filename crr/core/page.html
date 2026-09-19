@@ -24,6 +24,17 @@
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
   header .meta { color: #8a93a2; font-size: 12px; }
+  /* Settings gear (user feedback 2026-09-18): a persistent, icon-only
+     control pinned to the far right of the header, not a text button lost
+     among the "Other views" toolbar. margin-left: auto pushes it there
+     regardless of how many meta spans render before it. */
+  .icon-btn {
+    margin-left: auto; align-self: center; flex-shrink: 0;
+    font: inherit; font-size: 18px; line-height: 1; padding: 4px 8px;
+    border-radius: 6px; border: 1px solid #2f3745; background: #1c222c;
+    color: #8a93a2; cursor: pointer;
+  }
+  .icon-btn:hover { background: #232b37; color: #cdd3dd; }
   #key { display: flex; gap: 18px; flex-wrap: wrap; padding: 8px 16px; font-size: 12px; color: #8a93a2; }
   .kgroup { display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; }
   .klabel { color: #59616e; text-transform: uppercase; letter-spacing: .06em; font-size: 10px; }
@@ -323,10 +334,16 @@
   .adm-row {
     display: flex; align-items: center; gap: 10px; padding: 6px 0;
     border-bottom: 1px solid #1e232c; font-family: ui-monospace, monospace; font-size: 12px;
+    /* (user feedback 2026-09-18, mobile) flex items default to
+       min-width: auto — their content's natural width — not 0. .adm-src
+       can be a whole config.toml path with no spaces to wrap at, so
+       without flex-wrap + min-width: 0 it forced the row wider than a
+       phone screen instead of shrinking or dropping to its own line. */
+    flex-wrap: wrap;
   }
   .adm-row:last-child { border-bottom: none; }
-  .adm-name { flex: 1; color: #cdd3dd; word-break: break-all; }
-  .adm-src { color: #6b7280; font-size: 11px; }
+  .adm-name { flex: 1; min-width: 0; color: #cdd3dd; word-break: break-all; }
+  .adm-src { color: #6b7280; font-size: 11px; word-break: break-all; }
   #disc-modal, #admin-modal {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
     display: none; align-items: center; justify-content: center; padding: 16px;
@@ -375,6 +392,9 @@
        the question the whole reachability feature exists to serve. -->
   <span class="meta" id="reachableSummary"></span>
   <span id="authBadge"></span>
+  <!-- (user feedback 2026-09-18) A persistent control, not one more item
+       in the "Other views" toolbar — a bare gear glyph, top right. -->
+  <button id="admin-btn" type="button" class="icon-btn" aria-label="Settings" title="Settings: directories discovery should skip, and the dropped-Remote-Control auto-kick switch.">⚙</button>
 </header>
 <div id="key">
   <span class="kgroup"><span class="klabel">state</span><span class="k-live kterm" data-help="The shell and its claude are running, with a terminal attached.">live</span><span class="k-ghost kterm" data-help="The shell is alive but has no terminal — its window was closed. Restore re-homes the conversation.">ghost</span><span class="k-crashed kterm" data-help="The process is gone, or the host rebooted. The conversation is preserved and revivable with Reopen.">crashed</span><span class="k-parked kterm" data-help="Running inside a detached tmux session — crr restored it after a reboot. The conversation is alive; Reopen brings it back into a terminal tab, or attach with: tmux attach -t &lt;name&gt;.">restored</span><span class="k-attached kterm" data-help="A restored session you have already reopened — a terminal (tmux client) is attached to it. Lets you tell, in a long restore list, which conversations are already back from those still parked.">attached</span></span>
@@ -419,7 +439,6 @@
   <span class="tools-label">Other views</span>
   <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management. Opens a searchable list.">Recently untracked</button>
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable. Opens a searchable list.">Discoverable</button>
-  <button id="admin-btn" type="button" title="Settings: directories discovery should skip, and the dropped-Remote-Control auto-kick switch.">Settings</button>
   <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
   <button id="adddev-btn" type="button" title="Scan a QR code to open this dashboard on your phone, over your tailnet.">📱 Add a device</button>
   <button id="machines-btn" type="button" title="All crr dashboards on your tailnet.">Tailnet Members</button>

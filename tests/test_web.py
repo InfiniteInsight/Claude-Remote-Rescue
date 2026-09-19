@@ -1087,8 +1087,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_73():
-    """v73: explanation toasts (badge long-press, #key legend tap) are
+def test_page_version_is_74():
+    """v74: Settings moved from the "Other views" toolbar to a bare gear
+    icon in the header (top right) — user feedback 2026-09-18 that its old
+    spot wasn't intuitive. Excluded-directories rows now wrap instead of
+    overflowing on narrow screens (missing flex-wrap/min-width: 0 let a
+    long config.toml path force the row wider than a phone screen).
+    (v73: explanation toasts (badge long-press, #key legend tap) are
     sticky, not auto-dismissed after notice_seconds (3s) — user feedback
     2026-09-18: not enough time to read a full help sentence. Both surfaces
     share the same showNotice() call and the same text, so both got the
@@ -1156,7 +1161,7 @@ def test_page_version_is_73():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 73
+    assert web.PAGE_VERSION == 74
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1387,6 +1392,41 @@ def test_page_has_a_settings_modal_for_exclusions():
     # config.toml on disk these entries are BUILT-IN defaults
     assert "data.config_path" in page
     assert "built-in default" in page
+
+
+def test_settings_button_lives_in_the_header_as_a_gear_icon():
+    # User feedback 2026-09-18: Settings buried in the "Other views" row
+    # wasn't an intuitive place for it — moved to the header (top right,
+    # next to the auth badge) as a bare gear glyph, not a text button, so
+    # it reads as a persistent, always-visible control rather than one more
+    # item in the secondary-views toolbar.
+    page = web.render_page()
+    header = page[page.index("<header>"):page.index("</header>")]
+    tools = page[page.index('id="tools"'):page.index("</div>", page.index('id="tools"'))]
+    assert 'id="admin-btn"' in header, "Settings button must live in <header>"
+    assert 'id="admin-btn"' not in tools, "Settings button must no longer be in the #tools row"
+    # Icon-only: the visible label is the gear glyph, not the word "Settings".
+    btn = header[header.index('id="admin-btn"'):]
+    btn_tag = btn[:btn.index("</button>")]
+    assert "⚙" in btn_tag
+    assert ">Settings<" not in btn_tag
+
+
+def test_excluded_dirs_row_does_not_overflow_on_narrow_screens():
+    # User feedback 2026-09-18: the excluded-directories list "renders
+    # weirdly" on mobile. Root cause: .adm-row is a flex row with no wrap
+    # and .adm-src (a provenance string that can be a whole config.toml
+    # path, e.g. "built-in default · override in /home/x/.config/crr/
+    # config.toml") had no min-width/word-break — flex items default to
+    # min-width:auto (their content's natural width), so a long, unbroken
+    # path forces the row wider than a phone screen instead of shrinking
+    # or wrapping, squeezing .adm-name to near nothing or overflowing.
+    page = web.render_page()
+    css = page[page.index(".adm-row {"):page.index(".adm-src {") + len(".adm-src {")]
+    assert "flex-wrap: wrap" in css
+    assert "min-width: 0" in css
+    src_css = page[page.index(".adm-src {"):page.index("}", page.index(".adm-src {"))]
+    assert "word-break: break-all" in src_css or "overflow-wrap" in src_css
 
 
 def test_page_secondary_views_share_one_toolbar_row():
