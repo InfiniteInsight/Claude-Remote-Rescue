@@ -702,7 +702,15 @@ def test_doctor_caveats_differently_when_the_repo_is_known_but_head_probe_fails(
     assert "aaaaaaa" in out
     assert "cannot compare" in out
     assert "[WARN]" not in out
-    assert "unknown" not in out.lower(), "checkout is known; only the HEAD probe failed"
+    # Scoped to the deploy line's own wording, not a blanket "unknown" ban
+    # over the whole doctor output — doctor also runs a real, unmocked
+    # boot-survival probe whose own honest "unknown" verdict (unreadable
+    # boot timestamps, e.g. on some WSL2 hosts) is unrelated to this
+    # deploy-caveat behavior and must not fail this test.
+    assert "checkout found but its HEAD could not be read, cannot compare" in out
+    assert "source checkout unknown" not in out.lower(), (
+        "checkout is known; only the HEAD probe failed"
+    )
 
 
 def test_doctor_warns_with_an_unknown_count_when_ancestry_is_confirmed_but_the_count_probe_fails(

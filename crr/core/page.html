@@ -633,7 +633,7 @@ function lpBegin(target, x, y) {
   lpStart = { x: x, y: y };
   lpTimer = setTimeout(function () {
     var help = lpBadge.getAttribute("data-help") || "";
-    showNotice(lpBadge.textContent + ": " + help, "warn");
+    showNotice(lpBadge.textContent + ": " + help, "warn", { sticky: true });
     lpBadge = null;
   }, LONGPRESS_MS);
 }
@@ -2499,7 +2499,7 @@ document.getElementById("recall-q").addEventListener("input", function () {
 Array.prototype.forEach.call(document.querySelectorAll("#key .kterm"), function (t) {
   var help = t.getAttribute("data-help") || "";
   t.title = help;
-  t.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn"); });
+  t.addEventListener("click", function () { showNotice(t.textContent + ": " + help, "warn", { sticky: true }); });
 });
 
 // Wiring for the long-press detector above: delegated on #sessions so it
