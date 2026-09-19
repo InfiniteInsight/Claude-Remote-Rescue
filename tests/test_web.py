@@ -1087,8 +1087,14 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_74():
-    """v74: Settings moved from the "Other views" toolbar to a bare gear
+def test_page_version_is_75():
+    """v75: Add a device + Tailnet Members moved from the "Other views" toolbar
+    into a new "Devices" section inside Settings, grouped with Dashboard
+    Login — both are about reaching this dashboard, not about the sessions on
+    screen (user feedback 2026-09-19). No JS/behavior change: same ids, same
+    click handlers, which already looked their targets up by getElementById,
+    never by DOM position.
+    (v74: Settings moved from the "Other views" toolbar to a bare gear
     icon in the header (top right) — user feedback 2026-09-18 that its old
     spot wasn't intuitive. Excluded-directories rows now wrap instead of
     overflowing on narrow screens (missing flex-wrap/min-width: 0 let a
@@ -1161,7 +1167,7 @@ def test_page_version_is_74():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 74
+    assert web.PAGE_VERSION == 75
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1410,6 +1416,27 @@ def test_settings_button_lives_in_the_header_as_a_gear_icon():
     btn_tag = btn[:btn.index("</button>")]
     assert "⚙" in btn_tag
     assert ">Settings<" not in btn_tag
+
+
+def test_devices_section_lives_in_settings_not_tools():
+    # User feedback 2026-09-19: Add a device + Tailnet Members moved out of
+    # the "Other views" toolbar into a new "Devices" section inside Settings,
+    # grouped with Dashboard Login (both are about reaching this dashboard),
+    # ahead of the more advanced Auto-kick/Tunnel/Excluded-directories config.
+    page = web.render_page()
+    login_i = page.index('id="login-section"')
+    devices_i = page.index('id="devices-section"')
+    autokick_i = page.index('id="autokick-section"')
+    assert login_i < devices_i < autokick_i, (
+        "Devices section must sit between Dashboard Login and Auto-kick"
+    )
+    devices = page[devices_i:autokick_i]
+    for needle in ('id="adddev-btn"', 'id="adddev-box"', 'id="adddev-qr"',
+                   'id="machines-btn"', 'id="machines-panel"'):
+        assert needle in devices, f"{needle} must live in the Devices section"
+    tools = page[page.index('id="tools"'):page.index("</div>", page.index('id="tools"'))]
+    assert 'id="adddev-btn"' not in tools, "Add a device must no longer be in #tools"
+    assert 'id="machines-btn"' not in tools, "Tailnet Members must no longer be in #tools"
 
 
 def test_excluded_dirs_row_does_not_overflow_on_narrow_screens():
