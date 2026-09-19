@@ -1087,8 +1087,15 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_75():
-    """v75: Add a device + Tailnet Members moved from the "Other views" toolbar
+def test_page_version_is_76():
+    """v76: The #key legend starts as one compact row — 5 colored state dots
+    (live/ghost/crashed/restored/attached, reusing the existing .k-live etc.
+    colour classes) plus 3 bare group-name pills (context/remote control/sid)
+    — and expands to the exact same, unchanged full legend on click (user
+    feedback 2026-09-19: the always-visible 4-row legend took ~90px before a
+    single session card renders). Always starts collapsed on load; no
+    persistence, by explicit choice over remembering the expanded state.
+    (v75: Add a device + Tailnet Members moved from the "Other views" toolbar
     into a new "Devices" section inside Settings, grouped with Dashboard
     Login — both are about reaching this dashboard, not about the sessions on
     screen (user feedback 2026-09-19). No JS/behavior change: same ids, same
@@ -1167,7 +1174,7 @@ def test_page_version_is_75():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 75
+    assert web.PAGE_VERSION == 76
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1888,6 +1895,44 @@ def test_page_key_help_works_on_touch_not_just_hover():
     page = web.render_page()
     assert '#key .kterm' in page
     assert 'showNotice(t.textContent + ": " + help' in page
+
+
+def test_key_legend_has_a_compact_row_that_expands():
+    # User feedback 2026-09-19: the 4-row legend was always fully visible,
+    # ~90px of permanent vertical space before a single session card
+    # renders. Now it starts as one compact row (5 colored state dots +
+    # 3 bare group-name pills for context/remote control/sid) and expands
+    # to the exact same full legend on click. Always starts collapsed —
+    # no persistence (explicit user choice over remembering the state).
+    page = web.render_page()
+    assert 'id="key-compact"' in page
+    assert 'id="key-full" hidden' in page
+    compact = page[page.index('id="key-compact"'):page.index('id="key-full"')]
+    # State dots reuse the existing colour classes, WITHOUT kterm — the
+    # compact row has exactly one behaviour (click anywhere to expand), not
+    # a second per-dot tap-to-explain competing with it.
+    for cls in ("k-live", "k-ghost", "k-crashed", "k-parked", "k-attached"):
+        assert f'class="{cls}"' in compact, f"{cls} dot missing from the compact row"
+        assert f'{cls} kterm' not in compact, f"{cls} must not carry kterm in the compact row"
+    # The other three groups collapse to bare labels, not their term lists.
+    for label in (">context<", ">remote control<", ">sid<"):
+        assert label in compact
+    assert "phone: not connected" not in compact  # a term, not a group label
+
+    full = page[page.index('id="key-full"'):]
+    assert 'id="key-less"' in full
+    # The exact same full legend content still lives here, unchanged.
+    assert "kgroup" in full and "klabel" in full and "kterm" in full
+    assert "A restored session you have already reopened" in full
+
+
+def test_key_legend_toggle_wiring():
+    page = web.render_page()
+    assert 'getElementById("key-compact").addEventListener("click"' in page
+    assert 'getElementById("key-less").addEventListener("click"' in page
+    # Toggling flips both elements' hidden state in opposite directions.
+    assert 'document.getElementById("key-full").hidden = false' in page
+    assert 'document.getElementById("key-compact").hidden = false' in page
 
 
 # --- cold start: in-flight feedback + manual retry (#53) ------------------
