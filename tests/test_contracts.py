@@ -344,9 +344,28 @@ def test_v4_entry_requires_revived_boot():
         contracts.validate_journal_entry(e)
 
 
-def test_v4_revived_boot_must_be_a_string_or_null():
+def _journal_entry_v4():
     e = _journal_entry_v3()
-    e["v"] = 4
+    e.update(v=4, revived_boot=None, revived_at=None, host_deaths=0)
+    return e
+
+
+def test_v4_host_deaths_must_be_an_int():
+    e = _journal_entry_v4()
+    e["host_deaths"] = None
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_v4_revived_at_must_be_a_string_or_null():
+    e = _journal_entry_v4()
+    e["revived_at"] = 5
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_v4_revived_boot_must_be_a_string_or_null():
+    e = _journal_entry_v4()
     e["revived_boot"] = 12
     with pytest.raises(contracts.ContractError):
         contracts.validate_journal_entry(e)
@@ -360,6 +379,8 @@ def test_upgrade_entry_brings_v3_to_v4_with_unknown_revived_boot():
     contracts.validate_journal_entry(up)
     assert up["v"] == 4
     assert up["revived_boot"] is None
+    assert up["revived_at"] is None
+    assert up["host_deaths"] == 0
 
 
 def test_upgrade_entry_brings_v1_to_current_schema():

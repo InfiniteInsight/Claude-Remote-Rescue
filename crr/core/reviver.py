@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from datetime import datetime
 from typing import Any, Mapping, NamedTuple, Sequence
 
 from crr.core import tab_health as tab_health_module
@@ -348,9 +349,21 @@ def _alive_counts_as_healthy(entry: Mapping[str, Any], tx: "TranscriptProbe | No
     return tx.mtime is not None and tx.mtime > stamp
 
 
+def _stable(entry: Mapping[str, Any], now: str, stable_seconds: float | None) -> bool:
+    """Has this revival stayed up ``stable_seconds``? Unknown -> False."""
+    if stable_seconds is None or not entry.get("revived_at"):
+        return False
+    try:
+        up = datetime.fromisoformat(now) - datetime.fromisoformat(entry["revived_at"])
+    except (TypeError, ValueError):
+        return False
+    return up.total_seconds() >= stable_seconds
+
+
 def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str,
             tx: "TranscriptProbe | None" = None, attached: set[str] | None = None,
-            current_boot: str | None = None):
+            current_boot: str | None = None, max_host_deaths: int | None = None,
+            host_death_stable_seconds: float | None = None):
     """Return (action, updated_entry, name) for one candidate.
 
     action is one of: 'reset-nochange', 'reset', 'hold', 'revive', 'give_up'.
@@ -359,6 +372,11 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
     when the boot stamped at the last revival (``revived_boot``) is no
     longer the current one, that revival's outcome is unknown — revive
     again with the strikes unchanged, and don't give up on them (#138).
+    Those host deaths count separately against ``max_host_deaths`` (None =
+    uncapped), and clear once a revival is seen alive
+    ``host_death_stable_seconds`` after it started — so ordinary reboots
+    never exhaust a session, but a revival that keeps taking its host down
+    with it is given up.
     """
     name = resolved_session_name(entry)  # legacy crr-<sid8> keeps its name (#51)
     if name in live:
@@ -366,11 +384,16 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
             # Alive but frozen: keep the strikes. Never destructive — the
             # entry is untouched, and give-up still only fires when dead.
             return "hold", entry, name
-        if entry["revive_strikes"] == 0 and entry["tmux_session"] == name:
+        clear_host = (entry.get("host_deaths", 0) > 0
+                      and _stable(entry, now, host_death_stable_seconds))
+        if (entry["revive_strikes"] == 0 and entry["tmux_session"] == name
+                and not clear_host):
             return "reset-nochange", entry, name
         updated = dict(entry)
         updated["tmux_session"] = name
         updated["revive_strikes"] = 0
+        if clear_host:
+            updated["host_deaths"] = 0
         updated["updated"] = now
         return "reset", updated, name
     revived_boot = entry.get("revived_boot")
@@ -379,10 +402,15 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
     if not host_died and entry["revive_strikes"] >= max_strikes:
         return "give_up", entry, name
     updated = upgrade_entry(entry)
-    updated["tmux_session"] = name
-    if not host_died:
+    if host_died:
+        if max_host_deaths is not None and updated["host_deaths"] >= max_host_deaths:
+            return "give_up", entry, name
+        updated["host_deaths"] += 1
+    else:
         updated["revive_strikes"] = entry["revive_strikes"] + 1
+    updated["tmux_session"] = name
     updated["updated"] = now
+    updated["revived_at"] = now
     if current_boot is not None:
         updated["revived_boot"] = current_boot
     if tx is not None:
@@ -410,6 +438,8 @@ def revive_crashed(
     tab_health=None,
     transcripts: TranscriptSource | None = None,
     attached: set[str] | None = None,
+    max_host_deaths: int | None = None,
+    host_death_stable_seconds: float | None = None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -482,7 +512,9 @@ def revive_crashed(
         tx = _tx_probe(entry)
         action, updated, name = _decide(entry, live, max_strikes, now,
                                         tx=tx, attached=attached,
-                                        current_boot=current_boot)
+                                        current_boot=current_boot,
+                                        max_host_deaths=max_host_deaths,
+                                        host_death_stable_seconds=host_death_stable_seconds)
         pid = entry["pid"]
         if action == "hold":
             pass  # alive but frozen: strikes kept, nothing written
@@ -560,7 +592,9 @@ def revive_crashed(
         tx = _tx_probe(entry)
         action, updated, name = _decide(entry, live, max_strikes, now,
                                         tx=tx, attached=attached,
-                                        current_boot=current_boot)
+                                        current_boot=current_boot,
+                                        max_host_deaths=max_host_deaths,
+                                        host_death_stable_seconds=host_death_stable_seconds)
         pid = entry["pid"]
         sid = (entry.get("claude") or {}).get("session_id")
         if action == "hold":

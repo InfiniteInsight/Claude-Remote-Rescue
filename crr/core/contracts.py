@@ -31,6 +31,9 @@ from typing import Any, Iterable, Mapping
 #    `<kernel boot_id>@<PID 1 start ticks>` (a distro restart keeps the
 #    kernel id); compare boot ids only via classifier.same_boot, which
 #    treats a legacy bare kernel id as matching its compound form (#138).
+#    Also adds revived_at + host_deaths: uncounted host deaths get their own
+#    cap, cleared once a revival stays up (a revival that itself kills the
+#    VM must not be revived forever).
 JOURNAL_SCHEMA_VERSION = 4
 # v3 adds `tmux_session` (nullable per-session field; `detmux` op — 57195a5).
 #    Restored 2026-08-08 (#38): this line was DELETED by a later edit rather
@@ -261,7 +264,7 @@ _JOURNAL_KEYS_V12 = (
     "updated",
 )
 _JOURNAL_KEYS_V3 = _JOURNAL_KEYS_V12 + ("revived_tx_mtime",)
-JOURNAL_KEYS = _JOURNAL_KEYS_V3 + ("revived_boot",)
+JOURNAL_KEYS = _JOURNAL_KEYS_V3 + ("revived_boot", "revived_at", "host_deaths")
 _JOURNAL_CLAUDE_KEYS_V1 = ("session_id", "sid_source", "started")
 JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started", "skip_permissions")
 
@@ -437,8 +440,11 @@ def validate_journal_entry(entry: Any) -> None:
     else:
         keys = _JOURNAL_KEYS_V12
     _require_exact_keys(entry, keys, "journal entry")
-    if entry["v"] >= 4 and entry["revived_boot"] is not None:
-        _require_type(entry["revived_boot"], str, "journal 'revived_boot'")
+    if entry["v"] >= 4:
+        for key in ("revived_boot", "revived_at"):
+            if entry[key] is not None:
+                _require_type(entry[key], str, f"journal '{key}'")
+        _require_type(entry["host_deaths"], int, "journal 'host_deaths'")
 
     _require_type(entry["pid"], int, "journal 'pid'")
     _require_type(entry["boot_id"], str, "journal 'boot_id'")

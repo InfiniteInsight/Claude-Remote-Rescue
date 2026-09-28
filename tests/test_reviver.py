@@ -1440,3 +1440,90 @@ def test_archive_seeded_distro_restart_loop_never_exhausts_the_strikes(tmp_path)
         assert outcome.gave_up == [], f"gave up in distro life {life}"
     assert store.read(99)["revived_boot"] == "kernel@9"
     assert store.read(99)["revive_strikes"] <= 1
+
+
+# --- host-death cap (#138 follow-up) --------------------------------------
+#
+# Uncounted host deaths would revive forever a session whose revival itself
+# takes the VM down (e.g. OOM). They get their own counter and cap. An
+# ordinary reboot is also a host death, so the counter clears once a
+# revival has stayed up for `host_death_stable_seconds` — only a session
+# that keeps dying WITH its host shortly after revival reaches the cap.
+
+from datetime import datetime, timedelta, timezone
+
+
+def _at(minutes):
+    base = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    return (base + timedelta(minutes=minutes)).isoformat()
+
+
+class _Life:
+    def __init__(self, life):
+        self.life = life
+
+    def current(self):
+        return f"kernel@{self.life}"
+
+
+def _pass(store, archive, life, now, live=(), transcripts=None):
+    return revive_crashed(
+        store.scan().entries, _Life(life), FakeProbe(), FakeTmux(live=set(live)),
+        store, archive, max_strikes=3, now=now, remote_control_enabled=True,
+        transcripts=transcripts, max_host_deaths=4, host_death_stable_seconds=600,
+    )
+
+
+def test_host_death_counts_toward_its_own_cap_not_strikes(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    _pass(store, archive, 0, _at(0))
+    _pass(store, archive, 1, _at(2))
+    e = store.read(42)
+    assert e["host_deaths"] == 1
+    assert e["revive_strikes"] == 1  # only the first (unknown-boot) revival
+
+
+def test_a_revival_that_keeps_killing_its_host_is_given_up(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    outcomes = [_pass(store, archive, life, _at(2 * life)) for life in range(7)]
+    gave_up_at = [i for i, o in enumerate(outcomes) if o.gave_up]
+    assert gave_up_at == [5]  # revival in life 0, then 4 host deaths, then cap
+    assert archive.read(_claude()["session_id"])["reason"] == "gave-up"
+
+
+def test_a_revival_that_stayed_up_clears_its_host_deaths(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, claude=_claude())
+    _pass(store, archive, 0, _at(0))
+    _pass(store, archive, 1, _at(2))            # host death 1
+    assert store.read(42)["host_deaths"] == 1
+    _pass(store, archive, 1, _at(5), live={name})    # alive, but only 3 min up
+    assert store.read(42)["host_deaths"] == 1
+    _pass(store, archive, 1, _at(13), live={name})   # alive 11 min: stable
+    assert store.read(42)["host_deaths"] == 0
+
+
+def test_ordinary_reboots_never_exhaust_a_stable_session(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, claude=_claude())
+    t = 0
+    for life in range(12):
+        o = _pass(store, archive, life, _at(t))           # reboot -> revive
+        assert o.gave_up == [], f"gave up after reboot {life}"
+        _pass(store, archive, life, _at(t + 60), live={name})  # up an hour
+        t += 120
+
+
+def test_uncapped_when_the_caller_passes_no_cap(tmp_path):
+    # Callers that predate the cap keep the plain host-death rule.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    for life in range(20):
+        o = revive_crashed(
+            store.scan().entries, _Life(life), FakeProbe(), FakeTmux(live=set()),
+            store, archive, max_strikes=3, now=_at(life), remote_control_enabled=True)
+        assert o.gave_up == []

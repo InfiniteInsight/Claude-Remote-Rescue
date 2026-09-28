@@ -1201,6 +1201,8 @@ def _live_entry(pid, boot_id):
         "updated": "2026-07-23T00:00:00Z",
         "revived_tx_mtime": None,
         "revived_boot": None,
+        "revived_at": None,
+        "host_deaths": 0,
     }
 
 

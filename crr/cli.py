@@ -2773,6 +2773,8 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             outcome = reviver.revive_crashed(
                 scan.entries, boot, probe, tmux_spawner, store, archive,
                 max_strikes=config.get("zombie_strikes"),
+                max_host_deaths=config.get("host_death_max_revivals"),
+                host_death_stable_seconds=config.get("host_death_stable_seconds"),
                 now=_now(),
                 remote_control_enabled=config.get("remote_control"),
                 # Without this the sweep revives a conversation the user closed:
@@ -4243,6 +4245,8 @@ def _rescue_check(_args: argparse.Namespace) -> int:
             reviver.revive_crashed(
                 scan.entries, boot, probe, tmux_spawner, store, archive,
                 max_strikes=config.get("zombie_strikes"),
+                max_host_deaths=config.get("host_death_max_revivals"),
+                host_death_stable_seconds=config.get("host_death_stable_seconds"),
                 now=_now(),
                 remote_control_enabled=config.get("remote_control"),
                 flags=FlagStore(sd),

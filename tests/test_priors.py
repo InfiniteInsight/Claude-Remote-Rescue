@@ -153,3 +153,22 @@ def test_every_page_placeholder_is_substituted_at_serve_time():
     rendered = web.render_page(1)
     leftovers = re.findall(r"@[A-Z_]+@", rendered)
     assert leftovers == [], leftovers
+
+
+def test_every_cli_revive_pass_applies_the_host_death_cap():
+    # #138: the core leaves host deaths uncapped when no cap is passed, so a
+    # cli revive call that forgets these two kwargs silently re-opens the
+    # revive-forever hole the cap exists to close.
+    import inspect
+    from crr import cli
+    src = inspect.getsource(cli)
+    calls = src.count("reviver.revive_crashed(")
+    assert calls >= 2
+    assert src.count('max_host_deaths=config.get("host_death_max_revivals")') == calls
+    assert src.count(
+        'host_death_stable_seconds=config.get("host_death_stable_seconds")') == calls
+
+
+def test_host_death_cap_defaults():
+    assert DEFAULTS["host_death_max_revivals"] == 10
+    assert DEFAULTS["host_death_stable_seconds"] == 600
