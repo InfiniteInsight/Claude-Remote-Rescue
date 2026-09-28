@@ -1527,3 +1527,43 @@ def test_uncapped_when_the_caller_passes_no_cap(tmp_path):
             store.scan().entries, _Life(life), FakeProbe(), FakeTmux(live=set()),
             store, archive, max_strikes=3, now=_at(life), remote_control_enabled=True)
         assert o.gave_up == []
+
+
+def test_ordinary_reboots_never_exhaust_a_rekeyed_stable_session(tmp_path):
+    # The realistic shape: revival re-keys the entry onto the live pane pid
+    # (current boot, a tty) so it classifies LIVE and the reviver skips it
+    # while it runs. Stability must still be recognised at the NEXT host
+    # death, from the transcript having advanced long after the revival.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = _claude()["session_id"]
+    _seed(store, 42, claude=_claude())
+    t = 0
+    for life in range(12):
+        tx = FakeTranscripts({sid: TranscriptProbe(
+            True, datetime.fromisoformat(_at(t - 60)).timestamp())})
+        o = revive_crashed(
+            store.scan().entries, _Life(life), FakeProbe(),
+            _PidTmux(pane_pid=5000 + life), store, archive, max_strikes=3,
+            now=_at(t), remote_control_enabled=True, transcripts=tx,
+            max_host_deaths=4, host_death_stable_seconds=600,
+        )
+        assert o.gave_up == [], f"gave up after reboot {life}"
+        t += 120  # up two hours; the conversation kept being written
+
+
+def test_a_rekeyed_revival_that_keeps_killing_its_host_is_still_given_up(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = _claude()["session_id"]
+    _seed(store, 42, claude=_claude())
+    frozen = FakeTranscripts({sid: TranscriptProbe(True, 1_000.0)})
+    gave_up = []
+    for life in range(7):
+        o = revive_crashed(
+            store.scan().entries, _Life(life), FakeProbe(),
+            _PidTmux(pane_pid=5000 + life), store, archive, max_strikes=3,
+            now=_at(2 * life), remote_control_enabled=True, transcripts=frozen,
+            max_host_deaths=4, host_death_stable_seconds=600,
+        )
+        if o.gave_up:
+            gave_up.append(life)
+    assert gave_up == [5]

@@ -6195,6 +6195,23 @@ def _holder_running() -> bool | None:
     return (fields[-1] == "Running") if len(fields) >= 3 else None
 
 
+def _holder_end_marked() -> int:
+    """End the marked holder process(es) inside WSL; how many were signalled.
+
+    `schtasks /end` on the launcher task only kills powershell.exe — the
+    wsl.exe client and this `sleep` survive and keep WSL pinned (measured,
+    #138). Ending the sleep lets wsl.exe exit, releasing the distro.
+    """
+    ended = 0
+    for pid in boot_windows.holder_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+            ended += 1
+        except OSError:
+            pass
+    return ended
+
+
 def _read_hold(path: Path) -> dict | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -6228,8 +6245,11 @@ def _cmd_holder(args: argparse.Namespace) -> int:
         boot = boot_windows.read_facts().machine_boot
         running = _holder_running()
         task = {True: "running", False: "not running", None: "unknown"}[running]
+        pids = boot_windows.holder_pids()
         print(f"holder: {holder_hold.describe(rec, now=now, machine_boot=boot)}")
         print(f"task {boot_windows.WSL_BOOT_TASK}: {task}")
+        print("holder process: " + (f"running (pid {', '.join(map(str, pids))})"
+                                    if pids else "none marked"))
         return 0
 
     if action == "resume":
@@ -6257,10 +6277,22 @@ def _cmd_holder(args: argparse.Namespace) -> int:
     else:
         rec = holder_hold.stop(now=now)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(path, rec)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, rec)
+    except OSError as exc:
+        # Never end the holder without a hold in place: it would just
+        # re-arm within a minute and the "stop" would silently not stick.
+        print(f"crr holder: could not write the hold flag {path}: {exc} "
+              "(run `crr reachable-at-boot --install` to create its directory)",
+              file=sys.stderr)
+        return 1
     rc = 0
-    if not _holder_exec(boot_windows.end_holder_command()):
+    # Marked holders (launcher task) die from inside WSL; /end covers a
+    # holder from a pre-launcher install, whose task process IS wsl.exe.
+    ended = _holder_end_marked()
+    task_ended = _holder_exec(boot_windows.end_holder_command())
+    if not ended and not task_ended:
         print("crr holder: hold written, but could not end the running holder; "
               f"end it with `schtasks /end /tn {boot_windows.WSL_BOOT_TASK}`",
               file=sys.stderr)

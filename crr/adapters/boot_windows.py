@@ -21,13 +21,19 @@ TAILNET_TASK = "crr-tailnet-default"
 # The hold flag sits next to the launcher script (#138 follow-up); the
 # launcher finds it via $PSScriptRoot, crr via the launcher's directory.
 HOLD_FILE_NAME = "holder-hold.json"
+# Marks the holder's Linux-side process so crr can end it from inside WSL:
+# `schtasks /end` on the launcher task kills only powershell.exe, leaving
+# wsl.exe + `sleep infinity` pinning the distro (measured on the reference
+# host, #138).
+HOLDER_ENV_MARKER = "CRR_WSL_HOLDER=1"
 
 _WSL = r"C:\Windows\System32\wsl.exe"
 
 
 def wsl_boot_argument(distro: str, linux_user: str) -> str:
     """Args to wsl.exe that boot the distro and hold the VM open forever."""
-    return f'-d {distro} -u {linux_user} -e sh -c "exec sleep infinity"'
+    return (f'-d {distro} -u {linux_user} -e sh -c '
+            f'"{HOLDER_ENV_MARKER} exec sleep infinity"')
 
 
 def holder_script(distro: str, linux_user: str) -> str:
@@ -64,6 +70,29 @@ def holder_script(distro: str, linux_user: str) -> str:
         "} catch { }\n"
         f"& '{_WSL}' {wsl_boot_argument(distro, linux_user)}\n"
     )
+
+
+def holder_pids(proc_root: Path = Path("/proc")) -> list[int]:
+    """Pids of marked holder processes (``sleep`` carrying HOLDER_ENV_MARKER).
+
+    Both checks are required: ``crr awake`` also holds a ``sleep infinity``
+    (no marker), and anything forked from the holder's shell would inherit
+    the marker but isn't ``sleep``. Unreadable entries are skipped.
+    """
+    marker = HOLDER_ENV_MARKER.encode()
+    found = []
+    for d in proc_root.iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if (d / "comm").read_text().strip() != "sleep":
+                continue
+            if marker not in (d / "environ").read_bytes().split(b"\0"):
+                continue
+        except OSError:
+            continue
+        found.append(int(d.name))
+    return sorted(found)
 
 
 def end_holder_command() -> list[str]:

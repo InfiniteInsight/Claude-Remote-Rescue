@@ -360,6 +360,19 @@ def _stable(entry: Mapping[str, Any], now: str, stable_seconds: float | None) ->
     return up.total_seconds() >= stable_seconds
 
 
+def _stayed_up(entry: Mapping[str, Any], tx: "TranscriptProbe | None",
+               stable_seconds: float | None) -> bool:
+    """Did the last revival keep writing its transcript ``stable_seconds``
+    past ``revived_at``? Unknown transcript or stamp -> False (count it)."""
+    if stable_seconds is None or tx is None or tx.mtime is None:
+        return False
+    try:
+        started = datetime.fromisoformat(entry.get("revived_at") or "").timestamp()
+    except ValueError:
+        return False
+    return tx.mtime - started >= stable_seconds
+
+
 def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str,
             tx: "TranscriptProbe | None" = None, attached: set[str] | None = None,
             current_boot: str | None = None, max_host_deaths: int | None = None,
@@ -403,6 +416,12 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
         return "give_up", entry, name
     updated = upgrade_entry(entry)
     if host_died:
+        if _stayed_up(entry, tx, host_death_stable_seconds):
+            # The last revival outlived the stability window before its host
+            # died — an ordinary reboot, not a crash loop. A re-keyed revival
+            # classifies LIVE while it runs, so this (not the alive branch
+            # above) is where a real session's counter gets cleared.
+            updated["host_deaths"] = 0
         if max_host_deaths is not None and updated["host_deaths"] >= max_host_deaths:
             return "give_up", entry, name
         updated["host_deaths"] += 1

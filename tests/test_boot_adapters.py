@@ -454,3 +454,36 @@ def test_doctor_shows_login_only_as_a_warning_not_ok(monkeypatch, capsys):
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "WARN" in out and "reachable at boot" in out.lower()
+
+
+# --- releasing the holder from inside WSL (#138 follow-up) ----------------
+#
+# Measured on the reference host: with the hold-aware launcher, the task's
+# process is powershell.exe and `schtasks /end` kills only that — wsl.exe and
+# the Linux-side `sleep infinity` survive, so WSL stays pinned. The holder's
+# Linux process therefore carries an env marker crr can find and end.
+
+def test_holder_process_carries_the_env_marker():
+    arg = wsl_boot_argument("Ubuntu-24.04", "evan")
+    assert f"{boot_windows.HOLDER_ENV_MARKER} exec sleep infinity" in arg
+
+
+def _fake_proc(root, pid, comm, environ):
+    d = root / str(pid)
+    d.mkdir()
+    (d / "comm").write_text(comm + "\n")
+    (d / "environ").write_bytes(b"\0".join(e.encode() for e in environ) + b"\0")
+
+
+def test_holder_pids_finds_only_marked_sleeps(tmp_path):
+    _fake_proc(tmp_path, 10, "sleep", ["PATH=/bin", boot_windows.HOLDER_ENV_MARKER])
+    _fake_proc(tmp_path, 11, "sleep", ["PATH=/bin"])            # crr awake's hold
+    _fake_proc(tmp_path, 12, "bash", [boot_windows.HOLDER_ENV_MARKER])  # a child shell
+    (tmp_path / "self").mkdir()                                 # non-pid entry
+    assert boot_windows.holder_pids(proc_root=tmp_path) == [10]
+
+
+def test_holder_pids_skips_unreadable_processes(tmp_path):
+    d = tmp_path / "13"
+    d.mkdir()  # no comm/environ: vanished or not ours
+    assert boot_windows.holder_pids(proc_root=tmp_path) == []

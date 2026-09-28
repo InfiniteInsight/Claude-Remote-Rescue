@@ -24,6 +24,8 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_holder_hold_path", lambda: flag)
     monkeypatch.setattr(cli, "_holder_exec", lambda argv: ran.append(argv) or True)
     monkeypatch.setattr(cli, "_holder_running", lambda: True)
+    monkeypatch.setattr(cli, "_holder_end_marked", lambda: 1)
+    monkeypatch.setattr(cli.boot_windows, "holder_pids", lambda **k: [])
     monkeypatch.setattr(cli.boot_windows, "read_facts",
                         lambda **k: BootFacts(_BOOT, None, None, None, None))
     return flag, ran
@@ -114,11 +116,32 @@ def test_holder_refuses_outside_wsl(host, monkeypatch, capsys):
     assert not flag.exists() and ran == []
 
 
+def test_the_marked_holder_is_ended_even_when_schtasks_end_fails(host, monkeypatch):
+    # With the launcher, /end only kills powershell.exe; ending the marked
+    # Linux-side holder is what actually releases WSL.
+    flag, _ = host
+    monkeypatch.setattr(cli, "_holder_exec", lambda argv: False)
+    assert cli.main(["holder", "stop"]) == 0
+
+
 def test_a_failed_release_is_reported_not_hidden(host, monkeypatch, capsys):
     flag, _ = host
     monkeypatch.setattr(cli, "_holder_exec", lambda argv: False)
+    monkeypatch.setattr(cli, "_holder_end_marked", lambda: 0)
     assert cli.main(["holder", "stop"]) == 1
     # The hold is still written: the next re-arm will respect it even though
     # the running holder couldn't be ended now.
     assert _flag(flag)["mode"] == "stop"
     assert "could not end" in capsys.readouterr().err
+
+
+def test_an_unwritable_flag_location_is_a_clean_error(host, monkeypatch, capsys):
+    flag, ran = host
+
+    def boom(path, obj):
+        raise PermissionError("Access is denied")
+
+    monkeypatch.setattr(cli, "write_json_atomic", boom)
+    assert cli.main(["holder", "stop"]) == 1
+    assert "could not write the hold flag" in capsys.readouterr().err
+    assert ran == []  # never end the holder without a hold in place
