@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import textwrap
 import time
 import uuid
 from datetime import datetime, timezone
@@ -55,13 +56,13 @@ from crr.core import config as cfg  # ...and core
 from crr.core import deploy
 from crr.core import harden
 from crr.core import power
-from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, tunnel, web, whoami
+from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, holder_hold, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, tunnel, web, whoami
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core.flags import FlagStore
 from crr.core import journal
-from crr.core.journal import JournalStore, new_entry
+from crr.core.journal import JournalStore, new_entry, write_json_atomic
 
 
 def _now() -> str:
@@ -637,6 +638,57 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove what --install registered",
     )
     rab.set_defaults(func=_cmd_reachable_at_boot)
+
+    hold = sub.add_parser(
+        "holder",
+        help="WSL only: pause/stop/resume the holder that keeps the distro "
+             "running (needed before an intentional `wsl --shutdown`)",
+        # Pre-wrapped: RawDescriptionHelpFormatter keeps the epilog's
+        # example columns, which also means it won't wrap this for us.
+        description=textwrap.fill(
+            "Control the crr-wsl-boot holder: the Windows task (installed by "
+            "`crr reachable-at-boot --install`) that keeps this WSL distro "
+            "running. It re-arms every minute, so a deliberate `wsl "
+            "--shutdown` comes straight back unless the holder is paused or "
+            "stopped first. With no action, shows status.", width=78),
+        epilog=(
+            "Examples:\n"
+            "  crr holder                        show the hold and the task\n"
+            "  crr holder pause 30 --shutdown    shut WSL down for 30 minutes\n"
+            "  crr holder stop --until-reboot    stay down until Windows restarts\n"
+            "  crr holder resume                 clear the hold, start it now"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    hold.set_defaults(func=_cmd_holder, action="status")
+    hold_sub = hold.add_subparsers(dest="action", metavar="ACTION")
+    hold_sub.add_parser(
+        "status", help="show the hold, the task, and the holder process",
+        description="Show the current hold (if any), whether the "
+                    "crr-wsl-boot task is running, and the holder process.")
+    h_pause = hold_sub.add_parser(
+        "pause", help="keep the holder down for MINUTES, then re-arm",
+        description="Keep the holder down for MINUTES. When the pause "
+                    "expires, the next re-arm (within a minute) starts it "
+                    "again — and with it WSL, if WSL was shut down.")
+    h_pause.add_argument("minutes", type=int, metavar="MINUTES",
+                         help="how long the holder stays down")
+    h_stop = hold_sub.add_parser(
+        "stop", help="keep the holder down until `resume` (survives reboots)",
+        description="Keep the holder down until `crr holder resume`. A plain "
+                    "stop SURVIVES Windows reboots: the machine stays "
+                    "unreachable at boot until you resume. Use "
+                    "--until-reboot to lift it at the next Windows restart.")
+    h_stop.add_argument("--until-reboot", action="store_true",
+                        help="lift the stop when Windows next restarts")
+    for p_ in (h_pause, h_stop):
+        p_.add_argument("--shutdown", action="store_true",
+                        help="also run `wsl --shutdown` now (ends every WSL "
+                             "session, this one included; sessions are "
+                             "revived when WSL next starts)")
+    hold_sub.add_parser(
+        "resume", help="clear the hold and start the holder now",
+        description="Clear any pause/stop and start the holder immediately "
+                    "(which also starts WSL if it was down).")
 
     rec = sub.add_parser(
         "recall",
@@ -2402,7 +2454,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
         except (KeyError, contracts.ContractError):
             existing = None
         if existing is not None and existing.get("claude") is not None:
-            if existing["boot_id"] != current_boot:
+            if not classifier.same_boot(existing["boot_id"], current_boot):
                 # Different boot => the old process is unambiguously gone
                 # (reboot or stale). Preserve its session in the archive so
                 # the reviver can bring it back, then register fresh.
@@ -2773,6 +2825,8 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
             outcome = reviver.revive_crashed(
                 scan.entries, boot, probe, tmux_spawner, store, archive,
                 max_strikes=config.get("zombie_strikes"),
+                max_host_deaths=config.get("host_death_max_revivals"),
+                host_death_stable_seconds=config.get("host_death_stable_seconds"),
                 now=_now(),
                 remote_control_enabled=config.get("remote_control"),
                 # Without this the sweep revives a conversation the user closed:
@@ -4243,6 +4297,8 @@ def _rescue_check(_args: argparse.Namespace) -> int:
             reviver.revive_crashed(
                 scan.entries, boot, probe, tmux_spawner, store, archive,
                 max_strikes=config.get("zombie_strikes"),
+                max_host_deaths=config.get("host_death_max_revivals"),
+                host_death_stable_seconds=config.get("host_death_stable_seconds"),
                 now=_now(),
                 remote_control_enabled=config.get("remote_control"),
                 flags=FlagStore(sd),
@@ -5909,6 +5965,9 @@ def _current_tailnet_account(timeout: float) -> str | None:
 # generates (Windows side); a fixed, well-known path, not a temp one — the
 # Scheduled Task it registers re-invokes this same file on every boot.
 _TAILNET_SCRIPT_WINDOWS_PATH = r"C:\ProgramData\crr\tailnet-select.ps1"
+# The holder task's hold-aware launcher (#138); its hold flag
+# (boot_windows.HOLD_FILE_NAME) is written next to it by `crr holder`.
+_HOLDER_SCRIPT_WINDOWS_PATH = r"C:\ProgramData\crr\wsl-holder.ps1"
 
 
 def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
@@ -5921,7 +5980,9 @@ def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
     tailnet = config.get("boot_preferred_tailnet") or _current_tailnet_account(
         config.get("interop_timeout_seconds"))
     script_text = boot_windows.install_script(
-        distro, user, tailnet, _TAILNET_SCRIPT_WINDOWS_PATH)
+        distro, user, tailnet, _TAILNET_SCRIPT_WINDOWS_PATH,
+        holder_rearm_minutes=config.get("boot_holder_rearm_minutes"),
+        holder_script_path=_HOLDER_SCRIPT_WINDOWS_PATH)
     tmp = Path(tempfile.gettempdir()) / "crr-reachable-at-boot-install.ps1"
     tmp.write_text(script_text, encoding="utf-8")
     win_script = _windows_unc_path(distro, tmp)
@@ -6136,6 +6197,151 @@ def _cmd_reachable_at_boot(args: argparse.Namespace) -> int:
     if getattr(args, "install", False):
         return _reachable_at_boot_install(system, wsl, config)
     return _reachable_at_boot_report(system, wsl, config)
+
+
+def _holder_hold_path() -> Path:
+    """The hold flag, next to the holder launcher on the Windows side —
+    resolved through ``wslpath`` at call time (never a hardcoded /mnt/c,
+    #54)."""
+    win_dir = _HOLDER_SCRIPT_WINDOWS_PATH.rsplit("\\", 1)[0]
+    out = subprocess.run(["wslpath", "-u", win_dir], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    return Path(out) / boot_windows.HOLD_FILE_NAME
+
+
+def _holder_exec(argv: list[str]) -> bool:
+    """Run one unelevated Windows command; True iff it exited 0."""
+    try:
+        return subprocess.run(argv, capture_output=True, check=False).returncode == 0
+    except OSError:
+        return False
+
+
+def _holder_running() -> bool | None:
+    """Is the holder task running right now? None when unreadable."""
+    try:
+        out = subprocess.run(
+            ["schtasks.exe", "/query", "/tn", boot_windows.WSL_BOOT_TASK,
+             "/fo", "csv", "/nh"],
+            capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    fields = [f.strip().strip('"') for f in out.strip().split(",")]
+    return (fields[-1] == "Running") if len(fields) >= 3 else None
+
+
+def _holder_end_marked() -> int:
+    """End the marked holder process(es) inside WSL; how many were signalled.
+
+    `schtasks /end` on the launcher task only kills powershell.exe — the
+    wsl.exe client and this `sleep` survive and keep WSL pinned (measured,
+    #138). Ending the sleep lets wsl.exe exit, releasing the distro.
+    """
+    ended = 0
+    for pid in boot_windows.holder_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+            ended += 1
+        except OSError:
+            pass
+    return ended
+
+
+def _read_hold(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"v": None}  # present but unreadable: describe() says so
+
+
+def _cmd_holder(args: argparse.Namespace) -> int:
+    """Pause / stop / resume the WSL holder task (#138 follow-up).
+
+    The task re-arms every minute, so a hold is what makes an intentional
+    shutdown stick. A hold is written first, then the running holder is
+    ended — so even if ending it fails, the next re-arm honours the hold.
+    """
+    if not host.is_wsl():
+        print("crr holder: only meaningful inside WSL (it controls the "
+              f"Windows task {boot_windows.WSL_BOOT_TASK})", file=sys.stderr)
+        return 2
+    action = args.action or "status"   # bare `crr holder`
+    now = int(time.time())
+    try:
+        path = _holder_hold_path()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"crr holder: could not locate the hold flag: {exc}", file=sys.stderr)
+        return 1
+
+    if action == "status":
+        rec = _read_hold(path)
+        boot = boot_windows.read_facts().machine_boot
+        running = _holder_running()
+        task = {True: "running", False: "not running", None: "unknown"}[running]
+        pids = boot_windows.holder_pids()
+        print(f"holder: {holder_hold.describe(rec, now=now, machine_boot=boot)}")
+        print(f"task {boot_windows.WSL_BOOT_TASK}: {task}")
+        print("holder process: " + (f"running (pid {', '.join(map(str, pids))})"
+                                    if pids else "none marked"))
+        return 0
+
+    if action == "resume":
+        path.unlink(missing_ok=True)
+        if not _holder_exec(boot_windows.run_holder_command()):
+            print("crr holder: hold cleared, but could not start the holder now; "
+                  "it re-arms within a minute", file=sys.stderr)
+            return 1
+        print("holder: resumed")
+        return 0
+
+    if action == "pause":
+        if args.minutes <= 0:
+            print("crr holder pause: give a positive number of minutes", file=sys.stderr)
+            return 2
+        rec = holder_hold.pause(now=now, minutes=args.minutes)
+    elif getattr(args, "until_reboot", False):
+        boot = boot_windows.read_facts().machine_boot
+        if boot is None:
+            print("crr holder stop --until-reboot: could not read the Windows "
+                  "boot time, so a reboot couldn't be recognized; use plain "
+                  "`stop` and `resume` instead", file=sys.stderr)
+            return 2
+        rec = holder_hold.stop_until_reboot(now=now, machine_boot=int(boot))
+    else:
+        rec = holder_hold.stop(now=now)
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, rec)
+    except OSError as exc:
+        # Never end the holder without a hold in place: it would just
+        # re-arm within a minute and the "stop" would silently not stick.
+        print(f"crr holder: could not write the hold flag {path}: {exc} "
+              "(run `crr reachable-at-boot --install` to create its directory)",
+              file=sys.stderr)
+        return 1
+    rc = 0
+    # Marked holders (launcher task) die from inside WSL; /end covers a
+    # holder from a pre-launcher install, whose task process IS wsl.exe.
+    ended = _holder_end_marked()
+    task_ended = _holder_exec(boot_windows.end_holder_command())
+    if not ended and not task_ended:
+        print("crr holder: hold written, but could not end the running holder; "
+              f"end it with `schtasks /end /tn {boot_windows.WSL_BOOT_TASK}`",
+              file=sys.stderr)
+        rc = 1
+    print(f"holder: {holder_hold.describe(rec, now=now, machine_boot=None)}")
+    if rec["mode"] == "stop":
+        print("warning: a plain stop survives Windows reboots — the machine "
+              "stays unreachable at boot until `crr holder resume` (use "
+              "`stop --until-reboot` to lift it at the next restart)",
+              file=sys.stderr)
+    if getattr(args, "shutdown", False) and rc == 0:
+        print("holder: shutting WSL down now", flush=True)
+        _holder_exec(["wsl.exe", "--shutdown"])
+    return rc
 
 
 def _cmd_config(args: argparse.Namespace) -> int:

@@ -323,12 +323,64 @@ def test_journal_v2_rejects_revived_tx_mtime():
         contracts.validate_journal_entry(e)
 
 
-def test_new_entry_is_v3_with_null_stamp(tmp_path):
+def test_new_entry_is_v4_with_null_stamps(tmp_path):
     from crr.core.journal import new_entry
     e = new_entry(pid=7, cwd="/home/u/p", host="tmux", shell="zsh",
                   boot_id="b", now="2026-08-29T00:00:00Z")
-    assert e["v"] == contracts.JOURNAL_SCHEMA_VERSION == 3
+    assert e["v"] == contracts.JOURNAL_SCHEMA_VERSION == 4
     assert e["revived_tx_mtime"] is None
+    assert e["revived_boot"] is None
+
+
+def test_v3_entry_without_revived_boot_is_still_valid():
+    # Entries journaled before #138 stay readable as-is.
+    contracts.validate_journal_entry(_journal_entry_v3())
+
+
+def test_v4_entry_requires_revived_boot():
+    e = _journal_entry_v3()
+    e["v"] = 4
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def _journal_entry_v4():
+    e = _journal_entry_v3()
+    e.update(v=4, revived_boot=None, revived_at=None, host_deaths=0)
+    return e
+
+
+def test_v4_host_deaths_must_be_an_int():
+    e = _journal_entry_v4()
+    e["host_deaths"] = None
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_v4_revived_at_must_be_a_string_or_null():
+    e = _journal_entry_v4()
+    e["revived_at"] = 5
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+
+
+def test_v4_revived_boot_must_be_a_string_or_null():
+    e = _journal_entry_v4()
+    e["revived_boot"] = 12
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_journal_entry(e)
+    e["revived_boot"] = "k@1"
+    contracts.validate_journal_entry(e)
+
+
+def test_upgrade_entry_brings_v3_to_v4_with_unknown_revived_boot():
+    from crr.core.journal import upgrade_entry
+    up = upgrade_entry(_journal_entry_v3())
+    contracts.validate_journal_entry(up)
+    assert up["v"] == 4
+    assert up["revived_boot"] is None
+    assert up["revived_at"] is None
+    assert up["host_deaths"] == 0
 
 
 def test_upgrade_entry_brings_v1_to_current_schema():

@@ -114,13 +114,25 @@ from typing import Any, Mapping
 # duration and movement-cancel radius — same family as flash_ms, page
 # timing/geometry priors injected via @PLACEHOLDER@, never bare literals in
 # page.html; see tests/test_priors.py::test_no_bare_millisecond_constant_in_page)
-CONFIG_DEFAULTS_VERSION = 27
+# v28: added boot_holder_rearm_minutes (#138 — the WSL holder task's startup
+# trigger now repeats so a distro restart without a Windows reboot re-arms it)
+# and host_death_max_revivals + host_death_stable_seconds (a revival that
+# died with its host costs no strike, but those deaths are capped)
+CONFIG_DEFAULTS_VERSION = 28
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
 DEFAULTS: dict[str, Any] = {
     # watchdog / revival
     "zombie_strikes": 5,             # strikes before a re-dying session is archived
+    # #138: a revival that died WITH its host (reboot, distro restart) costs
+    # no strike, but repeated host deaths are capped so a revival that itself
+    # takes the VM down (OOM) isn't revived forever. Judgment calls: 10
+    # deaths is ~10-20 min of a 1-2 min crash loop; the counter clears once
+    # a revival is seen alive 10 min after it started, so ordinary reboots
+    # never add up.
+    "host_death_max_revivals": 10,
+    "host_death_stable_seconds": 600,
     "watchdog_interval_seconds": 30, # how often the systemd timer sweeps for revivals
     # session operations
     "close_grace_seconds": 5,     # wait after a polite close before force
@@ -315,6 +327,12 @@ DEFAULTS: dict[str, Any] = {
     # Which Tailscale account the boot task re-selects. Empty means "whatever
     # is active at install time" — crr never silently picks a tailnet.
     "boot_preferred_tailnet": "",
+    # How soon the WSL holder task (crr-wsl-boot) restarts after the distro
+    # dies without Windows rebooting (#138). A judgment call: 1 minute is
+    # the Task Scheduler minimum and each repeat is a no-op while the
+    # holder runs; longer only widens the window in which WSL's ~15s idle
+    # shutdown can kill the distro under revived sessions.
+    "boot_holder_rearm_minutes": 1,
     # launcher (Phase 3)
     "launcher_tag": "tag:crr",
     # dashboard reauth (Task 5): how long the reauth modal shows "Login

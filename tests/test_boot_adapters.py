@@ -5,7 +5,7 @@ elevated register path is exercised with an injected runner in the CLI tests.
 """
 
 import crr.adapters.boot_windows as boot_windows
-from crr.adapters.boot_windows import (TAILNET_TASK, WSL_BOOT_TASK,
+from crr.adapters.boot_windows import (HOLD_FILE_NAME, TAILNET_TASK, WSL_BOOT_TASK,
                                        BootFacts, install_script,
                                        parse_epoch, read_facts,
                                        tailnet_script, wsl_boot_argument,
@@ -30,7 +30,9 @@ def test_tailnet_script_retries_until_tailscaled_is_ready():
 
 def test_install_script_registers_both_tasks_with_the_right_shape():
     s = install_script("Ubuntu-24.04", "evan", "infiniteinsight@gmail.com",
-                       r"C:\ProgramData\crr\tailnet-default.ps1")
+                       r"C:\ProgramData\crr\tailnet-default.ps1",
+                       holder_rearm_minutes=1,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
     assert f"Register-ScheduledTask" in s
     assert WSL_BOOT_TASK in s and TAILNET_TASK in s
     # S4U: no stored password (PIN login), and it kept the desktop locked.
@@ -43,9 +45,65 @@ def test_install_script_registers_both_tasks_with_the_right_shape():
 
 def test_install_script_omits_the_tailnet_task_when_no_preference():
     # Single-account host: no tailnet task, no switch script.
-    s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1")
+    s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1",
+                       holder_rearm_minutes=1,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
     assert WSL_BOOT_TASK in s
     assert TAILNET_TASK not in s
+
+
+def test_holder_task_rearms_after_a_distro_restart():
+    # #138: `sudo reboot` inside WSL restarts the distro, not Windows, so an
+    # AtStartup-only trigger never fires again and WSL idle-kills the
+    # distro ~15s after every client leaves. Repeat the trigger forever;
+    # IgnoreNew makes each repeat a no-op while the holder is still running.
+    s = install_script("Ubuntu-24.04", "evan", "infiniteinsight@gmail.com",
+                       r"C:\ProgramData\crr\t.ps1", holder_rearm_minutes=3,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
+    wsl_part, tailnet_part = s.split(f"'{WSL_BOOT_TASK}'", 1)
+    assert "-RepetitionInterval (New-TimeSpan -Minutes 3)" in wsl_part
+    assert "$t.Repetition =" in wsl_part
+    assert "-MultipleInstances IgnoreNew" in wsl_part
+    # The tailnet switch is a one-shot at boot; repeating it would undo a
+    # manual `tailscale switch` every few minutes.
+    assert "Repetition" not in tailnet_part
+
+
+def test_holder_task_runs_the_hold_aware_launcher_not_wsl_directly():
+    # The re-arming task must be able to stay down on purpose, and only a
+    # Windows-side check can decide that without booting WSL.
+    s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1",
+                       holder_rearm_minutes=1,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
+    assert r"Set-Content -Path 'C:\ProgramData\crr\wsl-holder.ps1'" in s
+    action = [l for l in s.splitlines() if "New-ScheduledTaskAction" in l][0]
+    assert "powershell.exe" in action and "wsl-holder.ps1" in action
+
+
+def test_holder_script_checks_the_hold_flag_before_starting_wsl():
+    ps = boot_windows.holder_script("Ubuntu-24.04", "evan")
+    check = ps.index(HOLD_FILE_NAME)
+    launch = ps.index("sleep infinity")
+    assert check < launch
+    assert "$PSScriptRoot" in ps           # flag sits next to the launcher
+    for mode in ("'stop'", "'pause'", "'until-reboot'"):
+        assert mode in ps
+    assert "-d Ubuntu-24.04" in ps and "-u evan" in ps
+    # Fail open: a broken flag must never strand the machine.
+    assert "catch" in ps
+
+
+def test_holder_control_commands_target_the_holder_task():
+    assert boot_windows.end_holder_command() == ["schtasks.exe", "/end", "/tn", WSL_BOOT_TASK]
+    assert boot_windows.run_holder_command() == ["schtasks.exe", "/run", "/tn", WSL_BOOT_TASK]
+
+
+def test_holder_rearm_interval_has_no_default_of_its_own():
+    # The interval is a named config prior (boot_holder_rearm_minutes); a
+    # parameter default here would silently shadow it.
+    import inspect
+    param = inspect.signature(install_script).parameters["holder_rearm_minutes"]
+    assert param.default is inspect.Parameter.empty
 
 
 def test_parse_epoch_reads_a_numeric_line_and_rejects_junk():
@@ -290,7 +348,7 @@ def _cfg():
     # verdict assertions below stay the only thing under test here.
     return {"boot_headless_window_seconds": 300, "boot_preferred_tailnet": "",
             "interop_timeout_seconds": 5, "dashboard_port": 8765,
-            "tunnel_provider": "none"}
+            "tunnel_provider": "none", "boot_holder_rearm_minutes": 1}
 
 
 def test_report_says_headless_when_the_facts_show_it(tmp_path, monkeypatch, capsys):
@@ -343,6 +401,26 @@ def test_install_runs_the_generated_script_once_confirmed(monkeypatch, capsys):
     assert any("RunAs" in " ".join(c) for c in ran)
 
 
+def test_install_passes_the_configured_holder_rearm_interval(monkeypatch):
+    seen = {}
+    real = cli.boot_windows.install_script
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cli.boot_windows, "install_script", spy)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {**_cfg(), "boot_holder_rearm_minutes": 7})
+    monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert cli.main(["reachable-at-boot", "--install"]) == 0
+    assert seen["holder_rearm_minutes"] == 7
+
+
 def test_macos_install_refuses_under_filevault(monkeypatch, capsys):
     monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
@@ -376,3 +454,36 @@ def test_doctor_shows_login_only_as_a_warning_not_ok(monkeypatch, capsys):
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "WARN" in out and "reachable at boot" in out.lower()
+
+
+# --- releasing the holder from inside WSL (#138 follow-up) ----------------
+#
+# Measured on the reference host: with the hold-aware launcher, the task's
+# process is powershell.exe and `schtasks /end` kills only that — wsl.exe and
+# the Linux-side `sleep infinity` survive, so WSL stays pinned. The holder's
+# Linux process therefore carries an env marker crr can find and end.
+
+def test_holder_process_carries_the_env_marker():
+    arg = wsl_boot_argument("Ubuntu-24.04", "evan")
+    assert f"{boot_windows.HOLDER_ENV_MARKER} exec sleep infinity" in arg
+
+
+def _fake_proc(root, pid, comm, environ):
+    d = root / str(pid)
+    d.mkdir()
+    (d / "comm").write_text(comm + "\n")
+    (d / "environ").write_bytes(b"\0".join(e.encode() for e in environ) + b"\0")
+
+
+def test_holder_pids_finds_only_marked_sleeps(tmp_path):
+    _fake_proc(tmp_path, 10, "sleep", ["PATH=/bin", boot_windows.HOLDER_ENV_MARKER])
+    _fake_proc(tmp_path, 11, "sleep", ["PATH=/bin"])            # crr awake's hold
+    _fake_proc(tmp_path, 12, "bash", [boot_windows.HOLDER_ENV_MARKER])  # a child shell
+    (tmp_path / "self").mkdir()                                 # non-pid entry
+    assert boot_windows.holder_pids(proc_root=tmp_path) == [10]
+
+
+def test_holder_pids_skips_unreadable_processes(tmp_path):
+    d = tmp_path / "13"
+    d.mkdir()  # no comm/environ: vanished or not ours
+    assert boot_windows.holder_pids(proc_root=tmp_path) == []

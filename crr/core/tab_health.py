@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from crr.core import contracts
+from crr.core.classifier import same_boot
 from crr.core.journal import read_json_file, write_json_atomic
 
 FILENAME = "tab_health.json"
@@ -171,7 +172,7 @@ def doctor_line(
         ok = None
         message = f"unrecognized tab-spawn record — {when}"
 
-    if current_boot_id is not None and record.get("boot_id") != current_boot_id:
+    if current_boot_id is not None and not same_boot(record.get("boot_id"), current_boot_id):
         message += STALENESS_NOTE
 
     return LABEL, ok, message

@@ -71,6 +71,9 @@ def new_entry(
     revive_strikes: int = 0,
     claude: Mapping[str, Any] | None = None,
     revived_tx_mtime: float | None = None,
+    revived_boot: str | None = None,
+    revived_at: str | None = None,
+    host_deaths: int = 0,
 ) -> dict[str, Any]:
     """Build a journal entry at the current schema version, validated before return.
 
@@ -92,6 +95,9 @@ def new_entry(
         "revive_strikes": revive_strikes,
         "updated": now,
         "revived_tx_mtime": revived_tx_mtime,
+        "revived_boot": revived_boot,
+        "revived_at": revived_at,
+        "host_deaths": host_deaths,
     }
     contracts.validate_journal_entry(entry)
     return entry
@@ -113,6 +119,9 @@ def upgrade_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
         claude.setdefault("skip_permissions", False)  # v2 default
         up["claude"] = claude
     up.setdefault("revived_tx_mtime", None)  # v3 default
+    up.setdefault("revived_boot", None)  # v4 default: unknown -> strikes as before
+    up.setdefault("revived_at", None)    # v4 default: never proven stable
+    up.setdefault("host_deaths", 0)      # v4 default
     return up
 
 

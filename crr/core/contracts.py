@@ -25,7 +25,16 @@ from typing import Any, Iterable, Mapping
 #    reviver can tell "alive and progressing" from "alive but frozen" (an
 #    observed-alive session only clears its strikes when the conversation
 #    actually advanced; spec 2026-08-29 reviver hardening).
-JOURNAL_SCHEMA_VERSION = 3
+# v4 adds revived_boot — the boot identity each revival happened in, so a
+#    revival that died WITH its host (a WSL distro-restart loop) is not
+#    counted as a session failure. Same bump: on Linux `boot_id` becomes
+#    `<kernel boot_id>@<PID 1 start ticks>` (a distro restart keeps the
+#    kernel id); compare boot ids only via classifier.same_boot, which
+#    treats a legacy bare kernel id as matching its compound form (#138).
+#    Also adds revived_at + host_deaths: uncounted host deaths get their own
+#    cap, cleared once a revival stays up (a revival that itself kills the
+#    VM must not be revived forever).
+JOURNAL_SCHEMA_VERSION = 4
 # v3 adds `tmux_session` (nullable per-session field; `detmux` op — 57195a5).
 #    Restored 2026-08-08 (#38): this line was DELETED by a later edit rather
 #    than superseded, which is how a ledger silently loses its own history.
@@ -126,6 +135,12 @@ KICKS_STORE_VERSION = 1
 # v1: dashboard login — optional passphrase auth gate (spec 2026-08-26; see
 # crr.core.dashboard_auth). Brand new store: no prior unversioned shape.
 DASHBOARD_AUTH_STORE_VERSION = 1
+# v1: WSL holder hold flag (#138) — pause/stop the crr-wsl-boot holder.
+# Lives on the WINDOWS side (the task must decide before it starts WSL) and
+# is read by the generated PowerShell launcher as well as crr, which both
+# fail OPEN on a version they don't know. Brand new: no prior shape.
+HOLDER_HOLD_STORE_VERSION = 1
+HOLDER_HOLD_MODES = ("pause", "stop", "until-reboot")
 
 
 def store_version_ok(raw: Any, current: int) -> bool:
@@ -254,7 +269,8 @@ _JOURNAL_KEYS_V12 = (
     "revive_strikes",
     "updated",
 )
-JOURNAL_KEYS = _JOURNAL_KEYS_V12 + ("revived_tx_mtime",)
+_JOURNAL_KEYS_V3 = _JOURNAL_KEYS_V12 + ("revived_tx_mtime",)
+JOURNAL_KEYS = _JOURNAL_KEYS_V3 + ("revived_boot", "revived_at", "host_deaths")
 _JOURNAL_CLAUDE_KEYS_V1 = ("session_id", "sid_source", "started")
 JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started", "skip_permissions")
 
@@ -419,12 +435,22 @@ def validate_journal_entry(entry: Any) -> None:
     entry = _require_mapping(entry, "journal entry")
     # 'v' selects the key set, so it is checked before the exact-keys pass.
     _require_type(entry.get("v"), int, "journal 'v'")
-    if entry["v"] not in (1, 2, JOURNAL_SCHEMA_VERSION):
+    if entry["v"] not in (1, 2, 3, JOURNAL_SCHEMA_VERSION):
         raise ContractError(
             f"journal 'v' is {entry['v']}, this build understands 1..{JOURNAL_SCHEMA_VERSION}"
         )
-    keys = JOURNAL_KEYS if entry["v"] >= 3 else _JOURNAL_KEYS_V12
+    if entry["v"] >= 4:
+        keys = JOURNAL_KEYS
+    elif entry["v"] == 3:
+        keys = _JOURNAL_KEYS_V3
+    else:
+        keys = _JOURNAL_KEYS_V12
     _require_exact_keys(entry, keys, "journal entry")
+    if entry["v"] >= 4:
+        for key in ("revived_boot", "revived_at"):
+            if entry[key] is not None:
+                _require_type(entry[key], str, f"journal '{key}'")
+        _require_type(entry["host_deaths"], int, "journal 'host_deaths'")
 
     _require_type(entry["pid"], int, "journal 'pid'")
     _require_type(entry["boot_id"], str, "journal 'boot_id'")
@@ -815,3 +841,21 @@ def validate_machines_payload(payload: Any) -> None:
     for row in payload["machines"]:
         row = _require_mapping(row, "/api/machines row")
         _require_exact_keys(row, MACHINE_ROW_KEYS, "/api/machines row")
+
+
+# --------------------------------------------------------------------------
+# Holder hold flag (Windows side, see HOLDER_HOLD_STORE_VERSION).
+# --------------------------------------------------------------------------
+
+def validate_holder_hold(record: Any) -> None:
+    """Raise ContractError unless ``record`` is a valid v1 hold flag."""
+    record = _require_mapping(record, "holder hold")
+    if record.get("v") != HOLDER_HOLD_STORE_VERSION:
+        raise ContractError(f"holder hold 'v' must be {HOLDER_HOLD_STORE_VERSION}")
+    _require_enum(record.get("mode"), HOLDER_HOLD_MODES, "holder hold 'mode'")
+    extra = {"pause": ("until",), "stop": (), "until-reboot": ("boot",)}[record["mode"]]
+    _require_exact_keys(record, ("v", "mode", "set_at") + extra, "holder hold")
+    for key in ("set_at",) + extra:
+        _require_type(record[key], int, f"holder hold '{key}'")
+        if isinstance(record[key], bool):
+            raise ContractError(f"holder hold '{key}' must be int, got bool")

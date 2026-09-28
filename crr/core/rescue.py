@@ -28,6 +28,8 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from crr.core.classifier import BOOT_ID_SEPARATOR
+
 _MARKER_PREFIX = "rescue-prompted-"
 _REVIVE_MARKER_PREFIX = "rescue-revived-"
 
@@ -63,6 +65,26 @@ def marker_path(state_dir: Path | str, boot_id: str) -> Path:
     return Path(state_dir) / f"{_MARKER_PREFIX}{boot_id}"
 
 
+def _adopt_legacy_marker(state_dir: Path | str, prefix: str, boot_id: str) -> None:
+    """Rename a pre-#138 marker (bare kernel boot_id) to ``boot_id``'s name.
+
+    Upgrade-aware, once: a bare marker for this kernel was written by an
+    earlier crr build during this kernel's life, so it is taken as THIS
+    boot's marker — the upgrade alone must not re-fire the prompt or the
+    revive pass. Renaming (not merely matching) is what keeps it to once:
+    the next distro restart has a new compound id and no bare marker left.
+    A racing shell that loses the rename just finds the compound marker.
+    """
+    kernel, sep, _ = boot_id.partition(BOOT_ID_SEPARATOR)
+    if not sep:
+        return
+    legacy = Path(state_dir) / f"{prefix}{kernel}"
+    try:
+        os.replace(legacy, Path(state_dir) / f"{prefix}{boot_id}")
+    except FileNotFoundError:
+        pass
+
+
 def already_revived(state_dir: Path | str, boot_id: str) -> bool:
     """Has this boot's revive pass already run?
 
@@ -72,6 +94,7 @@ def already_revived(state_dir: Path | str, boot_id: str) -> bool:
     so the prompt marker is never written — without a dedicated revive
     marker the full sweep re-runs on every shell start.
     """
+    _adopt_legacy_marker(state_dir, _REVIVE_MARKER_PREFIX, boot_id)
     return (Path(state_dir) / f"{_REVIVE_MARKER_PREFIX}{boot_id}").exists()
 
 
@@ -106,6 +129,7 @@ def already_prompted(state_dir: Path | str, boot_id: str) -> bool:
     guarantee. This stays as a fast path so a hot shell-start doesn't pay
     for a journal/tmux scan once the boot has already been handled.
     """
+    _adopt_legacy_marker(state_dir, _MARKER_PREFIX, boot_id)
     return marker_path(state_dir, boot_id).exists()
 
 
@@ -118,6 +142,7 @@ def claim_prompt(state_dir: Path | str, boot_id: str) -> bool:
     another shell already claimed it; the caller must stay silent and
     exit, never re-attempt.
     """
+    _adopt_legacy_marker(state_dir, _MARKER_PREFIX, boot_id)
     target = marker_path(state_dir, boot_id)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:

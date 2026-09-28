@@ -7,8 +7,10 @@ reboot-recycled pid gets treated as the original session
 ([lesson: recycled pids]).
 """
 
+import pytest
+
 from crr.core import contracts
-from crr.core.classifier import classify
+from crr.core.classifier import classify, same_boot
 
 
 _SAME_BOOT = "b8f3c0de-0000-4000-8000-000000000000"
@@ -98,3 +100,45 @@ def test_result_is_always_a_contract_state():
         for tty in (True, False):
             result = classify(_entry(), boot, FakeProbe(alive=alive, tty=tty))
             assert result in contracts.STATES
+
+
+# --- distro-lifetime boot identity (#138) ---------------------------------
+#
+# On WSL the kernel boot_id belongs to the VM, which survives a *distro*
+# restart (`sudo reboot` inside WSL): pids recycle under an unchanged
+# kernel id. The Linux identity therefore appends PID 1's start time —
+# `<kernel boot_id>@<init start>`. Entries journaled before that change
+# carry a bare kernel id; they must keep matching their own kernel's
+# compound id, or every live session would classify crashed on upgrade and
+# the reviver would spawn a second agent onto it.
+
+
+_K = "246dbdec-2257-41b7-8fea-e8e719c41c0a"
+
+
+@pytest.mark.parametrize("recorded,current,expected", [
+    (f"{_K}@100", f"{_K}@100", True),     # same distro life
+    (f"{_K}@100", f"{_K}@9000", False),   # distro restarted, kernel didn't
+    (f"{_K}@100", "other-kernel@100", False),
+    (_K, f"{_K}@9000", True),             # legacy bare id: kernel half decides
+    (f"{_K}@9000", _K, True),             # (and symmetrically)
+    (_K, "other-kernel@1", False),
+    ("adopted", f"{_K}@1", False),        # the adopted sentinel never matches
+    ("1784723478", "1784723478", True),   # macOS decimal ids: plain equality
+    ("1784723478", "1784723479", False),
+])
+def test_same_boot(recorded, current, expected):
+    assert same_boot(recorded, current) is expected
+
+
+def test_distro_restart_is_crashed_without_probing_the_recycled_pid():
+    boot = FakeBoot(f"{_K}@9000")
+    probe = FakeProbe(alive=True, tty=True)  # a bystander now owns the pid
+    assert classify(_entry(boot_id=f"{_K}@100", pid=1256), boot, probe) == "crashed"
+    assert probe.alive_calls == []
+
+
+def test_legacy_bare_boot_id_still_classifies_live_after_upgrade():
+    boot = FakeBoot(f"{_K}@100")
+    probe = FakeProbe(alive=True, tty=True)
+    assert classify(_entry(boot_id=_K), boot, probe) == "live"

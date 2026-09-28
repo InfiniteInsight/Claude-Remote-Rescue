@@ -308,3 +308,13 @@ def test_record_from_spawner_tier_none_never_says_launched(tmp_path):
     assert ok is False
     assert "launched" not in message
     assert message == "no launcher worked — last attempt 2026-08-29T00:00:00Z"
+
+
+def test_doctor_line_legacy_boot_id_matches_its_compound_form():
+    # #138: a record written before the Linux identity gained its PID-1
+    # half is still this boot's record, not "from before the last reboot".
+    label, ok, detail = tab_health.doctor_line(
+        {"tier": tab_health.TIER_WT, "detail": "", "ts": "2026-08-29T00:00:00Z",
+         "boot_id": "k1"},
+        current_boot_id="k1@500")
+    assert "reboot" not in detail
