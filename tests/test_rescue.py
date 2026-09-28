@@ -132,3 +132,41 @@ def test_docs_no_longer_say_shim_wiring_is_pending():
     for name, text in (("CHANGELOG.md", changelog), ("DESIGN.md", design)):
         assert "pending a later task" not in text, name
         assert "nothing invokes it yet" not in text, name
+
+
+# --- upgrade-aware markers (#138) -----------------------------------------
+#
+# Before #138 markers were named by the bare kernel boot_id; the Linux
+# identity is now `<kernel>@<init start>`. A bare marker for this kernel is
+# adopted as THIS boot's marker exactly once (renamed to the compound
+# name), so the upgrade itself doesn't re-fire the prompt or revive pass —
+# and the next real distro restart (a new compound id) still does.
+
+_K = "246dbdec-2257-41b7-8fea-e8e719c41c0a"
+
+
+def test_legacy_prompt_marker_counts_as_this_boot_after_upgrade(tmp_path):
+    (tmp_path / f"rescue-prompted-{_K}").touch()
+    assert rescue.already_prompted(tmp_path, f"{_K}@100")
+    assert rescue.claim_prompt(tmp_path, f"{_K}@100") is False
+    assert (tmp_path / f"rescue-prompted-{_K}@100").exists()
+    assert not (tmp_path / f"rescue-prompted-{_K}").exists()
+
+
+def test_legacy_revive_marker_counts_as_this_boot_after_upgrade(tmp_path):
+    (tmp_path / f"rescue-revived-{_K}").touch()
+    assert rescue.already_revived(tmp_path, f"{_K}@100")
+    assert (tmp_path / f"rescue-revived-{_K}@100").exists()
+
+
+def test_adopted_legacy_marker_does_not_cover_the_next_distro_restart(tmp_path):
+    (tmp_path / f"rescue-prompted-{_K}").touch()
+    assert rescue.already_prompted(tmp_path, f"{_K}@100")   # adopted by life 100
+    assert not rescue.already_prompted(tmp_path, f"{_K}@9000")
+    assert rescue.claim_prompt(tmp_path, f"{_K}@9000") is True
+
+
+def test_legacy_marker_for_another_kernel_is_not_adopted(tmp_path):
+    (tmp_path / "rescue-prompted-other-kernel").touch()
+    assert not rescue.already_prompted(tmp_path, f"{_K}@100")
+    assert rescue.claim_prompt(tmp_path, f"{_K}@100") is True
