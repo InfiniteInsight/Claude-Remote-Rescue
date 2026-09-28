@@ -14,9 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from crr.adapters._proc import run_capture as _run
+from crr.core.holder_hold import BOOT_MATCH_TOLERANCE_SECONDS
 
 WSL_BOOT_TASK = "crr-wsl-boot"
 TAILNET_TASK = "crr-tailnet-default"
+# The hold flag sits next to the launcher script (#138 follow-up); the
+# launcher finds it via $PSScriptRoot, crr via the launcher's directory.
+HOLD_FILE_NAME = "holder-hold.json"
 
 _WSL = r"C:\Windows\System32\wsl.exe"
 
@@ -24,6 +28,53 @@ _WSL = r"C:\Windows\System32\wsl.exe"
 def wsl_boot_argument(distro: str, linux_user: str) -> str:
     """Args to wsl.exe that boot the distro and hold the VM open forever."""
     return f'-d {distro} -u {linux_user} -e sh -c "exec sleep infinity"'
+
+
+def holder_script(distro: str, linux_user: str) -> str:
+    """PowerShell launcher the holder task runs instead of wsl.exe directly.
+
+    The task re-arms every minute, so a deliberate shutdown needs a way to
+    keep it down — decided HERE, on the Windows side, because touching
+    anything inside WSL would boot it. Mirrors ``crr.core.holder_hold``:
+    only a v1 flag holds, and any failure reading it lets the holder run
+    (fail open — a stranded, unreachable machine is the worse failure),
+    except that an explicit stop-until-reboot whose boot time can't be read
+    keeps holding, as the core does.
+    """
+    return (
+        "# crr: WSL holder launcher (generated; #138). Starts the distro and\n"
+        "# holds it open unless holder-hold.json says to stay down.\n"
+        f"$hold = Join-Path $PSScriptRoot '{HOLD_FILE_NAME}'\n"
+        "try {\n"
+        "    if (Test-Path -LiteralPath $hold) {\n"
+        "        $h = Get-Content -Raw -LiteralPath $hold | ConvertFrom-Json\n"
+        "        if ($h.v -eq 1) {\n"
+        "            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()\n"
+        "            if ($h.mode -eq 'stop') { exit 0 }\n"
+        "            if ($h.mode -eq 'pause' -and [int64]$h.until -gt $now) { exit 0 }\n"
+        "            if ($h.mode -eq 'until-reboot') {\n"
+        "                $boot = $null\n"
+        "                try { $boot = [DateTimeOffset]::new((Get-CimInstance "
+        "Win32_OperatingSystem).LastBootUpTime).ToUnixTimeSeconds() } catch { }\n"
+        "                if ($null -eq $boot -or [math]::Abs([int64]$h.boot - $boot) "
+        f"-le {BOOT_MATCH_TOLERANCE_SECONDS}) {{ exit 0 }}\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "} catch { }\n"
+        f"& '{_WSL}' {wsl_boot_argument(distro, linux_user)}\n"
+    )
+
+
+def end_holder_command() -> list[str]:
+    """Stop the running holder (unelevated works; measured on the reference
+    host — the Linux-side ``sleep infinity`` dies with it)."""
+    return ["schtasks.exe", "/end", "/tn", WSL_BOOT_TASK]
+
+
+def run_holder_command() -> list[str]:
+    """Start the holder now instead of waiting for the next re-arm."""
+    return ["schtasks.exe", "/run", "/tn", WSL_BOOT_TASK]
 
 
 def tailnet_script(preferred_tailnet: str) -> str:
@@ -70,8 +121,19 @@ def _register_block(task: str, execute: str, argument: str,
     )
 
 
+def _write_script_block(path: str, body: str) -> str:
+    """PowerShell that writes ``body`` to ``path``, creating its directory."""
+    safe = body.replace("'", "''")
+    return (
+        f"$dir = Split-Path -Parent '{path}'\n"
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null\n"
+        f"Set-Content -Path '{path}' -Value '{safe}' -Encoding ASCII\n"
+    )
+
+
 def install_script(distro: str, linux_user: str, tailnet: str | None,
-                   script_path: str, *, holder_rearm_minutes: int) -> str:
+                   script_path: str, *, holder_rearm_minutes: int,
+                   holder_script_path: str) -> str:
     """The full PowerShell the cli runs elevated to register the task(s).
 
     ``holder_rearm_minutes`` (config ``boot_holder_rearm_minutes``) is how
@@ -79,16 +141,16 @@ def install_script(distro: str, linux_user: str, tailnet: str | None,
     rebooting. Only the holder repeats; the tailnet switch stays one-shot.
     """
     parts = ["$ErrorActionPreference = 'Stop'\n"]
-    parts.append(_register_block(WSL_BOOT_TASK, _WSL,
-                                 wsl_boot_argument(distro, linux_user),
-                                 rearm_minutes=holder_rearm_minutes))
+    parts.append(_write_script_block(holder_script_path,
+                                     holder_script(distro, linux_user)))
+    parts.append(_register_block(
+        WSL_BOOT_TASK, "powershell.exe",
+        f'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{holder_script_path}\"',
+        rearm_minutes=holder_rearm_minutes))
     if tailnet:
         # Write the retry script next to where the task will call it, then
         # register the task that runs it.
-        safe = tailnet_script(tailnet).replace("'", "''")
-        parts.append(f"$dir = Split-Path -Parent '{script_path}'\n")
-        parts.append("New-Item -ItemType Directory -Force -Path $dir | Out-Null\n")
-        parts.append(f"Set-Content -Path '{script_path}' -Value '{safe}' -Encoding ASCII\n")
+        parts.append(_write_script_block(script_path, tailnet_script(tailnet)))
         parts.append(_register_block(
             TAILNET_TASK, "powershell.exe",
             f'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script_path}\"'))

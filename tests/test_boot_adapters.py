@@ -5,7 +5,7 @@ elevated register path is exercised with an injected runner in the CLI tests.
 """
 
 import crr.adapters.boot_windows as boot_windows
-from crr.adapters.boot_windows import (TAILNET_TASK, WSL_BOOT_TASK,
+from crr.adapters.boot_windows import (HOLD_FILE_NAME, TAILNET_TASK, WSL_BOOT_TASK,
                                        BootFacts, install_script,
                                        parse_epoch, read_facts,
                                        tailnet_script, wsl_boot_argument,
@@ -31,7 +31,8 @@ def test_tailnet_script_retries_until_tailscaled_is_ready():
 def test_install_script_registers_both_tasks_with_the_right_shape():
     s = install_script("Ubuntu-24.04", "evan", "infiniteinsight@gmail.com",
                        r"C:\ProgramData\crr\tailnet-default.ps1",
-                       holder_rearm_minutes=1)
+                       holder_rearm_minutes=1,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
     assert f"Register-ScheduledTask" in s
     assert WSL_BOOT_TASK in s and TAILNET_TASK in s
     # S4U: no stored password (PIN login), and it kept the desktop locked.
@@ -45,7 +46,8 @@ def test_install_script_registers_both_tasks_with_the_right_shape():
 def test_install_script_omits_the_tailnet_task_when_no_preference():
     # Single-account host: no tailnet task, no switch script.
     s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1",
-                       holder_rearm_minutes=1)
+                       holder_rearm_minutes=1,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
     assert WSL_BOOT_TASK in s
     assert TAILNET_TASK not in s
 
@@ -56,7 +58,8 @@ def test_holder_task_rearms_after_a_distro_restart():
     # distro ~15s after every client leaves. Repeat the trigger forever;
     # IgnoreNew makes each repeat a no-op while the holder is still running.
     s = install_script("Ubuntu-24.04", "evan", "infiniteinsight@gmail.com",
-                       r"C:\ProgramData\crr\t.ps1", holder_rearm_minutes=3)
+                       r"C:\ProgramData\crr\t.ps1", holder_rearm_minutes=3,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
     wsl_part, tailnet_part = s.split(f"'{WSL_BOOT_TASK}'", 1)
     assert "-RepetitionInterval (New-TimeSpan -Minutes 3)" in wsl_part
     assert "$t.Repetition =" in wsl_part
@@ -64,6 +67,35 @@ def test_holder_task_rearms_after_a_distro_restart():
     # The tailnet switch is a one-shot at boot; repeating it would undo a
     # manual `tailscale switch` every few minutes.
     assert "Repetition" not in tailnet_part
+
+
+def test_holder_task_runs_the_hold_aware_launcher_not_wsl_directly():
+    # The re-arming task must be able to stay down on purpose, and only a
+    # Windows-side check can decide that without booting WSL.
+    s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1",
+                       holder_rearm_minutes=1,
+                       holder_script_path=r"C:\ProgramData\crr\wsl-holder.ps1")
+    assert r"Set-Content -Path 'C:\ProgramData\crr\wsl-holder.ps1'" in s
+    action = [l for l in s.splitlines() if "New-ScheduledTaskAction" in l][0]
+    assert "powershell.exe" in action and "wsl-holder.ps1" in action
+
+
+def test_holder_script_checks_the_hold_flag_before_starting_wsl():
+    ps = boot_windows.holder_script("Ubuntu-24.04", "evan")
+    check = ps.index(HOLD_FILE_NAME)
+    launch = ps.index("sleep infinity")
+    assert check < launch
+    assert "$PSScriptRoot" in ps           # flag sits next to the launcher
+    for mode in ("'stop'", "'pause'", "'until-reboot'"):
+        assert mode in ps
+    assert "-d Ubuntu-24.04" in ps and "-u evan" in ps
+    # Fail open: a broken flag must never strand the machine.
+    assert "catch" in ps
+
+
+def test_holder_control_commands_target_the_holder_task():
+    assert boot_windows.end_holder_command() == ["schtasks.exe", "/end", "/tn", WSL_BOOT_TASK]
+    assert boot_windows.run_holder_command() == ["schtasks.exe", "/run", "/tn", WSL_BOOT_TASK]
 
 
 def test_holder_rearm_interval_has_no_default_of_its_own():

@@ -135,6 +135,12 @@ KICKS_STORE_VERSION = 1
 # v1: dashboard login — optional passphrase auth gate (spec 2026-08-26; see
 # crr.core.dashboard_auth). Brand new store: no prior unversioned shape.
 DASHBOARD_AUTH_STORE_VERSION = 1
+# v1: WSL holder hold flag (#138) — pause/stop the crr-wsl-boot holder.
+# Lives on the WINDOWS side (the task must decide before it starts WSL) and
+# is read by the generated PowerShell launcher as well as crr, which both
+# fail OPEN on a version they don't know. Brand new: no prior shape.
+HOLDER_HOLD_STORE_VERSION = 1
+HOLDER_HOLD_MODES = ("pause", "stop", "until-reboot")
 
 
 def store_version_ok(raw: Any, current: int) -> bool:
@@ -835,3 +841,21 @@ def validate_machines_payload(payload: Any) -> None:
     for row in payload["machines"]:
         row = _require_mapping(row, "/api/machines row")
         _require_exact_keys(row, MACHINE_ROW_KEYS, "/api/machines row")
+
+
+# --------------------------------------------------------------------------
+# Holder hold flag (Windows side, see HOLDER_HOLD_STORE_VERSION).
+# --------------------------------------------------------------------------
+
+def validate_holder_hold(record: Any) -> None:
+    """Raise ContractError unless ``record`` is a valid v1 hold flag."""
+    record = _require_mapping(record, "holder hold")
+    if record.get("v") != HOLDER_HOLD_STORE_VERSION:
+        raise ContractError(f"holder hold 'v' must be {HOLDER_HOLD_STORE_VERSION}")
+    _require_enum(record.get("mode"), HOLDER_HOLD_MODES, "holder hold 'mode'")
+    extra = {"pause": ("until",), "stop": (), "until-reboot": ("boot",)}[record["mode"]]
+    _require_exact_keys(record, ("v", "mode", "set_at") + extra, "holder hold")
+    for key in ("set_at",) + extra:
+        _require_type(record[key], int, f"holder hold '{key}'")
+        if isinstance(record[key], bool):
+            raise ContractError(f"holder hold '{key}' must be int, got bool")

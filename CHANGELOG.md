@@ -139,6 +139,12 @@ No tag or release has been cut yet. This section describes everything on
   PID 1's start time, so a distro restart reads as a new boot instead of
   recycling pids under the old one. Re-run `crr reachable-at-boot --install`
   to pick up the new task trigger.
+  Follow-ups in the same fix: host-death revivals are capped
+  (`host_death_max_revivals`, default 10; the count clears once a revival
+  stays up `host_death_stable_seconds`, default 600), rescue markers carry
+  over the identity change instead of re-firing, and `crr holder
+  pause|stop|resume` makes an intentional WSL shutdown stick despite the
+  re-arming holder.
 - **Expired-login detection was blind on any host that keeps no credentials
   file.** The dashboard reauth feature read exactly one source,
   `~/.claude/.credentials.json`, and treated an unreadable one as

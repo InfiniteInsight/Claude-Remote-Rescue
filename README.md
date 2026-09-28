@@ -231,6 +231,7 @@ the Tailscale API**, so both are done by hand:
 | `crr systemd [--install\|--uninstall]` | Print (or install/uninstall) the Linux user units: watchdog timer + dashboard + keep-awake (`crr-awake.service`) |
 | `crr launchd [--install\|--uninstall]` | Print (or install/uninstall) the macOS launchd user agents (watchdog + dashboard + keep-awake) |
 | `crr schtasks [--install\|--uninstall]` | Print (or install/uninstall) the Windows/WSL Scheduled Tasks (watchdog + dashboard). **No keep-awake task** — the command says so; run `crr awake` yourself or use `crr systemd --install` inside WSL |
+| `crr holder [status\|pause MIN\|stop [--until-reboot]\|resume] [--shutdown]` | WSL only: control the `crr-wsl-boot` holder task (registered by `crr reachable-at-boot --install`) that keeps the distro running. It re-arms every minute, so to shut WSL down on purpose, `pause`/`stop` first (`--shutdown` does both). `resume` starts it again at once. A pause expires on its own; `--until-reboot` lasts until Windows next restarts |
 | `crr config --effective` | Every config key with its value and origin (`configured` / `default`) |
 | `crr doctor` | Install-health checklist |
 | `crr shim <shell>` | Print the shell shim to source from your rc file (fish/bash/zsh) |
