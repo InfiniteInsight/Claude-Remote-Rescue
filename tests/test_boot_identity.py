@@ -70,3 +70,46 @@ def test_current_boot_id_is_stable_and_nonempty():
         pytest.skip("no boot-identity adapter for this platform")
     first = adapter.current()
     assert first and first == adapter.current()
+
+
+# --- Linux: distro-lifetime identity (#138) -------------------------------
+#
+# A WSL distro restart keeps the VM kernel (and its boot_id) but restarts
+# PID 1, so PID 1's start time (field 22 of /proc/1/stat, clock ticks since
+# kernel boot) is what tells two distro lives apart.
+
+_STAT = "1 (systemd) S 0 1 1 0 -1 4194560 " + " ".join(["0"] * 12) + " 12345 0 0"  # field 22
+
+
+def test_parse_init_start_reads_field_22():
+    assert boot_identity._parse_init_start(_STAT) == "12345"
+
+
+def test_parse_init_start_survives_a_comm_with_spaces_and_parens():
+    stat = _STAT.replace("(systemd)", "(my (odd) init)")
+    assert boot_identity._parse_init_start(stat) == "12345"
+
+
+def test_parse_init_start_rejects_garbage():
+    with pytest.raises(ValueError):
+        boot_identity._parse_init_start("not a stat line")
+
+
+def test_linux_identity_composes_kernel_id_and_init_start(tmp_path):
+    kid = tmp_path / "boot_id"
+    kid.write_text("246dbdec-2257-41b7-8fea-e8e719c41c0a\n")
+    stat = tmp_path / "stat"
+    stat.write_text(_STAT + "\n")
+    ident = boot_identity.LinuxBootIdentity(boot_id_path=kid, init_stat_path=stat)
+    assert ident.current() == "246dbdec-2257-41b7-8fea-e8e719c41c0a@12345"
+
+
+def test_linux_identity_degrades_to_the_bare_kernel_id(tmp_path):
+    # An unreadable /proc/1/stat (hidepid, odd container) must not take crr
+    # down: the bare kernel id is exactly the pre-#138 identity, which
+    # same_boot() still compares correctly against compound ids.
+    kid = tmp_path / "boot_id"
+    kid.write_text("246dbdec-2257-41b7-8fea-e8e719c41c0a\n")
+    ident = boot_identity.LinuxBootIdentity(
+        boot_id_path=kid, init_stat_path=tmp_path / "missing")
+    assert ident.current() == "246dbdec-2257-41b7-8fea-e8e719c41c0a"

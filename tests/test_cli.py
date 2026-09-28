@@ -1200,6 +1200,7 @@ def _live_entry(pid, boot_id):
         "revive_strikes": 0,
         "updated": "2026-07-23T00:00:00Z",
         "revived_tx_mtime": None,
+        "revived_boot": None,
     }
 
 
@@ -1516,6 +1517,26 @@ def test_register_same_boot_preserves_claude_in_place(tmp_path, monkeypatch):
     assert entry["tmux_session"] == "crr-bbbbbbbb"
     assert entry["revive_strikes"] == 1
     assert archive.scan().records == []  # nothing archived on same boot
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="compound boot ids are Linux-only")
+def test_register_legacy_bare_boot_id_is_still_the_same_boot(tmp_path, monkeypatch):
+    # #138: an entry journaled before the identity gained its PID-1 half
+    # carries the bare kernel id. It is still this boot — archiving it as
+    # superseded would hand a possibly-live session to the reviver.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    current = boot_identity.detect().current()
+    assert "@" in current
+    legacy = current.split("@", 1)[0]
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    store.write(new_entry(
+        pid=2001, cwd="/p", host="tmux", shell="zsh",
+        boot_id=legacy, now="2026-07-24T00:00:00Z", claude=_claude_field(sid),
+    ))
+    assert cli.main(["register", "--pid", "2001", "--cwd", "/p", "--shell", "zsh", "--host", "tmux"]) == 0
+    assert store.read(2001)["claude"]["session_id"] == sid
+    assert archive.scan().records == []
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="register needs the boot adapter (Linux or macOS)")

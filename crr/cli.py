@@ -2402,7 +2402,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
         except (KeyError, contracts.ContractError):
             existing = None
         if existing is not None and existing.get("claude") is not None:
-            if existing["boot_id"] != current_boot:
+            if not classifier.same_boot(existing["boot_id"], current_boot):
                 # Different boot => the old process is unambiguously gone
                 # (reboot or stale). Preserve its session in the archive so
                 # the reviver can bring it back, then register fresh.
@@ -5921,7 +5921,8 @@ def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
     tailnet = config.get("boot_preferred_tailnet") or _current_tailnet_account(
         config.get("interop_timeout_seconds"))
     script_text = boot_windows.install_script(
-        distro, user, tailnet, _TAILNET_SCRIPT_WINDOWS_PATH)
+        distro, user, tailnet, _TAILNET_SCRIPT_WINDOWS_PATH,
+        holder_rearm_minutes=config.get("boot_holder_rearm_minutes"))
     tmp = Path(tempfile.gettempdir()) / "crr-reachable-at-boot-install.ps1"
     tmp.write_text(script_text, encoding="utf-8")
     win_script = _windows_unc_path(distro, tmp)

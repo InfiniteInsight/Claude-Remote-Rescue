@@ -32,7 +32,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 
 from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
-from crr.core.classifier import CRASHED, classify
+from crr.core.classifier import CRASHED, classify, same_boot
 from crr.core.journal import JournalStore, upgrade_entry
 from crr.core.ports import (
     BootIdentity,
@@ -349,10 +349,16 @@ def _alive_counts_as_healthy(entry: Mapping[str, Any], tx: "TranscriptProbe | No
 
 
 def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str,
-            tx: "TranscriptProbe | None" = None, attached: set[str] | None = None):
+            tx: "TranscriptProbe | None" = None, attached: set[str] | None = None,
+            current_boot: str | None = None):
     """Return (action, updated_entry, name) for one candidate.
 
     action is one of: 'reset-nochange', 'reset', 'hold', 'revive', 'give_up'.
+
+    ``current_boot`` lets a revival that died WITH its host go uncounted:
+    when the boot stamped at the last revival (``revived_boot``) is no
+    longer the current one, that revival's outcome is unknown — revive
+    again with the strikes unchanged, and don't give up on them (#138).
     """
     name = resolved_session_name(entry)  # legacy crr-<sid8> keeps its name (#51)
     if name in live:
@@ -367,17 +373,22 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
         updated["revive_strikes"] = 0
         updated["updated"] = now
         return "reset", updated, name
-    if entry["revive_strikes"] >= max_strikes:
+    revived_boot = entry.get("revived_boot")
+    host_died = (current_boot is not None and revived_boot is not None
+                 and not same_boot(revived_boot, current_boot))
+    if not host_died and entry["revive_strikes"] >= max_strikes:
         return "give_up", entry, name
-    updated = dict(entry)
+    updated = upgrade_entry(entry)
     updated["tmux_session"] = name
-    updated["revive_strikes"] = entry["revive_strikes"] + 1
+    if not host_died:
+        updated["revive_strikes"] = entry["revive_strikes"] + 1
     updated["updated"] = now
+    if current_boot is not None:
+        updated["revived_boot"] = current_boot
     if tx is not None:
         # Stamp the transcript's mtime at revival time so the NEXT pass can
         # tell progress from freeze. Only when a transcript source is in
         # play — a stampless write from a legacy caller stays pre-v3-shaped.
-        updated = upgrade_entry(updated)
         updated["revived_tx_mtime"] = tx.mtime if tx.exists else None
     return "revive", updated, name
 
@@ -410,6 +421,7 @@ def revive_crashed(
         # to do" for a caller — the three empty lists alone read identical
         # in both cases, so this pass has to say so explicitly.
         return RevivalOutcome([], [], [], skipped=True)
+    current_boot = boot_identity.current()
     revived: list[int] = []
     gave_up: list[int] = []
     reset: list[int] = []
@@ -460,8 +472,7 @@ def revive_crashed(
             armed = flags.read(entry["pid"])
             if armed is not None and armed[0] == "close":
                 flag_boot = armed[2] if len(armed) > 2 else None
-                current_boot = boot_identity.current()
-                if flag_boot is not None and flag_boot != current_boot:
+                if flag_boot is not None and not same_boot(flag_boot, current_boot):
                     flags.clear(entry["pid"])
                 else:
                     archive.archive(entry, "closed", now)
@@ -470,7 +481,8 @@ def revive_crashed(
                     continue
         tx = _tx_probe(entry)
         action, updated, name = _decide(entry, live, max_strikes, now,
-                                        tx=tx, attached=attached)
+                                        tx=tx, attached=attached,
+                                        current_boot=current_boot)
         pid = entry["pid"]
         if action == "hold":
             pass  # alive but frozen: strikes kept, nothing written
@@ -517,7 +529,7 @@ def revive_crashed(
                 armed = flags.read(pid)
                 if armed is not None and armed[0] == "relaunch":
                     flag_boot = armed[2] if len(armed) > 2 else None
-                    if flag_boot is not None and flag_boot != boot_identity.current():
+                    if flag_boot is not None and not same_boot(flag_boot, current_boot):
                         flags.clear(pid)
                     else:
                         _try_open_tab(tab_spawner, name, tab_health,
@@ -547,7 +559,8 @@ def revive_crashed(
         entry = record["entry"]
         tx = _tx_probe(entry)
         action, updated, name = _decide(entry, live, max_strikes, now,
-                                        tx=tx, attached=attached)
+                                        tx=tx, attached=attached,
+                                        current_boot=current_boot)
         pid = entry["pid"]
         sid = (entry.get("claude") or {}).get("session_id")
         if action == "hold":

@@ -25,7 +25,13 @@ from typing import Any, Iterable, Mapping
 #    reviver can tell "alive and progressing" from "alive but frozen" (an
 #    observed-alive session only clears its strikes when the conversation
 #    actually advanced; spec 2026-08-29 reviver hardening).
-JOURNAL_SCHEMA_VERSION = 3
+# v4 adds revived_boot — the boot identity each revival happened in, so a
+#    revival that died WITH its host (a WSL distro-restart loop) is not
+#    counted as a session failure. Same bump: on Linux `boot_id` becomes
+#    `<kernel boot_id>@<PID 1 start ticks>` (a distro restart keeps the
+#    kernel id); compare boot ids only via classifier.same_boot, which
+#    treats a legacy bare kernel id as matching its compound form (#138).
+JOURNAL_SCHEMA_VERSION = 4
 # v3 adds `tmux_session` (nullable per-session field; `detmux` op — 57195a5).
 #    Restored 2026-08-08 (#38): this line was DELETED by a later edit rather
 #    than superseded, which is how a ledger silently loses its own history.
@@ -254,7 +260,8 @@ _JOURNAL_KEYS_V12 = (
     "revive_strikes",
     "updated",
 )
-JOURNAL_KEYS = _JOURNAL_KEYS_V12 + ("revived_tx_mtime",)
+_JOURNAL_KEYS_V3 = _JOURNAL_KEYS_V12 + ("revived_tx_mtime",)
+JOURNAL_KEYS = _JOURNAL_KEYS_V3 + ("revived_boot",)
 _JOURNAL_CLAUDE_KEYS_V1 = ("session_id", "sid_source", "started")
 JOURNAL_CLAUDE_KEYS = ("session_id", "sid_source", "started", "skip_permissions")
 
@@ -419,12 +426,19 @@ def validate_journal_entry(entry: Any) -> None:
     entry = _require_mapping(entry, "journal entry")
     # 'v' selects the key set, so it is checked before the exact-keys pass.
     _require_type(entry.get("v"), int, "journal 'v'")
-    if entry["v"] not in (1, 2, JOURNAL_SCHEMA_VERSION):
+    if entry["v"] not in (1, 2, 3, JOURNAL_SCHEMA_VERSION):
         raise ContractError(
             f"journal 'v' is {entry['v']}, this build understands 1..{JOURNAL_SCHEMA_VERSION}"
         )
-    keys = JOURNAL_KEYS if entry["v"] >= 3 else _JOURNAL_KEYS_V12
+    if entry["v"] >= 4:
+        keys = JOURNAL_KEYS
+    elif entry["v"] == 3:
+        keys = _JOURNAL_KEYS_V3
+    else:
+        keys = _JOURNAL_KEYS_V12
     _require_exact_keys(entry, keys, "journal entry")
+    if entry["v"] >= 4 and entry["revived_boot"] is not None:
+        _require_type(entry["revived_boot"], str, "journal 'revived_boot'")
 
     _require_type(entry["pid"], int, "journal 'pid'")
     _require_type(entry["boot_id"], str, "journal 'boot_id'")

@@ -1296,7 +1296,7 @@ def test_revival_stamps_transcript_mtime_and_reports_strike_count(tmp_path):
     assert outcome.strike_counts == {42: 2}
     entry = store.read(42)
     assert entry["revived_tx_mtime"] == 123.5
-    assert entry["v"] == 3
+    assert entry["v"] == 4
 
 
 def test_held_strikes_accumulate_to_give_up_across_boots(tmp_path):
@@ -1325,3 +1325,93 @@ def test_held_strikes_accumulate_to_give_up_across_boots(tmp_path):
                  archive=archive, transcripts=tx)
     assert final.gave_up == [42]
     assert archive.read(sid)["reason"] == "gave-up"
+
+
+# --- host death is not a session failure (#138) ---------------------------
+#
+# A revival stamps the boot it happened in (`revived_boot`). If that boot
+# is gone by the next pass, the revived session died WITH its host (a WSL
+# distro restart loop killed five sessions this way, one strike per ~2-min
+# distro life) — revive again, but add no strike. A revival that died in
+# the CURRENT boot is a genuine failure and still strikes.
+
+def _seed_revived(store, pid, *, strikes, revived_boot):
+    entry = new_entry(
+        pid=pid, cwd=f"/home/u/p{pid}", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+        revive_strikes=strikes, revived_boot=revived_boot,
+    )
+    store.write(entry)
+
+
+def test_revival_stamps_the_boot_it_happened_in(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    _run(store, FakeTmux(live=set()))
+    assert store.read(42)["revived_boot"] == FakeBoot().current()
+
+
+def test_revival_that_died_with_its_host_adds_no_strike(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed_revived(store, 42, strikes=2, revived_boot="previous-distro-life")
+    outcome = _run(store, FakeTmux(live=set()), max_strikes=5)
+    assert outcome.revived == [42]
+    assert store.read(42)["revive_strikes"] == 2
+
+
+def test_revival_that_died_in_this_boot_still_strikes(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed_revived(store, 42, strikes=2, revived_boot=FakeBoot().current())
+    _run(store, FakeTmux(live=set()), max_strikes=5)
+    assert store.read(42)["revive_strikes"] == 3
+
+
+def test_host_death_at_the_strike_limit_revives_instead_of_giving_up(tmp_path):
+    # The last revival's outcome is unknown — its host died under it — so
+    # the limit is not yet proven; give-up waits for a same-boot death.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed_revived(store, 42, strikes=3, revived_boot="previous-distro-life")
+    outcome = _run(store, FakeTmux(live=set()), max_strikes=3, archive=archive)
+    assert outcome.gave_up == []
+    assert outcome.revived == [42]
+    assert store.read(42)["revive_strikes"] == 3
+
+
+def test_distro_restart_loop_never_exhausts_the_strikes(tmp_path):
+    # The incident, end to end: each pass runs in a new distro life and the
+    # previous revival is gone. Ten lives later the session is still being
+    # revived, not archived as gave-up.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+
+    class _Boot:
+        def __init__(self, life):
+            self.life = life
+
+        def current(self):
+            return f"kernel@{self.life}"
+
+    for life in range(10):
+        scan = store.scan()
+        outcome = revive_crashed(
+            scan.entries, _Boot(life), FakeProbe(), FakeTmux(live=set()), store,
+            archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+        )
+        assert outcome.gave_up == [], f"gave up in distro life {life}"
+    assert archive.scan().records == []
+
+
+def test_archived_revival_that_died_with_its_host_adds_no_strike(tmp_path):
+    store = JournalStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/p99", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+        revive_strikes=2, revived_boot="previous-distro-life",
+    )
+    archive = ArchiveStore(tmp_path)
+    archive.archive(entry, "superseded-on-register", _NOW)
+    outcome = _run(store, FakeTmux(live=set()), max_strikes=3, archive=archive)
+    assert outcome.revived == [99]
+    assert store.read(99)["revive_strikes"] == 2

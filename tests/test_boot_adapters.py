@@ -30,7 +30,8 @@ def test_tailnet_script_retries_until_tailscaled_is_ready():
 
 def test_install_script_registers_both_tasks_with_the_right_shape():
     s = install_script("Ubuntu-24.04", "evan", "infiniteinsight@gmail.com",
-                       r"C:\ProgramData\crr\tailnet-default.ps1")
+                       r"C:\ProgramData\crr\tailnet-default.ps1",
+                       holder_rearm_minutes=1)
     assert f"Register-ScheduledTask" in s
     assert WSL_BOOT_TASK in s and TAILNET_TASK in s
     # S4U: no stored password (PIN login), and it kept the desktop locked.
@@ -43,9 +44,34 @@ def test_install_script_registers_both_tasks_with_the_right_shape():
 
 def test_install_script_omits_the_tailnet_task_when_no_preference():
     # Single-account host: no tailnet task, no switch script.
-    s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1")
+    s = install_script("Ubuntu-24.04", "evan", None, r"C:\ProgramData\crr\x.ps1",
+                       holder_rearm_minutes=1)
     assert WSL_BOOT_TASK in s
     assert TAILNET_TASK not in s
+
+
+def test_holder_task_rearms_after_a_distro_restart():
+    # #138: `sudo reboot` inside WSL restarts the distro, not Windows, so an
+    # AtStartup-only trigger never fires again and WSL idle-kills the
+    # distro ~15s after every client leaves. Repeat the trigger forever;
+    # IgnoreNew makes each repeat a no-op while the holder is still running.
+    s = install_script("Ubuntu-24.04", "evan", "infiniteinsight@gmail.com",
+                       r"C:\ProgramData\crr\t.ps1", holder_rearm_minutes=3)
+    wsl_part, tailnet_part = s.split(f"'{WSL_BOOT_TASK}'", 1)
+    assert "-RepetitionInterval (New-TimeSpan -Minutes 3)" in wsl_part
+    assert "$t.Repetition =" in wsl_part
+    assert "-MultipleInstances IgnoreNew" in wsl_part
+    # The tailnet switch is a one-shot at boot; repeating it would undo a
+    # manual `tailscale switch` every few minutes.
+    assert "Repetition" not in tailnet_part
+
+
+def test_holder_rearm_interval_has_no_default_of_its_own():
+    # The interval is a named config prior (boot_holder_rearm_minutes); a
+    # parameter default here would silently shadow it.
+    import inspect
+    param = inspect.signature(install_script).parameters["holder_rearm_minutes"]
+    assert param.default is inspect.Parameter.empty
 
 
 def test_parse_epoch_reads_a_numeric_line_and_rejects_junk():
@@ -290,7 +316,7 @@ def _cfg():
     # verdict assertions below stay the only thing under test here.
     return {"boot_headless_window_seconds": 300, "boot_preferred_tailnet": "",
             "interop_timeout_seconds": 5, "dashboard_port": 8765,
-            "tunnel_provider": "none"}
+            "tunnel_provider": "none", "boot_holder_rearm_minutes": 1}
 
 
 def test_report_says_headless_when_the_facts_show_it(tmp_path, monkeypatch, capsys):
@@ -341,6 +367,26 @@ def test_install_runs_the_generated_script_once_confirmed(monkeypatch, capsys):
     assert ran, "confirmed but ran nothing"
     # the elevated register goes through powershell RunAs (mirrors harden)
     assert any("RunAs" in " ".join(c) for c in ran)
+
+
+def test_install_passes_the_configured_holder_rearm_interval(monkeypatch):
+    seen = {}
+    real = cli.boot_windows.install_script
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cli.boot_windows, "install_script", spy)
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config",
+                        lambda: {**_cfg(), "boot_holder_rearm_minutes": 7})
+    monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
+    monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert cli.main(["reachable-at-boot", "--install"]) == 0
+    assert seen["holder_rearm_minutes"] == 7
 
 
 def test_macos_install_refuses_under_filevault(monkeypatch, capsys):

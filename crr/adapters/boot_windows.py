@@ -39,14 +39,30 @@ def tailnet_script(preferred_tailnet: str) -> str:
     )
 
 
-def _register_block(task: str, execute: str, argument: str) -> str:
+def _register_block(task: str, execute: str, argument: str,
+                    rearm_minutes: int | None = None) -> str:
     # One AtStartup / S4U / Highest task, unbounded run time. -Force makes
     # re-install idempotent.
+    #
+    # rearm_minutes repeats the startup trigger forever (a -Once trigger's
+    # Repetition with no duration == indefinitely; measured on the reference
+    # host). With IgnoreNew a repeat is a no-op while the task still runs,
+    # and restarts it once it has died -- e.g. a `sudo reboot` inside WSL
+    # restarts the distro, not Windows, and kills the holder (#138).
+    repeat = ""
+    instances = ""
+    if rearm_minutes is not None:
+        repeat = (
+            "$t.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) "
+            f"-RepetitionInterval (New-TimeSpan -Minutes {int(rearm_minutes)})).Repetition\n"
+        )
+        instances = "-MultipleInstances IgnoreNew "
     return (
         f"$a = New-ScheduledTaskAction -Execute '{execute}' -Argument '{argument}'\n"
         "$t = New-ScheduledTaskTrigger -AtStartup\n"
+        f"{repeat}"
         "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
-        "-DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)\n"
+        f"-DontStopIfGoingOnBatteries {instances}-ExecutionTimeLimit ([TimeSpan]::Zero)\n"
         "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U "
         "-RunLevel Highest\n"
         f"Register-ScheduledTask -TaskName '{task}' -Action $a -Trigger $t "
@@ -55,11 +71,17 @@ def _register_block(task: str, execute: str, argument: str) -> str:
 
 
 def install_script(distro: str, linux_user: str, tailnet: str | None,
-                   script_path: str) -> str:
-    """The full PowerShell the cli runs elevated to register the task(s)."""
+                   script_path: str, *, holder_rearm_minutes: int) -> str:
+    """The full PowerShell the cli runs elevated to register the task(s).
+
+    ``holder_rearm_minutes`` (config ``boot_holder_rearm_minutes``) is how
+    soon the WSL holder comes back after the distro dies without Windows
+    rebooting. Only the holder repeats; the tailnet switch stays one-shot.
+    """
     parts = ["$ErrorActionPreference = 'Stop'\n"]
     parts.append(_register_block(WSL_BOOT_TASK, _WSL,
-                                 wsl_boot_argument(distro, linux_user)))
+                                 wsl_boot_argument(distro, linux_user),
+                                 rearm_minutes=holder_rearm_minutes))
     if tailnet:
         # Write the retry script next to where the task will call it, then
         # register the task that runs it.
