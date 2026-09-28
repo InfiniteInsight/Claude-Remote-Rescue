@@ -1415,3 +1415,28 @@ def test_archived_revival_that_died_with_its_host_adds_no_strike(tmp_path):
     outcome = _run(store, FakeTmux(live=set()), max_strikes=3, archive=archive)
     assert outcome.revived == [99]
     assert store.read(99)["revive_strikes"] == 2
+
+
+def test_archive_seeded_distro_restart_loop_never_exhausts_the_strikes(tmp_path):
+    # After #138 a distro restart is a new boot, so register archives the
+    # old entry as superseded-on-register — the archive path is the main
+    # recovery route. revived_boot must survive re-journaling from it, or
+    # the second host death strikes again.
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path, pid=99)
+
+    class _Boot:
+        def __init__(self, life):
+            self.life = life
+
+        def current(self):
+            return f"kernel@{self.life}"
+
+    for life in range(10):
+        outcome = revive_crashed(
+            store.scan().entries, _Boot(life), FakeProbe(), FakeTmux(live=set()),
+            store, archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+        )
+        assert outcome.gave_up == [], f"gave up in distro life {life}"
+    assert store.read(99)["revived_boot"] == "kernel@9"
+    assert store.read(99)["revive_strikes"] <= 1
