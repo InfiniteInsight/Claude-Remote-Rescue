@@ -46,7 +46,9 @@ def test_pause_writes_a_timed_hold_and_releases_the_running_holder(host):
 def test_pause_requires_positive_minutes(host, capsys):
     flag, ran = host
     assert cli.main(["holder", "pause", "0"]) == 2
-    assert cli.main(["holder", "pause"]) == 2
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["holder", "pause"])      # argparse: MINUTES is required
+    assert exc.value.code == 2
     assert not flag.exists() and ran == []
 
 
@@ -145,3 +147,44 @@ def test_an_unwritable_flag_location_is_a_clean_error(host, monkeypatch, capsys)
     assert cli.main(["holder", "stop"]) == 1
     assert "could not write the hold flag" in capsys.readouterr().err
     assert ran == []  # never end the holder without a hold in place
+
+
+# --- help and the reboot warning ------------------------------------------
+
+def _help(argv, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(argv + ["--help"])
+    return capsys.readouterr().out
+
+
+def test_holder_help_lists_every_action_with_a_summary(capsys):
+    out = _help(["holder"], capsys)
+    for action in ("status", "pause", "stop", "resume"):
+        line = [l for l in out.splitlines() if l.strip().startswith(action)]
+        assert line and len(line[0].split()) > 1, f"{action} has no summary"
+    assert "Examples" in out
+
+
+def test_each_holder_action_has_its_own_help(capsys):
+    assert "MINUTES" in _help(["holder", "pause"], capsys)
+    stop = _help(["holder", "stop"], capsys)
+    assert "--until-reboot" in stop and "reboot" in stop.lower()
+    assert "--shutdown" not in _help(["holder", "resume"], capsys)
+
+
+def test_plain_stop_warns_that_it_survives_reboots(host, capsys):
+    assert cli.main(["holder", "stop"]) == 0
+    out = capsys.readouterr()
+    text = (out.out + out.err).lower()
+    assert "survives windows reboots" in text and "--until-reboot" in text
+
+
+def test_stop_until_reboot_does_not_warn(host, capsys):
+    assert cli.main(["holder", "stop", "--until-reboot"]) == 0
+    out = capsys.readouterr()
+    assert "survives windows reboots" not in (out.out + out.err).lower()
+
+
+def test_shutdown_is_rejected_on_resume(host):
+    with pytest.raises(SystemExit):
+        cli.main(["holder", "resume", "--shutdown"])

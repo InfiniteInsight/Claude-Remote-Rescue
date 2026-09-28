@@ -90,7 +90,7 @@ def describe(record: Mapping[str, Any] | None, *, now: float,
         return "active (unrecognized hold flag ignored)"
     mode = record["mode"]
     if mode == "stop":
-        return "stopped until `crr holder resume`"
+        return "stopped until `crr holder resume` (survives Windows reboots)"
     if mode == "pause":
         if now < record["until"]:
             return f"paused until {_clock(record['until'])}"

@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import textwrap
 import time
 import uuid
 from datetime import datetime, timezone
@@ -640,20 +641,54 @@ def _build_parser() -> argparse.ArgumentParser:
 
     hold = sub.add_parser(
         "holder",
-        help="WSL only: pause/stop/resume the crr-wsl-boot holder that keeps "
-             "the distro running (it re-arms every minute, so an intentional "
-             "`wsl --shutdown` needs a hold first)",
+        help="WSL only: pause/stop/resume the holder that keeps the distro "
+             "running (needed before an intentional `wsl --shutdown`)",
+        # Pre-wrapped: RawDescriptionHelpFormatter keeps the epilog's
+        # example columns, which also means it won't wrap this for us.
+        description=textwrap.fill(
+            "Control the crr-wsl-boot holder: the Windows task (installed by "
+            "`crr reachable-at-boot --install`) that keeps this WSL distro "
+            "running. It re-arms every minute, so a deliberate `wsl "
+            "--shutdown` comes straight back unless the holder is paused or "
+            "stopped first. With no action, shows status.", width=78),
+        epilog=(
+            "Examples:\n"
+            "  crr holder                        show the hold and the task\n"
+            "  crr holder pause 30 --shutdown    shut WSL down for 30 minutes\n"
+            "  crr holder stop --until-reboot    stay down until Windows restarts\n"
+            "  crr holder resume                 clear the hold, start it now"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    hold.add_argument("action", nargs="?", default="status",
-                      choices=("status", "pause", "stop", "resume"))
-    hold.add_argument("minutes", nargs="?", type=int, default=None,
-                      help="pause: how long the holder stays down")
-    hold.add_argument("--until-reboot", action="store_true",
-                      help="stop: only until Windows next reboots")
-    hold.add_argument("--shutdown", action="store_true",
-                      help="pause/stop: also run `wsl --shutdown` right away "
-                           "(ends every WSL session, this one included)")
-    hold.set_defaults(func=_cmd_holder)
+    hold.set_defaults(func=_cmd_holder, action="status")
+    hold_sub = hold.add_subparsers(dest="action", metavar="ACTION")
+    hold_sub.add_parser(
+        "status", help="show the hold, the task, and the holder process",
+        description="Show the current hold (if any), whether the "
+                    "crr-wsl-boot task is running, and the holder process.")
+    h_pause = hold_sub.add_parser(
+        "pause", help="keep the holder down for MINUTES, then re-arm",
+        description="Keep the holder down for MINUTES. When the pause "
+                    "expires, the next re-arm (within a minute) starts it "
+                    "again — and with it WSL, if WSL was shut down.")
+    h_pause.add_argument("minutes", type=int, metavar="MINUTES",
+                         help="how long the holder stays down")
+    h_stop = hold_sub.add_parser(
+        "stop", help="keep the holder down until `resume` (survives reboots)",
+        description="Keep the holder down until `crr holder resume`. A plain "
+                    "stop SURVIVES Windows reboots: the machine stays "
+                    "unreachable at boot until you resume. Use "
+                    "--until-reboot to lift it at the next Windows restart.")
+    h_stop.add_argument("--until-reboot", action="store_true",
+                        help="lift the stop when Windows next restarts")
+    for p_ in (h_pause, h_stop):
+        p_.add_argument("--shutdown", action="store_true",
+                        help="also run `wsl --shutdown` now (ends every WSL "
+                             "session, this one included; sessions are "
+                             "revived when WSL next starts)")
+    hold_sub.add_parser(
+        "resume", help="clear the hold and start the holder now",
+        description="Clear any pause/stop and start the holder immediately "
+                    "(which also starts WSL if it was down).")
 
     rec = sub.add_parser(
         "recall",
@@ -6232,7 +6267,7 @@ def _cmd_holder(args: argparse.Namespace) -> int:
         print("crr holder: only meaningful inside WSL (it controls the "
               f"Windows task {boot_windows.WSL_BOOT_TASK})", file=sys.stderr)
         return 2
-    action = args.action
+    action = args.action or "status"   # bare `crr holder`
     now = int(time.time())
     try:
         path = _holder_hold_path()
@@ -6262,11 +6297,11 @@ def _cmd_holder(args: argparse.Namespace) -> int:
         return 0
 
     if action == "pause":
-        if args.minutes is None or args.minutes <= 0:
+        if args.minutes <= 0:
             print("crr holder pause: give a positive number of minutes", file=sys.stderr)
             return 2
         rec = holder_hold.pause(now=now, minutes=args.minutes)
-    elif args.until_reboot:
+    elif getattr(args, "until_reboot", False):
         boot = boot_windows.read_facts().machine_boot
         if boot is None:
             print("crr holder stop --until-reboot: could not read the Windows "
@@ -6298,7 +6333,12 @@ def _cmd_holder(args: argparse.Namespace) -> int:
               file=sys.stderr)
         rc = 1
     print(f"holder: {holder_hold.describe(rec, now=now, machine_boot=None)}")
-    if args.shutdown and rc == 0:
+    if rec["mode"] == "stop":
+        print("warning: a plain stop survives Windows reboots — the machine "
+              "stays unreachable at boot until `crr holder resume` (use "
+              "`stop --until-reboot` to lift it at the next restart)",
+              file=sys.stderr)
+    if getattr(args, "shutdown", False) and rc == 0:
         print("holder: shutting WSL down now", flush=True)
         _holder_exec(["wsl.exe", "--shutdown"])
     return rc
