@@ -138,6 +138,13 @@ No tag or release has been cut yet. This section describes everything on
   UAC window. It's now staged in the Windows `%TEMP%`, run with a
   process-scoped `-ExecutionPolicy Bypass`, and any failure is logged and
   printed by crr.
+- Restarting the dashboard no longer kills sessions restored from it (#140).
+  A dashboard Reopen/Restore starts the tmux server inside `crr-web.service`,
+  whose default `KillMode=control-group` took those sessions down on every
+  restart — including every `crr deploy`. The unit now uses
+  `KillMode=process` (like `crr-revive`), and `crr deploy` refuses to restart
+  an installed web unit that predates it. Run `crr systemd --install` to
+  rewrite the units.
 - A `sudo reboot` inside WSL (a distro-only restart) no longer loses sessions
   for good (#138). The `crr-wsl-boot` holder task now repeats its trigger
   (`boot_holder_rearm_minutes`, default 1) so it re-arms without a Windows

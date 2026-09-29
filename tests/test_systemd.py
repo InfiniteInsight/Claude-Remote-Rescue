@@ -125,6 +125,16 @@ def test_web_service_unit_runs_crr_web_and_stays_up():
     assert "WSL_DISTRO_NAME" not in unit
 
 
+def test_web_service_unit_restart_spares_sessions_it_spawned():
+    # #140: a dashboard Reopen/Restore starts the tmux server from the web
+    # process, so it lives in crr-web's cgroup. Under the default
+    # KillMode=control-group any web restart (a deploy, a crash-restart)
+    # killed those sessions — one was lost mid-turn deploying #139.
+    unit = systemd.web_service_unit(
+        crr_bin="/opt/crr/bin/crr", path="/usr/bin", state_home="/s", port=8377)
+    assert "KillMode=process" in unit
+
+
 def test_web_service_unit_honors_configured_restart_seconds():
     # F7: RestartSec was baked at 2, unconfigurable — now threaded like the
     # watchdog interval (default preserved for callers that don't pass it).
