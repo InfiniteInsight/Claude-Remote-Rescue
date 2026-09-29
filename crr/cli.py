@@ -5970,6 +5970,25 @@ _TAILNET_SCRIPT_WINDOWS_PATH = r"C:\ProgramData\crr\tailnet-select.ps1"
 _HOLDER_SCRIPT_WINDOWS_PATH = r"C:\ProgramData\crr\wsl-holder.ps1"
 
 
+_INSTALL_SCRIPT_NAME = "crr-reachable-at-boot-install.ps1"
+_INSTALL_LOG_NAME = "crr-reachable-at-boot-install.log"
+
+
+def _windows_temp_dir() -> tuple[Path, str] | None:
+    """The Windows user's %TEMP% as (WSL path, Windows path), resolved at
+    call time; None if interop can't answer (caller falls back to UNC)."""
+    try:
+        win = subprocess.run(["cmd.exe", "/c", "echo %TEMP%"], capture_output=True,
+                             text=True, timeout=10, check=True).stdout.strip()
+        posix = subprocess.run(["wslpath", "-u", win], capture_output=True,
+                               text=True, timeout=10, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not win or "%" in win or not posix or not Path(posix).is_dir():
+        return None
+    return Path(posix), win
+
+
 def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
     distro, user = _wsl_distro_and_user()
     if not distro or not user:
@@ -5983,9 +6002,23 @@ def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
         distro, user, tailnet, _TAILNET_SCRIPT_WINDOWS_PATH,
         holder_rearm_minutes=config.get("boot_holder_rearm_minutes"),
         holder_script_path=_HOLDER_SCRIPT_WINDOWS_PATH)
-    tmp = Path(tempfile.gettempdir()) / "crr-reachable-at-boot-install.ps1"
-    tmp.write_text(script_text, encoding="utf-8")
-    win_script = _windows_unc_path(distro, tmp)
+    # Staged on the Windows side when possible (#142): the elevated
+    # process's access to the \\wsl.localhost share is unverified, and a
+    # network-path script is exactly what RemoteSigned refuses.
+    staged = _windows_temp_dir()
+    if staged is not None:
+        posix_dir, win_dir = staged
+        tmp = posix_dir / _INSTALL_SCRIPT_NAME
+        win_script = f"{win_dir}\\{_INSTALL_SCRIPT_NAME}"
+        log_posix = posix_dir / _INSTALL_LOG_NAME
+        win_log = f"{win_dir}\\{_INSTALL_LOG_NAME}"
+    else:
+        tmp = Path(tempfile.gettempdir()) / _INSTALL_SCRIPT_NAME
+        win_script = _windows_unc_path(distro, tmp)
+        log_posix = Path(tempfile.gettempdir()) / _INSTALL_LOG_NAME
+        win_log = _windows_unc_path(distro, log_posix)
+    log_posix.unlink(missing_ok=True)  # never report an earlier run's error
+    tmp.write_text(boot_windows.logged_script(script_text, win_log), encoding="utf-8")
     tasks = boot_windows.WSL_BOOT_TASK + (
         f", {boot_windows.TAILNET_TASK}" if tailnet else "")
     print(
@@ -6007,10 +6040,19 @@ def _reachable_at_boot_install_wsl(config: cfg.Config) -> int:
         print("crr reachable-at-boot --install: aborted — nothing was "
               "registered.", file=sys.stderr)
         return 3
-    cmds = [_elevated_powershell(f'-NoProfile -NonInteractive -File "{win_script}"')]
+    # Bypass is process-scoped: it lets this one unsigned, crr-generated
+    # script run under RemoteSigned and changes no machine policy (#142).
+    cmds = [_elevated_powershell(
+        f'-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{win_script}"')]
     if not _run_commands(cmds, "reachable-at-boot"):
+        try:
+            detail = log_posix.read_text(encoding="utf-8-sig").strip()
+        except OSError:
+            detail = ""
         print("crr reachable-at-boot --install: the elevated registration "
-              "FAILED (see above)", file=sys.stderr)
+              "FAILED" + (f":\n{detail}" if detail else " (see above; if the "
+              "UAC prompt was declined, nothing was registered)"),
+              file=sys.stderr)
         return 1
     # Fallback unit rides the same consent. A root-interop failure degrades
     # to the exact manual command rather than failing the whole install —
