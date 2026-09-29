@@ -942,3 +942,48 @@ def test_deploy_no_restart_skips_the_service_restart(tmp_path, monkeypatch, caps
     monkeypatch.setenv("PATH", str(home / ".local" / "bin"))
     assert cli.main(["deploy", "--no-restart"]) == 0
     assert restarted == [], "--no-restart did not skip the restart"
+
+
+# --- #140: never restart a web unit that would kill restored sessions ------
+
+def _deploy_env(tmp_path, monkeypatch, unit_text):
+    from crr import cli
+    from crr.adapters import deploy as ad, state_dir, systemd
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    home = tmp_path / "home"
+    if unit_text is not None:
+        d = systemd.unit_dir(home)
+        d.mkdir(parents=True)
+        (d / systemd.WEB_SERVICE_NAME).write_text(unit_text)
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
+    monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
+    monkeypatch.setattr(ad, "build", lambda *a, **k: None)
+    restarts = []
+    monkeypatch.setattr(ad, "restart_service", lambda **k: restarts.append(1) or None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    return cli, repo, restarts
+
+
+def test_deploy_skips_restarting_a_web_unit_that_predates_killmode_process(
+        tmp_path, monkeypatch, capsys):
+    cli, repo, restarts = _deploy_env(
+        tmp_path, monkeypatch, "[Service]\nType=simple\nExecStart=/x web\n")
+    assert cli.main(["deploy", "--repo", str(repo)]) == 0
+    assert restarts == []
+    err = capsys.readouterr().err
+    assert "crr systemd --install" in err
+
+
+def test_deploy_restarts_a_web_unit_that_spares_its_sessions(tmp_path, monkeypatch):
+    cli, repo, restarts = _deploy_env(
+        tmp_path, monkeypatch, "[Service]\nType=simple\nKillMode=process\n")
+    assert cli.main(["deploy", "--repo", str(repo)]) == 0
+    assert restarts == [1]
+
+
+def test_deploy_restarts_when_no_systemd_unit_is_installed(tmp_path, monkeypatch):
+    cli, repo, restarts = _deploy_env(tmp_path, monkeypatch, None)
+    assert cli.main(["deploy", "--repo", str(repo)]) == 0
+    assert restarts == [1]

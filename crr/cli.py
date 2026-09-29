@@ -1408,6 +1408,15 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
 
     if args.no_restart:
         print("skipping service restart (--no-restart)")
+    elif systemd.web_unit_spares_sessions(Path.home()) is False:
+        # #140: this unit predates KillMode=process — restarting it kills
+        # every session a dashboard Reopen/Restore started. Deployed, but
+        # the running dashboard keeps the old code until it's safe.
+        print("crr deploy: NOT restarting crr-web.service — its installed "
+              "unit predates KillMode=process, so a restart would kill "
+              "sessions restored from the dashboard. Run `crr systemd "
+              "--install` (rewrites the units; restarts nothing), then "
+              "`systemctl --user restart crr-web.service`.", file=sys.stderr)
     else:
         err = deploy_io.restart_service()
         if err:

@@ -148,6 +148,11 @@ def web_service_unit(
     interval — a named config default (``web_restart_seconds``), not a
     baked literal; the default here only covers callers with no Config to
     hand.
+
+    KillMode=process (#140), for the same reason as the revive unit: a
+    dashboard Reopen/Restore starts the tmux server from this process, so
+    it lands in this unit's cgroup. Under the default control-group mode
+    every web restart — a deploy, a crash-restart — killed those sessions.
     """
     distro_line = f"Environment=WSL_DISTRO_NAME={wsl_distro}\n" if wsl_distro else ""
     return (
@@ -157,6 +162,7 @@ def web_service_unit(
         "\n"
         "[Service]\n"
         "Type=simple\n"
+        "KillMode=process\n"
         f"Environment=PATH={path}\n"
         f"Environment=XDG_STATE_HOME={state_home}\n"
         f"{distro_line}"
@@ -203,6 +209,20 @@ def awake_service_unit(
 def stop_awake_command() -> list[str]:
     """Stop the keep-awake loop, which IS how the hold is released."""
     return ["systemctl", "--user", "stop", AWAKE_SERVICE_NAME]
+
+
+def web_unit_spares_sessions(home: Path) -> bool | None:
+    """Does the INSTALLED crr-web unit use KillMode=process (#140)?
+
+    None when no unit is installed (not a systemd host, or never
+    installed); False when it's an older unit whose restart would kill the
+    tmux sessions dashboard Reopen/Restore started in its cgroup.
+    """
+    try:
+        text = (unit_dir(home) / WEB_SERVICE_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return any(line.strip() == "KillMode=process" for line in text.splitlines())
 
 
 def unit_dir(home: Path) -> Path:
