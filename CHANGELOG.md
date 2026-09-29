@@ -131,6 +131,13 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- `crr reachable-at-boot --install` works on WSL hosts with the common
+  `RemoteSigned` execution policy (#142). The elevated script was staged on
+  the `\\wsl.localhost` share and run without `-ExecutionPolicy`, so Windows
+  refused it as an unsigned network script, and the error vanished with the
+  UAC window. It's now staged in the Windows `%TEMP%`, run with a
+  process-scoped `-ExecutionPolicy Bypass`, and any failure is logged and
+  printed by crr.
 - A `sudo reboot` inside WSL (a distro-only restart) no longer loses sessions
   for good (#138). The `crr-wsl-boot` holder task now repeats its trigger
   (`boot_holder_rearm_minutes`, default 1) so it re-arms without a Windows

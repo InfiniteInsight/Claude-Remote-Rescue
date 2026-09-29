@@ -160,6 +160,23 @@ def _write_script_block(path: str, body: str) -> str:
     )
 
 
+def logged_script(body: str, log_path: str) -> str:
+    """Wrap an elevated script so any failure is written to ``log_path``.
+
+    The UAC-elevated window closes the moment the script ends, taking the
+    error with it (#142). crr reads this log back and prints it.
+    """
+    safe_log = log_path.replace("'", "''")
+    return (
+        "try {\n"
+        f"{body}"
+        "} catch {\n"
+        f"    $_ | Out-String | Set-Content -LiteralPath '{safe_log}' -Encoding UTF8\n"
+        "    exit 1\n"
+        "}\n"
+    )
+
+
 def install_script(distro: str, linux_user: str, tailnet: str | None,
                    script_path: str, *, holder_rearm_minutes: int,
                    holder_script_path: str) -> str:

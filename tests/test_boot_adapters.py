@@ -392,6 +392,7 @@ def test_install_runs_the_generated_script_once_confirmed(monkeypatch, capsys):
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli, "_load_config", _cfg)
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
+    monkeypatch.setattr(cli, "_windows_temp_dir", lambda: None)
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: ran.extend(cmds) or True)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
@@ -414,6 +415,7 @@ def test_install_passes_the_configured_holder_rearm_interval(monkeypatch):
     monkeypatch.setattr(cli, "_load_config",
                         lambda: {**_cfg(), "boot_holder_rearm_minutes": 7})
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
+    monkeypatch.setattr(cli, "_windows_temp_dir", lambda: None)
     monkeypatch.setattr(cli, "_run_commands", lambda cmds, label: True)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
@@ -487,3 +489,66 @@ def test_holder_pids_skips_unreadable_processes(tmp_path):
     d = tmp_path / "13"
     d.mkdir()  # no comm/environ: vanished or not ours
     assert boot_windows.holder_pids(proc_root=tmp_path) == []
+
+
+# --- #142: the elevated install must actually run, and fail visibly -------
+
+def _install_env(monkeypatch, tmp_path, run_ok=True):
+    ran = []
+    win_dir = tmp_path / "wintemp"
+    win_dir.mkdir()
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli, "_load_config", _cfg)
+    monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
+    monkeypatch.setattr(cli, "_windows_temp_dir",
+                        lambda: (win_dir, r"C:\Users\evan\AppData\Local\Temp"))
+    monkeypatch.setattr(cli, "_run_commands",
+                        lambda cmds, label: ran.extend(cmds) or run_ok)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    return ran, win_dir
+
+
+def test_install_bypasses_execution_policy_for_the_staged_script(monkeypatch, tmp_path):
+    # RemoteSigned (the common default) refuses an unsigned -File script
+    # from a network path; Bypass is process-scoped and changes nothing else.
+    ran, _ = _install_env(monkeypatch, tmp_path)
+    assert cli.main(["reachable-at-boot", "--install"]) == 0
+    elevated = " ".join(ran[0])
+    assert "-ExecutionPolicy Bypass" in elevated
+
+
+def test_install_stages_the_script_on_the_windows_side_not_unc(monkeypatch, tmp_path):
+    ran, win_dir = _install_env(monkeypatch, tmp_path)
+    cli.main(["reachable-at-boot", "--install"])
+    elevated = " ".join(ran[0])
+    assert r"C:\Users\evan\AppData\Local\Temp\crr-reachable-at-boot-install.ps1" in elevated
+    assert "wsl.localhost" not in elevated
+    assert (win_dir / "crr-reachable-at-boot-install.ps1").exists()
+
+
+def test_install_script_logs_its_own_failure(monkeypatch, tmp_path):
+    ran, win_dir = _install_env(monkeypatch, tmp_path)
+    cli.main(["reachable-at-boot", "--install"])
+    body = (win_dir / "crr-reachable-at-boot-install.ps1").read_text()
+    assert "catch" in body and "crr-reachable-at-boot-install.log" in body
+
+
+def test_a_failed_install_prints_the_elevated_error_log(monkeypatch, tmp_path, capsys):
+    ran, win_dir = _install_env(monkeypatch, tmp_path, run_ok=False)
+
+    def fail(cmds, label):
+        (win_dir / "crr-reachable-at-boot-install.log").write_text(
+            "Register-ScheduledTask : Access is denied.")
+        return False
+
+    monkeypatch.setattr(cli, "_run_commands", fail)
+    assert cli.main(["reachable-at-boot", "--install"]) == 1
+    assert "Access is denied" in capsys.readouterr().err
+
+
+def test_a_stale_log_from_an_earlier_run_is_not_reported(monkeypatch, tmp_path, capsys):
+    ran, win_dir = _install_env(monkeypatch, tmp_path, run_ok=False)
+    (win_dir / "crr-reachable-at-boot-install.log").write_text("old failure")
+    assert cli.main(["reachable-at-boot", "--install"]) == 1
+    assert "old failure" not in capsys.readouterr().err
