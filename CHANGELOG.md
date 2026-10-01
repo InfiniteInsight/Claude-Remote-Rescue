@@ -131,6 +131,13 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- A conversation ended with `/exit` (or a remote close) no longer comes back
+  (#144). The clean exit only cleared the exiting shell's own journal entry,
+  so any other crashed copy of the same conversation was still revived.
+  A clean exit now retires every non-running copy and closes a revivable
+  archive record; the post-reauth reopen also gets its missing clean-exit
+  hook. Regenerate the shell shim (`crr shim fish` etc.) to pick up
+  `claude-exit --clean`.
 - `crr reachable-at-boot --install` works on WSL hosts with the common
   `RemoteSigned` execution policy (#142). The elevated script was staged on
   the `\\wsl.localhost` share and run without `-ExecutionPolicy`, so Windows

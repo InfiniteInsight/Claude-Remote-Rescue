@@ -1113,3 +1113,52 @@ def test_subcommand_bypasses_injection_and_repair_loop(
     assert lines[0] == subcmd, f"expected bare {subcmd!r}, got: {lines[0]!r}"
     assert "AFTER-MARKER" in result.stdout
     assert _OFFER not in result.stderr
+
+
+# --- #144: a clean exit retires stale copies; a crash doesn't -------------
+
+_RETIRE_SID = "dddddddd-4444-4444-8444-444444444444"
+
+
+def _plant_stale_copy(state):
+    from crr.core.journal import JournalStore, new_entry
+    JournalStore(state / "crr").write(new_entry(
+        pid=4_000_003, cwd="/p", host="tmux", shell="bash",
+        boot_id="0000dead-0000-4000-8000-000000000000",  # never this boot
+        now="2026-07-24T00:00:00Z",
+        claude={"session_id": _RETIRE_SID, "sid_source": "verified",
+                "started": "2026-07-24T00:00:00Z", "skip_permissions": False}))
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_clean_exit_retires_a_stale_copy_of_the_conversation(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    _plant_stale_copy(state)
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim, cmdline=f"--resume {_RETIRE_SID}")
+    env = _repair_env(state, bindir, tmp_path, exits="0")
+    result = subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert not (state / "crr" / "tabs" / "4000003.json").exists()
+    rec = json.loads((state / "crr" / "archive" / f"{_RETIRE_SID}.json").read_text())
+    assert rec["reason"] == "closed"
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_crash_exit_leaves_other_copies_revivable(shell, tmp_path, capsys):
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    _plant_stale_copy(state)
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim, cmdline=f"--resume {_RETIRE_SID}")
+    env = _repair_env(state, bindir, tmp_path, exits="1")
+    subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    assert (state / "crr" / "tabs" / "4000003.json").exists()

@@ -763,6 +763,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="[shim] mark a shell's claude session ended (clean exit)",
     )
     ce.add_argument("--pid", type=int, required=True)
+    ce.add_argument("--clean", action="store_true",
+                    help="the user ended the conversation (/exit or a close): "
+                         "also retire every crashed copy of it (#144)")
     ce.set_defaults(func=_cmd_claude_exit)
 
     rca = sub.add_parser(
@@ -2516,10 +2519,15 @@ def _cmd_deregister(args: argparse.Namespace) -> int:
             entry = store.read(args.pid)
         except (KeyError, contracts.ContractError):
             entry = None
+        reason = getattr(args, "reason", None) or "shell-exited"
         if entry is not None and entry.get("claude") is not None:
-            ArchiveStore(sd).archive(entry, getattr(args, "reason", None) or "shell-exited", _now())
+            ArchiveStore(sd).archive(entry, reason, _now())
         rescue.invalidate_markers(sd)
         store.remove(args.pid)
+        if reason == "closed" and entry is not None and entry.get("claude"):
+            # The tmux exit hook's clean /exit ends the conversation (#144).
+            _retire_conversation(sd, store, entry["claude"]["session_id"],
+                                 keep_pid=args.pid)
     return 0
 
 
@@ -2602,10 +2610,26 @@ def _cmd_claude_exit(args: argparse.Namespace) -> int:
             entry = store.read(args.pid)
         except (KeyError, contracts.ContractError):
             return 0
+        sid = (entry.get("claude") or {}).get("session_id")
         entry["claude"] = None
         entry["updated"] = _now()
         store.write(entry)
+        if getattr(args, "clean", False) and sid:
+            _retire_conversation(sd, store, sid, keep_pid=args.pid)
     return 0
+
+
+def _retire_conversation(sd: Path, store: JournalStore, sid: str, *, keep_pid: int) -> None:
+    """Wiring for ops.retire_conversation (#144); caller holds the lock.
+    Best-effort: a clean exit must never fail because a probe did."""
+    try:
+        config = _load_config()
+        ops.retire_conversation(
+            store, ArchiveStore(sd), boot_identity.detect(),
+            process_probe.PsProcessProbe(config.get("interop_timeout_seconds")),
+            sid, keep_pid=keep_pid, now=_now())
+    except Exception:
+        pass
 
 
 def _cmd_remote_control_args(args: argparse.Namespace) -> int:
@@ -3329,6 +3353,9 @@ def _post_reauth_recovery(
                     pid, _now(), grace=config.get("close_grace_seconds"),
                     remote_control=config.get("remote_control"),
                     tab_spawner=spawner, tabs_expected=tabs_expected,
+                    # The clean-exit hook (#144): without it a later /exit
+                    # reads as a crash and the reviver resurrects it.
+                    crr_bin=_resolve_service_bin(None),
                     tab_health=tab_health.TabHealthStore(sd),
                 )
         elif kind == classifier.LIVE:

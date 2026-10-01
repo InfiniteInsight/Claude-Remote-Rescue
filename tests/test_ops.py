@@ -1811,3 +1811,96 @@ def test_set_skip_permissions_refuses_unknown_sid(tmp_path):
     res = ops.set_skip_permissions(store, _SID, True, _NOW)
     assert not res.ok
     assert "no session" in res.message
+
+
+# --- a clean exit retires the whole conversation (#144) -------------------
+#
+# 827f363d kept coming back after a clean /exit: the exit cleared only the
+# entry of the shell it ran in, while another crashed entry for the SAME
+# conversation stayed a revival candidate. A clean exit ends the
+# conversation, so every non-running copy of it is retired.
+
+_OTHER = "bbbbbbbb-2222-4222-8222-222222222222"
+
+
+def _claude_for(sid):
+    return {"session_id": sid, "sid_source": "verified", "started": _NOW,
+            "skip_permissions": False}
+
+
+class _PerPidProbe:
+    def __init__(self, alive):
+        self._alive = set(alive)
+
+    def is_alive(self, pid):
+        return pid in self._alive
+
+    def has_controlling_tty(self, pid):
+        return True
+
+
+def test_clean_exit_retires_crashed_copies_of_the_same_conversation(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 10, boot="current-boot", claude=_claude())   # the exiting shell
+    _seed(store, 20, boot="current-boot", claude=_claude())   # stale crashed copy
+    _seed(store, 30, boot="old-boot", claude=_claude())       # copy from a past boot
+    retired = ops.retire_conversation(
+        store, archive, FakeBoot(), _PerPidProbe(alive={10}), _SID,
+        keep_pid=10, now=_NOW)
+    assert sorted(retired) == [20, 30]
+    assert [e["pid"] for e in store.scan().entries] == [10]
+    assert archive.read(_SID)["reason"] == "closed"
+
+
+def test_clean_exit_never_touches_a_running_copy(tmp_path):
+    # Another LIVE agent on the same conversation is not ours to end.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 10, boot="current-boot", claude=_claude())
+    _seed(store, 20, boot="current-boot", claude=_claude())
+    retired = ops.retire_conversation(
+        store, archive, FakeBoot(), _PerPidProbe(alive={10, 20}), _SID,
+        keep_pid=10, now=_NOW)
+    assert retired == []
+    assert sorted(e["pid"] for e in store.scan().entries) == [10, 20]
+
+
+def test_clean_exit_leaves_other_conversations_alone(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 10, boot="current-boot", claude=_claude())
+    _seed(store, 20, boot="current-boot", claude=_claude_for(_OTHER))
+    ops.retire_conversation(store, archive, FakeBoot(), _PerPidProbe(alive={10}),
+                            _SID, keep_pid=10, now=_NOW)
+    assert sorted(e["pid"] for e in store.scan().entries) == [10, 20]
+
+
+def test_clean_exit_closes_a_revivable_archive_record(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    archived = new_entry(pid=40, cwd="/p40", host="tmux", shell="zsh",
+                         boot_id="old-boot", now=_NOW, claude=_claude())
+    archive.archive(archived, "superseded-on-register", _NOW)
+    ops.retire_conversation(store, archive, FakeBoot(), _PerPidProbe(alive=()),
+                            _SID, keep_pid=10, now=_NOW)
+    assert archive.read(_SID)["reason"] == "closed"
+
+
+def test_clean_exit_keeps_a_terminal_archive_reason(tmp_path):
+    # gave-up / untracked / dismissed already stop revival and say why;
+    # don't rewrite their history.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    archived = new_entry(pid=40, cwd="/p40", host="tmux", shell="zsh",
+                         boot_id="old-boot", now=_NOW, claude=_claude())
+    archive.archive(archived, "untracked", _NOW)
+    ops.retire_conversation(store, archive, FakeBoot(), _PerPidProbe(alive=()),
+                            _SID, keep_pid=10, now=_NOW)
+    assert archive.read(_SID)["reason"] == "untracked"
+
+
+def test_after_a_clean_exit_the_reviver_has_nothing_to_revive(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 20, boot="current-boot", claude=_claude())
+    ops.retire_conversation(store, archive, FakeBoot(), _PerPidProbe(alive=()),
+                            _SID, keep_pid=10, now=_NOW)
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), _PerPidProbe(alive=()), FakeTmux(),
+        store, archive, max_strikes=5, now=_NOW, remote_control_enabled=False)
+    assert outcome.revived == []

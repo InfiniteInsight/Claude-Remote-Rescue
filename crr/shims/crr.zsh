@@ -189,11 +189,16 @@ claude() {
       continue
     fi
     if [ "$_kind" = close ]; then
-      _crr claude-exit --pid "$$"
+      _crr claude-exit --pid "$$" --clean
       exit
     fi
     # Unknown kind or no flag: branch on how claude exited.
-    [ "$_code" -eq 0 ] && break
+    # A clean exit ends the conversation: --clean also retires any
+    # crashed copy of it elsewhere, or the reviver brings it back (#144).
+    if [ "$_code" -eq 0 ]; then
+      _crr claude-exit --pid "$$" --clean
+      break
+    fi
     [ "$_crashes" -ge "$_CRR_MAX_RESUMES" ] && break
     _ans=
     if [ -t 0 ]; then

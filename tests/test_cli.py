@@ -7468,3 +7468,67 @@ def test_web_provider_labels_a_file_sourced_answer(tmp_path, monkeypatch):
     assert payload["auth_state"] == "valid"
     assert payload["auth_source"] == "credentials_file"
     assert isinstance(payload["auth_expires_in_seconds"], int)
+
+
+# --- #144: a clean exit retires every crashed copy of the conversation ----
+
+_STALE_BOOT = "0000dead-0000-4000-8000-000000000000"  # never the current boot
+
+
+def _seed_claude(store, pid, sid, boot):
+    store.write(new_entry(
+        pid=pid, cwd="/p", host="tab", shell="fish", boot_id=boot,
+        now="2026-07-24T00:00:00Z", claude=_claude_field(sid)))
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="uses the real boot adapter")
+def test_clean_claude_exit_retires_a_stale_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    boot = boot_identity.detect().current()
+    _seed_claude(store, os.getpid(), sid, boot)       # the exiting shell (alive)
+    _seed_claude(store, 4_000_001, sid, _STALE_BOOT)  # crashed copy elsewhere
+    assert cli.main(["claude-exit", "--pid", str(os.getpid()), "--clean"]) == 0
+    assert store.read(os.getpid())["claude"] is None
+    with pytest.raises(KeyError):
+        store.read(4_000_001)
+    assert archive.read(sid)["reason"] == "closed"
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="uses the real boot adapter")
+def test_plain_claude_exit_does_not_retire_other_copies(tmp_path, monkeypatch):
+    # The after-crash path calls claude-exit without --clean: a crash is not
+    # the user ending the conversation.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    _seed_claude(store, os.getpid(), sid, boot_identity.detect().current())
+    _seed_claude(store, 4_000_001, sid, _STALE_BOOT)
+    assert cli.main(["claude-exit", "--pid", str(os.getpid())]) == 0
+    assert store.read(4_000_001)["claude"]["session_id"] == sid
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="uses the real boot adapter")
+def test_closed_deregister_retires_a_stale_copy(tmp_path, monkeypatch):
+    # The tmux exit hook: `crr deregister --pid $$ --reason closed`.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    _seed_claude(store, 4_000_002, sid, boot_identity.detect().current())
+    _seed_claude(store, 4_000_001, sid, _STALE_BOOT)
+    assert cli.main(["deregister", "--pid", "4000002", "--reason", "closed"]) == 0
+    assert store.scan().entries == []
+    assert archive.read(sid)["reason"] == "closed"
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="uses the real boot adapter")
+def test_shell_exit_deregister_does_not_retire_other_copies(tmp_path, monkeypatch):
+    # A tab close (fish_exit -> deregister, no reason) is NOT a clean exit.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store = JournalStore(tmp_path)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    _seed_claude(store, 4_000_002, sid, boot_identity.detect().current())
+    _seed_claude(store, 4_000_001, sid, _STALE_BOOT)
+    assert cli.main(["deregister", "--pid", "4000002"]) == 0
+    assert store.read(4_000_001)["claude"]["session_id"] == sid
