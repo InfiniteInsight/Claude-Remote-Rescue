@@ -226,7 +226,7 @@ function claude
             continue
         end
         if test "$_flag[1]" = close
-            _crr claude-exit --pid $fish_pid --clean
+            _crr claude-exit --pid $fish_pid
             exit
         end
         # Unknown kind or no flag: branch on how claude exited.

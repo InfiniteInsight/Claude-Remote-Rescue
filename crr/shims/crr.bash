@@ -191,7 +191,7 @@ claude() {
       continue
     fi
     if [ "$_kind" = close ]; then
-      _crr claude-exit --pid "$$" --clean
+      _crr claude-exit --pid "$$"
       exit
     fi
     # Unknown kind or no flag: branch on how claude exited.

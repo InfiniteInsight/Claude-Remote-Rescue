@@ -764,7 +764,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ce.add_argument("--pid", type=int, required=True)
     ce.add_argument("--clean", action="store_true",
-                    help="the user ended the conversation (/exit or a close): "
+                    help="the user ended the conversation with /exit: "
                          "also retire every crashed copy of it (#144)")
     ce.set_defaults(func=_cmd_claude_exit)
 

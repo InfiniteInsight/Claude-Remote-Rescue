@@ -1162,3 +1162,20 @@ def test_crash_exit_leaves_other_copies_revivable(shell, tmp_path, capsys):
     subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     assert (state / "crr" / "tabs" / "4000003.json").exists()
+
+
+@pytest.mark.parametrize("shell", _REPAIR_SHELLS)
+def test_remote_close_ends_only_its_own_session(shell, tmp_path, capsys):
+    # Owner decision (#144): a dashboard Close ends just the session it was
+    # aimed at; other copies of the conversation stay revivable.
+    if not _installed(shell):
+        pytest.skip(f"{shell} not installed")
+    shim = _make_shim(shell, tmp_path, capsys)
+    state = tmp_path / "state"
+    _plant_stale_copy(state)
+    bindir = _fake_claude_repair_bindir(tmp_path)
+    script = _repair_script(shell, shim, cmdline=f"--resume {_RETIRE_SID}")
+    env = _repair_env(state, bindir, tmp_path, exits="143", flag="close")
+    subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    assert (state / "crr" / "tabs" / "4000003.json").exists()

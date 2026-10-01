@@ -131,7 +131,7 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
-- A conversation ended with `/exit` (or a remote close) no longer comes back
+- A conversation ended with `/exit` no longer comes back
   (#144). The clean exit only cleared the exiting shell's own journal entry,
   so any other crashed copy of the same conversation was still revived.
   A clean exit now retires every non-running copy and closes a revivable
