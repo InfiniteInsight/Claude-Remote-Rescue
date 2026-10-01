@@ -172,3 +172,21 @@ def test_every_cli_revive_pass_applies_the_host_death_cap():
 def test_host_death_cap_defaults():
     assert DEFAULTS["host_death_max_revivals"] == 10
     assert DEFAULTS["host_death_stable_seconds"] == 600
+
+
+def test_every_cli_reopen_passes_the_exit_hook_binary():
+    # #144: ops.reopen without crr_bin launches a bare `claude` with no
+    # clean-exit hook, so a later /exit looks like a crash and the reviver
+    # brings the conversation back. The post-reauth sweep did exactly that.
+    import ast
+    import inspect
+    from crr import cli
+    tree = ast.parse(inspect.getsource(cli))
+    missing = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "reopen"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "ops"):
+            if "crr_bin" not in {k.arg for k in node.keywords}:
+                missing.append(node.lineno)
+    assert not missing, f"ops.reopen without crr_bin at cli.py lines {missing}"

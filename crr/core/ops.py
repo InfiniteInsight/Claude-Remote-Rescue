@@ -23,6 +23,7 @@ from crr.core import journal as journal_module
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TabSpawnTimeout, TmuxSpawner
 from crr.core.reviver import (
+    TERMINAL_ARCHIVE_REASONS,
     attach_argv,
     exit_hook_argv,
     resolved_session_name,
@@ -817,3 +818,44 @@ def _open_tab(
         tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id,
                                                error=exc)
         return f" (tab spawn failed: {exc} — attach with: tmux attach -t {name})", False
+
+
+def retire_conversation(
+    store: JournalStore,
+    archive: ArchiveStore,
+    boot: BootIdentity,
+    probe: ProcessProbe,
+    session_id: str,
+    *,
+    keep_pid: int,
+    now: str,
+) -> list[int]:
+    """A clean exit ends the CONVERSATION, not just the shell it ran in (#144).
+
+    /exit (or a remote close) only ever cleared the exiting shell's own
+    entry; any other crashed entry for the same session stayed a revival
+    candidate, so the conversation came back. Retire every other copy that
+    isn't running (archive ``closed``, delist), and close a still-revivable
+    archive record. Never touches a LIVE/GHOST copy — that's another agent
+    on the conversation, not ours to end — nor rewrites an archive record
+    that already has a terminal reason. Returns the retired pids.
+    """
+    try:
+        record = archive.read(session_id)
+    except (KeyError, contracts.ContractError):
+        record = None
+    if record is not None and record["reason"] not in TERMINAL_ARCHIVE_REASONS:
+        record["reason"] = "closed"
+        archive.write(record)
+    retired = []
+    for entry in store.scan().entries:
+        if entry["pid"] == keep_pid:
+            continue
+        if (entry.get("claude") or {}).get("session_id") != session_id:
+            continue
+        if classify(entry, boot, probe) != CRASHED:
+            continue
+        archive.archive(entry, "closed", now)
+        store.remove(entry["pid"])
+        retired.append(entry["pid"])
+    return retired

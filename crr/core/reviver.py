@@ -54,6 +54,12 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 _MAX_NAME_LEN = 40
 
 
+# Archive reasons that are a conversation's terminal home: never revival
+# candidates (see the archive pass in revive_crashed for why each is here).
+TERMINAL_ARCHIVE_REASONS = ("gave-up", "detmuxed", "untracked", "untmuxed",
+                            "dismissed", "closed", "unresumable")
+
+
 class RevivalOutcome(NamedTuple):
     revived: list[int]   # pids (re)spawned into tmux this pass
     gave_up: list[int]   # pids abandoned to the archive past the strike limit
@@ -604,8 +610,7 @@ def revive_crashed(
     #    their decision. The two 'superseded-*' reasons stay revivable on
     #    purpose: their archives exist to preserve revival data.)
     for record in archive.scan().records:
-        if record["reason"] in ("gave-up", "detmuxed", "untracked", "untmuxed",
-                                "dismissed", "closed", "unresumable"):
+        if record["reason"] in TERMINAL_ARCHIVE_REASONS:
             continue
         entry = record["entry"]
         tx = _tx_probe(entry)

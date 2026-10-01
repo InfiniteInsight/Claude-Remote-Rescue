@@ -202,7 +202,7 @@ function claude
     # returning and this one call. Crash paths (code != 0) deliberately keep
     # the field set so a genuine mid-session close still revives.
     if test $_code -eq 0
-        _crr claude-exit --pid $fish_pid
+        _crr claude-exit --pid $fish_pid --clean
     end
 
     set -l _crashes 0
