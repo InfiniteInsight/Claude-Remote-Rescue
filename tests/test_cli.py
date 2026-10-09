@@ -46,7 +46,8 @@ def test_diagnose_degrades_cleanly_when_journald_absent(monkeypatch, capsys):
     assert set(payload["degraded"]) == {"boots", "prev_boot_errors", "host_events"}
     # F11: params carries the generating caps/lookback/timeout even when the
     # source degraded — the lineage is about what was ASKED, not just answered.
-    assert set(payload["params"]) == {"lookback_boots", "event_cap", "line_cap", "timeout_seconds"}
+    assert set(payload["params"]) == {
+        "lookback_boots", "event_cap", "line_cap", "scan_cap", "timeout_seconds"}
 
 
 def test_select_diag_source_uses_windows_wsl_source_when_journald_absent(monkeypatch):
@@ -86,6 +87,7 @@ def test_diagnostics_params_named_per_source_semantics():
         "lookback_boots": config.get("diagnose_lookback_boots"),
         "event_cap": config.get("diagnose_event_cap"),
         "line_cap": config.get("diagnose_line_cap"),
+        "scan_cap": config.get("diagnose_scan_cap"),
         "timeout_seconds": config.get("interop_timeout_seconds"),
     }
     assert cli._diagnostics_params(cli.diagnostics_macos, config) == {

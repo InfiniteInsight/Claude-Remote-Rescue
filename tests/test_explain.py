@@ -120,3 +120,21 @@ def test_oom_without_a_parseable_kill_line_still_reports_oom():
     out = explain.summarize(["systemd[1]: init.scope: Failed with result 'oom-kill'."], [])
     assert not any("looks clean" in s.lower() for s in out)
     assert any("out-of-memory:" in s.lower() for s in out)
+
+
+NOISE = [
+    "ua-reboot-cmds.service: Skipped due to 'exec-condition'.",
+    "ua-reboot-cmds.service - Run Ubuntu Pro reboot commands skipped",
+    "(CRON) INFO (Running @reboot jobs)",
+]
+
+
+def test_host_event_rank_is_none_for_reboot_substring_noise():
+    assert [explain.host_event_rank(line) for line in NOISE] == [None, None, None]
+
+
+def test_host_event_rank_orders_by_severity_and_none_for_noise():
+    oom = explain.host_event_rank(OOM_KILL_JOURNAL[2])
+    shutdown = explain.host_event_rank("systemd-shutdown[1]: Rebooting.")
+    assert oom is not None and shutdown is not None
+    assert oom < shutdown  # lower rank = more severe

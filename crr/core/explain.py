@@ -96,6 +96,20 @@ _CLEAN = (
 )
 
 
+def host_event_rank(line: str) -> int | None:
+    """Severity rank of one log line (0 = most severe), or None for noise.
+
+    The index of the first ``_SIGNATURES`` entry the line matches — the same
+    patterns ``summarize`` uses, so what is *kept* as an event and what the
+    verdict *recognizes* can never drift apart (#148: a bare "reboot" substring
+    kept benign `@reboot` cron lines as "events").
+    """
+    for rank, (pattern, _sentence) in enumerate(_SIGNATURES):
+        if pattern.search(line):
+            return rank
+    return None
+
+
 def summarize(host_events: Sequence[str], prev_boot_errors: Sequence[str]) -> list[str]:
     """Return the matching plain-English death summaries, most severe first.
 
