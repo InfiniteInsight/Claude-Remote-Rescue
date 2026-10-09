@@ -2131,6 +2131,7 @@ def test_revive_names_host_crash_loop_pids_and_how_to_restore_them(
     # #147: a host-death-cap park is reported apart from "gave up" — it is
     # restorable, and the line says how.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)  # a Mac with tmux would probe Terminal.app (#133)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
