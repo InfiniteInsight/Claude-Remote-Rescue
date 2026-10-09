@@ -2102,6 +2102,42 @@ def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "revived 0" in out  # normal-path summary line is still printed
     assert "gave up:" not in out
+    assert "host crash loop" not in out
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"),
+                     reason="needs the boot-identity adapter (Linux or macOS)")
+def test_revive_names_host_crash_loop_pids_and_how_to_restore_them(
+        tmp_path, monkeypatch, capsys):
+    # #147: a host-death-cap park is reported apart from "gave up" — it is
+    # restorable, and the line says how.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+
+    class _FakeTmux:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return True
+
+        def list_sessions(self):
+            return set()
+
+        def attached_sessions(self):
+            return set()
+
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmux)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], [], host_crash_loop=[4242, 4343]),
+    )
+    rc = cli.main(["revive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gave up:" not in out
+    line = next(l for l in out.splitlines() if "host crash loop" in l)
+    assert "[4242, 4343]" in line
+    assert "crr reopen --host-crash-loop" in line
 
 
 def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypatch, capsys):

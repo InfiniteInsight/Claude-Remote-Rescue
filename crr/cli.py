@@ -2898,6 +2898,11 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     )
     if outcome.gave_up:
         print(f"gave up: {outcome.gave_up}")
+    if outcome.host_crash_loop:
+        # #147: not a verdict on the session — the host kept dying under
+        # its revivals. Restorable, so say how rather than just "gave up".
+        print(f"parked after a host crash loop (restore once the machine is stable: "
+              f"crr reopen --host-crash-loop): {outcome.host_crash_loop}")
     # Reviver hardening (spec 2026-08-29): escalation is user-visible — a
     # session climbing toward give-up names its count and the consequence.
     max_strikes = config.get("zombie_strikes")
