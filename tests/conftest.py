@@ -5,6 +5,7 @@ for. See ``_boot_identity_on_unsupported_platforms`` for why that is a test
 seam rather than a cover-up.
 """
 
+import os
 import platform
 
 import pytest
@@ -28,6 +29,24 @@ def set_home(monkeypatch, path) -> None:
     """
     monkeypatch.setenv("HOME", str(path))
     monkeypatch.setenv("USERPROFILE", str(path))
+
+
+def simulate_wsl_uid(monkeypatch, uid: int = 1000) -> None:
+    """Give a WSL-simulating test a POSIX uid on a host that has none.
+
+    ``crr reachable-at-boot --install`` under WSL runs inside a Linux
+    distro, where ``os.getuid()`` always exists, and bakes it into the
+    user-manager fallback unit. Tests drive that path on every runner by
+    stubbing ``host.is_wsl``; on the Windows runner ``os`` has no
+    ``getuid`` at all, so they failed with an ``AttributeError`` about the
+    runner rather than anything about the install (#133).
+
+    Supplied only where missing — on POSIX the real uid is used, exactly as
+    before. Deliberately NOT autouse: a suite-wide ``os.getuid`` on Windows
+    would hide a genuinely Windows-reachable call to it.
+    """
+    if not hasattr(os, "getuid"):
+        monkeypatch.setattr(os, "getuid", lambda: uid, raising=False)
 
 
 # Any string works; it only has to be stable within a run, because that is

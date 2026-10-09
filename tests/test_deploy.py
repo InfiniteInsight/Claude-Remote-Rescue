@@ -5,8 +5,10 @@ an editable install, so unreviewed edits reached real session state within
 one timer interval. Pure decisions here; git/pip live in the adapter.
 """
 
+import re
 from pathlib import Path
 
+from conftest import set_home  # tests/ is on sys.path (no __init__.py)
 from crr.core import deploy
 
 
@@ -580,7 +582,10 @@ def test_deploy_normalizes_a_user_relative_repo_flag_before_recording_it(
     (explicit_repo / ".git").mkdir(parents=True)
     sd = tmp_path / "state"
     monkeypatch.setattr(state_dir, "state_dir", lambda: sd)
-    monkeypatch.setenv("HOME", str(home))
+    # Not setenv("HOME") alone: `~` expansion on Windows reads USERPROFILE
+    # and never HOME, so this test resolved `~` to the runner's real profile
+    # there and refused it as "not a git checkout" (#133).
+    set_home(monkeypatch, home)
     monkeypatch.setattr(ad, "is_dirty", lambda repo, timeout=5: False)
     monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "abc1234")
     monkeypatch.setattr(ad, "build", lambda *a, **k: None)
@@ -627,13 +632,31 @@ def test_deploy_records_the_repo_path_in_the_marker(tmp_path, monkeypatch, capsy
     assert ad.read_marker_repo(core.marker_path(sd)) == str(repo)
 
 
+def _deploy_line(out: str) -> str:
+    """The one ``[mark] deploy — …`` line out of doctor's full report (#133).
+
+    The doctor tests below are about the deploy-drift check, but doctor also
+    reports tmux, units, power hold, the user-manager fallback and more —
+    each honestly ``[WARN]`` on a host where that piece is not installed
+    (every CI runner). Asserting over the whole stdout made these tests pass
+    only on a fully installed developer box. Asserting on exactly one
+    matched line keeps them about the deploy check; requiring exactly one
+    makes a renamed or dropped check fail loudly instead of leaving the
+    scoped assertions vacuous.
+    """
+    lines = [ln for ln in out.splitlines()
+             if re.match(r"\s*\[(?:ok  |WARN|unkn)\] deploy\b", ln)]
+    assert len(lines) == 1, f"expected exactly one deploy line, got {lines!r}"
+    return lines[0]
+
+
 def test_doctor_reports_nothing_deployed(tmp_path, monkeypatch, capsys):
     from crr import cli
     from crr.adapters import state_dir
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)  # no marker written
     assert cli.main(["doctor"]) == 0
-    out = capsys.readouterr().out
-    assert "nothing deployed" in out
+    line = _deploy_line(capsys.readouterr().out)
+    assert "nothing deployed" in line
 
 
 def test_doctor_warns_when_the_deployed_sha_is_behind_head(tmp_path, monkeypatch, capsys):
@@ -649,9 +672,11 @@ def test_doctor_warns_when_the_deployed_sha_is_behind_head(tmp_path, monkeypatch
     monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: True)
     monkeypatch.setattr(ad, "commits_behind", lambda repo, a, b, timeout=5: 5)
     assert cli.main(["doctor"]) == 0
-    out = capsys.readouterr().out
-    assert "aaaaaaa" in out and "bbbbbbb" in out and "crr deploy" in out
-    assert "[WARN]" in out
+    line = _deploy_line(capsys.readouterr().out)
+    assert "aaaaaaa" in line and "bbbbbbb" in line and "crr deploy" in line
+    # Scoped: over the whole output this was satisfiable by any unrelated
+    # warning (a missing unit), so it could not catch a lost deploy WARN.
+    assert "[WARN]" in line
 
 
 def test_doctor_reports_up_to_date_when_the_deploy_matches_head(tmp_path, monkeypatch, capsys):
@@ -663,9 +688,9 @@ def test_doctor_reports_up_to_date_when_the_deploy_matches_head(tmp_path, monkey
     monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
     monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "same111")
     cli.main(["doctor"])
-    out = capsys.readouterr().out
-    assert "up to date" in out
-    assert "[WARN]" not in out
+    line = _deploy_line(capsys.readouterr().out)
+    assert "up to date" in line
+    assert "[WARN]" not in line
 
 
 def test_doctor_caveats_when_the_deployed_repo_is_unknown(tmp_path, monkeypatch, capsys):
@@ -678,11 +703,11 @@ def test_doctor_caveats_when_the_deployed_repo_is_unknown(tmp_path, monkeypatch,
     monkeypatch.setattr(ad, "read_marker_repo", lambda path: None)
     monkeypatch.setattr(ad, "is_checkout", lambda repo: False)
     cli.main(["doctor"])
-    out = capsys.readouterr().out
-    assert "aaaaaaa" in out
-    assert "cannot compare" in out
-    assert "[WARN]" not in out
-    assert "checkout" in out.lower() and "unknown" in out.lower()
+    line = _deploy_line(capsys.readouterr().out)
+    assert "aaaaaaa" in line
+    assert "cannot compare" in line
+    assert "[WARN]" not in line
+    assert "checkout" in line.lower() and "unknown" in line.lower()
 
 
 def test_doctor_caveats_differently_when_the_repo_is_known_but_head_probe_fails(
@@ -698,17 +723,17 @@ def test_doctor_caveats_differently_when_the_repo_is_known_but_head_probe_fails(
     monkeypatch.setattr(ad, "is_checkout", lambda repo: True)
     monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: None)
     cli.main(["doctor"])
-    out = capsys.readouterr().out
-    assert "aaaaaaa" in out
-    assert "cannot compare" in out
-    assert "[WARN]" not in out
-    # Scoped to the deploy line's own wording, not a blanket "unknown" ban
-    # over the whole doctor output — doctor also runs a real, unmocked
-    # boot-survival probe whose own honest "unknown" verdict (unreadable
-    # boot timestamps, e.g. on some WSL2 hosts) is unrelated to this
-    # deploy-caveat behavior and must not fail this test.
-    assert "checkout found but its HEAD could not be read, cannot compare" in out
-    assert "source checkout unknown" not in out.lower(), (
+    line = _deploy_line(capsys.readouterr().out)
+    assert "aaaaaaa" in line
+    assert "cannot compare" in line
+    assert "[WARN]" not in line
+    # Scoped to the deploy line, not a blanket "unknown" ban over the whole
+    # doctor output — doctor also runs a real, unmocked boot-survival probe
+    # whose own honest "unknown" verdict (unreadable boot timestamps, e.g.
+    # on some WSL2 hosts) is unrelated to this deploy-caveat behavior and
+    # must not fail this test.
+    assert "checkout found but its HEAD could not be read, cannot compare" in line
+    assert "unknown" not in line.lower(), (
         "checkout is known; only the HEAD probe failed"
     )
 
@@ -728,10 +753,10 @@ def test_doctor_warns_with_an_unknown_count_when_ancestry_is_confirmed_but_the_c
     monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: True)
     monkeypatch.setattr(ad, "commits_behind", lambda repo, a, b, timeout=5: None)
     cli.main(["doctor"])
-    out = capsys.readouterr().out
-    assert "aaaaaaa" in out and "bbbbbbb" in out and "crr deploy" in out
-    assert "[WARN]" in out
-    assert "cannot be compared" not in out
+    line = _deploy_line(capsys.readouterr().out)
+    assert "aaaaaaa" in line and "bbbbbbb" in line and "crr deploy" in line
+    assert "[WARN]" in line
+    assert "cannot be compared" not in line
 
 
 def test_doctor_is_informational_when_the_deployed_sha_is_unknown_to_the_repo(
@@ -746,9 +771,9 @@ def test_doctor_is_informational_when_the_deployed_sha_is_unknown_to_the_repo(
     monkeypatch.setattr(ad, "head_sha", lambda repo, timeout=5: "bbbbbbb2222")
     monkeypatch.setattr(ad, "is_ancestor", lambda repo, a, b, timeout=5: None)
     cli.main(["doctor"])
-    out = capsys.readouterr().out
-    assert "cannot be compared" in out
-    assert "[WARN]" not in out
+    line = _deploy_line(capsys.readouterr().out)
+    assert "cannot be compared" in line
+    assert "[WARN]" not in line
 
 
 # --- deploy puts crr on PATH (#61 follow-up) ------------------------------
