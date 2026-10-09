@@ -35,6 +35,7 @@ def _page_sha() -> str:
 # version -> sha256 of crr/core/page.html when that version shipped.
 # APPEND a new entry for every page change; never edit an existing one.
 PAGE_PINS: dict[int, str] = {
+    78: "fe5c726cd4e4f511f800f6d7a40368dacc4ee2d7cb90479f62684cd4710590a2",
     77: "c0bc3ee65b504e243454c5babea20930bdc74341b6a2c62c78c312c3d4dbb0b3",
     76: "9cae34560c8919a33fc916551d31bafd222b6ce6a6781c1c18b1387850e5585a",
     75: "db8d3228cb9838dd525de6de48ffea44974ad649c187def915702e032eb88200",

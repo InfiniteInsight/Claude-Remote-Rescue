@@ -35,7 +35,8 @@ def _untracked_row():
 
 def test_every_lazy_payload_has_a_version_constant():
     for name in ("UNTRACKED_CONTRACT_VERSION", "RECALL_CONTRACT_VERSION",
-                 "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION"):
+                 "EXCLUSIONS_CONTRACT_VERSION", "SETTINGS_CONTRACT_VERSION",
+                 "HOST_CRASH_LOOP_CONTRACT_VERSION"):
         assert getattr(contracts, name) == 1, name
     # discoverable moved to v2 when #34 added `cwd_source` to its rows, then
     # v3 when the same issue added worktree collapse (`dup_count`/`dup_members`).
@@ -54,6 +55,13 @@ def test_discoverable_payload_roundtrips():
 def test_untracked_payload_roundtrips():
     contracts.validate_untracked_payload(
         _rows_payload(contracts.UNTRACKED_CONTRACT_VERSION, [_untracked_row()]))
+
+
+def test_host_crash_loop_payload_roundtrips():
+    # #147: the dashboard's "Host crash loop" panel — same row shape as the
+    # untracked panel (both list archive records), its own version.
+    contracts.validate_host_crash_loop_payload(
+        _rows_payload(contracts.HOST_CRASH_LOOP_CONTRACT_VERSION, [_untracked_row()]))
 
 
 def test_recall_payload_roundtrips():
@@ -95,6 +103,7 @@ def test_tunnel_payload_roundtrips():
 @pytest.mark.parametrize("validator,payload", [
     ("validate_discoverable_payload", _rows_payload(99)),
     ("validate_untracked_payload", _rows_payload(99)),
+    ("validate_host_crash_loop_payload", _rows_payload(99)),
     ("validate_recall_payload", {"contract": 99, "matches": [], "scanned": 0, "skipped": 0}),
     ("validate_tunnel_payload", {
         "contract": 99, "provider": "tailscale", "origin": "configured",
@@ -163,6 +172,17 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
     set_home(monkeypatch, str(home))
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    # A parked session, so the host-crash-loop panel returns a ROW and its
+    # row validator actually runs (see _seed_transcript's docstring).
+    from crr.adapters import state_dir
+    from crr.core.archive import ArchiveStore
+    from crr.core.journal import new_entry
+    ArchiveStore(state_dir.state_dir()).archive(new_entry(
+        pid=4242, cwd="/home/u/proj", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-10-09T08:00:00+00:00",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-10-09T08:00:00+00:00", "skip_permissions": False},
+    ), "host-crash-loop", "2026-10-09T08:18:00+00:00")
     handler_holder = {}
 
     real_make = cli.make_web_handler
@@ -183,6 +203,7 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
     checks = [
         ("discoverable_provider", ("", 0, 20), contracts.validate_discoverable_payload),
         ("untracked_provider", ("", 0, 20), contracts.validate_untracked_payload),
+        ("host_crash_loop_provider", ("", 0, 20), contracts.validate_host_crash_loop_payload),
         ("exclusions_provider", (), contracts.validate_exclusions_payload),
         ("settings_provider", (), contracts.validate_settings_payload),
         ("recall_provider", ("zzz-no-such-term-zzz", None), contracts.validate_recall_payload),
@@ -202,6 +223,8 @@ def test_live_endpoints_satisfy_their_contracts(tmp_path, monkeypatch):
     # Guard the guard: if no endpoint returned a row, the row validators
     # above never ran and this test proved far less than it appears to.
     assert saw_rows, "no endpoint returned rows — the row contracts went unchecked"
+    assert handler_holder["host_crash_loop_provider"]("", 0, 20)["rows"], \
+        "the seeded host-crash-loop record produced no row — its row contract went unchecked"
 
     # The writer closures are captured above but never CALLED by the checks
     # loop (it only reads GET-style providers) — a renamed kwarg or a wrong

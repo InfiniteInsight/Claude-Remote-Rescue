@@ -105,6 +105,11 @@ ARCHIVE_CONTRACT_VERSION = 2
 # folded siblings' {session_id, sid8} so the modal can expand and adopt one.
 DISCOVERABLE_CONTRACT_VERSION = 3
 UNTRACKED_CONTRACT_VERSION = 1
+# The dashboard's "Host crash loop" panel (#147): sessions the host-death
+# cap parked, restorable from the page. Brand new: no prior unversioned
+# shape to backfill. Rows share the untracked panel's shape (both list
+# archive records); the version is its own so either can move alone.
+HOST_CRASH_LOOP_CONTRACT_VERSION = 1
 RECALL_CONTRACT_VERSION = 1
 EXCLUSIONS_CONTRACT_VERSION = 1
 SETTINGS_CONTRACT_VERSION = 1
@@ -759,6 +764,11 @@ def validate_discoverable_payload(payload: Any) -> None:
 def validate_untracked_payload(payload: Any) -> None:
     _validate_paged(payload, UNTRACKED_CONTRACT_VERSION,
                     UNTRACKED_ROW_KEYS, "/api/untracked")
+
+
+def validate_host_crash_loop_payload(payload: Any) -> None:
+    _validate_paged(payload, HOST_CRASH_LOOP_CONTRACT_VERSION,
+                    UNTRACKED_ROW_KEYS, "/api/host-crash-loop")
 
 
 def validate_recall_payload(payload: Any) -> None:

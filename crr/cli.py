@@ -4521,6 +4521,7 @@ def make_web_handler(
     action_provider: Callable[[str, int], tuple[bool, str]] | None = None,
     diagnostics_provider: Callable[[], dict] | None = None,
     untracked_provider: Callable[[str, int, int], dict] | None = None,
+    host_crash_loop_provider: Callable[[str, int, int], dict] | None = None,
     discoverable_provider: Callable[[str, int, int], dict] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
@@ -4595,6 +4596,7 @@ def make_web_handler(
                 action_provider=action_provider,
                 diagnostics_provider=diagnostics_provider,
                 untracked_provider=untracked_provider,
+                host_crash_loop_provider=host_crash_loop_provider,
                 discoverable_provider=discoverable_provider,
                 sid_action_provider=sid_action_provider,
                 recall_provider=recall_provider,
@@ -5343,6 +5345,24 @@ def _cmd_web(args: argparse.Namespace) -> int:
         ]
         return page
 
+    def host_crash_loop_provider(query: str = "", offset: int = 0, limit: int = 20) -> dict:
+        # #147: the untracked panel's twin over a different reason — same
+        # cheap-filter-then-read-one-page shape, same row view.
+        cap = config.get("last_prompt_display_cap")
+        model_tail_lines = config.get("model_tail_lines")
+        cheap = [
+            {"session_id": r["entry"]["claude"]["session_id"],
+             "cwd": r["entry"]["cwd"], "_record": r}
+            for r in _host_crash_loop_records(archive.scan().records)
+        ]
+        page = discovery.filter_and_page(
+            cheap, query=query, offset=offset, limit=limit,
+            contract=contracts.HOST_CRASH_LOOP_CONTRACT_VERSION)
+        page["rows"] = [
+            _untracked_view(row["_record"], cap, model_tail_lines) for row in page["rows"]
+        ]
+        return page
+
     def discoverable_provider(query: str = "", offset: int = 0, limit: int = 20) -> dict:
         # Lazy (T-C) AND paged: filter/slice the CHEAP candidate list first,
         # then read transcript content for ONLY the page being shown. Reading
@@ -5405,6 +5425,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
         with mutation_lock(sd):
             if op == "retrack":
                 res = ops.retrack(store, archive, sid, _now())
+            elif op == "restore-host-crash-loop":
+                res = ops.restore_host_crash_loop(store, archive, sid, _now())
             elif op in ("skip-permissions-on", "skip-permissions-off"):
                 res = ops.set_skip_permissions(
                     store, sid, op == "skip-permissions-on", _now())
@@ -5512,6 +5534,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
         action_provider=action_provider,
         diagnostics_provider=diagnostics_provider,
         untracked_provider=untracked_provider,
+        host_crash_loop_provider=host_crash_loop_provider,
         discoverable_provider=discoverable_provider,
         sid_action_provider=sid_action_provider,
         recall_provider=recall_provider,

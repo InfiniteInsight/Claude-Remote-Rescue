@@ -5762,6 +5762,31 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
 # reauth providers above.
 # --------------------------------------------------------------------------
 
+def test_web_host_crash_loop_panel_lists_only_parked_sessions_newest_first(
+        tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _archive_hcl(archive, 41, _HCL_SIDS[0], at="2026-10-09T12:10:00+00:00")
+    _archive_hcl(archive, 42, _HCL_SIDS[1], at="2026-10-09T12:18:00+00:00")
+    _archive_hcl(archive, 43, "aaaaaaaa-1111-4111-8111-111111111111", reason="gave-up")
+    page = captured["host_crash_loop_provider"]("", 0, 20)
+    contracts.validate_host_crash_loop_payload(page)
+    assert [r["session_id"] for r in page["rows"]] == [_HCL_SIDS[1], _HCL_SIDS[0]]
+    assert page["total"] == 2
+
+
+def test_web_restore_host_crash_loop_action_restores_the_session(tmp_path, monkeypatch):
+    captured = _web_captured(monkeypatch, tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_hcl(archive, 42, _HCL_SIDS[0])
+    ok, message, degraded = captured["sid_action_provider"](
+        "restore-host-crash-loop", _HCL_SIDS[0])
+    assert ok, message
+    assert degraded is False
+    assert "next pass" in message
+    assert (store.read(42)["host_deaths"], store.read(42)["revive_strikes"]) == (0, 0)
+
+
 def test_auth_enabled_fn_flips_live_after_enable_no_restart_needed(tmp_path, monkeypatch):
     """Enabling login through `dashboard_auth_provider` must be visible to
     `auth_enabled_fn` on the very next call — this is the "live per-request"

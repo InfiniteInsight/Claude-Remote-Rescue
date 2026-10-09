@@ -469,6 +469,7 @@
 <div id="tools">
   <span class="tools-label">Other views</span>
   <button id="untracked-btn" type="button" title="Sessions you recently untracked — one tap to put them back under crr's management. Opens a searchable list.">Recently untracked</button>
+  <button id="host-crash-loop-btn" type="button" title="Sessions crr stopped reviving because the machine kept going down shortly after each revival. Restore them once it is stable. Opens a searchable list.">Host crash loop</button>
   <button id="discoverable-btn" type="button" title="claude conversations on disk that crr never tracked — adopt one to make it recoverable. Opens a searchable list.">Discoverable</button>
   <button id="diag-btn" type="button" title="Plain-English verdict on why the previous boot or your sessions died (out-of-memory, kernel panic, unexpected shutdown, clean reboot), above the raw system evidence. Expands below.">Why did sessions die?</button>
 </div>
@@ -637,7 +638,8 @@ var BUTTON_HELP = {
   "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
   "Retrack": "Put this recently-untracked session back under crr's management.",
   "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, a second copy may start.",
-  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs."
+  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs.",
+  "Restore": "Put this session back under crr's management with its host-death and strike counts reset. The watchdog revives it on its next pass, so restore once the machine is stable."
 };
 
 var SID_SOURCE_HELP = {
@@ -2062,6 +2064,19 @@ var MODAL_KINDS = {
       note.textContent = "Sessions you stopped tracking (untrack / de-tmux). Their conversations are preserved in the archive — Retrack puts one back under crr's management, exactly as it was.";
     },
     actions: function () { return [{ label: "Retrack", op: "retrack" }]; }
+  },
+  // #147: sessions the host-death cap parked. The cap cannot tell an
+  // unstable host from a revival that itself brings the host down, so the
+  // copy says what happened and claims neither.
+  hostCrashLoop: {
+    title: "Parked after a host crash loop",
+    url: "/api/host-crash-loop",
+    ageField: "archived_at",
+    empty: "no sessions parked by a host crash loop",
+    note: function (note) {
+      note.textContent = "The machine kept going down shortly after each revival, so crr stopped reviving these rather than revive them into the next round. The host may have been unstable, or one of these revivals may be what took it down. Their conversations are preserved. Once the machine is stable, Restore puts one back with its counts reset (the watchdog revives it on its next pass). To restore them all at once: crr reopen --host-crash-loop";
+    },
+    actions: function () { return [{ label: "Restore", op: "restore-host-crash-loop" }]; }
   }
 };
 
@@ -2139,6 +2154,7 @@ function closeDisc() {
 }
 document.getElementById("discoverable-btn").addEventListener("click", function () { openDisc("discoverable"); });
 document.getElementById("untracked-btn").addEventListener("click", function () { openDisc("untracked"); });
+document.getElementById("host-crash-loop-btn").addEventListener("click", function () { openDisc("hostCrashLoop"); });
 document.getElementById("disc-close").addEventListener("click", closeDisc);
 document.getElementById("disc-modal").addEventListener("click", function (e) {
   if (e.target === this) { closeDisc(); }   // click the backdrop to dismiss
