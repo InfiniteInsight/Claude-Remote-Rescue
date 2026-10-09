@@ -4699,6 +4699,7 @@ def _diagnostics_params(source, config: cfg.Config) -> dict:
             "lookback_boots": config.get("diagnose_lookback_boots"),
             "event_cap": config.get("diagnose_event_cap"),
             "line_cap": config.get("diagnose_line_cap"),
+            "scan_cap": config.get("diagnose_scan_cap"),
             "timeout_seconds": config.get("interop_timeout_seconds"),
         }
     # No implicit fallthrough: a future source falling through to

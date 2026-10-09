@@ -107,3 +107,50 @@ def test_build_payload_records_degraded_sources():
     )
     contracts.validate_diagnostics_payload(payload)
     assert payload["degraded"] == ["host_events"]
+
+
+# --- #148: classify first, cap after --------------------------------------
+
+def test_select_host_events_noise_cannot_crowd_out_a_real_event():
+    noise = [f"(CRON) INFO (Running @reboot jobs) #{i}" for i in range(300)]
+    oom = "Out of memory: Killed process 21373 (node) total-vm:1kB, anon-rss:2kB"
+    out = diagnostics.select_host_events([*noise, oom], cap=50)
+    assert len(out) == 50
+    assert out[0] == oom  # severity first, even though it arrived last
+
+
+def test_select_host_events_prefers_severity_when_truncating():
+    lines = ["systemd-shutdown[1]: Rebooting.", "oom-kill:constraint=CONSTRAINT_NONE,task=node,pid=1"]
+    assert diagnostics.select_host_events(lines, cap=1) == [lines[1]]
+
+
+def test_select_host_events_drops_exact_replays_keeping_first_seen_order():
+    a, b = "Out of memory: Killed process 1 (x)", "systemd-shutdown[1]: Rebooting."
+    assert diagnostics.select_host_events([a, b, a, a, b], cap=50) == [a, b]
+
+
+def test_select_host_events_cap_zero_means_uncapped():
+    lines = [f"Out of memory: Killed process {i} (x)" for i in range(80)]
+    assert len(diagnostics.select_host_events(lines, cap=0)) == 80
+
+
+def test_build_payload_summary_counts_replays_that_the_event_list_dedupes():
+    kill = "Out of memory: Killed process 21373 (node) total-vm:9kB, anon-rss:81837596kB, file-rss:0kB"
+    payload = diagnostics.build_payload(
+        source="journald", boots=[], prev_boot_errors=[], host_events=[kill] * 9,
+        degraded=[], params=_PARAMS,
+    )
+    assert payload["host_events"] == [kill]
+    assert "logged 9 times" in " ".join(payload["summary"])
+
+
+def test_build_payload_caps_host_events_by_params_event_cap_after_classifying():
+    noise = [f"(CRON) INFO (Running @reboot jobs) #{i}" for i in range(100)]
+    oom = "Out of memory: Killed process 21373 (node) total-vm:1kB, anon-rss:2kB"
+    payload = diagnostics.build_payload(
+        source="journald", boots=[], prev_boot_errors=[], host_events=[*noise, oom],
+        degraded=[], params={**_PARAMS, "event_cap": 10},
+    )
+    assert len(payload["host_events"]) == 10
+    assert payload["host_events"][0] == oom
+    assert any("node" in s for s in payload["summary"])

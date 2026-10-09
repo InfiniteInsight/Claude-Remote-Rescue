@@ -144,6 +144,16 @@ No tag or release has been cut yet. This section describes everything on
   the dashboard's new "Host crash loop" view has a Restore button per
   session (PAGE_VERSION 78). Sessions archived as `gave-up` before this fix
   are not migrated.
+- `crr diagnose` no longer reports "the previous boot looks clean" after an
+  OOM kill (#148). The journald query matched the bare substring `reboot`
+  (`ua-reboot-cmds.service`, `@reboot` cron) and capped its results before
+  classifying, so benign lines crowded the real kernel OOM out. Events are
+  now classified first, de-duplicated (WSL2 replays the kernel log into the
+  journal on every distro restart), ordered most-severe-first and only then
+  capped. The OOM verdict names the victim, pid and RSS and how often the
+  kill was logged, and repeated systemd starts within one kernel boot (WSL2
+  distro restarts) are reported instead of reading as one clean boot. New
+  config `diagnose_scan_cap` (defaults v29).
 - A conversation ended with `/exit` no longer comes back
   (#144). The clean exit only cleared the exiting shell's own journal entry,
   so any other crashed copy of the same conversation was still revived.

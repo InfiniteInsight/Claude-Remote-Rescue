@@ -78,3 +78,108 @@ def test_prev_boot_errors_are_also_scanned():
     # The signal can live in prev_boot_errors too (e.g. an OOM logged as an error).
     out = explain.summarize([], ["kernel: Out of memory: Killed process 99"])
     assert any("memory" in s.lower() for s in out)
+
+
+# --- #148: the real lines from a 78 GB OOM kill, as `journalctl -k -b -1`
+# printed them. The kill was replayed into the journal on every WSL distro
+# restart, so the same lines recur.
+OOM_KILL_JOURNAL = [
+    "node invoked oom-killer: gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0, oom_score_adj=200",
+    "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=user.slice,mems_allowed=0,global_oom,task_memcg=/init.scope,task=node,pid=21373,uid=1000",
+    "Out of memory: Killed process 21373 (node) total-vm:95301400kB, anon-rss:81837596kB, file-rss:0kB, shmem-rss:0kB, UID:1000 pgtables:189128kB oom_score_adj:0",
+    "systemd[1]: init.scope: A process of this unit has been killed by the OOM killer.",
+    "systemd[1]: init.scope: Failed with result 'oom-kill'.",
+]
+
+
+def test_oom_kill_is_reported_with_victim_name_and_rss():
+    out = explain.summarize(OOM_KILL_JOURNAL, [])
+    text = " ".join(out)
+    assert "node" in text
+    assert "21373" in text
+    assert "78.0 GiB" in text  # 81837596 kB
+    assert not any("looks clean" in s.lower() for s in out)
+
+
+def test_replayed_oom_kill_is_reported_once_with_a_replay_count():
+    out = explain.summarize(OOM_KILL_JOURNAL * 7, [])
+    oom = [s for s in out if "memory" in s.lower()]
+    assert len(oom) == 1
+    assert oom[0].count("21373") == 1
+    assert "7" in oom[0]  # logged 7 times
+
+
+def test_distinct_oom_kills_are_each_reported():
+    other = OOM_KILL_JOURNAL[2].replace("21373", "555").replace("(node)", "(python)")
+    out = explain.summarize([*OOM_KILL_JOURNAL, other], [])
+    text = " ".join(out)
+    assert "21373" in text and "555" in text and "python" in text
+
+
+def test_oom_without_a_parseable_kill_line_still_reports_oom():
+    out = explain.summarize(["systemd[1]: init.scope: Failed with result 'oom-kill'."], [])
+    assert not any("looks clean" in s.lower() for s in out)
+    assert any("out-of-memory:" in s.lower() for s in out)
+
+
+def _starts(n, pid="1"):
+    return [f"2026-10-09T10:{i:02d}:00+0000 host systemd[{pid}]: Startup finished in 1.2s."
+            for i in range(n)]
+
+
+def test_repeated_system_starts_in_one_boot_are_not_called_clean():
+    out = explain.summarize(_starts(4), [])
+    text = " ".join(out)
+    assert "looks clean" not in text.lower()
+    assert "4 times" in text
+    assert "kernel boot" in text
+
+
+def test_timestamps_in_start_lines_do_not_read_as_a_death_signature():
+    # Regression found on real data: `short-iso` timestamps like `11:41:02`
+    # satisfy the Windows event-id signature `\b41\b` ("Unexpected shutdown").
+    lines = [f"2026-10-09T11:41:0{i}-04:00 host systemd[1]: Startup finished in 3.0s."
+             for i in range(3)]
+    out = explain.summarize(lines, [])
+    assert not any("unexpected" in s.lower() for s in out)
+    assert len(out) == 1 and "3 times" in out[0]
+
+
+def test_a_single_system_start_keeps_the_clean_verdict():
+    out = explain.summarize(_starts(1), [])
+    assert len(out) == 1 and "looks clean" in out[0].lower()
+
+
+def test_user_manager_startups_are_not_counted_as_distro_restarts():
+    out = explain.summarize(_starts(5, pid="4821"), [])
+    assert len(out) == 1 and "looks clean" in out[0].lower()
+
+
+def test_oom_and_repeated_starts_are_both_reported_oom_first():
+    out = explain.summarize([*OOM_KILL_JOURNAL, *_starts(3)], [])
+    assert "node" in out[0]
+    assert any("3 times" in s for s in out)
+
+
+def test_system_start_lines_are_events_ranked_below_every_signature():
+    start = explain.host_event_rank(_starts(1)[0])
+    assert start is not None
+    assert start > explain.host_event_rank("systemd-shutdown[1]: Rebooting.")
+
+
+NOISE = [
+    "ua-reboot-cmds.service: Skipped due to 'exec-condition'.",
+    "ua-reboot-cmds.service - Run Ubuntu Pro reboot commands skipped",
+    "(CRON) INFO (Running @reboot jobs)",
+]
+
+
+def test_host_event_rank_is_none_for_reboot_substring_noise():
+    assert [explain.host_event_rank(line) for line in NOISE] == [None, None, None]
+
+
+def test_host_event_rank_orders_by_severity_and_none_for_noise():
+    oom = explain.host_event_rank(OOM_KILL_JOURNAL[2])
+    shutdown = explain.host_event_rank("systemd-shutdown[1]: Rebooting.")
+    assert oom is not None and shutdown is not None
+    assert oom < shutdown  # lower rank = more severe

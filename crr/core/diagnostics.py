@@ -90,6 +90,27 @@ def filter_lines(text: str, terms: Sequence[str], cap: int) -> list[str]:
     return hits[:cap] if cap else hits
 
 
+def select_host_events(lines: Sequence[str], cap: int) -> list[str]:
+    """Classify first, cap after: the ``cap`` most severe distinct event lines.
+
+    Exact repeats are dropped (WSL2 replays the kernel ring buffer into the
+    journal on every distro restart), then lines are ordered most-severe
+    first — unclassified lines last — and only THEN truncated, so a flood of
+    benign or replayed lines can never crowd a real signature out of the cap
+    (#148). Stable within a severity, so first-seen order is kept. ``cap`` of
+    0 means uncapped.
+    """
+    from crr.core import explain
+
+    ranked = []
+    for index, line in enumerate(dict.fromkeys(lines)):
+        rank = explain.host_event_rank(line)
+        ranked.append((float("inf") if rank is None else rank, index, line))
+    ranked.sort(key=lambda item: item[:2])
+    ordered = [line for _rank, _index, line in ranked]
+    return ordered[:cap] if cap else ordered
+
+
 def build_payload(
     *,
     source: str,
@@ -113,7 +134,9 @@ def build_payload(
     from crr.core import contracts, explain
 
     if summary is None:
+        # From the FULL list: replay counts must survive the dedupe below.
         summary = explain.summarize(host_events, prev_boot_errors)
+    host_events = select_host_events(host_events, params.get("event_cap") or 0)
     payload = {
         "contract": contracts.DIAGNOSTICS_CONTRACT_VERSION,
         "source": source,

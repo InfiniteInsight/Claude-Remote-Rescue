@@ -118,7 +118,10 @@ from typing import Any, Mapping
 # trigger now repeats so a distro restart without a Windows reboot re-arms it)
 # and host_death_max_revivals + host_death_stable_seconds (a revival that
 # died with its host costs no strike, but those deaths are capped)
-CONFIG_DEFAULTS_VERSION = 28
+# v29: added diagnose_scan_cap (#148 — journald host-event query reads up to
+# this many lines BEFORE classification; the event cap is applied after, so
+# benign matches and WSL kernel-log replays can't crowd out a real OOM)
+CONFIG_DEFAULTS_VERSION = 29
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -140,6 +143,12 @@ DEFAULTS: dict[str, Any] = {
     "diagnose_lookback_boots": 1,  # how many prior boots to inspect
     "diagnose_event_cap": 50,      # max events returned per source
     "diagnose_line_cap": 200,      # max log lines scanned per source
+    # #148: how many journal lines the host-event query may READ before
+    # classifying. Distinct from diagnose_event_cap (what is shown): WSL2 replays
+    # the kernel log into the journal on every distro restart, so one OOM kill
+    # repeats ~5 lines x restarts. 5000 covers hundreds of restarts of a tight
+    # pre-filter; it bounds memory, it is not a severity judgment.
+    "diagnose_scan_cap": 5000,
     "diagnose_macos_lookback": "1d",  # macOS `log show --last` window (no boot index on macOS)
     "diagnose_macos_timeout_seconds": 30,  # macOS `log show` is slow to start; own timeout
     "interop_timeout_seconds": 5,  # per external-command guard in diagnostics/probes
