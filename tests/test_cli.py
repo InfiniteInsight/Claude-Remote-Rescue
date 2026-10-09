@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import set_home  # tests/ is on sys.path (no __init__.py)
+from conftest import set_home, simulate_wsl_uid  # tests/ is on sys.path (no __init__.py)
 from crr import cli
 from crr.adapters import boot_identity, process_probe, session_state, state_dir
 from crr.core import config as cfg
@@ -1985,6 +1985,22 @@ def test_status_stays_lock_free_when_no_guess_is_upgradable(tmp_path, monkeypatc
     assert payload["sessions"][0]["sid_source"] == "guessed"
 
 
+def _headless_tabs(monkeypatch) -> None:
+    """Make `crr revive`'s ``_tab_spawner(config)`` a headless host's answer.
+
+    Every revive pass that gets past the auth gate evaluates
+    ``_tab_spawner(config)`` for the sweep's ``tab_spawner=`` kwarg — even
+    when the test stubs ``reviver.revive_crashed``. On a headless Linux
+    runner that resolves to ``(None, False)`` with no subprocess, so tests
+    that never stubbed it passed there by luck. On macOS it builds the
+    Terminal.app spawner and probes it with ``open -Ra Terminal``, which
+    conftest's ``_forbid_unstubbed_tab_spawn`` turns into a loud failure
+    (#133). These tests are not about tabs; pin the headless answer so
+    they mean the same thing on every platform.
+    """
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
+
+
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter")
 def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_path, monkeypatch):
     # End-to-end through `crr revive`: the guessed->verified upgrade must
@@ -1992,6 +2008,7 @@ def test_revive_verifies_guessed_sids_and_the_upgrade_survives_the_sweep(tmp_pat
     # ordering (without it, revive would write back the stale guessed dict).
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
     set_home(monkeypatch, str(tmp_path / "home"))
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -2041,6 +2058,7 @@ def test_revive_names_gave_up_pids(tmp_path, monkeypatch, capsys):
     # F14: a terminal outcome (gave up) used to report a bare count while
     # sibling problem-loops name the file/session responsible.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -2074,6 +2092,7 @@ def test_revive_names_gave_up_pids(tmp_path, monkeypatch, capsys):
 
 def test_revive_omits_gave_up_line_when_none(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -2115,6 +2134,7 @@ def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypat
     # flapping nonzero oneshot would spam systemd failure state under a
     # transient fault).
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -2200,6 +2220,7 @@ def test_revive_skips_revival_when_auth_expired(tmp_path, monkeypatch, capsys):
 def test_revive_proceeds_when_auth_valid(tmp_path, monkeypatch, capsys):
     """Revival must proceed normally when auth is valid."""
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     creds_path = tmp_path / ".credentials.json"
     now = 1_700_000_000.0
@@ -2250,6 +2271,7 @@ def test_revive_invokes_the_bridge_watchdog_pass_after_the_summary(tmp_path, mon
     # dir, and only AFTER the crashed-session summary line — so deleting the
     # call site, or wiring the wrong sd/store, fails a test.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -2473,6 +2495,7 @@ def test_reopen_revives_one_crashed_session(tmp_path, monkeypatch):
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="reopen classifies (needs Linux or macOS boot adapter)")
 def test_reopen_refuses_claude_less_session(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)  # a Mac with tmux would probe Terminal.app (#133)
     store = JournalStore(tmp_path)
     store.write(new_entry(
         pid=42, cwd="/p", host="tmux", shell="zsh", boot_id="old-boot",
@@ -2571,6 +2594,7 @@ def test_detmux_reports_no_session(tmp_path, monkeypatch, capsys):
     # lookup is what fails — exercising the CLI wiring (parser ->
     # mutation_lock -> ops.detmux) without touching real tmux state.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)  # a Mac with tmux would probe Terminal.app (#133)
     rc = cli.main(["detmux", "424242"])
     assert rc == 1
     assert "no session" in capsys.readouterr().err
@@ -2635,6 +2659,7 @@ def test_detmux_attaches_a_session_via_cli(tmp_path, monkeypatch, capsys):
 )
 def test_untmux_reports_no_session(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)  # a Mac with tmux would probe Terminal.app (#133)
     rc = cli.main(["untmux", "424242"])
     assert rc == 1
     assert "no session" in capsys.readouterr().err
@@ -4002,6 +4027,9 @@ def test_revive_spawns_tmux_for_crashed_claude_session(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    # macOS CI skips this only for want of tmux; any Mac with tmux would
+    # otherwise reach the real Terminal.app probe (#133).
+    _headless_tabs(monkeypatch)
 
     store = JournalStore(tmp_path)
     sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -6186,6 +6214,7 @@ def test_revive_passes_the_flag_store_so_close_actually_sticks(tmp_path, monkeyp
 
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    _headless_tabs(monkeypatch)
     monkeypatch.setattr(cli.tmux, "RealTmux",
                         lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["revive"]) == 0
@@ -6553,6 +6582,7 @@ def test_revive_prints_strike_counts_and_unresumable(tmp_path, monkeypatch, caps
     # to which strike, and which were archived as unresumable — silence
     # here is how the old strike oscillation went unnoticed for weeks.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -6645,6 +6675,7 @@ def test_revive_wires_transcripts_and_attached_into_the_sweep(tmp_path, monkeypa
     # TranscriptSource and the attached-session set — a forgotten wire-up
     # silently reverts to eternal revival, so this pin is load-bearing.
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
 
     class _FakeTmux:
         def __init__(self, *a, **k):
@@ -7114,6 +7145,7 @@ def test_doctor_user_manager_fallback_unknown_stays_unknown(tmp_path, monkeypatc
 
 def test_reachable_at_boot_install_wsl_also_installs_fallback_unit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    simulate_wsl_uid(monkeypatch)  # the WSL path reads os.getuid; Windows has none (#133)
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu", "evan"))
     monkeypatch.setattr(cli, "_current_tailnet_account", lambda t: None)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
@@ -7336,6 +7368,7 @@ class TestReviveUsesBothAuthSources:
         monkeypatch.setattr(cli.time, "time", lambda: now)
         self._fake_tmux(monkeypatch)
         self._no_watchdog(monkeypatch)
+        _headless_tabs(monkeypatch)  # this pass proceeds, so it reaches the tab probe
         revived = []
         monkeypatch.setattr(
             cli.reviver, "revive_crashed",

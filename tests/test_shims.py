@@ -106,6 +106,20 @@ def _shell_env(state_dir, **extra) -> dict:
     return env
 
 
+def _crr_state(state_dir) -> Path:
+    """Where crr keeps its state for a shim run under ``_shell_env(state_dir)``.
+
+    The same resolution the shim's own ``crr`` performs: ``<state_dir>/crr``
+    on Linux (XDG), ``<state_dir>/Library/Application Support/crr`` on
+    macOS. Python-side plants and asserts must go through this, never a
+    hardcoded ``state_dir / "crr"`` — that is the #43 bug class again: on
+    macOS a planted journal entry sat where crr never looks (so the #144
+    retire test failed there), and every "file is gone" assertion passed
+    vacuously because the path it checked never existed at all (#133).
+    """
+    return Path(_shell_env(state_dir)["CRR_STATE"])
+
+
 def _run(shell, script, state_dir) -> subprocess.CompletedProcess:
     env = _shell_env(state_dir)
     return subprocess.run(
@@ -144,7 +158,9 @@ def test_shim_deregisters_on_exit(shell, tmp_path, capsys):
     assert result.returncode == 0, result.stderr
 
     recorded = (tmp_path / "pid").read_text().strip()
-    assert not (state / "crr" / "tabs" / f"{recorded}.json").exists()
+    tabs = _crr_state(state) / "tabs"
+    assert tabs.is_dir(), "shim never registered here; the absence check would be vacuous"
+    assert not (tabs / f"{recorded}.json").exists()
 
 
 def _fake_claude_bindir(tmp_path) -> Path:
@@ -557,7 +573,9 @@ def test_repair_stale_flag_cleared_at_wrapper_start(shell, tmp_path, capsys):
     assert len(_record_lines(tmp_path)) == 1  # never resumed the stale sid
     assert "AFTER-MARKER" in result.stdout
     recorded = (state / "shellpid").read_text().strip()
-    assert not (state / "crr" / "relaunch" / recorded).exists()
+    relaunch = _crr_state(state) / "relaunch"
+    assert relaunch.is_dir(), "the stale flag was never planted here"
+    assert not (relaunch / recorded).exists()
 
 
 @pytest.mark.parametrize("shell", _REPAIR_SHELLS)
@@ -584,7 +602,9 @@ def test_repair_relaunch_flag_resumes_silently(shell, tmp_path, capsys):
     assert _OFFER not in result.stderr  # silent — no offer on a kick
     assert "AFTER-MARKER" in result.stdout  # shell survives a kick
     recorded = (state / "shellpid").read_text().strip()
-    assert not (state / "crr" / "relaunch" / recorded).exists()  # consumed
+    relaunch = _crr_state(state) / "relaunch"
+    assert relaunch.is_dir(), "the fake claude never armed the flag here"
+    assert not (relaunch / recorded).exists()  # consumed
 
 
 @pytest.mark.parametrize("shell", _REPAIR_SHELLS)
@@ -605,7 +625,9 @@ def test_repair_close_flag_exits_the_shell(shell, tmp_path, capsys):
     assert len(_record_lines(tmp_path)) == 1  # close never relaunches
     assert "AFTER-MARKER" not in result.stdout
     recorded = (state / "shellpid").read_text().strip()
-    assert not (state / "crr" / "tabs" / f"{recorded}.json").exists()
+    tabs = _crr_state(state) / "tabs"
+    assert tabs.is_dir(), "shim never registered here; the absence check would be vacuous"
+    assert not (tabs / f"{recorded}.json").exists()
 
 
 @pytest.mark.parametrize("shell", _REPAIR_SHELLS)
@@ -1122,7 +1144,9 @@ _RETIRE_SID = "dddddddd-4444-4444-8444-444444444444"
 
 def _plant_stale_copy(state):
     from crr.core.journal import JournalStore, new_entry
-    JournalStore(state / "crr").write(new_entry(
+    # _crr_state, not `state / "crr"`: on macOS that is a directory crr
+    # never reads, so the clean-exit retire had nothing to retire (#133).
+    JournalStore(_crr_state(state)).write(new_entry(
         pid=4_000_003, cwd="/p", host="tmux", shell="bash",
         boot_id="0000dead-0000-4000-8000-000000000000",  # never this boot
         now="2026-07-24T00:00:00Z",
@@ -1144,8 +1168,8 @@ def test_clean_exit_retires_a_stale_copy_of_the_conversation(shell, tmp_path, ca
                             stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
-    assert not (state / "crr" / "tabs" / "4000003.json").exists()
-    rec = json.loads((state / "crr" / "archive" / f"{_RETIRE_SID}.json").read_text())
+    assert not (_crr_state(state) / "tabs" / "4000003.json").exists()
+    rec = json.loads((_crr_state(state) / "archive" / f"{_RETIRE_SID}.json").read_text())
     assert rec["reason"] == "closed"
 
 
@@ -1161,7 +1185,7 @@ def test_crash_exit_leaves_other_copies_revivable(shell, tmp_path, capsys):
     env = _repair_env(state, bindir, tmp_path, exits="1")
     subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
-    assert (state / "crr" / "tabs" / "4000003.json").exists()
+    assert (_crr_state(state) / "tabs" / "4000003.json").exists()
 
 
 @pytest.mark.parametrize("shell", _REPAIR_SHELLS)
@@ -1178,4 +1202,4 @@ def test_remote_close_ends_only_its_own_session(shell, tmp_path, capsys):
     env = _repair_env(state, bindir, tmp_path, exits="143", flag="close")
     subprocess.run(_SHELLS[shell]["argv"] + [script], env=env,
                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
-    assert (state / "crr" / "tabs" / "4000003.json").exists()
+    assert (_crr_state(state) / "tabs" / "4000003.json").exists()

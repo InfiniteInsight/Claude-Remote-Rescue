@@ -337,6 +337,7 @@ def test_filevault_parsing():
 # (spec 2026-08-14, Task 7)
 # ---------------------------------------------------------------------------
 
+from conftest import simulate_wsl_uid  # tests/ is on sys.path (no __init__.py)
 from crr import cli
 from crr.adapters.boot_windows import BootFacts
 
@@ -390,6 +391,7 @@ def test_install_refuses_without_a_tty(monkeypatch, capsys):
 def test_install_runs_the_generated_script_once_confirmed(monkeypatch, capsys):
     ran = []
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    simulate_wsl_uid(monkeypatch)
     monkeypatch.setattr(cli, "_load_config", _cfg)
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
     monkeypatch.setattr(cli, "_windows_temp_dir", lambda: None)
@@ -412,6 +414,7 @@ def test_install_passes_the_configured_holder_rearm_interval(monkeypatch):
 
     monkeypatch.setattr(cli.boot_windows, "install_script", spy)
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    simulate_wsl_uid(monkeypatch)
     monkeypatch.setattr(cli, "_load_config",
                         lambda: {**_cfg(), "boot_holder_rearm_minutes": 7})
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
@@ -498,6 +501,7 @@ def _install_env(monkeypatch, tmp_path, run_ok=True):
     win_dir = tmp_path / "wintemp"
     win_dir.mkdir()
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    simulate_wsl_uid(monkeypatch)
     monkeypatch.setattr(cli, "_load_config", _cfg)
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu-24.04", "evan"))
     monkeypatch.setattr(cli, "_windows_temp_dir",
