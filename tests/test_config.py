@@ -111,7 +111,10 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # geometry priors).
     # v28 (2026-09-28): boot_holder_rearm_minutes (#138 — the WSL holder
     # task repeats so a distro-only restart re-arms it).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 28
+    # v29 (2026-10-09): diagnose_scan_cap (#148 — journald host events are
+    # classified from up to this many scanned lines, then capped).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 29
+    assert cfg.DEFAULTS["diagnose_scan_cap"] == 5000
 
 
 def test_zombie_strikes_default_is_five():
