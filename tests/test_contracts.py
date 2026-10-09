@@ -793,9 +793,9 @@ def test_valid_archive_record_passes():
     contracts.validate_archive_record(_archive_record())
 
 
-def test_archive_wrong_version_rejected():
+def test_archive_version_from_the_future_rejected():
     r = _archive_record()
-    r["v"] = 2
+    r["v"] = contracts.ARCHIVE_CONTRACT_VERSION + 1
     with pytest.raises(contracts.ContractError):
         contracts.validate_archive_record(r)
 
@@ -847,18 +847,50 @@ def test_untmuxed_is_a_valid_archive_reason():
     # [user request 2026-07-31] ops.untmux kills the parked tmux session and
     # relaunches `claude --resume <sid>` directly in a visible tab; success
     # archives with this new reason (same vocabulary-extension rationale as
-    # "ghost-restored" — see test_archive_contract_version_still_1_and_v1_records_validate).
+    # "ghost-restored" — see test_v1_archive_records_still_validate_under_v2).
     r = _archive_record()
     r["reason"] = "untmuxed"
     contracts.validate_archive_record(r)  # must not raise
 
 
-def test_archive_contract_version_still_1_and_v1_records_validate():
-    # Extending ARCHIVE_REASONS changes no key/type in the stored shape, so
-    # it does not bump ARCHIVE_CONTRACT_VERSION — every v1 record already on
-    # disk (any reason) stays valid without a migration.
-    assert contracts.ARCHIVE_CONTRACT_VERSION == 1
+def test_v1_archive_records_still_validate_under_v2():
+    # The earlier reasons (ghost-restored, untmuxed, closed, ...) widened the
+    # vocabulary WITHOUT a bump, because the validator then demanded
+    # v == current and a bump would have invalidated every record on disk.
+    # #147 bumps (a v1 build has no case for `host-crash-loop`) and keeps
+    # that guarantee the other way: any version up to the current one is
+    # readable, so every v1 record already on disk stays valid unmigrated.
+    assert contracts.ARCHIVE_CONTRACT_VERSION == 2
     contracts.validate_archive_record(_archive_record())  # stored v1 stays valid
+    old = _archive_record()
+    old["reason"] = "gave-up"
+    contracts.validate_archive_record(old)  # pre-#147 give-ups stay valid too
+
+
+def test_host_crash_loop_is_a_valid_archive_reason():
+    # #147: the host-death cap's own give-up, distinct from the strike
+    # cap's "gave-up" — the session was a bystander of an unstable host.
+    r = _archive_record()
+    r["v"] = 2
+    r["reason"] = "host-crash-loop"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_a_v1_record_cannot_carry_the_v2_host_crash_loop_reason():
+    # A v1 record with a reason v1 never had is a shape that never existed;
+    # a writer that rewrites an old record's reason must restamp it.
+    r = _archive_record()
+    r["reason"] = "host-crash-loop"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
+
+
+@pytest.mark.parametrize("v", [0, -1])
+def test_archive_version_below_1_rejected(v):
+    r = _archive_record()
+    r["v"] = v
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)
 
 
 def test_archive_missing_key_rejected():

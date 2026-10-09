@@ -42,7 +42,7 @@ from crr.core import pwa
 # moves without it. Two branches also collided on this number twice in two
 # days; git caught both because it is one line, but a page change that simply
 # forgets to bump merges clean, which is what the guard is for.
-PAGE_VERSION = 77  # v77: final-review fixes — [hidden] elements actually hide now (a page-wide CSS reset; #key-compact/#key-full's own display:flex was silently overriding the browser's [hidden] rule, so the v76 toggle never worked), Settings modal scrolls when the QR box is open, aria-expanded on the key-legend toggle, adddev-box alignment inside Devices; v76: #key legend starts as a compact row (5 state dots + 3 group pills), expands to the full legend on click (user feedback 2026-09-19); v75: Add a device + Tailnet Members moved into a new Settings "Devices" section (were buried in the "Other views" toolbar); v74: Settings moved to a header gear icon (was buried in the "Other views" toolbar); excluded-directories rows wrap instead of overflowing on narrow screens (user feedback 2026-09-18); v73: explanation toasts (badge long-press, #key legend tap) are sticky, not auto-dismissed — 3s wasn't enough to read a full sentence; v72: session-card status badges long-press to reveal an explanation, via the same showNotice toast the #key legend already uses on tap; v71: auth badge no longer treats "unknown" as healthy — visible muted badge + Reauth button, and the expired badge names its source
+PAGE_VERSION = 78  # v78: "Host crash loop" view (#147) — sessions the host-death cap parked, each with a Restore button (sid-op restore-host-crash-loop), in the shared Discoverable/untracked modal; v77: final-review fixes — [hidden] elements actually hide now (a page-wide CSS reset; #key-compact/#key-full's own display:flex was silently overriding the browser's [hidden] rule, so the v76 toggle never worked), Settings modal scrolls when the QR box is open, aria-expanded on the key-legend toggle, adddev-box alignment inside Devices; v76: #key legend starts as a compact row (5 state dots + 3 group pills), expands to the full legend on click (user feedback 2026-09-19); v75: Add a device + Tailnet Members moved into a new Settings "Devices" section (were buried in the "Other views" toolbar); v74: Settings moved to a header gear icon (was buried in the "Other views" toolbar); excluded-directories rows wrap instead of overflowing on narrow screens (user feedback 2026-09-18); v73: explanation toasts (badge long-press, #key legend tap) are sticky, not auto-dismissed — 3s wasn't enough to read a full sentence; v72: session-card status badges long-press to reveal an explanation, via the same showNotice toast the #key legend already uses on tap; v71: auth badge no longer treats "unknown" as healthy — visible muted badge + Reauth button, and the expired badge names its source
 _VERSION_PLACEHOLDER = "@PAGE_VERSION@"
 _POLL_PLACEHOLDER = "@POLL_MS@"
 _VERSION_MS_PLACEHOLDER = "@VERSION_MS@"
@@ -237,8 +237,11 @@ ACTIONS = ("reopen", "dismiss", "remove", "kick", "close", "untrack", "detmux", 
 # module docstring for why). Two explicit ops rather than one op carrying a
 # bool value, matching every other op here: the shape stays "op + sid",
 # nothing more to validate.
+# "restore-host-crash-loop" (#147) puts a session the host-death cap parked
+# back under the watchdog (ops.restore_host_crash_loop) — sid-keyed because
+# a parked session lives only in the archive, with no journal pid.
 SID_ACTIONS = ("retrack", "adopt", "takeover", "autokick-on", "autokick-off",
-               "skip-permissions-on", "skip-permissions-off")
+               "skip-permissions-on", "skip-permissions-off", "restore-host-crash-loop")
 
 
 # Rows per page in the dashboard's discoverable modal (see crr.core.config's
@@ -293,6 +296,7 @@ def handle_request(
     action_provider: Callable[[str, int], tuple[bool, str, bool]] | None = None,
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None,
     untracked_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
+    host_crash_loop_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     discoverable_provider: Callable[[str, int, int], dict[str, Any]] | None = None,
     sid_action_provider: Callable[[str, str], tuple[bool, str, bool]] | None = None,
     recall_provider: Callable[[str, str | None], dict] | None = None,
@@ -416,6 +420,16 @@ def handle_request(
             offset = _positive_int(params.get("offset", [""])[0], 0)
             limit = _positive_int(params.get("limit", [""])[0], DISCOVERABLE_PAGE) or DISCOVERABLE_PAGE
             return _json(200, untracked_provider(unt_q, offset, limit))
+        if path == "/api/host-crash-loop":
+            # Lazy + paged exactly like /api/untracked (#147): the sessions
+            # the host-death cap parked, shown only when the panel opens.
+            if host_crash_loop_provider is None:
+                return _plain(404, "not found")
+            params = parse_qs(query)
+            hcl_q = (params.get("q", [""])[0]).strip()
+            offset = _positive_int(params.get("offset", [""])[0], 0)
+            limit = _positive_int(params.get("limit", [""])[0], DISCOVERABLE_PAGE) or DISCOVERABLE_PAGE
+            return _json(200, host_crash_loop_provider(hcl_q, offset, limit))
         if path == "/api/discoverable":
             # Lazy (T-C): the untracked-transcript scan reads transcript
             # content per candidate — never on the poll path, only when the

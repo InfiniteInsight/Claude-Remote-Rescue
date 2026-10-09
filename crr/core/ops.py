@@ -23,6 +23,7 @@ from crr.core import journal as journal_module
 from crr.core.journal import JournalStore
 from crr.core.ports import BootIdentity, ProcessProbe, TabSpawner, TabSpawnTimeout, TmuxSpawner
 from crr.core.reviver import (
+    HOST_CRASH_LOOP,
     TERMINAL_ARCHIVE_REASONS,
     attach_argv,
     exit_hook_argv,
@@ -702,6 +703,19 @@ def retrack(store: JournalStore, archive: ArchiveStore, sid: str, now: str) -> O
         )
     entry = dict(record["entry"])
     entry["updated"] = now  # re-journaling is itself a change; a stale timestamp would lie
+    refused = _rejournal(store, archive, sid, entry, verb="retrack")
+    return refused or OpResult(True, f"retracked {sid[:8]}")
+
+
+def _rejournal(store: JournalStore, archive: ArchiveStore, sid: str, entry: dict,
+               *, verb: str) -> OpResult | None:
+    """Write an archived ``entry`` back to its pid slot, then drop the record.
+
+    The recycled-pid guard ``retrack``'s docstring explains, shared with
+    ``restore_host_crash_loop``: the slot is checked BEFORE either
+    destructive step, and any refusal leaves the archive record intact.
+    Returns None on success, else the refusal.
+    """
     pid = entry["pid"]
     try:
         existing = store.read(pid)
@@ -709,18 +723,64 @@ def retrack(store: JournalStore, archive: ArchiveStore, sid: str, now: str) -> O
         existing = None  # slot is genuinely empty — safe to write
     except (contracts.ContractError, OSError):
         return OpResult(
-            False, f"cannot retrack {sid[:8]}: pid slot {pid} is unreadable, refusing to guess"
+            False, f"cannot {verb} {sid[:8]}: pid slot {pid} is unreadable, refusing to guess"
         )
     if existing is not None:
         if (existing.get("claude") or {}).get("session_id") == sid:
             return OpResult(False, f"session {sid[:8]} is already tracked")
         return OpResult(
             False,
-            f"cannot retrack {sid[:8]}: pid slot {pid} now belongs to a different session",
+            f"cannot {verb} {sid[:8]}: pid slot {pid} now belongs to a different session",
         )
     store.write(entry)
     archive.remove(sid)
-    return OpResult(True, f"retracked {sid[:8]}")
+    return None
+
+
+def restore_host_crash_loop(store: JournalStore, archive: ArchiveStore, sid: str,
+                            now: str) -> OpResult:
+    """Undo the host-death cap's park (#147): put a ``host-crash-loop``
+    session back under the watchdog, both counters zeroed.
+
+    The reviver parks a session there when its host kept dying shortly
+    after each revival — terminal for the AUTOMATIC reviver, because
+    reviving into a crash loop is what the cap exists to stop. Only a human
+    can say the host is stable again, so this op is the way back: re-journal
+    the preserved entry with ``host_deaths`` and ``revive_strikes`` at 0 (a
+    fresh start, not the tail of the loop — left at the cap, the very next
+    pass would park it again) and remove the record. The watchdog revives
+    it on its next pass; ``crr reopen --sid`` also reopens it immediately.
+
+    Only this reason is eligible. ``gave-up`` stays the strike cap's
+    terminal verdict (the session's OWN revival kept dying), and every
+    other reason has its own owner (``retrack`` for untracked, the reviver
+    for the revivable ones). Refuses — leaving the record intact — when the
+    conversation is already journaled under any pid (adopted again, or
+    resumed by hand: a second entry would be a second revival candidate),
+    or when the pid slot is taken or unreadable (see ``_rejournal``).
+    """
+    try:
+        record = archive.read(sid)
+    except (KeyError, contracts.ContractError):
+        return OpResult(False, f"no archived session {sid}")
+    if record["reason"] != HOST_CRASH_LOOP:
+        return OpResult(
+            False,
+            f"session {sid[:8]} was archived as {record['reason']!r}, "
+            f"not {HOST_CRASH_LOOP!r} — refusing",
+        )
+    if any((e.get("claude") or {}).get("session_id") == sid for e in store.scan().entries):
+        return OpResult(False, f"session {sid[:8]} is already tracked — nothing to restore")
+    entry = journal_module.upgrade_entry(record["entry"])
+    entry["host_deaths"] = 0
+    entry["revive_strikes"] = 0
+    entry["updated"] = now
+    refused = _rejournal(store, archive, sid, entry, verb="restore")
+    return refused or OpResult(
+        True,
+        f"restored {sid[:8]} ({entry['cwd']}) from the host crash loop, counters reset — "
+        f"the watchdog revives it on its next pass",
+    )
 
 
 def _signal_groups(
@@ -838,13 +898,17 @@ def retire_conversation(
     isn't running (archive ``closed``, delist), and close a still-revivable
     archive record. Never touches a LIVE/GHOST copy — that's another agent
     on the conversation, not ours to end — nor rewrites an archive record
-    that already has a terminal reason. Returns the retired pids.
+    that already has a terminal reason. The one exception is
+    ``host-crash-loop`` (#147): terminal for the reviver but still on offer
+    for restore, so a conversation the user has since resumed by hand and
+    ended must stop being offered. Returns the retired pids.
     """
     try:
         record = archive.read(session_id)
     except (KeyError, contracts.ContractError):
         record = None
-    if record is not None and record["reason"] not in TERMINAL_ARCHIVE_REASONS:
+    if record is not None and (record["reason"] not in TERMINAL_ARCHIVE_REASONS
+                               or record["reason"] == HOST_CRASH_LOOP):
         record["reason"] = "closed"
         archive.write(record)
     retired = []

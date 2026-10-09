@@ -644,7 +644,7 @@ def test_revive_skips_the_entire_pass_when_tmux_liveness_is_unknown(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())  # would ordinarily be revived
     outcome = _run(store, FakeTmux(live=None))
-    assert outcome == ([], [], [], True, [], {})
+    assert outcome == ([], [], [], True, [], {}, [])
     assert outcome.skipped is True
     entry = store.read(42)
     assert entry["revive_strikes"] == 0          # no strike accrued
@@ -660,7 +660,7 @@ def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_
     )
     archive.archive(entry, "superseded-on-register", _NOW)  # a revival candidate
     outcome = _run(store, FakeTmux(live=None), archive=archive)
-    assert outcome == ([], [], [], True, [], {})
+    assert outcome == ([], [], [], True, [], {}, [])
     assert outcome.skipped is True
     assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched
 
@@ -1484,12 +1484,92 @@ def test_host_death_counts_toward_its_own_cap_not_strikes(tmp_path):
     assert e["revive_strikes"] == 1  # only the first (unknown-boot) revival
 
 
-def test_a_revival_that_keeps_killing_its_host_is_given_up(tmp_path):
+def test_a_revival_that_keeps_killing_its_host_is_parked_as_host_crash_loop(tmp_path):
+    # #147: the host-death cap is NOT the strike cap. The session may be an
+    # innocent bystander of an unstable host, so it is archived under its
+    # own reason — never the strike cap's "gave-up".
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     _seed(store, 42, claude=_claude())
     outcomes = [_pass(store, archive, life, _at(2 * life)) for life in range(7)]
-    gave_up_at = [i for i, o in enumerate(outcomes) if o.gave_up]
-    assert gave_up_at == [5]  # revival in life 0, then 4 host deaths, then cap
+    parked_at = [i for i, o in enumerate(outcomes) if o.host_crash_loop]
+    assert parked_at == [5]  # revival in life 0, then 4 host deaths, then cap
+    assert outcomes[5].host_crash_loop == [42]
+    assert all(o.gave_up == [] for o in outcomes)
+    record = archive.read(_claude()["session_id"])
+    assert record["reason"] == "host-crash-loop"
+    assert record["v"] == 2
+
+
+def test_the_crash_loop_incident_parks_every_bystander_and_a_healthy_boot_leaves_them(
+        tmp_path):
+    # 2026-10-09: the distro restarted every ~2 min; every tracked session
+    # hit the host-death cap together. They are parked (terminal for the
+    # automatic reviver — reviving into a crash loop is what the cap stops)
+    # and stay parked on the next, healthy boot until a human restores them.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sids = [f"8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c{i:02d}" for i in range(9)]
+    for i, sid in enumerate(sids):
+        _seed(store, 100 + i, claude=_claude(sid=sid))
+    for life in range(7):
+        _pass(store, archive, life, _at(2 * life))
+    assert store.scan().entries == []
+    assert sorted(r["entry"]["claude"]["session_id"] for r in archive.scan().records) == sids
+    assert {r["reason"] for r in archive.scan().records} == {"host-crash-loop"}
+    healthy = _pass(store, archive, 99, _at(600))
+    assert healthy.revived == []
+    assert {r["reason"] for r in archive.scan().records} == {"host-crash-loop"}
+
+
+def test_host_crash_loop_archive_record_is_not_re_revived(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/x", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+    )
+    archive.archive(entry, "host-crash-loop", _NOW)
+    tmux = FakeTmux(live=set())
+    outcome = _run(store, tmux, archive=archive)
+    assert outcome.revived == []
+    assert tmux.created == []
+    assert archive.read(_claude()["session_id"])["reason"] == "host-crash-loop"
+
+
+def test_an_archived_record_at_the_host_death_cap_is_parked_in_place(tmp_path):
+    # The archive pass's flavor of the same verdict. The record predates
+    # archive v2 (stamped v1); rewriting its reason to a v2-only one must
+    # restamp it, or the store refuses the write.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    entry = new_entry(
+        pid=99, cwd="/home/u/p99", host="tmux", shell="zsh",
+        boot_id=_ENTRY_BOOT, now=_NOW, claude=_claude(),
+        revived_boot="kernel@0", host_deaths=4,
+    )
+    archive.write({"v": 1, "reason": "superseded-on-register",
+                   "archived_at": _NOW, "entry": entry})
+    tmux = FakeTmux(live=set())
+    outcome = revive_crashed(
+        [], _Life(1), FakeProbe(), tmux, store, archive, max_strikes=3,
+        now=_at(2), remote_control_enabled=True,
+        max_host_deaths=4, host_death_stable_seconds=600,
+    )
+    assert outcome.host_crash_loop == [99]
+    assert outcome.gave_up == []
+    assert tmux.created == []
+    record = archive.read(_claude()["session_id"])
+    assert record["reason"] == "host-crash-loop"
+    assert record["v"] == 2
+
+
+def test_strike_give_up_still_archives_as_gave_up_not_host_crash_loop(tmp_path):
+    # Only the HOST-death cap changed: a revival that keeps dying in a
+    # healthy boot is still the strike cap's terminal "gave-up".
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude(), strikes=3)
+    archive = ArchiveStore(tmp_path)
+    outcome = _run(store, FakeTmux(live=set()), max_strikes=3, archive=archive)
+    assert outcome.gave_up == [42]
+    assert outcome.host_crash_loop == []
     assert archive.read(_claude()["session_id"])["reason"] == "gave-up"
 
 
@@ -1551,12 +1631,12 @@ def test_ordinary_reboots_never_exhaust_a_rekeyed_stable_session(tmp_path):
         t += 120  # up two hours; the conversation kept being written
 
 
-def test_a_rekeyed_revival_that_keeps_killing_its_host_is_still_given_up(tmp_path):
+def test_a_rekeyed_revival_that_keeps_killing_its_host_is_still_parked(tmp_path):
     store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
     sid = _claude()["session_id"]
     _seed(store, 42, claude=_claude())
     frozen = FakeTranscripts({sid: TranscriptProbe(True, 1_000.0)})
-    gave_up = []
+    parked = []
     for life in range(7):
         o = revive_crashed(
             store.scan().entries, _Life(life), FakeProbe(),
@@ -1564,6 +1644,7 @@ def test_a_rekeyed_revival_that_keeps_killing_its_host_is_still_given_up(tmp_pat
             now=_at(2 * life), remote_control_enabled=True, transcripts=frozen,
             max_host_deaths=4, host_death_stable_seconds=600,
         )
-        if o.gave_up:
-            gave_up.append(life)
-    assert gave_up == [5]
+        if o.host_crash_loop:
+            parked.append(life)
+    assert parked == [5]
+    assert archive.read(sid)["reason"] == "host-crash-loop"

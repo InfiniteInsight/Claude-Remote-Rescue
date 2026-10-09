@@ -22,10 +22,22 @@ _SRC = Path(__file__).resolve().parent.parent / "crr" / "core"
 
 
 def _ledger_versions(path: Path, constant: str) -> set[int]:
-    """Versions with an entry in the comment block above ``constant``."""
-    text = path.read_text(encoding="utf-8")
-    head = text[: text.index(constant)]
-    return {int(n) for n in re.findall(r"^#\s*v(\d+)\b", head, re.M)}
+    """Versions with an entry in the comment block directly above ``constant``.
+
+    Only the contiguous ``#`` lines immediately above the assignment count.
+    Scanning everything before the constant (the original rule) let one
+    constant's ledger borrow another's: ARCHIVE_CONTRACT_VERSION sits below
+    the journal ledger, whose "# v2" entry would have papered over a
+    missing archive v2 entry (#147).
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"{constant} ="))
+    block = []
+    for line in reversed(lines[:at]):
+        if not line.startswith("#"):
+            break
+        block.append(line)
+    return {int(n) for n in re.findall(r"^#\s*v(\d+)\b", "\n".join(block), re.M)}
 
 
 def _assert_contiguous(path: Path, constant: str, current: int, floor: int = 2) -> None:
@@ -57,6 +69,13 @@ def test_config_defaults_ledger_has_no_holes():
     # every comment after it sat one behind the constant it described.
     _assert_contiguous(_SRC / "config.py", "CONFIG_DEFAULTS_VERSION",
                        cfg.CONFIG_DEFAULTS_VERSION)
+
+
+def test_archive_contract_ledger_has_no_holes():
+    # Archive reasons are a stored contract (#147): a record read back by a
+    # later — or, after a rollback, an earlier — crr must be explainable.
+    _assert_contiguous(_SRC / "contracts.py", "ARCHIVE_CONTRACT_VERSION",
+                       contracts.ARCHIVE_CONTRACT_VERSION)
 
 
 def test_journal_schema_ledger_has_no_holes():

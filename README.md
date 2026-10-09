@@ -210,6 +210,7 @@ the Tailscale API**, so both are done by hand:
 | `crr status [--json]` | List journaled sessions and their state (live / ghost / crashed) |
 | `crr revive` | Revive crashed claude sessions into detached tmux (the watchdog runs this) |
 | `crr reopen --pid N` (alias `crr restore --pid N`) | Revive one specific crashed or ghost session now (ghost: closes the orphaned shell and archives the conversation for revival) |
+| `crr reopen --sid ID` / `crr reopen --host-crash-loop` | Restore a session the reviver parked as `host-crash-loop` (its host kept going down shortly after each revival, so it stopped reviving it) — host-death and strike counters reset. `--sid` restores one and reopens it now; `--host-crash-loop` restores all of them and the watchdog revives them on its next pass. Strike give-ups (`gave-up`) are not eligible |
 | `crr dismiss --pid N` | Clean up a crashed session without reviving (archives it) |
 | `crr remove --pid N` | Delist a session, touch nothing else |
 | `crr kick <pid>` | Restart claude in place on the same conversation |

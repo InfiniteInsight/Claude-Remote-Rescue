@@ -513,6 +513,36 @@ def test_untracked_endpoint_404_without_provider():
 
 
 # --------------------------------------------------------------------------
+# GET /api/host-crash-loop — sessions the host-death cap parked (#147)
+# --------------------------------------------------------------------------
+
+def test_host_crash_loop_endpoint_uses_provider_lazily_and_pages():
+    seen = []
+
+    def prov(q, o, limit):
+        seen.append((q, o, limit))
+        return {"rows": [_UNTRACKED_ITEM], "total": 9, "filtered": 1,
+                "offset": o, "limit": limit}
+
+    resp = web.handle_request(
+        "GET", "/api/host-crash-loop", {"Host": "localhost"}, b"",
+        sessions_provider=_payload, host_crash_loop_provider=prov,
+        query="q=proj&offset=0&limit=20", allowed_hosts=ALLOWED, allowed_suffixes=SUFFIXES)
+    assert resp.status == 200
+    body = json.loads(resp.body)
+    assert body["rows"] == [_UNTRACKED_ITEM]
+    assert body["total"] == 9 and body["filtered"] == 1   # no silent cap
+    assert seen == [("proj", 0, 20)]                    # only when the panel asks
+
+
+def test_host_crash_loop_endpoint_404_without_provider():
+    resp = web.handle_request(
+        "GET", "/api/host-crash-loop", {"Host": "localhost"}, b"",
+        sessions_provider=_payload, allowed_hosts=ALLOWED, allowed_suffixes=SUFFIXES)
+    assert resp.status == 404
+
+
+# --------------------------------------------------------------------------
 # GET /api/discoverable — untracked transcripts (T-C, C3)
 # --------------------------------------------------------------------------
 
@@ -733,6 +763,21 @@ def _post_sid(payload=None, host="localhost", headers=None, sid_action_provider=
 
 def test_sid_actions_include_retrack():
     assert "retrack" in web.SID_ACTIONS
+
+
+def test_post_sid_action_restore_host_crash_loop_dispatches():
+    # #147: the dashboard's Restore button on a crash-loop-parked row.
+    assert "restore-host-crash-loop" in web.SID_ACTIONS
+    seen = {}
+
+    def act(op, sid):
+        seen["call"] = (op, sid)
+        return True, "restored", False
+
+    resp = _post_sid({"op": "restore-host-crash-loop", "sid": _VALID_SID},
+                     sid_action_provider=act)
+    assert resp.status == 200
+    assert seen["call"] == ("restore-host-crash-loop", _VALID_SID)
 
 
 def test_sid_actions_include_adopt():
@@ -1087,8 +1132,13 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_77():
-    """v77: final-review fixes for the header-declutter feature — a page-wide
+def test_page_version_is_78():
+    """v78: a "Host crash loop" view in the "Other views" toolbar (#147) —
+    sessions the host-death cap parked as `host-crash-loop`, listed lazily
+    from /api/host-crash-loop in the shared Discoverable/untracked modal,
+    each with a Restore button (sid-op `restore-host-crash-loop`). Until now
+    the dashboard showed them nowhere.
+    (v77: final-review fixes for the header-declutter feature — a page-wide
     [hidden] { display: none !important; } CSS reset (the v76 compact/expand
     key-legend toggle set el.hidden but #key-compact/#key-full's own
     display: flex silently overrode the browser's built-in [hidden] rule, so
@@ -1186,7 +1236,7 @@ def test_page_version_is_77():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 77
+    assert web.PAGE_VERSION == 78
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1496,6 +1546,29 @@ def test_page_untracked_uses_the_same_modal_as_discoverable():
     assert '"/api/untracked"' in page
     # both lists paged through the same shell
     assert page.count('id="disc-modal"') == 1
+
+
+def test_page_lists_host_crash_loop_sessions_as_restorable():
+    # #147: sessions the host-death cap parked were invisible on the
+    # dashboard. They get their own lazy list in the shared modal, with a
+    # Restore action wired to the sid-keyed op.
+    page = web.render_page()
+    assert 'id="host-crash-loop-btn"' in page
+    assert 'openDisc("hostCrashLoop")' in page
+    assert '"/api/host-crash-loop"' in page
+    assert '{ label: "Restore", op: "restore-host-crash-loop" }' in page
+    assert '"Restore":' in page   # BUTTON_HELP tooltip
+
+
+def test_page_host_crash_loop_label_is_honest():
+    # Not "gave up" / "abandoned": the cap cannot tell an unstable host from
+    # a revival that brings the host down, and the copy must not pretend to.
+    page = web.render_page()
+    start = page.index("hostCrashLoop: {")
+    block = page[start:page.index("actions:", start)]
+    assert "gave up" not in block.lower() and "abandon" not in block.lower()
+    assert "kept going down" in block
+    assert "crr reopen --host-crash-loop" in block   # the bulk path is named
 
 
 def test_page_has_global_recall_search_bar():

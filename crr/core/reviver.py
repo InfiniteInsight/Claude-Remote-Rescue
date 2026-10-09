@@ -18,7 +18,10 @@ The give-up guard is the safety valve for that gate. Each revival
 increments a strike; past ``max_strikes`` the session is abandoned to the
 archive with reason ``gave-up`` (its terminal home — it stops being a
 candidate and stops re-reporting). Observing the session alive resets
-strikes to zero, so only *persistent* failures accumulate.
+strikes to zero, so only *persistent* failures accumulate. Revivals that
+died WITH their host count against a separate host-death cap instead;
+exhausting it parks the session as ``host-crash-loop`` (#147) — just as
+terminal for this module, but restorable by a human.
 
 Pure core: takes the ports + the journal and archive stores, so it is
 fully testable with fakes and touches no OS directly.
@@ -31,6 +34,7 @@ import shlex
 from datetime import datetime
 from typing import Any, Mapping, NamedTuple, Sequence
 
+from crr.core import contracts
 from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
 from crr.core.classifier import CRASHED, classify, same_boot
@@ -54,10 +58,16 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 _MAX_NAME_LEN = 40
 
 
+# The host-death cap's archive reason (#147). Terminal for THIS module —
+# reviving into a crash loop is what the cap exists to stop — but, unlike
+# "gave-up", restorable by a human (ops.restore_host_crash_loop) once the
+# host is stable: the session may be an innocent bystander of the loop.
+HOST_CRASH_LOOP = "host-crash-loop"
+
 # Archive reasons that are a conversation's terminal home: never revival
 # candidates (see the archive pass in revive_crashed for why each is here).
 TERMINAL_ARCHIVE_REASONS = ("gave-up", "detmuxed", "untracked", "untmuxed",
-                            "dismissed", "closed", "unresumable")
+                            "dismissed", "closed", "unresumable", HOST_CRASH_LOOP)
 
 
 class RevivalOutcome(NamedTuple):
@@ -67,6 +77,7 @@ class RevivalOutcome(NamedTuple):
     skipped: bool = False  # True when the whole pass was skipped (tmux liveness unknown)
     unresumable: list[int] = []   # pids archived by the pre-flight (no transcript)
     strike_counts: dict[int, int] = {}  # revived pid -> its NEW strike count
+    host_crash_loop: list[int] = []  # pids parked past the host-death cap (#147)
 
 
 def session_name(entry: Mapping[str, Any]) -> str:
@@ -385,7 +396,8 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
             host_death_stable_seconds: float | None = None):
     """Return (action, updated_entry, name) for one candidate.
 
-    action is one of: 'reset-nochange', 'reset', 'hold', 'revive', 'give_up'.
+    action is one of: 'reset-nochange', 'reset', 'hold', 'revive', 'give_up',
+    'host_crash_loop'.
 
     ``current_boot`` lets a revival that died WITH its host go uncounted:
     when the boot stamped at the last revival (``revived_boot``) is no
@@ -395,7 +407,10 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
     uncapped), and clear once a revival is seen alive
     ``host_death_stable_seconds`` after it started — so ordinary reboots
     never exhaust a session, but a revival that keeps taking its host down
-    with it is given up.
+    with it stops being revived: 'host_crash_loop', NOT 'give_up' (#147).
+    From here the two cases — "this revival takes the host down" and "the
+    host is crash-looping on its own" — look identical, and the second
+    must not earn the strike cap's verdict.
     """
     name = resolved_session_name(entry)  # legacy crr-<sid8> keeps its name (#51)
     if name in live:
@@ -429,7 +444,7 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
             # above) is where a real session's counter gets cleared.
             updated["host_deaths"] = 0
         if max_host_deaths is not None and updated["host_deaths"] >= max_host_deaths:
-            return "give_up", entry, name
+            return "host_crash_loop", entry, name
         updated["host_deaths"] += 1
     else:
         updated["revive_strikes"] = entry["revive_strikes"] + 1
@@ -482,6 +497,7 @@ def revive_crashed(
     reset: list[int] = []
     unresumable: list[int] = []
     strike_counts: dict[int, int] = {}
+    host_crash_loop: list[int] = []
 
     def _tx_probe(e: Mapping[str, Any]) -> "TranscriptProbe | None":
         if transcripts is None:
@@ -558,6 +574,12 @@ def revive_crashed(
             archive.archive(entry, "gave-up", now)
             store.remove(pid)
             gave_up.append(pid)
+        elif action == "host_crash_loop":
+            # Same shape as give-up, its own lineage (#147): parked until a
+            # human restores it, never revived into the loop by this pass.
+            archive.archive(entry, HOST_CRASH_LOOP, now)
+            store.remove(pid)
+            host_crash_loop.append(pid)
         elif action == "revive" and tx is not None and tx.exists is False:
             # Pre-flight: a CONFIRMED-absent transcript can never resume —
             # reviving it spawns a claude that dies (or wedges) every boot,
@@ -607,8 +629,11 @@ def revive_crashed(
     #    both resurrect the conversation and contradict the tmux session
     #    ops.untmux deliberately killed) — and 'dismissed' is the user's
     #    explicit "clean up without restoring"; reviving it would un-dismiss
-    #    their decision. The two 'superseded-*' reasons stay revivable on
-    #    purpose: their archives exist to preserve revival data.)
+    #    their decision. 'host-crash-loop' (#147) waits for a human: the
+    #    host kept dying under its revivals, and only a person can tell a
+    #    stable host from the next round of the loop. The two 'superseded-*'
+    #    reasons stay revivable on purpose: their archives exist to preserve
+    #    revival data.)
     for record in archive.scan().records:
         if record["reason"] in TERMINAL_ARCHIVE_REASONS:
             continue
@@ -637,6 +662,12 @@ def revive_crashed(
             record["reason"] = "gave-up"
             archive.write(record)
             gave_up.append(pid)
+        elif action == "host_crash_loop":
+            # A v2-only reason: restamp, or an older record is refused.
+            record["reason"] = HOST_CRASH_LOOP
+            record["v"] = contracts.ARCHIVE_CONTRACT_VERSION
+            archive.write(record)
+            host_crash_loop.append(pid)
         elif action == "revive" and tx is not None and tx.exists is False:
             # Pre-flight, archive flavor: rewrite the record's reason in
             # place — it stays preserved but stops being a candidate.
@@ -653,4 +684,5 @@ def revive_crashed(
             strike_counts[pid] = updated["revive_strikes"]
 
     return RevivalOutcome(revived, gave_up, reset,
-                          unresumable=unresumable, strike_counts=strike_counts)
+                          unresumable=unresumable, strike_counts=strike_counts,
+                          host_crash_loop=host_crash_loop)
