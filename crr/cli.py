@@ -396,9 +396,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     reo = sub.add_parser(
         "reopen", aliases=["restore"],
-        help="revive one crashed or ghost session now (alias: restore)",
+        help="revive one crashed or ghost session now, or restore sessions "
+             "parked by a host crash loop (alias: restore)",
     )
-    reo.add_argument("--pid", type=int, required=True)
+    reo_target = reo.add_mutually_exclusive_group(required=True)
+    reo_target.add_argument("--pid", type=int)
+    reo_target.add_argument(
+        "--sid", default=None,
+        help="restore this session parked by a host crash loop (counters reset) "
+             "and reopen it now")
+    reo_target.add_argument(
+        "--host-crash-loop", action="store_true",
+        help="restore EVERY session parked by a host crash loop (counters reset); "
+             "the watchdog revives them on its next pass")
     reo.set_defaults(func=_cmd_reopen)
 
     kick = sub.add_parser("kick", help="restart claude in place on the same conversation")
@@ -3458,7 +3468,53 @@ def _tab_spawner(config: cfg.Config, *, probe: bool = False) -> tuple[object | N
     return None, False
 
 
+def _host_crash_loop_records(records: list[dict]) -> list[dict]:
+    """The records parked by the host-death cap (#147), newest first.
+
+    Shared by ``crr reopen --host-crash-loop`` and the dashboard's
+    /api/host-crash-loop panel so the two surfaces can't drift on what
+    "parked by a host crash loop" means (the ``_recent_untracked_records``
+    pattern). Takes records, not an ArchiveStore: the caller decides what
+    to do with the scan's problems.
+    """
+    parked = [r for r in records if r["reason"] == reviver.HOST_CRASH_LOOP]
+    return sorted(parked, key=lambda r: r["archived_at"], reverse=True)
+
+
+def _reopen_host_crash_loop() -> int:
+    """``crr reopen --host-crash-loop``: restore every parked session.
+
+    Nine sessions parked by one crash loop should not be nine manual steps
+    (#147). Each is restored with its counters reset and reported on its
+    own line; the watchdog revives them on its next pass, in detached tmux
+    like any boot-time revival (no tab per session). A refusal (already
+    tracked, pid slot taken) is reported and leaves that record parked.
+    """
+    sd = state_dir.state_dir()
+    store, archive = JournalStore(sd), ArchiveStore(sd)
+    with mutation_lock(sd):
+        scan = archive.scan()
+        results = [
+            ops.restore_host_crash_loop(store, archive, r["entry"]["claude"]["session_id"], _now())
+            for r in _host_crash_loop_records(scan.records)
+        ]
+    # Corrupt files are surfaced, never silently dropped (mirrors retrack).
+    for name, reason in scan.problems:
+        print(f"crr reopen: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
+    if not results:
+        print("no sessions parked by a host crash loop")
+        return 0
+    for res in results:
+        print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    return 0 if all(res.ok for res in results) else 1
+
+
 def _cmd_reopen(args: argparse.Namespace) -> int:
+    if args.host_crash_loop:
+        return _reopen_host_crash_loop()
+    if args.sid is not None and not contracts.valid_session_id(args.sid):
+        print(f"crr reopen: {args.sid!r} is not a valid session id", file=sys.stderr)
+        return 2
     try:
         boot = boot_identity.detect()
     except NotImplementedError as exc:
@@ -3474,27 +3530,48 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     sd = state_dir.state_dir()
     flags = FlagStore(sd)
     spawner, tabs_expected = _tab_spawner(config)
-    # Capture the target session name + cwd BEFORE reopen: a GHOST reopen
-    # archives + delists the entry (ops._reopen_ghost -> store.remove), so
-    # reading it back by pid afterward would miss it and skip the drop-in.
-    try:
-        _pre = JournalStore(sd).read(args.pid)
-        reopen_name = reviver.resolved_session_name(_pre)
-        reopen_cwd = _pre["cwd"]
-    except (KeyError, contracts.ContractError, TypeError):
-        # TypeError: a valid-but-claude-less, tmux_session-less entry (a
-        # freshly registered shell) has no session name to resolve yet —
-        # ops.reopen will refuse it below anyway, so no drop-in is expected.
-        reopen_name = reopen_cwd = None
+    # One lock across restore + reopen for --sid: released in between, the
+    # watchdog could revive (and re-key) the restored entry first, and the
+    # reopen below would then miss it by pid.
     with mutation_lock(sd):
+        pid = args.pid
+        if args.sid is not None:
+            # #147: a session parked by a host crash loop is not in the
+            # journal; restore it (counters reset) and reopen it like --pid.
+            try:
+                pid = ArchiveStore(sd).read(args.sid)["entry"]["pid"]
+            except (KeyError, contracts.ContractError):
+                pid = None
+            restored = ops.restore_host_crash_loop(JournalStore(sd), ArchiveStore(sd),
+                                                   args.sid, _now())
+            if not restored.ok:
+                print(f"crr reopen: {restored.message}", file=sys.stderr)
+                return 2
+            print(f"restored {args.sid[:8]} from the host crash loop (counters reset)")
+        # Capture the target session name + cwd BEFORE reopen: a GHOST reopen
+        # archives + delists the entry (ops._reopen_ghost -> store.remove), so
+        # reading it back by pid afterward would miss it and skip the drop-in.
+        try:
+            _pre = JournalStore(sd).read(pid)
+            reopen_name = reviver.resolved_session_name(_pre)
+            reopen_cwd = _pre["cwd"]
+        except (KeyError, contracts.ContractError, TypeError):
+            # TypeError: a valid-but-claude-less, tmux_session-less entry (a
+            # freshly registered shell) has no session name to resolve yet —
+            # ops.reopen will refuse it below anyway, so no drop-in is expected.
+            reopen_name = reopen_cwd = None
         res = ops.reopen(JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
-                         boot, probe, args.pid, _now(),
+                         boot, probe, pid, _now(),
                          grace=config.get("close_grace_seconds"),
                          remote_control=config.get("remote_control"),
                          tab_spawner=spawner, tabs_expected=tabs_expected,
                          crr_bin=_resolve_service_bin(None),
                          tab_health=tab_health.TabHealthStore(sd))
     print(res.message, file=sys.stdout if res.ok else sys.stderr)
+    if args.sid is not None and not res.ok:
+        # The restore stands even though the immediate reopen didn't happen.
+        print(f"crr reopen: {args.sid[:8]} is restored but not reopened — "
+              f"the watchdog revives it on its next pass", file=sys.stderr)
     if res.ok and not tabs_expected and reopen_name:
         # Headless host: no GUI tab was possible. Drop the user into the now-
         # parked conversation via tmux (attach, or link into the current

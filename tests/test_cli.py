@@ -2574,6 +2574,134 @@ def test_reopen_headless_ghost_still_drops_you_in(tmp_path, monkeypatch, capsys)
     assert execed == [("tmux", ["tmux", "attach", "-t", "crr-8a1b2c3d"])]
 
 
+# --- reopen --sid / --host-crash-loop (#147) ---------------------------------
+
+_HCL_SIDS = ("8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c01", "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c02")
+
+
+def _archive_hcl(archive, pid, sid, reason="host-crash-loop", at="2026-10-09T12:18:00+00:00"):
+    archive.archive(new_entry(
+        pid=pid, cwd=f"/home/u/p{pid}", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-10-09T08:00:00+00:00", claude=_claude_field(sid),
+        revive_strikes=1, revived_boot="kernel@9", host_deaths=10,
+    ), reason, at)
+
+
+def test_reopen_needs_exactly_one_target():
+    with pytest.raises(SystemExit):
+        cli.main(["reopen"])
+    with pytest.raises(SystemExit):
+        cli.main(["reopen", "--pid", "42", "--host-crash-loop"])
+
+
+def test_reopen_host_crash_loop_restores_every_parked_session_and_reports_each(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_hcl(archive, 41, _HCL_SIDS[0])
+    _archive_hcl(archive, 42, _HCL_SIDS[1])
+    gave_up_sid = "aaaaaaaa-1111-4111-8111-111111111111"
+    _archive_hcl(archive, 43, gave_up_sid, reason="gave-up")
+    rc = cli.main(["reopen", "--host-crash-loop"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    for pid, sid in ((41, _HCL_SIDS[0]), (42, _HCL_SIDS[1])):
+        e = store.read(pid)
+        assert e["claude"]["session_id"] == sid
+        assert (e["host_deaths"], e["revive_strikes"]) == (0, 0)
+        assert sid[:8] in out and f"/home/u/p{pid}" in out
+    assert out.count("restored ") == 2
+    # Strike give-ups are not crash-loop bystanders: untouched.
+    assert archive.read(gave_up_sid)["reason"] == "gave-up"
+    with pytest.raises(KeyError):
+        store.read(43)
+
+
+def test_reopen_host_crash_loop_with_nothing_parked_says_so(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    assert cli.main(["reopen", "--host-crash-loop"]) == 0
+    assert "no sessions parked by a host crash loop" in capsys.readouterr().out
+
+
+def test_reopen_host_crash_loop_reports_a_refusal_and_exits_nonzero(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_hcl(archive, 41, _HCL_SIDS[0])
+    _archive_hcl(archive, 42, _HCL_SIDS[1])
+    store.write(new_entry(  # the second conversation was adopted again meanwhile
+        pid=900, cwd="/home/u/p42", host="tmux", shell="zsh", boot_id="old-boot",
+        now="2026-10-09T13:00:00+00:00", claude=_claude_field(_HCL_SIDS[1])))
+    rc = cli.main(["reopen", "--host-crash-loop"])
+    out, err = capsys.readouterr()
+    assert rc == 1
+    assert store.read(41)["claude"]["session_id"] == _HCL_SIDS[0]   # the other one still restored
+    assert "already tracked" in err and _HCL_SIDS[1][:8] in err
+    assert archive.read(_HCL_SIDS[1])["reason"] == "host-crash-loop"
+
+
+def _stub_reopen_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", _FakeTmuxRescued)
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
+    calls = []
+
+    def fake_reopen(*a, **k):
+        calls.append(a[7])  # the pid
+        return SimpleNamespace(ok=True, degraded=False, message=f"reopened {a[7]} as crr-x")
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+    return calls
+
+
+def test_reopen_sid_restores_a_crash_looped_session_and_reopens_it_now(
+        tmp_path, monkeypatch, capsys):
+    calls = _stub_reopen_env(monkeypatch, tmp_path)
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_hcl(archive, 42, _HCL_SIDS[0])
+    rc = cli.main(["reopen", "--sid", _HCL_SIDS[0]])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [42]            # reopened through the same op as --pid
+    e = store.read(42)
+    assert (e["host_deaths"], e["revive_strikes"]) == (0, 0)
+    assert "restored" in out and "reopened 42" in out
+    with pytest.raises(KeyError):
+        archive.read(_HCL_SIDS[0])
+
+
+def test_reopen_sid_says_the_watchdog_takes_over_when_the_reopen_itself_fails(
+        tmp_path, monkeypatch, capsys):
+    _stub_reopen_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.ops, "reopen", lambda *a, **k: SimpleNamespace(
+        ok=False, degraded=False, message="reopen 42: cannot determine tmux state"))
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_hcl(archive, 42, _HCL_SIDS[0])
+    rc = cli.main(["reopen", "--sid", _HCL_SIDS[0]])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert store.read(42)["host_deaths"] == 0   # the restore itself stands
+    assert "watchdog" in err
+
+
+def test_reopen_sid_refuses_a_gave_up_session(tmp_path, monkeypatch, capsys):
+    calls = _stub_reopen_env(monkeypatch, tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _archive_hcl(archive, 42, _HCL_SIDS[0], reason="gave-up")
+    rc = cli.main(["reopen", "--sid", _HCL_SIDS[0]])
+    assert rc == 2
+    assert calls == []
+    assert "gave-up" in capsys.readouterr().err
+    assert archive.read(_HCL_SIDS[0])["reason"] == "gave-up"
+
+
+def test_reopen_sid_rejects_a_malformed_sid(tmp_path, monkeypatch, capsys):
+    calls = _stub_reopen_env(monkeypatch, tmp_path)
+    assert cli.main(["reopen", "--sid", "../etc/passwd"]) == 2
+    assert calls == []
+    assert "not a valid session id" in capsys.readouterr().err
+
+
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="boot adapter")
 def test_kick_refuses_a_crashed_session(tmp_path, monkeypatch, capsys):
     # A crashed entry is refused BEFORE any signalling (classifier gate),
