@@ -82,7 +82,14 @@ SESSIONS_CONTRACT_VERSION = 18
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
 DIAGNOSTICS_CONTRACT_VERSION = 3
-ARCHIVE_CONTRACT_VERSION = 1
+# v2 adds the `host-crash-loop` reason (#147) — the host-death cap's own
+#    give-up, so the lineage no longer files a bystander of a crash-looping
+#    host under the strike cap's "gave-up". No new key: the reason enum
+#    widens, and a v1 build has no case for the member. Unlike every earlier
+#    reason widening this one bumps, so the validator now accepts any
+#    1 <= v <= current (v1 records on disk stay valid, unmigrated) and a
+#    reason may not appear in a record stamped before its version.
+ARCHIVE_CONTRACT_VERSION = 2
 
 # --------------------------------------------------------------------------
 # The five lazy API payloads (#36). Every one of these shipped unversioned:
@@ -361,7 +368,18 @@ ARCHIVE_REASONS = (
     # conversation's transcript CONFIRMED absent — it can never resume, so
     # reviving it would spawn a claude that dies/wedges every boot forever.
     "unresumable",
+    # Terminal for the AUTOMATIC reviver, restorable by a human (#147,
+    # archive v2): the host-death cap (`host_death_max_revivals`) ran out —
+    # the host kept going down shortly after each revival. Distinct from
+    # "gave-up" (the strike cap: the session's own revival kept dying) so
+    # the lineage says which one happened; `crr reopen --sid` /
+    # `--host-crash-loop` and the dashboard restore it.
+    "host-crash-loop",
 )
+# The archive version each reason first appeared in. A record stamped
+# earlier than its reason's version is a shape no build ever wrote — a
+# rewrite that changed the reason but forgot to restamp `v`.
+_ARCHIVE_REASON_SINCE = {"host-crash-loop": 2}
 
 
 class ContractError(ValueError):
@@ -633,11 +651,19 @@ def validate_archive_record(record: Any) -> None:
     _require_exact_keys(record, ARCHIVE_RECORD_KEYS, "archive record")
 
     _require_type(record["v"], int, "archive 'v'")
-    if record["v"] != ARCHIVE_CONTRACT_VERSION:
+    # Any version up to the current one: a record written by an earlier
+    # build is still a record this one understands (no migration step).
+    # A version from the future is refused — its vocabulary is unknown.
+    if not 1 <= record["v"] <= ARCHIVE_CONTRACT_VERSION:
         raise ContractError(
-            f"archive 'v' is {record['v']}, this build understands {ARCHIVE_CONTRACT_VERSION}"
+            f"archive 'v' is {record['v']}, this build understands 1..{ARCHIVE_CONTRACT_VERSION}"
         )
     _require_enum(record["reason"], ARCHIVE_REASONS, "archive 'reason'")
+    since = _ARCHIVE_REASON_SINCE.get(record["reason"], 1)
+    if record["v"] < since:
+        raise ContractError(
+            f"archive reason {record['reason']!r} needs v>={since}, record says v{record['v']}"
+        )
     _require_type(record["archived_at"], str, "archive 'archived_at'")
 
     validate_journal_entry(record["entry"])
