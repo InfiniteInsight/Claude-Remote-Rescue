@@ -66,6 +66,10 @@ def collect(config: cfg.Config) -> tuple[list, list, list, list]:
         events = host_events(lookback, config.get("diagnose_scan_cap"), timeout)
     except core.DEGRADE_ERRORS:
         degraded.append("host_events")
+    try:
+        events = events + system_starts(lookback, config.get("diagnose_scan_cap"), timeout)
+    except core.DEGRADE_ERRORS:
+        degraded.append("system_starts")
     return boots, prev, events, degraded
 
 
@@ -95,3 +99,18 @@ def host_events(lookback: int, scan_cap: int, timeout: float) -> list[str]:
     )
     return [line for line in out.splitlines()
             if line.strip() and explain.host_event_rank(line) is not None]
+
+
+def system_starts(lookback: int, scan_cap: int, timeout: float) -> list[str]:
+    """The previous boot's system-manager (PID 1) "Startup finished" lines.
+
+    One per distro start; several inside one kernel boot means restarts the
+    boot list cannot show (WSL2). ``short-iso`` keeps the ``systemd[1]``
+    identifier, which separates the system manager from user managers.
+    """
+    out = _run(
+        ["-b", f"-{lookback}", "-o", "short-iso", "-t", "systemd",
+         "-g", "Startup finished in", "-n", str(scan_cap)],
+        timeout,
+    )
+    return [line for line in out.splitlines() if "systemd[1]: Startup finished" in line]

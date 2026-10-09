@@ -89,6 +89,12 @@ _SIGNATURES: list[tuple[re.Pattern[str], str]] = [
      "(a planned reboot or an update, not a crash)."),
 ]
 
+# The system manager (PID 1) finished starting. Once per distro start: on WSL2
+# the VM's kernel boot outlives distro restarts, so several of these inside ONE
+# journal boot are the only trace of a restart loop (#148). User managers
+# print the same message as `systemd[<pid>]`, hence the literal `[1]`.
+_SYSTEM_START_RE = re.compile(r"systemd\[1\]: Startup finished")
+
 _CLEAN = (
     "No crash, out-of-memory, or shutdown signature was recognized in the "
     "collected events — the previous boot looks clean. A session that died "
@@ -104,6 +110,10 @@ def host_event_rank(line: str) -> int | None:
     verdict *recognizes* can never drift apart (#148: a bare "reboot" substring
     kept benign `@reboot` cron lines as "events").
     """
+    if _SYSTEM_START_RE.search(line):
+        # Evidence of a restart, but below every death signature — and never
+        # run through them: its timestamp can satisfy e.g. the `\b41\b` event id.
+        return len(_SIGNATURES)
     for rank, (pattern, _sentence) in enumerate(_SIGNATURES):
         if pattern.search(line):
             return rank
@@ -119,7 +129,8 @@ def summarize(host_events: Sequence[str], prev_boot_errors: Sequence[str]) -> li
     free from ``_SIGNATURES`` (declared severity-desc, distinct sentences).
     """
     lines = [*host_events, *prev_boot_errors]
-    haystack = "\n".join(lines)
+    # Restart markers are counted, not pattern-matched (see host_event_rank).
+    haystack = "\n".join(line for line in lines if not _SYSTEM_START_RE.search(line))
     out = []
     for pattern, sentence in _SIGNATURES:
         if not pattern.search(haystack):
@@ -131,4 +142,12 @@ def summarize(host_events: Sequence[str], prev_boot_errors: Sequence[str]) -> li
                     "Out-of-memory: the host ran low on memory and the kernel "
                     "killed " + "; ".join(_describe_victim(v) for v in victims) + ".")
         out.append(sentence)
+    starts = sum(1 for line in lines if _SYSTEM_START_RE.search(line))
+    if starts > 1:
+        # More than one start in the one boot being inspected is not "clean":
+        # say how often the system manager started so a restart loop is visible.
+        out.append(
+            f"The system manager (systemd) started {starts} times within this one "
+            "kernel boot. On WSL2 each distro restart does this while the VM keeps "
+            "running, so repeated restarts do not show up as separate boots.")
     return out or [_CLEAN]

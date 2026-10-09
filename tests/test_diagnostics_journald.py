@@ -37,6 +37,38 @@ def test_host_events_returns_only_classified_lines_and_does_not_cap_them(monkeyp
     assert seen["args"][seen["args"].index("-n") + 1] == "4321"
 
 
+_START = "2026-10-09T10:00:00+0000 host systemd[1]: Startup finished in 1.2s."
+
+
+def test_system_starts_returns_only_the_pid1_manager_starts(monkeypatch):
+    # WSL2: a distro restart re-runs systemd (PID 1) inside the SAME kernel
+    # boot, so the starts are the only trace of a restart loop. User managers
+    # (systemd[<pid>]) print the same message and must not be counted.
+    user = "2026-10-09T10:01:00+0000 host systemd[4821]: Startup finished in 90ms."
+    monkeypatch.setattr(jd, "_run", lambda args, timeout: f"{_START}\n{user}\n")
+    assert jd.system_starts(1, 5000, 5) == [_START]
+
+
+def test_collect_appends_system_starts_to_host_events(monkeypatch):
+    monkeypatch.setattr(jd, "available", lambda: True)
+    monkeypatch.setattr(jd, "_run", lambda args, timeout: f"{_START}\n" if "-t" in args else "")
+    _boots, _prev, events, degraded = jd.collect(cfg.Config())
+    assert events == [_START] and degraded == []
+
+
+def test_a_failing_start_query_is_degraded_not_silently_omitted(monkeypatch):
+    def fake_run(args, timeout):
+        if "-t" in args:
+            raise RuntimeError("journalctl exited 1")
+        return ""
+
+    monkeypatch.setattr(jd, "available", lambda: True)
+    monkeypatch.setattr(jd, "_run", fake_run)
+    _boots, _prev, _events, degraded = jd.collect(cfg.Config())
+    assert "system_starts" in degraded
+    assert "host_events" not in degraded
+
+
 def test_collect_scans_with_the_configured_scan_cap(monkeypatch):
     calls = []
     monkeypatch.setattr(jd, "available", lambda: True)

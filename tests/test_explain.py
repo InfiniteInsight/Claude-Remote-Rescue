@@ -122,6 +122,51 @@ def test_oom_without_a_parseable_kill_line_still_reports_oom():
     assert any("out-of-memory:" in s.lower() for s in out)
 
 
+def _starts(n, pid="1"):
+    return [f"2026-10-09T10:{i:02d}:00+0000 host systemd[{pid}]: Startup finished in 1.2s."
+            for i in range(n)]
+
+
+def test_repeated_system_starts_in_one_boot_are_not_called_clean():
+    out = explain.summarize(_starts(4), [])
+    text = " ".join(out)
+    assert "looks clean" not in text.lower()
+    assert "4 times" in text
+    assert "kernel boot" in text
+
+
+def test_timestamps_in_start_lines_do_not_read_as_a_death_signature():
+    # Regression found on real data: `short-iso` timestamps like `11:41:02`
+    # satisfy the Windows event-id signature `\b41\b` ("Unexpected shutdown").
+    lines = [f"2026-10-09T11:41:0{i}-04:00 host systemd[1]: Startup finished in 3.0s."
+             for i in range(3)]
+    out = explain.summarize(lines, [])
+    assert not any("unexpected" in s.lower() for s in out)
+    assert len(out) == 1 and "3 times" in out[0]
+
+
+def test_a_single_system_start_keeps_the_clean_verdict():
+    out = explain.summarize(_starts(1), [])
+    assert len(out) == 1 and "looks clean" in out[0].lower()
+
+
+def test_user_manager_startups_are_not_counted_as_distro_restarts():
+    out = explain.summarize(_starts(5, pid="4821"), [])
+    assert len(out) == 1 and "looks clean" in out[0].lower()
+
+
+def test_oom_and_repeated_starts_are_both_reported_oom_first():
+    out = explain.summarize([*OOM_KILL_JOURNAL, *_starts(3)], [])
+    assert "node" in out[0]
+    assert any("3 times" in s for s in out)
+
+
+def test_system_start_lines_are_events_ranked_below_every_signature():
+    start = explain.host_event_rank(_starts(1)[0])
+    assert start is not None
+    assert start > explain.host_event_rank("systemd-shutdown[1]: Rebooting.")
+
+
 NOISE = [
     "ua-reboot-cmds.service: Skipped due to 'exec-condition'.",
     "ua-reboot-cmds.service - Run Ubuntu Pro reboot commands skipped",
