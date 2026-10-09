@@ -1445,6 +1445,129 @@ def test_retrack_refuses_when_the_pid_slot_is_unreadable(tmp_path):
     assert (tabs_dir / "42.json").read_text(encoding="utf-8") == "not json"
 
 
+# --- restore_host_crash_loop (#147) ------------------------------------------
+#
+# The host-death cap parks sessions as `host-crash-loop`: terminal for the
+# automatic reviver, restorable by a human once the host is stable. Restore
+# re-journals the preserved entry with BOTH counters zeroed — a fresh start,
+# not the tail of the loop — and hands it back to the watchdog.
+
+def _archive_crash_looped(archive, pid=42, host_deaths=10, strikes=2):
+    entry = new_entry(
+        pid=pid, cwd=f"/p{pid}", host="tmux", shell="zsh",
+        boot_id="entry-boot", now=_NOW, claude=_claude(),
+        revive_strikes=strikes, revived_boot="kernel@7", host_deaths=host_deaths,
+    )
+    archive.archive(entry, "host-crash-loop", _NOW)
+    return entry
+
+
+_LATER = "2026-10-09T13:00:00+00:00"
+
+
+def test_restore_host_crash_loop_rejournals_with_both_counters_reset(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_crash_looped(archive, host_deaths=10, strikes=2)
+    res = ops.restore_host_crash_loop(store, archive, _SID, _LATER)
+    assert res.ok, res.message
+    e = store.read(42)
+    assert e["claude"]["session_id"] == _SID
+    assert e["host_deaths"] == 0
+    assert e["revive_strikes"] == 0
+    assert e["updated"] == _LATER
+    contracts.validate_journal_entry(e)
+    with pytest.raises(KeyError):
+        archive.read(_SID)  # restored: no longer parked
+
+
+def test_restore_host_crash_loop_message_names_the_session_and_what_happens_next(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_crash_looped(archive)
+    res = ops.restore_host_crash_loop(store, archive, _SID, _LATER)
+    assert _SID[:8] in res.message
+    assert "/p42" in res.message
+    assert "next pass" in res.message
+
+
+@pytest.mark.parametrize("reason", [
+    "gave-up", "untracked", "dismissed", "closed", "unresumable",
+    "superseded-on-register", "ghost-restored",
+])
+def test_restore_host_crash_loop_refuses_every_other_reason(tmp_path, reason):
+    # "gave-up" in particular stays the strike cap's terminal verdict.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_untracked(archive, reason=reason)
+    res = ops.restore_host_crash_loop(store, archive, _SID, _LATER)
+    assert not res.ok
+    assert reason in res.message
+    assert archive.read(_SID)["reason"] == reason
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+@pytest.mark.parametrize("sid", [_SID, "not-a-uuid"])
+def test_restore_host_crash_loop_refuses_a_missing_or_malformed_record(tmp_path, sid):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    res = ops.restore_host_crash_loop(store, archive, sid, _LATER)
+    assert not res.ok
+    assert "no archived session" in res.message
+
+
+def test_restore_host_crash_loop_refuses_when_the_sid_is_already_tracked(tmp_path):
+    # Adopted again from Discoverable, or resumed by hand, under another
+    # pid: a second journal entry would be a second card (and a second
+    # revival candidate) for one conversation.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_crash_looped(archive, pid=42)
+    _seed(store, 77, claude=_claude())
+    res = ops.restore_host_crash_loop(store, archive, _SID, _LATER)
+    assert not res.ok
+    assert "already tracked" in res.message
+    assert archive.read(_SID)["reason"] == "host-crash-loop"
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+def test_restore_host_crash_loop_refuses_a_pid_slot_owned_by_another_session(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_crash_looped(archive, pid=42)
+    _seed(store, 42, claude=_claude_for(_OTHER_SID))
+    res = ops.restore_host_crash_loop(store, archive, _SID, _LATER)
+    assert not res.ok
+    assert "different session" in res.message
+    assert store.read(42)["claude"]["session_id"] == _OTHER_SID
+    assert archive.read(_SID)["reason"] == "host-crash-loop"
+
+
+def test_a_restored_session_is_revived_by_the_next_watchdog_pass(tmp_path):
+    # Restore hands the session back to the watchdog: on a healthy boot the
+    # very next pass revives it, and the zeroed counter means the cap no
+    # longer stands in the way (left at 10, the same pass would re-park it).
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_crash_looped(archive, host_deaths=10)
+    assert ops.restore_host_crash_loop(store, archive, _SID, _LATER).ok
+    tmux = FakeTmux(live=set())
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot("kernel@8"), FakeProbe(), tmux, store, archive,
+        max_strikes=5, now=_LATER, remote_control_enabled=False,
+        max_host_deaths=10, host_death_stable_seconds=600,
+    )
+    assert outcome.revived == [42]
+    assert outcome.host_crash_loop == []
+    assert [name for name, _cwd, _argv in tmux.created] == [f"crr-{_SID}"]
+
+
+def test_clean_exit_closes_a_host_crash_loop_record(tmp_path):
+    # Terminal for the reviver, but still on offer for restore — so a
+    # conversation the user since resumed by hand and /exit-ed must not
+    # stay restorable, or the bulk restore would resurrect what they ended.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _archive_crash_looped(archive, pid=40)
+    ops.retire_conversation(store, archive, FakeBoot(), _PerPidProbe(alive=()),
+                            _SID, keep_pid=10, now=_NOW)
+    assert archive.read(_SID)["reason"] == "closed"
+
+
 # --- kick / close -----------------------------------------------------------
 
 class FakeController:
