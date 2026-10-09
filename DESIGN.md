@@ -159,6 +159,17 @@ double-registers.
 **[lesson: give-up guard]** A revived session that dies again is archived,
 not re-revived forever.
 
+**[lesson: two caps, two verdicts]** (#147) A revival that died *with its
+host* counts against a separate host-death cap, not the strikes. Exhausting
+it once archived the session as `gave-up`, the strike cap's verdict: on
+2026-10-09 a WSL crash loop sent nine healthy sessions there, and a clean
+reboot brought none back. The host-death cap now parks a session as
+`host-crash-loop`. That reason is just as terminal for the automatic
+reviver, because reviving into the loop is what the cap stops. Unlike
+`gave-up`, it is restorable by a human (`crr reopen --sid` /
+`--host-crash-loop`, or the dashboard's "Host crash loop" view), with both
+counters reset.
+
 ### Session operations (all classifier-gated, pid-keyed)
 
 `kick` (restart claude in place, same conversation), `close` (remote

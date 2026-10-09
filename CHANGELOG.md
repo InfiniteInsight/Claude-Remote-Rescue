@@ -131,6 +131,19 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- A host crash loop no longer archives healthy sessions as a terminal
+  `gave-up` (#147). On 2026-10-09 a WSL distro restarted every ~2 minutes
+  after an OOM. Every restart counted as a host death for every session,
+  and at `host_death_max_revivals` all nine were archived under the strike
+  cap's terminal verdict, so a clean reboot revived none of them. The
+  host-death cap now archives under its own reason, `host-crash-loop`
+  (archive contract v2; v1 records stay valid). The automatic reviver still
+  never revives these into the loop, but they are restorable with
+  host-death and strike counts reset: `crr reopen --sid ID` restores one and
+  reopens it now, `crr reopen --host-crash-loop` restores all of them, and
+  the dashboard's new "Host crash loop" view has a Restore button per
+  session (PAGE_VERSION 78). Sessions archived as `gave-up` before this fix
+  are not migrated.
 - A conversation ended with `/exit` no longer comes back
   (#144). The clean exit only cleared the exiting shell's own journal entry,
   so any other crashed copy of the same conversation was still revived.
