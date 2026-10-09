@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import set_home  # tests/ is on sys.path (no __init__.py)
+from conftest import set_home, simulate_wsl_uid  # tests/ is on sys.path (no __init__.py)
 from crr import cli
 from crr.adapters import boot_identity, process_probe, session_state, state_dir
 from crr.core import config as cfg
@@ -7143,6 +7143,7 @@ def test_doctor_user_manager_fallback_unknown_stays_unknown(tmp_path, monkeypatc
 
 def test_reachable_at_boot_install_wsl_also_installs_fallback_unit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    simulate_wsl_uid(monkeypatch)  # the WSL path reads os.getuid; Windows has none (#133)
     monkeypatch.setattr(cli, "_wsl_distro_and_user", lambda: ("Ubuntu", "evan"))
     monkeypatch.setattr(cli, "_current_tailnet_account", lambda t: None)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
