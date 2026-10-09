@@ -5,7 +5,7 @@ import re
 from crr.adapters import diagnostics as jd
 from crr.core import config as cfg
 
-from tests.test_explain import NOISE, OOM_KILL_JOURNAL
+from test_explain import NOISE, OOM_KILL_JOURNAL  # tests/ is on sys.path (no __init__.py)
 
 
 def test_journalctl_grep_pattern_ignores_reboot_substring_noise():
