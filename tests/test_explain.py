@@ -78,3 +78,45 @@ def test_prev_boot_errors_are_also_scanned():
     # The signal can live in prev_boot_errors too (e.g. an OOM logged as an error).
     out = explain.summarize([], ["kernel: Out of memory: Killed process 99"])
     assert any("memory" in s.lower() for s in out)
+
+
+# --- #148: the real lines from a 78 GB OOM kill, as `journalctl -k -b -1`
+# printed them. The kill was replayed into the journal on every WSL distro
+# restart, so the same lines recur.
+OOM_KILL_JOURNAL = [
+    "node invoked oom-killer: gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0, oom_score_adj=200",
+    "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=user.slice,mems_allowed=0,global_oom,task_memcg=/init.scope,task=node,pid=21373,uid=1000",
+    "Out of memory: Killed process 21373 (node) total-vm:95301400kB, anon-rss:81837596kB, file-rss:0kB, shmem-rss:0kB, UID:1000 pgtables:189128kB oom_score_adj:0",
+    "systemd[1]: init.scope: A process of this unit has been killed by the OOM killer.",
+    "systemd[1]: init.scope: Failed with result 'oom-kill'.",
+]
+
+
+def test_oom_kill_is_reported_with_victim_name_and_rss():
+    out = explain.summarize(OOM_KILL_JOURNAL, [])
+    text = " ".join(out)
+    assert "node" in text
+    assert "21373" in text
+    assert "78.0 GiB" in text  # 81837596 kB
+    assert not any("looks clean" in s.lower() for s in out)
+
+
+def test_replayed_oom_kill_is_reported_once_with_a_replay_count():
+    out = explain.summarize(OOM_KILL_JOURNAL * 7, [])
+    oom = [s for s in out if "memory" in s.lower()]
+    assert len(oom) == 1
+    assert oom[0].count("21373") == 1
+    assert "7" in oom[0]  # logged 7 times
+
+
+def test_distinct_oom_kills_are_each_reported():
+    other = OOM_KILL_JOURNAL[2].replace("21373", "555").replace("(node)", "(python)")
+    out = explain.summarize([*OOM_KILL_JOURNAL, other], [])
+    text = " ".join(out)
+    assert "21373" in text and "555" in text and "python" in text
+
+
+def test_oom_without_a_parseable_kill_line_still_reports_oom():
+    out = explain.summarize(["systemd[1]: init.scope: Failed with result 'oom-kill'."], [])
+    assert not any("looks clean" in s.lower() for s in out)
+    assert any("out-of-memory:" in s.lower() for s in out)

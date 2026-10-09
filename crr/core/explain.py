@@ -21,12 +21,55 @@ from typing import Sequence
 # OOM detection terms — the SINGLE source shared with the diagnostics
 # collectors (adapters/diagnostics_windows), so what lands in host_events and
 # what the verdict recognizes can never drift apart.
-OOM_TERMS = ("out of memory", "oom-killer", "killed process")
+# "oom-kill" covers the kernel's `oom-kill:constraint=...` record, the
+# `Failed with result 'oom-kill'` systemd line and `oom-killer` itself;
+# "oom killer" the `has been killed by the OOM killer` systemd line (#148).
+OOM_TERMS = ("out of memory", "oom-kill", "oom killer", "killed process")
+_OOM_RE = re.compile("|".join(OOM_TERMS), re.I)
+
+# The kernel's victim line, e.g.
+#   Out of memory: Killed process 21373 (node) total-vm:95301400kB,
+#   anon-rss:81837596kB, file-rss:0kB, shmem-rss:0kB, ...
+_OOM_VICTIM_RE = re.compile(
+    r"Killed process (\d+) \(([^)]*)\)(?:.*?anon-rss:(\d+)kB)?", re.I)
+
+
+def parse_oom_victims(lines: Sequence[str]) -> list[dict]:
+    """Distinct OOM victims in ``lines``, each with how often it was logged.
+
+    WSL2 replays the kernel ring buffer into the journal on every distro
+    restart, so ONE kill appears many times under different journal
+    timestamps. Victims are keyed by (pid, name, anon-rss) — the kernel's own
+    identity for the kill — and reported once with a ``count`` of occurrences,
+    in first-seen order. ``rss_kb`` is None when the line carried no figure.
+    """
+    victims: dict[tuple, dict] = {}
+    for line in lines:
+        m = _OOM_VICTIM_RE.search(line)
+        if not m:
+            continue
+        rss_kb = int(m.group(3)) if m.group(3) else None
+        key = (m.group(1), m.group(2), rss_kb)
+        if key in victims:
+            victims[key]["count"] += 1
+        else:
+            victims[key] = {"pid": int(m.group(1)), "name": m.group(2),
+                            "rss_kb": rss_kb, "count": 1}
+    return list(victims.values())
+
+
+def _describe_victim(v: dict) -> str:
+    text = f"{v['name']} (pid {v['pid']}"
+    if v["rss_kb"] is not None:
+        text += f", {v['rss_kb'] / (1024 * 1024):.1f} GiB RSS"
+    if v["count"] > 1:
+        text += f", logged {v['count']} times"
+    return text + ")"
 
 # (pattern, sentence) pairs, declared MOST-SEVERE FIRST — summarize emits any
 # that match in this order, so declaration order IS the reporting order.
 _SIGNATURES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile("|".join(OOM_TERMS), re.I),
+    (_OOM_RE,
      "Out-of-memory: the host ran low on memory and the kernel killed one or "
      "more processes. On WSL, check the Shmem / Inactive(anon) figures — the "
      "victim is often shared/tmpfs memory, not the biggest process."),
@@ -61,5 +104,17 @@ def summarize(host_events: Sequence[str], prev_boot_errors: Sequence[str]) -> li
     "looks clean" verdict when nothing matches. Order and uniqueness come for
     free from ``_SIGNATURES`` (declared severity-desc, distinct sentences).
     """
-    haystack = "\n".join([*host_events, *prev_boot_errors])
-    return [sentence for pattern, sentence in _SIGNATURES if pattern.search(haystack)] or [_CLEAN]
+    lines = [*host_events, *prev_boot_errors]
+    haystack = "\n".join(lines)
+    out = []
+    for pattern, sentence in _SIGNATURES:
+        if not pattern.search(haystack):
+            continue
+        if pattern is _OOM_RE:
+            victims = parse_oom_victims(lines)
+            if victims:
+                sentence = (
+                    "Out-of-memory: the host ran low on memory and the kernel "
+                    "killed " + "; ".join(_describe_victim(v) for v in victims) + ".")
+        out.append(sentence)
+    return out or [_CLEAN]
