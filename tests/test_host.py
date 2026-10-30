@@ -25,8 +25,14 @@ def test_is_wsl_reads_proc_version(tmp_path):
 # reopens it in the user's login shell, the one that carries the shim.
 
 
+def _passwd(monkeypatch, getpwuid):
+    # Both are absent on native Windows, where CI also runs this file.
+    monkeypatch.setattr(host, "pwd", SimpleNamespace(getpwuid=getpwuid))
+    monkeypatch.setattr(host.os, "getuid", lambda: 1000, raising=False)
+
+
 def _passwd_shell(monkeypatch, shell):
-    monkeypatch.setattr(host.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_shell=shell))
+    _passwd(monkeypatch, lambda uid: SimpleNamespace(pw_shell=shell))
 
 
 @pytest.mark.parametrize("path, expected", [
@@ -56,7 +62,13 @@ def test_login_shell_falls_back_to_bash_without_a_passwd_entry(monkeypatch):
     def missing(uid):
         raise KeyError(uid)
 
-    monkeypatch.setattr(host.pwd, "getpwuid", missing)
+    _passwd(monkeypatch, missing)
+    assert host.login_shell() == "bash"
+
+
+def test_login_shell_falls_back_to_bash_on_a_host_without_pwd(monkeypatch):
+    # Native Windows has no pwd module, and crr.cli imports this one.
+    monkeypatch.setattr(host, "pwd", None)
     assert host.login_shell() == "bash"
 
 
