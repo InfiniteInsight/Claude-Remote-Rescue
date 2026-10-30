@@ -17,6 +17,7 @@ import pytest
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 from crr.core.reviver import (
+    owns_a_process,
     attach_argv,
     exit_hook_argv,
     resolved_session_name,
@@ -1776,3 +1777,41 @@ def test_an_unrelated_running_conversation_changes_nothing(tmp_path):
 
     assert outcome.revived == [42]
     assert outcome.running_elsewhere == []
+
+
+# --- owns_a_process: what Take over must never stop (#158) ------------------------
+
+class _DeadProbe(FakeProbe):
+    def is_alive(self, pid):
+        return False
+
+
+def _entry(pid=42, boot=_ENTRY_BOOT, tmux_session=None):
+    return new_entry(pid=pid, cwd="/home/u/p", host="tab", shell="fish", boot_id=boot,
+                     now=_NOW, claude=_claude(), tmux_session=tmux_session)
+
+
+def test_a_crashed_entry_owns_no_process():
+    assert owns_a_process(_entry(), FakeBoot(), FakeProbe(), set()) is False
+
+
+def test_a_live_entry_owns_its_process():
+    entry = _entry(boot=FakeBoot().current())
+    assert owns_a_process(entry, FakeBoot(), FakeProbe(), set()) is True
+
+
+def test_a_crashed_entry_owns_its_live_tmux_session():
+    name = session_name({"claude": _claude()})
+    assert owns_a_process(_entry(), FakeBoot(), FakeProbe(), {name}) is True
+
+
+def test_a_default_named_tmux_session_counts_with_no_recorded_name():
+    name = session_name({"claude": _claude()})
+    entry = _entry()
+    assert entry["tmux_session"] is None
+    assert owns_a_process(entry, FakeBoot(), _DeadProbe(), {name}) is True
+
+
+def test_unknown_tmux_state_counts_as_owned():
+    # This gates a kill, so "can't tell" has to mean "don't".
+    assert owns_a_process(_entry(), FakeBoot(), FakeProbe(), None) is True

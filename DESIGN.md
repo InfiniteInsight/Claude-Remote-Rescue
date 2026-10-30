@@ -181,7 +181,10 @@ other copy stops. A session's own tmux pane doesn't count, because that path
 never reaches the check. The match is on the session id claude's command line
 names, so a plain `claude` isn't seen. Post-reauth recovery skips the same
 sessions, because it reopens with nobody watching. A human's `crr reopen` isn't
-gated: it's an explicit ask, and the adopt note discloses the hazard.
+gated: it's an explicit ask, and the adopt note discloses the hazard. The card
+says so (`running_elsewhere`, from the sweep's own test) and asks for a confirm
+on Reopen. Take over refuses only what crr itself runs (`owns_a_process`, on the
+classifier), so it can reach any session the watchdog is leaving alone.
 
 ### Session operations (all classifier-gated, pid-keyed)
 

@@ -418,7 +418,7 @@ class PsProcessController:
         (``_child_groups``/``claude_groups``): matching a specific UUID
         identifies one conversation, not "any process that looks like
         claude". It is still not trusted alone — the caller (cli)
-        additionally re-checks the sid is untracked immediately before
+        additionally re-checks that crr doesn't run the sid immediately before
         killing (closing the resolve-to-kill race) and signals by the
         returned ``pgid``, never by re-running this argv pattern at kill
         time.

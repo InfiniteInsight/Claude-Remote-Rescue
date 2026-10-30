@@ -638,7 +638,7 @@ var BUTTON_HELP = {
   "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
   "Retrack": "Put this recently-untracked session back under crr's management.",
   "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, crr leaves it alone while it can see that process, and Reopen would start a second copy.",
-  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs.",
+  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then keep it under crr — so no second copy runs.",
   "Restore": "Put this session back under crr's management with its host-death and strike counts reset. The watchdog revives it on its next pass, so restore once the machine is stable."
 };
 
@@ -993,6 +993,15 @@ function renderCard(s, uncertain, groupColor, latest) {
     rcu.setAttribute("data-help", rcu.title);
     top.appendChild(rcu);
   }
+  // (#159) "crashed" alone reads as something to fix, and here it isn't: the
+  // conversation is up, and the watchdog is holding off on purpose.
+  if (s.running_elsewhere) {
+    var reb = el("span", "badge running-badge");
+    reb.textContent = "running elsewhere";
+    reb.title = "This conversation is already running in another copy, so the watchdog is leaving this one alone. It revives once that copy stops. Reopen would start a second copy.";
+    reb.setAttribute("data-help", reb.title);
+    top.appendChild(reb);
+  }
   // Blocked on the USER, from Claude Code's own `waitingFor`. Its OWN branch,
   // deliberately not nested in the arms above: a reachable session renders no
   // badge, and a reachable session stuck on a permission prompt is precisely
@@ -1063,7 +1072,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   }
 
   var actions = el("div", "actions");
-  function addBtn(label, op, danger, confirm) {
+  function addBtn(label, op, danger, confirm, run) {
     var b = el("button", danger ? "danger" : "");
     b.title = BUTTON_HELP[label] || "";
     var isArmed = function () {
@@ -1088,7 +1097,7 @@ function renderCard(s, uncertain, groupColor, latest) {
         confirmArmed = null;
         b.textContent = label;
       }
-      action(op, s.pid, b);
+      if (run) { run(b); } else { action(op, s.pid, b); }
     });
     actions.appendChild(b);
   }
@@ -1109,7 +1118,19 @@ function renderCard(s, uncertain, groupColor, latest) {
     return;
   }
   if (s.state === "crashed") {
-    addBtn("Reopen", "reopen", false, false);
+    // (#158) A journaled session never appears in Discoverable, so the card
+    // is the only place left to stop the other copy.
+    if (s.can_take_over) {
+      addBtn("Take over", "takeover", true, true, function (b) {
+        sidAction("takeover", s.session_id, b);
+      });
+    }
+    // (#159) Reopen starts a second copy here, so it takes a confirm.
+    if (s.running_elsewhere) {
+      addBtn("Reopen", "reopen", true, true);
+    } else {
+      addBtn("Reopen", "reopen", false, false);
+    }
     if (s.tmux_session) {
       addBtn("Un-tmux", "untmux", true, true);
     }

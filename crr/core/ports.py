@@ -136,7 +136,7 @@ class ProcessController(Protocol):
         one conversation; there is no plausible false-positive class the
         way "any argv0 starting with claude" has. The caller still keeps
         two independent guards on top of this match rather than trusting
-        it alone: it re-checks the sid is still untracked immediately
+        it alone: it re-checks that crr doesn't run the sid immediately
         before killing (closing the resolve-to-kill race), and it signals
         by the returned ``pgid`` — never by re-running this pattern match
         at kill time.

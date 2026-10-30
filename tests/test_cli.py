@@ -1228,6 +1228,28 @@ def test_status_json_reports_live_process(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
+def test_status_json_says_when_a_crashed_session_is_running_elsewhere(tmp_path, monkeypatch, capsys):
+    # (#159) Without this wiring the field is permanently False.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(cli.discovery.build_adopted_entry(
+        sid, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish"))
+    monkeypatch.setattr(cli, "_live_tmux_sessions", lambda config: set())
+    monkeypatch.setattr(cli.process_probe.PsProcessController, "resume_session_ids",
+                        lambda self: {sid})
+    assert cli.main(["status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["running_elsewhere"] is True
+
+
+def test_status_line_names_a_session_running_elsewhere():
+    card = {"duplicate_group": None, "sid_source": "verified", "model": "", "state": "crashed",
+            "pid": 7, "sid8": "8a1b2c3d", "cwd": "/p", "revive_strikes": 0,
+            "running_elsewhere": True}
+    assert "running elsewhere" in cli._status_line(card)
+
+
+@pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
 def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsys):
     # An entry from a different boot must classify crashed even though its
     # pid (ours) is alive — the recycled-pid guard, end to end.
@@ -4879,6 +4901,173 @@ def test_takeover_times_out_while_still_actively_writing(tmp_path):
     assert len(sleeps) == 2  # polled twice before the deadline tripped
 
 
+def _adopted_placeholder(store, sid=_TAKEOVER_SID):
+    entry = cli.discovery.build_adopted_entry(sid, "/home/u/proj", "2026-08-03T00:00:00+00:00",
+                                              shell="fish")
+    store.write(entry)
+    return entry
+
+
+class _TakeoverBoot:
+    def current(self):
+        return "current-boot"
+
+
+class _TakeoverProbe:
+    def is_alive(self, pid):
+        return True
+
+    def has_controlling_tty(self, pid):
+        return True
+
+
+def _take_over(store, tmp_path, controller, flags, monkeypatch, live_tmux=frozenset()):
+    # The real ownership rule, over fake processes and a fake tmux answer.
+    monkeypatch.setattr(cli, "_live_tmux_sessions",
+                        lambda config: None if live_tmux is None else set(live_tmux))
+    config = cfg.Config()
+    return cli._takeover(
+        store, tmp_path, config, controller, flags, _TAKEOVER_SID,
+        max_wait=180.0, boot_id="current-boot",
+        owns_process=cli._process_owner_check(config, _TakeoverBoot(), _TakeoverProbe()),
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+
+
+def _tracked_shell(store, boot_id):
+    _seed(store, 4242, cwd="/home/u/proj")
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(_TAKEOVER_SID)
+    entry["boot_id"] = boot_id
+    store.write(entry)
+    return entry
+
+
+def _running_controller(calls):
+    return _FakeResumeController(ResumeProcess(pid=100, ppid=50, pgid=100), calls)
+
+
+def _killed(calls):
+    return any(c[0] == "terminate_group" for c in calls)
+
+
+def test_takeover_stops_the_live_copy_of_an_adopted_session(tmp_path, monkeypatch):
+    # (#158) A crashed entry owns no process, so nothing crr runs is at risk.
+    # The session is already journaled, so there's nothing to adopt, and the
+    # next sweep revives it.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    entry = _adopted_placeholder(store)
+
+    ok, msg = _take_over(store, tmp_path, _running_controller(calls),
+                         _FakeTakeoverFlags(calls), monkeypatch)
+
+    assert ok, msg
+    assert _killed(calls)
+    assert "adoption failed" not in msg
+    assert store.read(entry["pid"])["claude"]["session_id"] == _TAKEOVER_SID
+
+
+def test_takeover_reaches_a_crashed_session_crr_really_tracked(tmp_path, monkeypatch):
+    # A shell that died and left its claude behind hits the same dead end.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _tracked_shell(store, "an-earlier-boot")
+
+    ok, msg = _take_over(store, tmp_path, _running_controller(calls),
+                         _FakeTakeoverFlags(calls), monkeypatch)
+
+    assert ok, msg
+    assert _killed(calls)
+    assert store.read(4242)["claude"]["session_id"] == _TAKEOVER_SID
+
+
+def test_takeover_refuses_when_a_live_shell_sits_beside_the_placeholder(tmp_path, monkeypatch):
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _adopted_placeholder(store)
+    _tracked_shell(store, "current-boot")
+
+    ok, msg = _take_over(store, tmp_path, _running_controller(calls),
+                         _FakeTakeoverFlags(calls), monkeypatch)
+
+    assert not ok
+    assert f"{_TAKEOVER_SID[:8]} is now tracked" in msg
+    assert not _killed(calls)
+
+
+def test_takeover_refuses_crrs_own_tmux_copy(tmp_path, monkeypatch):
+    # Reopen keeps the adopted boot until the next sweep re-keys, so the boot
+    # alone can't say this pane isn't crr's.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _adopted_placeholder(store)
+
+    ok, _msg = _take_over(store, tmp_path, _running_controller(calls), _FakeTakeoverFlags(calls),
+                          monkeypatch, live_tmux={f"crr-{_TAKEOVER_SID}"})
+
+    assert not ok
+    assert not _killed(calls)
+
+
+def test_takeover_refuses_when_tmux_state_is_unknown(tmp_path, monkeypatch):
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _adopted_placeholder(store)
+
+    ok, _msg = _take_over(store, tmp_path, _running_controller(calls), _FakeTakeoverFlags(calls),
+                          monkeypatch, live_tmux=None)
+
+    assert not ok
+    assert not _killed(calls)
+
+
+def test_takeover_treats_a_journaled_sid_as_owned_unless_told_otherwise(tmp_path):
+    # The kill's safe default: a caller that doesn't pass the check gets a refusal.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _adopted_placeholder(store)
+
+    ok, _msg = cli._takeover(
+        store, tmp_path, cfg.Config(), _running_controller(calls), _FakeTakeoverFlags(calls),
+        _TAKEOVER_SID, max_wait=180.0, boot_id="current-boot",
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+
+    assert not ok
+    assert not _killed(calls)
+
+
+def test_adopt_takeover_applies_the_ownership_check(tmp_path, monkeypatch, capsys):
+    # (#158) Without this wiring the CLI still refuses every adopted session.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    seen = {}
+
+    def fake_takeover(*a, **kw):
+        seen.update(kw)
+        return True, "took over stub"
+
+    monkeypatch.setattr(cli, "_takeover", fake_takeover)
+    assert cli.main(["adopt", _TAKEOVER_SID, "--takeover"]) == 0
+    assert callable(seen.get("owns_process"))
+
+
+def test_dashboard_takeover_applies_the_ownership_check(tmp_path, monkeypatch):
+    # (#158) Likewise for the card's button.
+    captured = _web_captured(monkeypatch, tmp_path, FakeReauthTmux())
+    seen = {}
+
+    def fake_takeover(*a, **kw):
+        seen.update(kw)
+        return True, "took over stub"
+
+    monkeypatch.setattr(cli, "_web_takeover", fake_takeover)
+    captured["sid_action_provider"]("takeover", _TAKEOVER_SID)
+    assert callable(seen.get("owns_process"))
+
+
 def test_takeover_refuses_when_sid_becomes_tracked_before_the_kill(tmp_path):
     # Ready to take over, but the exclusion re-check finds the sid already
     # journaled (a resolve->kill race) -> refuse, no kill, no flag.
@@ -5652,6 +5841,19 @@ def test_reauth_code_provider_without_active_reauth_fails(tmp_path, monkeypatch)
     assert ok is False
     assert "no reauth in progress" in message.lower()
     assert fake_tmux.send_keys_calls == []
+
+
+def test_the_dashboard_poll_says_when_a_session_is_running_elsewhere(tmp_path, monkeypatch):
+    # (#159) The phone reads this provider, not `crr status`.
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(cli.discovery.build_adopted_entry(
+        sid, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish"))
+    monkeypatch.setattr(cli, "_live_tmux_sessions", lambda config: set())
+    monkeypatch.setattr(cli.process_probe.PsProcessController, "resume_session_ids",
+                        lambda self: {sid})
+    assert captured["provider"]()["sessions"][0]["running_elsewhere"] is True
 
 
 def test_post_reauth_recovery_fires_once_on_expired_to_valid_transition(tmp_path, monkeypatch):

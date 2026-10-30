@@ -1132,10 +1132,31 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_79():
-    """v79: Discoverable and Adopt copy stop promising a second copy from
+def test_page_shows_a_session_the_watchdog_is_leaving_alone():
+    # (#159) The card reads "crashed" with no sign the watchdog is holding off.
+    page = web.render_page()
+    assert "s.running_elsewhere" in page
+    assert '"running elsewhere"' in page
+    # Reopen starts a second copy here, so it has to be confirmed.
+    assert 'addBtn("Reopen", "reopen", true, true)' in page
+
+
+def test_page_offers_take_over_on_an_adopted_running_session():
+    # (#158) It leaves Discoverable once adopted, so the card is the only home.
+    page = web.render_page()
+    assert "if (s.can_take_over)" in page
+    # Confirm-gated, and routed to the sid endpoint: /api/action has no such op.
+    assert 'addBtn("Take over", "takeover", true, true, function (b)' in page
+    assert 'sidAction("takeover", s.session_id' in page
+    assert "if (run) { run(b); }" in page
+
+
+def test_page_version_is_80():
+    """v80: a "running elsewhere" badge, Take over on an adopted card, and a
+    confirm on Reopen for those cards (#158, #159).
+    (v79: Discoverable and Adopt copy stop promising a second copy from
     adopting a running session (#153). The watchdog leaves those alone now,
-    and only Reopen would start one.
+    and only Reopen would start one.)
     (v78: a "Host crash loop" view in the "Other views" toolbar (#147) —
     sessions the host-death cap parked as `host-crash-loop`, listed lazily
     from /api/host-crash-loop in the shared Discoverable/untracked modal,
@@ -1239,7 +1260,7 @@ def test_page_version_is_79():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 79
+    assert web.PAGE_VERSION == 80
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
