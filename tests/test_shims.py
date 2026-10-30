@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ if os.name != "posix":  # pragma: no cover - Windows CI
     pytest.skip("shim tests need a POSIX shell host", allow_module_level=True)
 
 import pty  # noqa: E402  (deliberately after the platform guard)
+import termios  # noqa: E402
 
 from crr import cli
 from crr.adapters import state_dir as state_dir_mod
@@ -500,29 +502,29 @@ def _repair_script(shell, shim, cmdline="go", pre="", marker=True):
     return "\n".join(lines) + "\n"
 
 
-def _skip_fish_pty_on_macos(shell: str) -> None:
-    """[#43, unresolved] fish's `read` never returns under a pty on macOS CI.
-
-    Both crash-offer tests time out after 30s there, and only for fish —
-    bash and zsh pass, and all three pass on Linux with fish 3.7.1. The
-    cause is not established: brew ships a newer fish than the Linux runner,
-    and the pty write may also race differently on Darwin. Skipped rather
-    than guessed at, because the two candidate explanations lead to
-    opposite fixes and neither can be tested without the platform.
-
-    This is NOT a claim that the fish shim works on macOS. It is a claim
-    that this harness cannot currently tell.
-    """
-    if shell == "fish" and platform.system() == "Darwin":
-        pytest.skip("fish read under a pty hangs on macOS CI — unresolved, see #43")
+def _wait_for_line_editor(master, proc, timeout):
+    """Block until the process has taken the tty out of canonical mode."""
+    deadline = time.monotonic() + timeout
+    while termios.tcgetattr(master)[3] & termios.ICANON:
+        if proc.poll() is not None or time.monotonic() > deadline:
+            return
+        time.sleep(0.01)
 
 
-def _run_pty(argv, env, input_bytes, timeout=30):
+def _run_pty(argv, env, input_bytes, timeout=30, line_editor=False):
     """Run argv with stdin on a pty slave (so `test -t 0` is true), with
-    input_bytes pre-buffered in the pty. stdout/stderr stay pipes."""
+    input_bytes pre-buffered in the pty. stdout/stderr stay pipes.
+
+    End a typed line with ``\\r``, which is what the Enter key sends. With
+    ``line_editor``, type once the program's own line editor owns the terminal,
+    as a person would. fish needs both from 4.0 on (#156): it reads ``\\n`` as
+    ctrl-j, so `read` never completes, and it drops anything typed before
+    `read` started. bash and zsh `read` use the tty's own line handling, which
+    keeps pre-buffered input and turns ``\\r`` into ``\\n``.
+    """
     master, slave = pty.openpty()
     try:
-        if input_bytes:
+        if input_bytes and not line_editor:
             os.write(master, input_bytes)
         proc = subprocess.Popen(
             argv, env=env, stdin=slave,
@@ -530,6 +532,9 @@ def _run_pty(argv, env, input_bytes, timeout=30):
         )
         os.close(slave)
         slave = -1
+        if input_bytes and line_editor:
+            _wait_for_line_editor(master, proc, timeout)
+            os.write(master, input_bytes)
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -714,13 +719,12 @@ def test_repair_crash_offer_explicit_no_declines(shell, tmp_path, capsys):
     # With a tty, an explicit `n` at the offer stops the loop.
     if not _installed(shell):
         pytest.skip(f"{shell} not installed")
-    _skip_fish_pty_on_macos(shell)
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     bindir = _fake_claude_repair_bindir(tmp_path)
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="7")
-    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"n\n")
+    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"n\r", line_editor=shell == "fish")
     assert len(_record_lines(tmp_path)) == 1  # declined — no resume
     assert _OFFER in result.stderr
     assert "AFTER-MARKER" in result.stdout
@@ -730,13 +734,12 @@ def test_repair_crash_offer_explicit_no_declines(shell, tmp_path, capsys):
 def test_repair_crash_offer_yes_resumes(shell, tmp_path, capsys):
     if not _installed(shell):
         pytest.skip(f"{shell} not installed")
-    _skip_fish_pty_on_macos(shell)
     shim = _make_shim(shell, tmp_path, capsys)
     state = tmp_path / "state"
     bindir = _fake_claude_repair_bindir(tmp_path)
     script = _repair_script(shell, shim)
     env = _repair_env(state, bindir, tmp_path, exits="7 0")
-    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"y\n")
+    result = _run_pty(_SHELLS[shell]["argv"] + [script], env, b"y\r", line_editor=shell == "fish")
     lines = _record_lines(tmp_path)
     assert len(lines) == 2
     assert lines[1].startswith("--resume ")

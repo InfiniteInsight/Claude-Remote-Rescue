@@ -1,17 +1,16 @@
 """The two needs-review findings from audit run 3 (#40).
 
 1. P4 — Quarantined fakery. `discovery.build_adopted_entry` writes
-   host="tab" and shell="bash" into the journal for a session where neither
-   was ever observed ("any enum member the schema accepts would be equally
-   fabricated"). Those fields turn out to be DISPLAY-ONLY — nothing in crr
-   makes a decision on them, they are copied straight onto the card. So the
-   fabrication's only escape route is the dashboard, and that is where it
-   gets closed: an adopted card reports what was actually observed.
+   host="tab" and a shell into the journal for a session where neither was
+   ever observed. The card must not present those as observations, so an
+   adopted card reports what was actually seen.
+
+   The shell is not filler (#152): `ops.tracked_resume_argv` reads it to
+   choose the shell Un-tmux reopens in, so it is the user's login shell.
 
    Deliberately NOT done: widening the journal schema to allow None. That
-   means JOURNAL_SCHEMA_VERSION 1 -> 2 and migrating live journal files, for
-   two fields nothing reads. Fixing the claim where the claim is made is the
-   smaller true change.
+   means JOURNAL_SCHEMA_VERSION 1 -> 2 and migrating live journal files.
+   Fixing the claim where the claim is made is the smaller true change.
 
 2. P3 — Confidence + provenance. A degraded settings store maps to
    `effective_global_autokick() -> False`, so the card rendered
@@ -41,25 +40,24 @@ class FakeProbe:
 # --- 1. adopted entries stop presenting fabricated fields as fact ---------
 
 def test_the_journal_entry_still_validates_unchanged():
-    # The placeholders stay in the journal: they satisfy a v1 schema that
-    # nothing reads them through. This pins that we did NOT migrate.
-    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    # The fields stay in the journal: this pins that we did NOT migrate.
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
     contracts.validate_journal_entry(entry)
-    assert entry["host"] == "tab" and entry["shell"] == "bash"
+    assert entry["host"] == "tab" and entry["shell"] == "fish"
     assert entry["boot_id"] == ADOPTED_BOOT_ID
 
 
 def test_an_adopted_card_is_marked_as_adopted():
-    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
     card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
     assert card["adopted"] is True
 
 
 def test_an_adopted_card_does_not_claim_a_host_or_shell():
-    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
     card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
-    # Adoption never observed a shell registration; the journal's "tab"/"bash"
-    # are schema filler, and the card must not repeat them as fact.
+    # Adoption never observed a shell registration, so the card must not
+    # repeat the journal's values as fact.
     assert card["host"] == ""
     assert card["shell"] == ""
 
@@ -126,7 +124,7 @@ def test_degraded_overrides_every_other_state(degraded, expected):
 # Validating the assembled payload is the check that was missing.
 
 def test_an_adopted_payload_passes_its_own_contract():
-    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
     payload = assemble_sessions([entry], FakeBoot(), FakeProbe())
     contracts.validate_sessions_payload(payload)
 
@@ -146,7 +144,7 @@ def test_a_normal_payload_passes_its_own_contract():
 def test_a_non_adopted_card_may_not_have_an_empty_shell():
     # The conditional must not become a blanket "" allowance: an empty
     # shell on a normally-registered card is still a real error.
-    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
     card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
     card["adopted"] = False
     with pytest.raises(contracts.ContractError):
@@ -154,7 +152,7 @@ def test_a_non_adopted_card_may_not_have_an_empty_shell():
 
 
 def test_an_adopted_card_may_not_carry_a_fabricated_shell():
-    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00")
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
     card = assemble_sessions([entry], FakeBoot(), FakeProbe())["sessions"][0]
     card["shell"] = "bash"
     with pytest.raises(contracts.ContractError):

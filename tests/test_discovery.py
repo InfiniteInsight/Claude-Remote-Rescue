@@ -223,16 +223,17 @@ def test_untracked_missing_optional_fields_default_honestly():
 
 
 def test_build_adopted_entry_is_a_valid_journal_entry():
-    entry = discovery.build_adopted_entry(_SID_A, "/home/u/proj", "2026-08-03T00:00:00+00:00")
+    entry = discovery.build_adopted_entry(_SID_A, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish")
     contracts.validate_journal_entry(entry)  # must not raise
 
 
 def test_build_adopted_entry_fields():
-    entry = discovery.build_adopted_entry(_SID_A, "/home/u/proj", "2026-08-03T00:00:00+00:00")
+    entry = discovery.build_adopted_entry(_SID_A, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish")
     assert entry["cwd"] == "/home/u/proj"
     assert entry["tmux_session"] is None
     assert entry["boot_id"] == discovery.ADOPTED_BOOT_ID
     assert entry["updated"] == "2026-08-03T00:00:00+00:00"
+    assert entry["shell"] == "fish"
     assert entry["claude"] == {
         "session_id": _SID_A,
         "sid_source": "guessed",
@@ -250,7 +251,7 @@ def test_adopted_entry_started_lets_verify_guessed_upgrade_immediately():
     # sid_source="guessed" (and keep costing a poll-path glob) forever.
     from crr.core.resume import verify_guessed
 
-    entry = discovery.build_adopted_entry(_SID_A, "/home/u/proj", "2026-08-03T00:00:00+00:00")
+    entry = discovery.build_adopted_entry(_SID_A, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish")
     transcripts = [{"session_id": _SID_A, "mtime": 1.0}]  # any real mtime > epoch 0
     updated = verify_guessed(entry, transcripts, "2026-08-03T00:00:01+00:00")
     assert updated is not None
@@ -258,7 +259,7 @@ def test_adopted_entry_started_lets_verify_guessed_upgrade_immediately():
 
 
 def test_build_adopted_entry_pid_matches_adopted_pid():
-    entry = discovery.build_adopted_entry(_SID_A, "/x", "2026-08-03T00:00:00+00:00")
+    entry = discovery.build_adopted_entry(_SID_A, "/x", "2026-08-03T00:00:00+00:00", shell="fish")
     assert entry["pid"] == discovery.adopted_pid(_SID_A)
 
 

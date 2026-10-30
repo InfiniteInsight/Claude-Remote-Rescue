@@ -7,6 +7,16 @@ lives here rather than inside one feature adapter.
 
 from __future__ import annotations
 
+import os
+from pathlib import PurePosixPath
+
+from crr.core import contracts
+
+try:
+    import pwd
+except ImportError:  # native Windows
+    pwd = None
+
 
 def is_wsl(proc_version_path: str = "/proc/version") -> bool:
     """True if this Linux userland is WSL (``/proc/version`` names microsoft)."""
@@ -15,6 +25,24 @@ def is_wsl(proc_version_path: str = "/proc/version") -> bool:
             return "microsoft" in fh.read().lower()
     except OSError:
         return False
+
+
+def login_shell() -> str:
+    """The user's login shell, as a journal ``shell`` value.
+
+    Read from the passwd entry rather than ``$SHELL``, which describes
+    whatever started crr: a service, or a tool running its own shell. Adopted
+    sessions need this because they have no registration to read a shell from
+    (#152). Falls back to ``"bash"``, as ``ops.tracked_resume_argv`` does, for
+    a shell the journal has no value for, or a host without passwd entries.
+    """
+    if pwd is None:
+        return "bash"
+    try:
+        name = PurePosixPath(pwd.getpwuid(os.getuid()).pw_shell).name
+    except KeyError:
+        return "bash"
+    return name if name in contracts.SHELLS else "bash"
 
 
 # `wslpath -w /` renders this distro's root as a Windows UNC path, and the

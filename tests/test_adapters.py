@@ -258,11 +258,15 @@ def test_realtmux_creates_word_form_detached_session(tmp_path, monkeypatch):
         assert "crr-itest" in t.list_sessions()
 
         # Word-form proof: the pane runs the target directly, not a shell.
-        got = subprocess.run(
-            ["tmux", "display", "-t", "crr-itest", "-p", "#{pane_current_command}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        assert got.stdout.strip() == "sleep"
+        # Polled, because the pane reads as "tmux" until its child has exec'd.
+        command = ""
+        deadline = time.monotonic() + 5
+        while command != "sleep" and time.monotonic() < deadline:
+            command = subprocess.run(
+                ["tmux", "display", "-t", "crr-itest", "-p", "#{pane_current_command}"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        assert command == "sleep"
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
