@@ -131,6 +131,11 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- An adopted session no longer drops out of tracking when you Un-tmux it.
+  Adoption wrote a placeholder `bash` into the journal, and Un-tmux reopened
+  the session in that shell, where a fish or zsh user has no shim to
+  re-register it. Adoption now records your real login shell (#152). A
+  session adopted before this fix keeps `bash` until it is adopted again.
 - A host crash loop no longer archives healthy sessions as a terminal
   `gave-up` (#147). On 2026-10-09 a WSL distro restarted every ~2 minutes
   after an OOM. Every restart counted as a host death for every session,

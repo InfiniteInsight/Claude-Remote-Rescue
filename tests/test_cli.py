@@ -3168,6 +3168,21 @@ def test_discover_adopt_writes_a_valid_journal_entry(tmp_path, monkeypatch, caps
     assert entry["tmux_session"] is None
 
 
+def test_discover_adopt_journals_the_shell_untmux_will_reopen_in(tmp_path, monkeypatch, capsys):
+    # (#152) Un-tmux reopens in the journaled shell, and only a shell with the
+    # shim re-registers the session. A placeholder "bash" on a fish host drops
+    # the conversation out of tracking.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state")
+    set_home(monkeypatch, str(tmp_path / "home"))
+    monkeypatch.setattr(cli.host, "login_shell", lambda: "fish")
+    _write_discover_transcript(tmp_path / "home", "/home/u/proj", _DISCOVER_SID, [
+        _discover_user_rec("a prompt", cwd="/home/u/proj"),
+    ])
+    assert cli.main(["discover", "--adopt", _DISCOVER_SID]) == 0
+    entry = JournalStore(tmp_path / "state").scan().entries[0]
+    assert cli.ops.tracked_resume_argv(entry)[0] == "fish"
+
+
 def test_discover_adopt_uses_the_transcripts_authoritative_cwd(tmp_path, monkeypatch, capsys):
     # The project dir name is "-home-u-Real-Dashed-Proj", which a naive
     # decode would mangle into "/home/u/Real/Dashed/Proj". The transcript's

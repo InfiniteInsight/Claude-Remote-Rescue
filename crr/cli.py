@@ -3936,7 +3936,9 @@ def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = Tr
                 "directory — adopting it would journal a path nothing can "
                 "revive into"
             )
-        entry = discovery.build_adopted_entry(row["session_id"], row["cwd"], _now())
+        entry = discovery.build_adopted_entry(
+            row["session_id"], row["cwd"], _now(), shell=host.login_shell(),
+        )
         pid = entry["pid"]
         try:
             existing = store.read(pid)

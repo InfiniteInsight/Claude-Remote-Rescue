@@ -280,15 +280,12 @@ def assemble_sessions(
                 "state": state,
                 "attached": attached,
                 "cwd": entry["cwd"],
-                # (#40) An ADOPTED entry never observed a shell registration
-                # — `build_adopted_entry` writes host="tab"/shell="bash"
-                # because the v1 schema admits no None, and its docstring is
-                # explicit that "any enum member the schema accepts would be
-                # equally fabricated". Those two fields are display-only
-                # (nothing in crr decides on them), so the dashboard is the
-                # only place the fabrication could escape to — and it stops
-                # here. The journal keeps its schema-valid filler; the card
-                # reports what was actually seen, which is nothing.
+                # (#40) An ADOPTED entry never observed a shell registration.
+                # `build_adopted_entry` writes host="tab" as filler because
+                # the v1 schema admits no None, and the user's login shell so
+                # Un-tmux has a shell to reopen in (#152). Neither was seen
+                # for this session, so the card reports what was actually
+                # seen, which is nothing.
                 "shell": "" if adopted else entry["shell"],
                 "host": "" if adopted else entry["host"],
                 "session_id": sid,
