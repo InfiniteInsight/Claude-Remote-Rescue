@@ -2355,7 +2355,8 @@ def _status_line(card: dict, max_strikes: int = cfg.DEFAULTS["zombie_strikes"]) 
     strikes = card.get("revive_strikes", 0)
     strike_tag = (f" ⚠ strike {strikes}/{max_strikes} — process died upon revival"
                   if strikes > 0 else "")
-    return (f"#{card['pid']} · {card['sid8']} [{shown}]{model} "
+    held = " [running elsewhere]" if card.get("running_elsewhere") else ""
+    return (f"#{card['pid']} · {card['sid8']} [{shown}]{held}{model} "
             f"{card['cwd']}{dup}{sid_tag}{strike_tag}")
 
 
@@ -3988,6 +3989,13 @@ def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = Tr
     return True, msg
 
 
+def _process_owner_check(config: cfg.Config, boot, probe) -> Callable[[Mapping[str, Any]], bool]:
+    """``_takeover``'s "does crr itself run this entry?" (#158). tmux is read
+    at each ask, because the answer has to hold under ``_takeover``'s lock.
+    """
+    return lambda entry: reviver.owns_a_process(entry, boot, probe, _live_tmux_sessions(config))
+
+
 def _takeover(
     store: JournalStore,
     sd: Path,
@@ -3998,6 +4006,7 @@ def _takeover(
     *,
     max_wait: float,
     boot_id: str,
+    owns_process: Callable[[Mapping[str, Any]], bool] = lambda entry: True,
     read_signal=transcript_source.read_takeover_signal,
     clock=time.time,
     sleep=time.sleep,
@@ -4020,8 +4029,8 @@ def _takeover(
          refuses IMMEDIATELY, never waiting out the timeout; a busy
          transcript only refuses once ``max_wait`` elapses. Every
          non-ready outcome here is a refusal, never a kill.
-      3. Kill under ``mutation_lock`` (bounded by ``grace``): re-check the
-         sid is still untracked (closes the resolve->kill race), then
+      3. Kill under ``mutation_lock`` (bounded by ``grace``): re-check that
+         crr doesn't run the sid itself (closes the resolve->kill race), then
          RE-RESOLVE the live process (``find_resume_process`` again) —
          this is the tuple the kill actually uses, so it can never be the
          stale one from step 1. None on re-resolve -> refuse honestly (the
@@ -4030,10 +4039,12 @@ def _takeover(
          the FRESH tuple — a flag survives only when a kill actually lands
          (mirrors ``_reopen_ghost``'s rollback rule); an undeliverable kill
          clears the flag and fails with nothing else touched.
-      4. An adoption placeholder doesn't count as tracked in step 3: it
-         owns no process, and once adopted this is the only way to stop the
-         live copy (#158). That sid needs no adopting, so step 5 is skipped,
-         and the next sweep revives it because nothing is running it now.
+      4. A journal entry counts in step 3 only if ``owns_process`` says crr
+         runs it (#158). A CRASHED entry doesn't, and this is the only way to
+         stop the copy the watchdog is leaving alone. That sid needs no
+         adopting, so step 5 is skipped, and the sweep revives it once nothing
+         else runs it. The default refuses every journaled sid, so a caller
+         that doesn't pass the check can't stop anything crr knows about.
       5. Adopt via ``_adopt`` (its own lock + re-check) AFTER the kill
          lock is released — the journal write only ever happens once a
          kill has actually landed. ``_adopt`` can still refuse past its own
@@ -4073,13 +4084,13 @@ def _takeover(
         sleep(poll)
 
     with mutation_lock(sd):
-        boots = [
-            e["boot_id"] for e in store.scan().entries
+        entries = [
+            e for e in store.scan().entries
             if (e.get("claude") or {}).get("session_id") == sid
         ]
-        already_adopted = bool(boots)
-        if any(boot != discovery.ADOPTED_BOOT_ID for boot in boots):
+        if any(owns_process(e) for e in entries):
             return False, f"{sid[:8]} is now tracked — not taking over"
+        already_journaled = bool(entries)
         # Re-resolve under the lock: the wait loop above ran lock-free for
         # up to max_wait seconds, long enough for the step-1 process to
         # exit and its pid/ppid/pgid to be recycled by the OS. The kill
@@ -4099,8 +4110,8 @@ def _takeover(
 
     sid8 = sid[:8]
     prefix = f"took over {sid8} (stopped live pid {proc.pid})"
-    if already_adopted:
-        return True, f"{prefix}; the watchdog revives it on its next pass"
+    if already_journaled:
+        return True, f"{prefix}; the watchdog revives it once nothing else is running it"
     ok, msg = _adopt(store, sd, sid, competing_note=False)
     if ok:
         return True, f"{prefix}; {msg}"
@@ -4154,8 +4165,11 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
             f"{idle_window:g}s",
             file=sys.stderr,
         )
+    boot = boot_identity.detect()
+    probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     ok, msg = _takeover(store, sd, config, controller, flags, args.sid,
-                        max_wait=max_wait, boot_id=boot_identity.detect().current())
+                        max_wait=max_wait, boot_id=boot.current(),
+                        owns_process=_process_owner_check(config, boot, probe))
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1
 
@@ -5435,7 +5449,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
             # _web_takeover uses max_wait=0.0 (non-blocking) and manages its
             # own mutation_lock for the kill, like _adopt — do NOT wrap it.
             return (*_web_takeover(store, sd, config, controller, flags, sid,
-                                  boot_id=boot.current()), False)
+                                  boot_id=boot.current(),
+                                  owns_process=_process_owner_check(config, boot, probe)), False)
         if op in ("autokick-on", "autokick-off"):
             # Pins ONE session's auto-kick opt-in/opt-out (spec 2026-08-07,
             # Slice 3). `_write_session_autokick_locked` holds `mutation_lock`

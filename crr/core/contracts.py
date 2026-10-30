@@ -82,6 +82,8 @@ JOURNAL_SCHEMA_VERSION = 4
 # "crashed" with Reopen as its first button, so the one action that starts a
 # second copy looked like the fix. True only on a crashed card; a v18 consumer
 # has no way to tell this card from one the watchdog is about to revive.
+# `can_take_over` (#158) says Take over would act on it: true only with
+# `running_elsewhere`, and false when a sibling card is a copy crr itself runs.
 SESSIONS_CONTRACT_VERSION = 19
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
@@ -325,6 +327,7 @@ SESSION_CARD_KEYS = (
     "autokick",
     "adopted",
     "running_elsewhere",
+    "can_take_over",
     # Reviver strike count (v17): how close this session is to give-up.
     # Verbatim from the journal — display-only, nothing decides on it.
     "revive_strikes",
@@ -572,6 +575,12 @@ def validate_session_card(card: Any) -> None:
         raise ContractError(
             f"session 'running_elsewhere' on a {card['state']!r} card: only a "
             "crashed card can be waiting on another copy"
+        )
+    _require_type(card["can_take_over"], bool, "session 'can_take_over'")
+    if card["can_take_over"] and not card["running_elsewhere"]:
+        raise ContractError(
+            "session 'can_take_over' without 'running_elsewhere': there is no "
+            "other copy to stop"
         )
     _require_type(card["skip_permissions"], bool, "session 'skip_permissions'")
     _require_type(card["revive_strikes"], int, "session 'revive_strikes'")

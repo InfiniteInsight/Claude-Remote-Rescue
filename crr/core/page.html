@@ -638,7 +638,7 @@ var BUTTON_HELP = {
   "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
   "Retrack": "Put this recently-untracked session back under crr's management.",
   "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, crr leaves it alone while it can see that process, and Reopen would start a second copy.",
-  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs.",
+  "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then keep it under crr — so no second copy runs.",
   "Restore": "Put this session back under crr's management with its host-death and strike counts reset. The watchdog revives it on its next pass, so restore once the machine is stable."
 };
 
@@ -998,7 +998,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   if (s.running_elsewhere) {
     var reb = el("span", "badge running-badge");
     reb.textContent = "running elsewhere";
-    reb.title = "This conversation is already running outside crr, so the watchdog is leaving it alone. It revives once that copy stops. Reopen would start a second copy.";
+    reb.title = "This conversation is already running in another copy, so the watchdog is leaving this one alone. It revives once that copy stops. Reopen would start a second copy.";
     reb.setAttribute("data-help", reb.title);
     top.appendChild(reb);
   }
@@ -1118,9 +1118,9 @@ function renderCard(s, uncertain, groupColor, latest) {
     return;
   }
   if (s.state === "crashed") {
-    // (#158) Adopting took this session out of Discoverable, so the card is
-    // the only place left to stop the other copy.
-    if (s.running_elsewhere && s.adopted) {
+    // (#158) A journaled session never appears in Discoverable, so the card
+    // is the only place left to stop the other copy.
+    if (s.can_take_over) {
       addBtn("Take over", "takeover", true, true, function (b) {
         sidAction("takeover", s.session_id, b);
       });

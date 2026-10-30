@@ -250,7 +250,8 @@ def assemble_sessions(
     # feeds it to both this and the reachability detector, because a second
     # `ps -A` per poll is exactly what the batching exists to avoid. Absent
     # (None) means no evidence, and no evidence must not become a claim that
-    # two agents are fighting.
+    # two agents are fighting. (`running_sids` is a second snapshot: it needs
+    # the full argv, which this one drops for speed.)
     _conflicted = _conflicting_sids(sessions, claude_owners or {})
     probe = _MemoTtyProbe(process_probe, tty_pids)
 
@@ -332,11 +333,17 @@ def assemble_sessions(
                     and live_tmux_sessions is not None
                     and resolved_session_name(entry) not in live_tmux_sessions
                 ),
+                "can_take_over": False,  # needs every card's state, set below
                 "skip_permissions": entry["claude"].get("skip_permissions", False),
                 "revive_strikes": entry["revive_strikes"],
             }
         )
 
+    # (#158) Take over refuses a sid crr itself runs, so a live, ghost or parked
+    # sibling withdraws the offer. The warning stands: Reopen is still a copy.
+    owned_sids = {card["session_id"] for card in cards if card["state"] != CRASHED}
+    for card in cards:
+        card["can_take_over"] = card["running_elsewhere"] and card["session_id"] not in owned_sids
     return {
         "contract": contracts.SESSIONS_CONTRACT_VERSION,
         "sessions": cards,

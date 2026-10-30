@@ -133,11 +133,12 @@ No tag or release has been cut yet. This section describes everything on
 
 - A session the watchdog is leaving alone no longer looks broken (#159). Its
   card now reads "running elsewhere" and asks for a confirm on Reopen, which
-  would start a second copy (sessions contract v19, PAGE_VERSION 80). Take
-  over now works on an adopted session, from that card or `crr adopt
-  --takeover` (#158). It used to refuse any journaled session, and adopting
-  also removed the Discoverable row that offered it, so nothing could stop the
-  other copy from crr.
+  would start a second copy (sessions contract v19, PAGE_VERSION 80). `crr
+  status` shows the same. Take over now works on those sessions, from the card
+  or `crr adopt --takeover` (#158). It used to refuse any journaled session,
+  and a journaled session has no Discoverable row, so nothing could stop the
+  other copy from crr. It now refuses only what crr itself runs, decided by
+  the classifier and live tmux sessions, and the card only offers it then.
 - The watchdog no longer starts a second copy of a conversation that is
   already running outside crr (#153). Adopting a transcript still open in an
   untracked tab left a crashed entry, and the next sweep revived it into

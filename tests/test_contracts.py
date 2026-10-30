@@ -63,6 +63,7 @@ def _session_card():
         "autokick": "on",
         "adopted": False,
         "running_elsewhere": False,
+        "can_take_over": False,
         "conflict": False,
         "attached": False,
         "skip_permissions": False,
@@ -1111,3 +1112,20 @@ def test_a_crashed_card_can_be_running_elsewhere():
     card["state"] = "crashed"
     card["running_elsewhere"] = True
     contracts.validate_session_card(card)
+
+
+def test_can_take_over_must_be_a_bool():
+    card = _session_card()
+    card["state"] = "crashed"
+    card["running_elsewhere"] = True
+    card["can_take_over"] = "yes"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)
+
+
+def test_take_over_needs_something_running_elsewhere():
+    card = _session_card()
+    card["state"] = "crashed"
+    card["can_take_over"] = True
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)

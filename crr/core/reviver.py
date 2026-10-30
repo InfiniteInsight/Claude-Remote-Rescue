@@ -121,6 +121,22 @@ def resolved_session_name(entry: Mapping[str, Any]) -> str:
     return entry.get("tmux_session") or session_name(entry)
 
 
+def owns_a_process(entry: Mapping[str, Any], boot_identity: BootIdentity,
+                   process_probe: ProcessProbe, live: set[str] | None) -> bool:
+    """Is this journal entry a process crr itself runs?
+
+    What Take over has to know before it stops a claude (#158). A LIVE or
+    GHOST entry, or one sitting in its own tmux session, is crr's, and
+    stopping it wouldn't be a take over. Only a CRASHED entry with no tmux
+    session of its own is free, because nothing crr tracks is behind it.
+    ``live`` is the live tmux sessions. None means they couldn't be read,
+    which counts as owned: this gates a kill, so "can't tell" means "don't".
+    """
+    if live is None or classify(entry, boot_identity, process_probe) != CRASHED:
+        return True
+    return resolved_session_name(entry) in live
+
+
 def remote_control_name(cwd: str) -> str:
     """A safe Claude Code Remote Control session name derived from a
     session's working directory (its basename), so the mobile session list

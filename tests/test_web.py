@@ -1144,8 +1144,11 @@ def test_page_shows_a_session_the_watchdog_is_leaving_alone():
 def test_page_offers_take_over_on_an_adopted_running_session():
     # (#158) It leaves Discoverable once adopted, so the card is the only home.
     page = web.render_page()
-    assert "s.running_elsewhere && s.adopted" in page
+    assert "if (s.can_take_over)" in page
+    # Confirm-gated, and routed to the sid endpoint: /api/action has no such op.
+    assert 'addBtn("Take over", "takeover", true, true, function (b)' in page
     assert 'sidAction("takeover", s.session_id' in page
+    assert "if (run) { run(b); }" in page
 
 
 def test_page_version_is_80():

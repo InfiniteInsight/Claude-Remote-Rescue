@@ -209,3 +209,48 @@ def test_the_card_uses_the_watchdogs_own_tmux_name():
     # watchdog treats that as its own, so the card has to as well.
     assert _adopted_card(running_sids={SID}, live_tmux_sessions={f"crr-{SID}"})[
         "running_elsewhere"] is False
+
+
+# --- can_take_over: only offer what Take over will do (#158) -----------------------
+
+def _tracked(pid, boot):
+    return new_entry(pid=pid, cwd="/home/u/p", host="tab", shell="fish", boot_id=boot,
+                     now="2026-01-01T00:00:00+00:00",
+                     claude={"session_id": SID, "sid_source": "injected",
+                             "started": "2026-01-01T00:00:00+00:00",
+                             "skip_permissions": False})
+
+
+def _cards(*entries):
+    payload = assemble_sessions(list(entries), FakeBoot(), FakeProbe(), running_sids={SID},
+                                live_tmux_sessions=set())
+    return {card["pid"]: card for card in payload["sessions"]}
+
+
+def test_an_adopted_running_card_offers_take_over():
+    assert _adopted_card(running_sids={SID})["can_take_over"] is True
+
+
+def test_a_crashed_tracked_card_offers_take_over_too():
+    # A shell that died and left its claude behind: nothing crr runs owns it.
+    assert _cards(_tracked(7, "an-earlier-boot"))[7]["can_take_over"] is True
+
+
+def test_a_live_sibling_withdraws_take_over_but_keeps_the_warning():
+    # Adopted, then resumed in a shimmed tab. Take over would refuse, so the
+    # card must not offer it, but Reopen would still start a second copy.
+    placeholder = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
+    cards = _cards(placeholder, _tracked(7, "boot-1"))
+    card = cards[placeholder["pid"]]
+    assert card["running_elsewhere"] is True
+    assert card["can_take_over"] is False
+    assert cards[7]["can_take_over"] is False
+
+
+def test_two_crashed_cards_can_both_offer_take_over():
+    cards = _cards(_tracked(7, "an-earlier-boot"), _tracked(8, "an-earlier-boot"))
+    assert cards[7]["can_take_over"] is True and cards[8]["can_take_over"] is True
+
+
+def test_a_card_with_nothing_running_offers_no_take_over():
+    assert _adopted_card(running_sids=set())["can_take_over"] is False
