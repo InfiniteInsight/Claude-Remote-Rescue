@@ -64,25 +64,30 @@ def adopted_pid(session_id: str) -> int:
 _UNKNOWN_STARTED = "1970-01-01T00:00:00+00:00"
 
 
-def build_adopted_entry(session_id: str, cwd: str, now: str) -> dict[str, Any]:
+def build_adopted_entry(session_id: str, cwd: str, now: str, *, shell: str) -> dict[str, Any]:
     """Build a schema-v1 journal entry for a transcript crr never journaled.
 
     The "recoverable entry from an external record" T-C shares
     conceptually with F3's retrack: ``sid_source="guessed"`` (crr never saw
     this sid get injected by a shim — see ``_UNKNOWN_STARTED`` for why
     ``claude.started`` is epoch zero rather than the adoption time), no
-    ``tmux_session`` (nothing is parked), ``host="tab"``/``shell="bash"``
-    placeholders (adoption never observed a real shell registration — any
-    enum member the schema accepts would be equally fabricated), and
+    ``tmux_session`` (nothing is parked), a ``host="tab"`` placeholder
+    (adoption never observed a real shell registration, so any enum member
+    the schema accepts would be equally fabricated), and
     ``boot_id=ADOPTED_BOOT_ID`` so the classifier reports CRASHED: the
     entry shows up as a recoverable card, revivable via ``crr reopen``,
     but adoption itself never attaches to a live process.
+
+    ``shell`` is required, not a placeholder: ``ops.tracked_resume_argv``
+    reads it to reopen the session, and only a shell with the shim
+    re-registers it (#152). Core can't look it up, so the composition root
+    passes the user's login shell.
     """
     return new_entry(
         pid=adopted_pid(session_id),
         cwd=cwd,
         host="tab",
-        shell="bash",
+        shell=shell,
         boot_id=ADOPTED_BOOT_ID,
         now=now,
         tmux_session=None,
