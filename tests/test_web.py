@@ -1781,6 +1781,7 @@ def test_page_has_discoverable_section_lazy_with_adopt_note():
     # but Reopen on the adopted card still starts a second copy.
     assert "does NOT attach to a running process" in page
     assert "second" in page and "claude --resume" in page
+    assert "Adopting would start" not in page  # no longer what adopting does
 
 
 def test_page_sid_action_helper_posts_json_to_sid_action_endpoint():

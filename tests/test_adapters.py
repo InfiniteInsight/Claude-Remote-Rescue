@@ -586,6 +586,50 @@ def test_resume_session_ids_collects_every_live_resume_sid(monkeypatch):
     assert pp.PsProcessController(2.0).resume_session_ids() == {_SID, _OTHER_SID}
 
 
+# (#153) The sweep relies on this set, so it has to see the conversation however
+# claude was started. `--session-id` is what the shims run for a fresh launch.
+_LAUNCH_SHAPES = [
+    f"--resume {_SID}",
+    f"-r {_SID}",
+    f"--resume={_SID}",
+    f"--session-id {_SID}",
+    f"--session-id={_SID}",
+    f"--remote-control proj --session-id {_SID} --dangerously-skip-permissions",
+]
+
+
+@pytest.mark.parametrize("args", _LAUNCH_SHAPES)
+def test_resume_session_ids_sees_every_way_claude_names_a_conversation(monkeypatch, args):
+    stdout = f"796194    916 796194 claude {args}\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).resume_session_ids() == {_SID}
+
+
+@pytest.mark.parametrize("args", _LAUNCH_SHAPES)
+def test_find_resume_process_agrees_on_every_launch_shape(monkeypatch, args):
+    # A row the dashboard tags `running` has to be one Take over can find.
+    stdout = f"796194    916 796194 claude {args}\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    got = pp.PsProcessController(2.0).find_resume_process(_SID)
+    assert got == pp.ResumeProcess(pid=796194, ppid=916, pgid=796194)
+
+
+def test_a_bare_resume_picker_names_no_conversation(monkeypatch):
+    stdout = "796194    916 796194 claude --resume --remote-control proj\n"
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).resume_session_ids() == set()
+
+
+def test_a_wrapper_carrying_the_sid_is_not_the_running_claude(monkeypatch):
+    # The reviver's exit hook, and the shell a tracked window starts in.
+    stdout = (
+        f'100 1 100 sh -c claude "$@"; crr deregister sh --resume {_SID}\n'
+        f"200 1 200 fish -i -C claude --resume {_SID}\n"
+    )
+    monkeypatch.setattr(pp.subprocess, "run", lambda *a, **k: _Result(0, stdout=stdout))
+    assert pp.PsProcessController(2.0).resume_session_ids() == set()
+
+
 def test_resume_session_ids_is_one_ps_call_not_one_per_sid(monkeypatch):
     calls = []
 

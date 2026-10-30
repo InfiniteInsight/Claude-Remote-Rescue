@@ -2844,6 +2844,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
         print("crr revive: tmux is required for revival but was not found", file=sys.stderr)
         return 2
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
+    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     sd = state_dir.state_dir()
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
@@ -2889,8 +2890,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
                 attached=tmux_spawner.attached_sessions(),
                 # (#153) Without this the sweep starts a second claude on a
                 # conversation already running outside crr.
-                running_sids=process_probe.PsProcessController(
-                    config.get("interop_timeout_seconds")).resume_session_ids(),
+                running_sids=controller.resume_session_ids(),
             )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -2915,7 +2915,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     if outcome.running_elsewhere:
         # #153: nothing is wrong with these, so name them apart from the
         # failures, and say when they'll be picked up.
-        print(f"left alone, already running outside crr (revives once that stops): "
+        print(f"left alone, conversation already running (revives once that stops): "
               f"{outcome.running_elsewhere}")
     if outcome.host_crash_loop:
         # #147: not a verdict on the session — the host kept dying under
@@ -2944,7 +2944,6 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     # dangerous action that deserves its own gate, its own re-scan (the
     # revival above may have changed journal state), and its own reasoning
     # trail. See `_kick_dropped_bridges` for the full guard chain.
-    controller = process_probe.PsProcessController(config.get("interop_timeout_seconds"))
     flags = FlagStore(sd)
     settings_store = settings.SettingsStore(sd)
     _kick_dropped_bridges(
@@ -3358,6 +3357,10 @@ def _post_reauth_recovery(
     ``reachability.may_kick`` — a session mid-turn (``busy``/``shell``)
     still must not be SIGTERM'd here; that one is left for the next
     ordinary sweep once it reaches a boundary.
+
+    A CRASHED session whose conversation is already running is skipped, like
+    the sweep skips it (#153): nobody is watching this path to choose a
+    second copy.
     """
     kick_store = bridge_kicks.KickHistoryStore(sd)
     entries = [e for e in store.scan().entries if e.get("claude") is not None]
@@ -3365,11 +3368,14 @@ def _post_reauth_recovery(
         kick_store.reset(entry["claude"]["session_id"])
 
     states = session_state.read_all()
+    running = controller.resume_session_ids()
     for entry in entries:
         pid = entry["pid"]
         sid = entry["claude"]["session_id"]
         kind = classifier.classify(entry, boot, probe)
         if kind == classifier.CRASHED:
+            if sid in running:
+                continue
             with mutation_lock(sd):
                 spawner, tabs_expected = _tab_spawner(config)
                 ops.reopen(
@@ -3971,9 +3977,9 @@ def _adopt(store: JournalStore, sd: Path, sid: str, *, competing_note: bool = Tr
     if competing_note:
         msg += (
             "; NOTE: this does NOT attach to a running process — if the session is "
-            "still alive elsewhere, the watchdog leaves it alone until that process "
-            "stops, but `crr reopen` would start a second `claude --resume` on the "
-            "same conversation."
+            "still alive elsewhere, the watchdog leaves it alone while it can see that "
+            "process, but it can't see a plain `claude` launch, and `crr reopen` would "
+            "start a second `claude --resume` on the same conversation."
         )
     return True, msg
 

@@ -137,8 +137,12 @@ No tag or release has been cut yet. This section describes everything on
   tmux: the new copy took Remote Control from the tab, and both wrote to one
   transcript. A sweep now leaves such a session alone, with no strike and no
   verdict from either cap, and revives it once the other copy stops. `crr
-  revive` names the sessions it left alone. `crr reopen` is not gated, and the
-  adopt note and dashboard copy now say so (PAGE_VERSION 79).
+  revive` names the sessions it left alone. Post-reauth recovery skips them
+  too. "Running" now covers every way claude's command line names a
+  conversation (`--resume`, `-r`, `--session-id`), which also widens the
+  dashboard's `running` tag and Take over; a plain `claude` still can't be
+  seen. A human's `crr reopen` is not gated, and the adopt note and dashboard
+  copy now say so (PAGE_VERSION 79).
 - A host crash loop no longer archives healthy sessions as a terminal
   `gave-up` (#147). On 2026-10-09 a WSL distro restarted every ~2 minutes
   after an OOM. Every restart counted as a host death for every session,

@@ -637,7 +637,7 @@ var BUTTON_HELP = {
   "Un-tmux": "Kill the tmux wrapper and relaunch `claude --resume` directly in a visible tab, with no tmux underneath.",
   "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
   "Retrack": "Put this recently-untracked session back under crr's management.",
-  "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, crr leaves it alone until that stops, and Reopen would start a second copy.",
+  "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, crr leaves it alone while it can see that process, and Reopen would start a second copy.",
   "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs.",
   "Restore": "Put this session back under crr's management with its host-death and strike counts reset. The watchdog revives it on its next pass, so restore once the machine is stable."
 };
@@ -1006,7 +1006,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     top.appendChild(wb);
   }
   // (#40) An adopted card never observed a shell registration, so its
-  // host/shell come back empty rather than as the journal's schema filler.
+  // host/shell come back empty rather than as unobserved journal values.
   // Say WHY they are blank, or a blank field reads as a rendering bug.
   if (s.adopted) {
     var adb = el("span", "badge unknown-badge");
@@ -2115,7 +2115,7 @@ function loadDiscoverable() {
           if (r.running) {
             var tag = el("span", "badge running-badge");
             tag.textContent = "running (untracked)";
-            tag.title = "crr is not tracking this conversation, but a live `claude --resume` is running for it right now. Adopting would start a SECOND copy on the same transcript — use Take over instead.";
+            tag.title = "crr is not tracking this conversation, but a live `claude --resume` is running for it right now. Reopening it after Adopt would start a SECOND copy on the same transcript — use Take over instead.";
             row.firstChild.appendChild(tag);  // inline beside the sid
           }
           list.appendChild(row);

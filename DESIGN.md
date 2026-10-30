@@ -178,9 +178,10 @@ copies wrote to one transcript. A sweep now snapshots `claude --resume`
 processes and leaves alone any session it would otherwise revive, give up on
 or park. It writes nothing, so no strike accrues, and revival resumes once the
 other copy stops. A session's own tmux pane doesn't count, because that path
-never reaches the check. The match is on `--resume <sid>`, so a conversation
-started any other way isn't seen. `crr reopen` isn't gated: it's a human's
-explicit ask, and the adopt note discloses the hazard.
+never reaches the check. The match is on the session id claude's command line
+names, so a plain `claude` isn't seen. Post-reauth recovery skips the same
+sessions, because it reopens with nobody watching. A human's `crr reopen` isn't
+gated: it's an explicit ask, and the adopt note discloses the hazard.
 
 ### Session operations (all classifier-gated, pid-keyed)
 

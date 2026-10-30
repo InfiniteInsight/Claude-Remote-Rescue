@@ -515,7 +515,7 @@ def revive_crashed(
     def _is_running_elsewhere(action: str, e: Mapping[str, Any]) -> bool:
         # An inconclusive process probe arrives as an empty set, so this
         # degrades to reviving, as it did before this check existed. Nothing
-        # is written for a held session: it takes no strike, and neither cap
+        # is written for these sessions: they take no strike, and neither cap
         # can pass a verdict on a conversation that is up.
         return (action in _ASSUMES_NOT_RUNNING
                 and (e.get("claude") or {}).get("session_id") in (running_sids or ()))

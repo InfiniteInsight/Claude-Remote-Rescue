@@ -2178,7 +2178,7 @@ def test_revive_names_sessions_left_alone_because_they_already_run(tmp_path, mon
     )
     assert cli.main(["revive"]) == 0
     out = capsys.readouterr().out
-    assert "already running outside crr" in out
+    assert "left alone" in out
     assert "[4242]" in out
 
 
@@ -2187,7 +2187,7 @@ def test_revive_omits_the_left_alone_line_when_none(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli.reviver, "revive_crashed",
                         lambda *a, **k: cli.reviver.RevivalOutcome([], [], []))
     assert cli.main(["revive"]) == 0
-    assert "already running outside crr" not in capsys.readouterr().out
+    assert "left alone" not in capsys.readouterr().out
 
 
 def test_revive_tells_the_sweep_what_is_already_running(tmp_path, monkeypatch):
@@ -5738,6 +5738,9 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
             return True
 
     class _Controller:
+        def resume_session_ids(self):
+            return set()
+
         def claude_groups(self, pid):
             return [pid + 5000]  # arbitrary claude pgid, distinct from the shell pid
 
@@ -5784,6 +5787,49 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     assert kicked_pids == [1002]
 
 
+def test_post_reauth_recovery_leaves_a_running_conversation_alone(tmp_path, monkeypatch):
+    # (#153) This path reopens with nobody watching, so nobody chose a second
+    # copy. The sweep skips while auth is expired, so sessions pile up here.
+    from crr.adapters import session_state
+    from crr.core import ops
+    from crr.core.flags import FlagStore
+
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-0000-4a6b-8c7d-9e0f1a2b3c4d"
+    store.write(new_entry(
+        pid=1001, cwd="/home/u/project", host="tmux", shell="zsh",
+        boot_id="a-previous-boot", now="2026-08-21T00:00:00Z",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-08-21T00:00:00Z", "skip_permissions": False}))
+
+    class _Boot:
+        def current(self):
+            return "current-boot"
+
+    class _Probe:
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            return True
+
+    class _Controller:
+        def resume_session_ids(self):
+            return {sid}
+
+    monkeypatch.setattr(session_state, "read_all", lambda: {})
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
+    reopened = []
+    monkeypatch.setattr(ops, "reopen", lambda *a, **kw: reopened.append(a[7]))
+
+    cli._post_reauth_recovery(
+        store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
+        FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
+    )
+
+    assert reopened == []
+
+
 def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch):
     """An idle session whose transcript tail is mid-turn (not at an
     ``assistant-end`` boundary) must NOT be kicked by recovery — mirroring
@@ -5821,6 +5867,9 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
             return True
 
     class _Controller:
+        def resume_session_ids(self):
+            return set()
+
         def claude_groups(self, pid):
             return [pid + 5000]
 
