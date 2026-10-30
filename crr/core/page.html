@@ -637,7 +637,7 @@ var BUTTON_HELP = {
   "Un-tmux": "Kill the tmux wrapper and relaunch `claude --resume` directly in a visible tab, with no tmux underneath.",
   "Search": "Search THIS session's transcript for earlier conversation, using the text in the search box above.",
   "Retrack": "Put this recently-untracked session back under crr's management.",
-  "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, a second copy may start.",
+  "Adopt": "Track this conversation as recoverable. It does NOT attach to a running process — if the session is still alive elsewhere, crr leaves it alone while it can see that process, and Reopen would start a second copy.",
   "Take over": "Stop the live claude for this conversation first (only at a safe turn boundary), then adopt it — so no second copy runs.",
   "Restore": "Put this session back under crr's management with its host-death and strike counts reset. The watchdog revives it on its next pass, so restore once the machine is stable."
 };
@@ -1006,7 +1006,7 @@ function renderCard(s, uncertain, groupColor, latest) {
     top.appendChild(wb);
   }
   // (#40) An adopted card never observed a shell registration, so its
-  // host/shell come back empty rather than as the journal's schema filler.
+  // host/shell come back empty rather than as unobserved journal values.
   // Say WHY they are blank, or a blank field reads as a rendering bug.
   if (s.adopted) {
     var adb = el("span", "badge unknown-badge");
@@ -2040,14 +2040,14 @@ var MODAL_KINDS = {
       note.appendChild(document.createTextNode(" tracks a conversation as recoverable (revive via `crr reopen`); it does NOT attach to a running process. A row marked "));
       var b2 = el("strong"); b2.textContent = "running (untracked)";
       note.appendChild(b2);
-      note.appendChild(document.createTextNode(" also has a live `claude --resume` going right now, so adopting it would start a SECOND copy on the same transcript — use "));
+      note.appendChild(document.createTextNode(" also has a live `claude --resume` going right now. Adopting it leaves that copy running, and Reopen would start a SECOND copy on the same transcript — use "));
       var b3 = el("strong"); b3.textContent = "Take over";
       note.appendChild(b3);
       note.appendChild(document.createTextNode(", which stops the live one first (only at a safe turn boundary) and then adopts."));
     },
     actions: function (r) {
-      // A conversation that is STILL RUNNING can't be plain-Adopted without
-      // starting a second claude on the same transcript — promote Take over.
+      // A conversation that is STILL RUNNING can't be managed until it stops,
+      // and Reopen would start a second claude on it — promote Take over.
       return r.running
         ? [{ label: "Take over", op: "takeover", danger: true, confirm: true },
            { label: "Adopt", op: "adopt", confirm: true }]
@@ -2115,7 +2115,7 @@ function loadDiscoverable() {
           if (r.running) {
             var tag = el("span", "badge running-badge");
             tag.textContent = "running (untracked)";
-            tag.title = "crr is not tracking this conversation, but a live `claude --resume` is running for it right now. Adopting would start a SECOND copy on the same transcript — use Take over instead.";
+            tag.title = "crr is not tracking this conversation, but a live `claude --resume` is running for it right now. Reopening it after Adopt would start a SECOND copy on the same transcript — use Take over instead.";
             row.firstChild.appendChild(tag);  // inline beside the sid
           }
           list.appendChild(row);

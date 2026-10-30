@@ -115,19 +115,18 @@ class ProcessController(Protocol):
         ...
 
     def resume_session_ids(self) -> set[str]:
-        """Every session id with a live ``claude --resume <sid>`` process.
+        """Every session id a live claude names on its command line.
 
         The BATCH counterpart to ``find_resume_process`` (parallel to
         ``controlling_ttys`` vs ``has_controlling_tty``): one probe answers
-        "already running?" for a whole page of discoverable rows. An
-        inconclusive probe degrades to an empty set, never a fabricated
-        answer."""
+        "already running?" for a whole page of discoverable rows, or a whole
+        revive sweep. An inconclusive probe degrades to an empty set, never a
+        fabricated answer."""
         ...
 
     def find_resume_process(self, session_id: str) -> "ResumeProcess | None":
-        """Locate a live ``claude --resume <session_id>`` process (`crr
-        adopt --takeover`'s live-process resolver), or None if none is
-        running.
+        """Locate a live claude running ``session_id`` (`crr adopt
+        --takeover`'s live-process resolver), or None if none is running.
 
         This is a sid-scoped, whole-argv-token match on a specific UUID —
         a DIFFERENT specificity class from ``claude_groups``'s

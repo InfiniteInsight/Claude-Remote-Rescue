@@ -212,6 +212,27 @@ def _is_claude_argv0(argv0: str) -> bool:
     return base.startswith("claude")
 
 
+# How a claude command line names its conversation. `--session-id` is the
+# shims' fresh launch; the others resume one.
+_SID_FLAGS = ("--resume", "-r", "--session-id")
+
+
+def _named_session_id(tokens: Sequence[str]) -> str | None:
+    """The conversation a claude argv names, in either ``--flag value`` or
+    ``--flag=value`` form. None for a plain launch, a ``--continue``, or the
+    bare ``--resume`` picker, whose next token is just another flag.
+    """
+    for i, token in enumerate(tokens):
+        flag, equals, value = token.partition("=")
+        if flag not in _SID_FLAGS:
+            continue
+        if not equals:
+            value = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if value and not value.startswith("-"):
+            return value
+    return None
+
+
 def _parse_ps_rows_full_args(stdout: str) -> list[tuple[int, int, int, str]]:
     """Same row shape as ``_parse_ps_rows`` (pid, ppid, pgid) but keeps the
     FULL args string as the fourth field instead of truncating it to argv0.
@@ -378,8 +399,8 @@ class PsProcessController:
         )
 
     def find_resume_process(self, session_id: str) -> ResumeProcess | None:
-        """Locate a live ``claude --resume <session_id>`` process (`crr
-        adopt --takeover`'s live-process resolver).
+        """Locate a live claude running ``session_id`` (`crr adopt
+        --takeover`'s live-process resolver).
 
         One ``ps`` snapshot, matched on the FULL argv (via
         ``_parse_ps_rows_full_args`` — ``_parse_ps_rows`` truncates to
@@ -387,9 +408,9 @@ class PsProcessController:
         way, so this is a separate parse of the same snapshot). A row
         matches when its argv0 basename starts with ``claude``
         (``_is_claude_argv0``, reused) AND its args, split on whitespace,
-        contain both ``"--resume"`` and ``session_id`` as WHOLE tokens —
-        never a substring check, so a row carrying a sid that is merely a
-        prefix (or superstring) of ``session_id`` cannot false-hit.
+        name ``session_id`` (``_named_session_id``) as a WHOLE value — never
+        a substring check, so a row carrying a sid that is merely a prefix
+        (or superstring) of ``session_id`` cannot false-hit.
 
         This sid-scoped ``--resume <UUID>`` match is a DIFFERENT
         specificity class from the broad ``_is_claude_argv0``-only
@@ -420,24 +441,25 @@ class PsProcessController:
             tokens = args.split()
             if not tokens or not _is_claude_argv0(tokens[0]):
                 continue
-            if "--resume" in tokens and session_id in tokens:
+            if _named_session_id(tokens) == session_id:
                 return ResumeProcess(pid, ppid, pgid)
         return None
 
     def resume_session_ids(self) -> set[str]:
-        """Every session id that a live ``claude --resume <sid>`` is running.
+        """Every session id that a live claude names on its command line.
 
         The batch counterpart to ``find_resume_process`` (and the direct
         parallel to ``controlling_ttys``): ONE ``ps`` snapshot answers "is this
         conversation already running?" for a whole page of discoverable rows,
         instead of one snapshot per row. The dashboard uses it to warn that
-        plain Adopt would start a SECOND claude on a transcript that is still
-        live, and to steer to Take over instead.
+        a conversation is still live and steer to Take over. The revive sweep
+        uses it to leave those conversations alone (#153).
 
         Same degrade-to-empty policy as the other probes here: an
-        inconclusive ``ps`` yields an empty set (no warnings shown) rather
-        than a fabricated answer — the adopt path's own competing-resume
-        disclosure remains the backstop.
+        inconclusive ``ps`` yields an empty set (no warnings shown, and a
+        sweep revives as if nothing were running) rather than a fabricated
+        answer — the adopt path's own competing-resume disclosure remains
+        the backstop.
         """
         try:
             result = subprocess.run(
@@ -453,9 +475,9 @@ class PsProcessController:
             tokens = args.split()
             if not tokens or not _is_claude_argv0(tokens[0]):
                 continue
-            for i, tok in enumerate(tokens):
-                if tok == "--resume" and i + 1 < len(tokens):
-                    sids.add(tokens[i + 1])
+            sid = _named_session_id(tokens)
+            if sid:
+                sids.add(sid)
         return sids
 
     def terminate_group(self, pgid: int, grace_seconds: float) -> None:

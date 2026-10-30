@@ -170,6 +170,19 @@ reviver, because reviving into the loop is what the cap stops. Unlike
 `--host-crash-loop`, or the dashboard's "Host crash loop" view), with both
 counters reset.
 
+**[lesson: ask what's running, not just what's journaled]** (#153) A
+journaled entry can be CRASHED while its conversation runs in a tab crr isn't
+tracking. On 2026-10-30 the watchdog revived two adopted sessions into tmux
+while each was open in a tab: the tmux copies took Remote Control, and both
+copies wrote to one transcript. A sweep now snapshots `claude --resume`
+processes and leaves alone any session it would otherwise revive, give up on
+or park. It writes nothing, so no strike accrues, and revival resumes once the
+other copy stops. A session's own tmux pane doesn't count, because that path
+never reaches the check. The match is on the session id claude's command line
+names, so a plain `claude` isn't seen. Post-reauth recovery skips the same
+sessions, because it reopens with nobody watching. A human's `crr reopen` isn't
+gated: it's an explicit ask, and the adopt note discloses the hazard.
+
 ### Session operations (all classifier-gated, pid-keyed)
 
 `kick` (restart claude in place, same conversation), `close` (remote

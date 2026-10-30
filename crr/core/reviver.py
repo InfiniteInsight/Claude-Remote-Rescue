@@ -23,6 +23,10 @@ died WITH their host count against a separate host-death cap instead;
 exhausting it parks the session as ``host-crash-loop`` (#147) — just as
 terminal for this module, but restorable by a human.
 
+A journal entry can be CRASHED while its conversation runs in a tab crr isn't
+tracking. Reviving it would start a second claude on the same transcript, so
+a session already running outside crr is left alone until it stops (#153).
+
 Pure core: takes the ports + the journal and archive stores, so it is
 fully testable with fakes and touches no OS directly.
 """
@@ -70,6 +74,12 @@ TERMINAL_ARCHIVE_REASONS = ("gave-up", "detmuxed", "untracked", "untmuxed",
                             "dismissed", "closed", "unresumable", HOST_CRASH_LOOP)
 
 
+# The decisions that assume nothing is running the conversation. Everything
+# else `_decide` returns means crr's own tmux session is up, whose pane is
+# itself a `claude --resume <sid>`: that one is not a second copy.
+_ASSUMES_NOT_RUNNING = ("revive", "give_up", "host_crash_loop")
+
+
 class RevivalOutcome(NamedTuple):
     revived: list[int]   # pids (re)spawned into tmux this pass
     gave_up: list[int]   # pids abandoned to the archive past the strike limit
@@ -78,6 +88,7 @@ class RevivalOutcome(NamedTuple):
     unresumable: list[int] = []   # pids archived by the pre-flight (no transcript)
     strike_counts: dict[int, int] = {}  # revived pid -> its NEW strike count
     host_crash_loop: list[int] = []  # pids parked past the host-death cap (#147)
+    running_elsewhere: list[int] = []  # pids left alone: already running outside crr (#153)
 
 
 def session_name(entry: Mapping[str, Any]) -> str:
@@ -480,6 +491,7 @@ def revive_crashed(
     attached: set[str] | None = None,
     max_host_deaths: int | None = None,
     host_death_stable_seconds: float | None = None,
+    running_sids: set[str] | None = None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -498,6 +510,15 @@ def revive_crashed(
     unresumable: list[int] = []
     strike_counts: dict[int, int] = {}
     host_crash_loop: list[int] = []
+    running_elsewhere: list[int] = []
+
+    def _is_running_elsewhere(action: str, e: Mapping[str, Any]) -> bool:
+        # An inconclusive process probe arrives as an empty set, so this
+        # degrades to reviving, as it did before this check existed. Nothing
+        # is written for these sessions: they take no strike, and neither cap
+        # can pass a verdict on a conversation that is up.
+        return (action in _ASSUMES_NOT_RUNNING
+                and (e.get("claude") or {}).get("session_id") in (running_sids or ()))
 
     def _tx_probe(e: Mapping[str, Any]) -> "TranscriptProbe | None":
         if transcripts is None:
@@ -557,7 +578,9 @@ def revive_crashed(
                                         max_host_deaths=max_host_deaths,
                                         host_death_stable_seconds=host_death_stable_seconds)
         pid = entry["pid"]
-        if action == "hold":
+        if _is_running_elsewhere(action, entry):
+            running_elsewhere.append(pid)
+        elif action == "hold":
             pass  # alive but frozen: strikes kept, nothing written
         elif action == "reset-nochange":
             # Already parked and healthy — but possibly never journaled under
@@ -646,7 +669,9 @@ def revive_crashed(
                                         host_death_stable_seconds=host_death_stable_seconds)
         pid = entry["pid"]
         sid = (entry.get("claude") or {}).get("session_id")
-        if action == "hold":
+        if _is_running_elsewhere(action, entry):
+            running_elsewhere.append(pid)
+        elif action == "hold":
             pass  # alive but frozen: strikes kept, record untouched
         elif action == "reset-nochange":
             if _journal_from_archive(store, tmux, boot_identity, entry, name, now):
@@ -685,4 +710,5 @@ def revive_crashed(
 
     return RevivalOutcome(revived, gave_up, reset,
                           unresumable=unresumable, strike_counts=strike_counts,
-                          host_crash_loop=host_crash_loop)
+                          host_crash_loop=host_crash_loop,
+                          running_elsewhere=running_elsewhere)

@@ -131,6 +131,18 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- The watchdog no longer starts a second copy of a conversation that is
+  already running outside crr (#153). Adopting a transcript still open in an
+  untracked tab left a crashed entry, and the next sweep revived it into
+  tmux: the new copy took Remote Control from the tab, and both wrote to one
+  transcript. A sweep now leaves such a session alone, with no strike and no
+  verdict from either cap, and revives it once the other copy stops. `crr
+  revive` names the sessions it left alone. Post-reauth recovery skips them
+  too. "Running" now covers every way claude's command line names a
+  conversation (`--resume`, `-r`, `--session-id`), which also widens the
+  dashboard's `running` tag and Take over; a plain `claude` still can't be
+  seen. A human's `crr reopen` is not gated, and the adopt note and dashboard
+  copy now say so (PAGE_VERSION 79).
 - An adopted session no longer drops out of tracking when you Un-tmux it.
   Adoption wrote a placeholder `bash` into the journal, and Un-tmux reopened
   the session in that shell, where a fish or zsh user has no shim to

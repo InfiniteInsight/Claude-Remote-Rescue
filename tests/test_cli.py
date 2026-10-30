@@ -2162,6 +2162,50 @@ def test_revive_names_host_crash_loop_pids_and_how_to_restore_them(
     assert "crr reopen --host-crash-loop" in line
 
 
+def _revive_with_stub_tmux(monkeypatch, tmp_path):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _headless_tabs(monkeypatch)
+    monkeypatch.setattr(cli.tmux, "RealTmux",
+                        lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
+
+
+def test_revive_names_sessions_left_alone_because_they_already_run(tmp_path, monkeypatch, capsys):
+    # (#153) A crashed card the watchdog won't touch needs a reason somewhere.
+    _revive_with_stub_tmux(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], [], running_elsewhere=[4242]),
+    )
+    assert cli.main(["revive"]) == 0
+    out = capsys.readouterr().out
+    assert "left alone" in out
+    assert "[4242]" in out
+
+
+def test_revive_omits_the_left_alone_line_when_none(tmp_path, monkeypatch, capsys):
+    _revive_with_stub_tmux(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.reviver, "revive_crashed",
+                        lambda *a, **k: cli.reviver.RevivalOutcome([], [], []))
+    assert cli.main(["revive"]) == 0
+    assert "left alone" not in capsys.readouterr().out
+
+
+def test_revive_tells_the_sweep_what_is_already_running(tmp_path, monkeypatch):
+    # (#153) Without this wiring the hold is inert in the only place it runs.
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["running_sids"] = kw.get("running_sids")
+        return cli.reviver.RevivalOutcome([], [], [])
+
+    _revive_with_stub_tmux(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    monkeypatch.setattr(cli.process_probe.PsProcessController, "resume_session_ids",
+                        lambda self: {"a-running-sid"})
+    assert cli.main(["revive"]) == 0
+    assert seen["running_sids"] == {"a-running-sid"}
+
+
 def test_revive_reports_skipped_tmux_state_and_omits_summary(tmp_path, monkeypatch, capsys):
     # Finding 1 (re-audit): a None-liveness pass used to print the exact
     # same "revived 0, gave up 0, already running 0" summary as a genuine
@@ -3149,11 +3193,10 @@ def test_discover_adopt_writes_a_valid_journal_entry(tmp_path, monkeypatch, caps
     assert rc == 0
     assert "adopted" in out
     assert _DISCOVER_SID[:8] in out
-    # Discloses the competing-resume hazard, not just "no attach": an
-    # adopted entry is always a revive candidate, so if the real session
-    # is still running elsewhere the watchdog will start a second
-    # `claude --resume` on it.
+    # Discloses the competing-resume hazard, not just "no attach": the
+    # watchdog holds off (#153), but Reopen on the adopted card does not.
     assert "does NOT attach to a running process" in out
+    assert "watchdog leaves it alone" in out
     assert "second" in out and "claude --resume" in out
 
     store = JournalStore(tmp_path / "state")
@@ -4024,7 +4067,7 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
 
     monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
     monkeypatch.setattr(cli.process_probe, "PsProcessController",
-                        lambda t: type("C", (), {})())
+                        lambda t: type("C", (), {"resume_session_ids": lambda s: set()})())
 
     rc = cli.main(["rescue-check"])
     out = capsys.readouterr().out
@@ -4079,7 +4122,7 @@ def test_rescue_check_fires_after_deregister_clears_markers(tmp_path, monkeypatc
 
     monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
     monkeypatch.setattr(cli.process_probe, "PsProcessController",
-                        lambda t: type("C", (), {})())
+                        lambda t: type("C", (), {"resume_session_ids": lambda s: set()})())
 
     reopen_calls = []
 
@@ -4145,6 +4188,28 @@ def test_rescue_check_revive_pass_runs_at_most_once_per_boot(tmp_path, monkeypat
 
     cli.main(["rescue-check"])
     assert len(revive_calls) == 1, "second rescue-check must NOT re-run the revive pass"
+
+
+def test_rescue_check_revive_pass_knows_what_is_already_running(tmp_path, monkeypatch, capsys):
+    # (#153) rescue-check runs the same sweep as the watchdog, on the first
+    # shell after a boot, so it needs the same protection.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: _FakeTmuxRevive())
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_exec", lambda *a, **k: None)
+    monkeypatch.setattr(cli.process_probe.PsProcessController, "resume_session_ids",
+                        lambda self: {"a-running-sid"})
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["running_sids"] = kw.get("running_sids")
+        return cli.reviver.RevivalOutcome([], [], [])
+
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    cli.main(["rescue-check"])
+    assert seen["running_sids"] == {"a-running-sid"}
 
 
 def test_exec_seam_is_forbidden_unless_a_test_stubs_it():
@@ -5688,6 +5753,9 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
             return True
 
     class _Controller:
+        def resume_session_ids(self):
+            return set()
+
         def claude_groups(self, pid):
             return [pid + 5000]  # arbitrary claude pgid, distinct from the shell pid
 
@@ -5734,6 +5802,49 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     assert kicked_pids == [1002]
 
 
+def test_post_reauth_recovery_leaves_a_running_conversation_alone(tmp_path, monkeypatch):
+    # (#153) This path reopens with nobody watching, so nobody chose a second
+    # copy. The sweep skips while auth is expired, so sessions pile up here.
+    from crr.adapters import session_state
+    from crr.core import ops
+    from crr.core.flags import FlagStore
+
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-0000-4a6b-8c7d-9e0f1a2b3c4d"
+    store.write(new_entry(
+        pid=1001, cwd="/home/u/project", host="tmux", shell="zsh",
+        boot_id="a-previous-boot", now="2026-08-21T00:00:00Z",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-08-21T00:00:00Z", "skip_permissions": False}))
+
+    class _Boot:
+        def current(self):
+            return "current-boot"
+
+    class _Probe:
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            return True
+
+    class _Controller:
+        def resume_session_ids(self):
+            return {sid}
+
+    monkeypatch.setattr(session_state, "read_all", lambda: {})
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
+    reopened = []
+    monkeypatch.setattr(ops, "reopen", lambda *a, **kw: reopened.append(a[7]))
+
+    cli._post_reauth_recovery(
+        store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
+        FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
+    )
+
+    assert reopened == []
+
+
 def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch):
     """An idle session whose transcript tail is mid-turn (not at an
     ``assistant-end`` boundary) must NOT be kicked by recovery — mirroring
@@ -5771,6 +5882,9 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
             return True
 
     class _Controller:
+        def resume_session_ids(self):
+            return set()
+
         def claude_groups(self, pid):
             return [pid + 5000]
 
