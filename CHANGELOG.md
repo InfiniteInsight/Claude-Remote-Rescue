@@ -131,6 +131,14 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- The watchdog no longer starts a second copy of a conversation that is
+  already running outside crr (#153). Adopting a transcript still open in an
+  untracked tab left a crashed entry, and the next sweep revived it into
+  tmux: the new copy took Remote Control from the tab, and both wrote to one
+  transcript. A sweep now leaves such a session alone, with no strike and no
+  verdict from either cap, and revives it once the other copy stops. `crr
+  revive` names the sessions it left alone. `crr reopen` is not gated, and the
+  adopt note and dashboard copy now say so (PAGE_VERSION 79).
 - A host crash loop no longer archives healthy sessions as a terminal
   `gave-up` (#147). On 2026-10-09 a WSL distro restarted every ~2 minutes
   after an OOM. Every restart counted as a host death for every session,

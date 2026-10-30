@@ -119,9 +119,9 @@ class ProcessController(Protocol):
 
         The BATCH counterpart to ``find_resume_process`` (parallel to
         ``controlling_ttys`` vs ``has_controlling_tty``): one probe answers
-        "already running?" for a whole page of discoverable rows. An
-        inconclusive probe degrades to an empty set, never a fabricated
-        answer."""
+        "already running?" for a whole page of discoverable rows, or a whole
+        revive sweep. An inconclusive probe degrades to an empty set, never a
+        fabricated answer."""
         ...
 
     def find_resume_process(self, session_id: str) -> "ResumeProcess | None":

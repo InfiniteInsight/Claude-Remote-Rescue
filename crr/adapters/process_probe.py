@@ -431,13 +431,14 @@ class PsProcessController:
         parallel to ``controlling_ttys``): ONE ``ps`` snapshot answers "is this
         conversation already running?" for a whole page of discoverable rows,
         instead of one snapshot per row. The dashboard uses it to warn that
-        plain Adopt would start a SECOND claude on a transcript that is still
-        live, and to steer to Take over instead.
+        a conversation is still live and steer to Take over. The revive sweep
+        uses it to leave those conversations alone (#153).
 
         Same degrade-to-empty policy as the other probes here: an
-        inconclusive ``ps`` yields an empty set (no warnings shown) rather
-        than a fabricated answer — the adopt path's own competing-resume
-        disclosure remains the backstop.
+        inconclusive ``ps`` yields an empty set (no warnings shown, and a
+        sweep revives as if nothing were running) rather than a fabricated
+        answer — the adopt path's own competing-resume disclosure remains
+        the backstop.
         """
         try:
             result = subprocess.run(

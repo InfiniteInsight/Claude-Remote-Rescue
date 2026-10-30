@@ -1132,12 +1132,15 @@ def test_notice_can_be_dismissed_and_copies_the_attach_command():
     assert "navigator.clipboard" in page
 
 
-def test_page_version_is_78():
-    """v78: a "Host crash loop" view in the "Other views" toolbar (#147) —
+def test_page_version_is_79():
+    """v79: Discoverable and Adopt copy stop promising a second copy from
+    adopting a running session (#153). The watchdog leaves those alone now,
+    and only Reopen would start one.
+    (v78: a "Host crash loop" view in the "Other views" toolbar (#147) —
     sessions the host-death cap parked as `host-crash-loop`, listed lazily
     from /api/host-crash-loop in the shared Discoverable/untracked modal,
     each with a Restore button (sid-op `restore-host-crash-loop`). Until now
-    the dashboard showed them nowhere.
+    the dashboard showed them nowhere.)
     (v77: final-review fixes for the header-declutter feature — a page-wide
     [hidden] { display: none !important; } CSS reset (the v76 compact/expand
     key-legend toggle set el.hidden but #key-compact/#key-full's own
@@ -1236,7 +1239,7 @@ def test_page_version_is_78():
     (v47: the card reports whether the phone can reach this session, from
     Claude Code's own connection state (spec 2026-08-09, Phases 1-3)
     (v46 gave parked cards Kick/Close, #58)."""
-    assert web.PAGE_VERSION == 78
+    assert web.PAGE_VERSION == 79
 
 
 def test_tunnel_payload_v2_carries_override_fields_separately():
@@ -1774,9 +1777,8 @@ def test_page_has_discoverable_section_lazy_with_adopt_note():
     assert '"?q=" + encodeURIComponent' in page  # paged/filtered fetch
     assert "Adopt" in page
     assert '"adopt"' in page
-    # Discloses the competing-resume hazard: an adopted entry is always a
-    # revive candidate, so if the real session is still running elsewhere
-    # the watchdog will start a second `claude --resume` on it.
+    # Discloses the competing-resume hazard: the watchdog holds off (#153),
+    # but Reopen on the adopted card still starts a second copy.
     assert "does NOT attach to a running process" in page
     assert "second" in page and "claude --resume" in page
 

@@ -80,14 +80,14 @@ class FakeTmux:
 
 
 def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enabled=True,
-         transcripts=None, attached=None):
+         transcripts=None, attached=None, running_sids=None):
     scan = entries_store.scan()
     return revive_crashed(
         scan.entries, FakeBoot(), FakeProbe(), tmux, entries_store,
         archive if archive is not None else ArchiveStore(entries_store._state_dir),
         max_strikes=max_strikes, now=_NOW,
         remote_control_enabled=remote_control_enabled,
-        transcripts=transcripts, attached=attached,
+        transcripts=transcripts, attached=attached, running_sids=running_sids,
     )
 
 
@@ -644,7 +644,7 @@ def test_revive_skips_the_entire_pass_when_tmux_liveness_is_unknown(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())  # would ordinarily be revived
     outcome = _run(store, FakeTmux(live=None))
-    assert outcome == ([], [], [], True, [], {}, [])
+    assert outcome == ([], [], [], True, [], {}, [], [])
     assert outcome.skipped is True
     entry = store.read(42)
     assert entry["revive_strikes"] == 0          # no strike accrued
@@ -660,7 +660,7 @@ def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_
     )
     archive.archive(entry, "superseded-on-register", _NOW)  # a revival candidate
     outcome = _run(store, FakeTmux(live=None), archive=archive)
-    assert outcome == ([], [], [], True, [], {}, [])
+    assert outcome == ([], [], [], True, [], {}, [], [])
     assert outcome.skipped is True
     assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched
 
@@ -1648,3 +1648,131 @@ def test_a_rekeyed_revival_that_keeps_killing_its_host_is_still_parked(tmp_path)
             parked.append(life)
     assert parked == [5]
     assert archive.read(sid)["reason"] == "host-crash-loop"
+
+
+# --- conversation already running outside crr (#153) --------------------------
+#
+# A journaled entry can be CRASHED while its conversation runs in a tab crr
+# isn't tracking. Reviving it starts a second claude on the same transcript,
+# and that copy takes Remote Control from the first.
+
+_RUNNING = {_claude()["session_id"]}
+
+
+def test_a_crashed_entry_is_left_alone_while_its_conversation_runs_elsewhere(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    before = store.read(42)
+    tmux = FakeTmux()
+
+    outcome = _run(store, tmux, running_sids=_RUNNING)
+
+    assert tmux.created == []
+    assert outcome.revived == []
+    assert outcome.running_elsewhere == [42]
+    assert store.read(42) == before  # no strike, no tmux name, nothing written
+
+
+def test_a_left_alone_entry_revives_once_the_other_copy_stops(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+
+    _run(store, tmux, running_sids=_RUNNING)
+    outcome = _run(store, tmux, running_sids=set())
+
+    assert outcome.revived == [42]
+    assert len(tmux.created) == 1
+    assert store.read(42)["revive_strikes"] == 1  # only the real revival counts
+
+
+def test_a_session_in_its_own_tmux_is_not_mistaken_for_a_second_copy(tmp_path):
+    # A parked session's pane is itself a `claude --resume <sid>`. Treating
+    # that as "running elsewhere" would stop the pass from ever re-keying it.
+    store = JournalStore(tmp_path)
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, claude=_claude(), tmux_session=name)
+    tmux = FakeTmux(live={name})
+
+    outcome = _run(store, tmux, running_sids=_RUNNING)
+
+    assert outcome.running_elsewhere == []
+    assert outcome.reset == [42]
+    assert tmux.created == []
+
+
+def test_the_strike_cap_waits_while_the_conversation_runs_elsewhere(tmp_path):
+    # Giving up is a verdict on a conversation that can't stay up. This one
+    # is up, in another terminal.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude(), strikes=3)
+
+    outcome = _run(store, FakeTmux(), archive=archive, running_sids=_RUNNING)
+
+    assert outcome.gave_up == []
+    assert outcome.running_elsewhere == [42]
+    assert store.read(42)["revive_strikes"] == 3
+    with pytest.raises(KeyError):
+        archive.read(_claude()["session_id"])
+
+
+def test_the_host_death_cap_waits_while_the_conversation_runs_elsewhere(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    # Four host deaths in: the next pass would park it (see _pass above).
+    for life in range(5):
+        _pass(store, archive, life, _at(2 * life))
+    assert store.read(42)["host_deaths"] == 4
+
+    outcome = revive_crashed(
+        store.scan().entries, _Life(5), FakeProbe(), FakeTmux(), store, archive,
+        max_strikes=3, now=_at(10), remote_control_enabled=True,
+        max_host_deaths=4, host_death_stable_seconds=600, running_sids=_RUNNING,
+    )
+
+    assert outcome.host_crash_loop == []
+    assert outcome.running_elsewhere == [42]
+    assert store.read(42)["host_deaths"] == 4
+
+
+def test_the_preflight_does_not_archive_a_conversation_that_is_running(tmp_path):
+    # A process that is resuming the conversation outranks a transcript probe
+    # that can't find it.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tx = FakeTranscripts({_claude()["session_id"]: TranscriptProbe(False, None)})
+
+    outcome = _run(store, FakeTmux(), archive=archive, transcripts=tx, running_sids=_RUNNING)
+
+    assert outcome.unresumable == []
+    assert outcome.running_elsewhere == [42]
+    assert store.read(42) is not None
+
+
+def test_an_archived_record_is_left_in_place_while_its_conversation_runs(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    tmux = FakeTmux()
+
+    outcome = _run(store, tmux, archive=archive, running_sids=_RUNNING)
+
+    assert tmux.created == []
+    assert outcome.revived == []
+    assert outcome.running_elsewhere == [99]
+    assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"
+    with pytest.raises(KeyError):
+        store.read(99)
+
+
+def test_an_unrelated_running_conversation_changes_nothing(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+
+    outcome = _run(store, tmux, running_sids={"11111111-2222-4333-8444-555555555555"})
+
+    assert outcome.revived == [42]
+    assert outcome.running_elsewhere == []
