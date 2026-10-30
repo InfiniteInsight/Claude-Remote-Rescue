@@ -77,7 +77,12 @@ JOURNAL_SCHEMA_VERSION = 4
 # can populate `auth_expires_in_seconds` or justify an "expiring" warning.
 # A v17 consumer would read a `cli_probe` "expired" as if it came with a
 # countdown. See AUTH_SOURCES.
-SESSIONS_CONTRACT_VERSION = 18
+# v19 adds `running_elsewhere` to the CARD (#159). The sweep leaves a session
+# alone while its conversation runs outside crr (#153), and the card read
+# "crashed" with Reopen as its first button, so the one action that starts a
+# second copy looked like the fix. True only on a crashed card; a v18 consumer
+# has no way to tell this card from one the watchdog is about to revive.
+SESSIONS_CONTRACT_VERSION = 19
 # v2 adds the plain-English `summary` list (restored 2026-08-08, #38 — this
 #    entry was deleted rather than superseded when v3 landed)
 # v3 adds `params` — the generating caps/lookback/timeout
@@ -319,6 +324,7 @@ SESSION_CARD_KEYS = (
     "waiting_for",
     "autokick",
     "adopted",
+    "running_elsewhere",
     # Reviver strike count (v17): how close this session is to give-up.
     # Verbatim from the journal — display-only, nothing decides on it.
     "revive_strikes",
@@ -561,6 +567,12 @@ def validate_session_card(card: Any) -> None:
     _require_type(card["waiting_for"], str, "session 'waiting_for'")
     _require_enum(card["autokick"], AUTOKICK_STATES, "session 'autokick'")
     _require_type(card["adopted"], bool, "session 'adopted'")
+    _require_type(card["running_elsewhere"], bool, "session 'running_elsewhere'")
+    if card["running_elsewhere"] and card["state"] != "crashed":
+        raise ContractError(
+            f"session 'running_elsewhere' on a {card['state']!r} card: only a "
+            "crashed card can be waiting on another copy"
+        )
     _require_type(card["skip_permissions"], bool, "session 'skip_permissions'")
     _require_type(card["revive_strikes"], int, "session 'revive_strikes'")
 

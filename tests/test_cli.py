@@ -1228,6 +1228,20 @@ def test_status_json_reports_live_process(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.skipif(platform.system() not in ("Linux", "Darwin"), reason="needs the boot-identity adapter (Linux or macOS)")
+def test_status_json_says_when_a_crashed_session_is_running_elsewhere(tmp_path, monkeypatch, capsys):
+    # (#159) Without this wiring the field is permanently False.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(cli.discovery.build_adopted_entry(
+        sid, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish"))
+    monkeypatch.setattr(cli, "_live_tmux_sessions", lambda config: set())
+    monkeypatch.setattr(cli.process_probe.PsProcessController, "resume_session_ids",
+                        lambda self: {sid})
+    assert cli.main(["status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions"][0]["running_elsewhere"] is True
+
+
 def test_status_json_marks_rebooted_session_crashed(tmp_path, monkeypatch, capsys):
     # An entry from a different boot must classify crashed even though its
     # pid (ours) is alive — the recycled-pid guard, end to end.
@@ -4879,6 +4893,57 @@ def test_takeover_times_out_while_still_actively_writing(tmp_path):
     assert len(sleeps) == 2  # polled twice before the deadline tripped
 
 
+def _adopted_placeholder(store, sid=_TAKEOVER_SID):
+    entry = cli.discovery.build_adopted_entry(sid, "/home/u/proj", "2026-08-03T00:00:00+00:00",
+                                              shell="fish")
+    store.write(entry)
+    return entry
+
+
+def _take_over(store, tmp_path, controller, flags):
+    return cli._takeover(
+        store, tmp_path, cfg.Config(), controller, flags, _TAKEOVER_SID,
+        max_wait=180.0, boot_id="test-boot",
+        read_signal=lambda sid: {"mtime": 100.0, "tail_kind": "assistant-end"},
+        clock=_scripted([500.0, 1000.0]), sleep=_failing_sleep,
+    )
+
+
+def test_takeover_stops_the_live_copy_of_an_adopted_session(tmp_path):
+    # (#158) An adoption placeholder owns no process, so it isn't "tracked" in
+    # the sense this guard protects. The session is already journaled, so
+    # there's nothing to adopt, and the next sweep revives it.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    entry = _adopted_placeholder(store)
+    controller = _FakeResumeController(ResumeProcess(pid=100, ppid=50, pgid=100), calls)
+
+    ok, msg = _take_over(store, tmp_path, controller, _FakeTakeoverFlags(calls))
+
+    assert ok, msg
+    assert any(c[0] == "terminate_group" for c in calls)
+    assert "adoption failed" not in msg
+    assert store.read(entry["pid"])["claude"]["session_id"] == _TAKEOVER_SID
+
+
+def test_takeover_refuses_when_a_real_owner_sits_beside_the_placeholder(tmp_path):
+    # The placeholder doesn't excuse a shell crr really tracks on this sid.
+    calls: list = []
+    store = JournalStore(tmp_path)
+    _adopted_placeholder(store)
+    _seed(store, 4242, cwd="/home/u/proj")
+    entry = store.read(4242)
+    entry["claude"] = _claude_field(_TAKEOVER_SID)
+    store.write(entry)
+    controller = _FakeResumeController(ResumeProcess(pid=100, ppid=50, pgid=100), calls)
+
+    ok, msg = _take_over(store, tmp_path, controller, _FakeTakeoverFlags(calls))
+
+    assert not ok
+    assert f"{_TAKEOVER_SID[:8]} is now tracked" in msg
+    assert not any(c[0] == "terminate_group" for c in calls)
+
+
 def test_takeover_refuses_when_sid_becomes_tracked_before_the_kill(tmp_path):
     # Ready to take over, but the exclusion re-check finds the sid already
     # journaled (a resolve->kill race) -> refuse, no kill, no flag.
@@ -5652,6 +5717,19 @@ def test_reauth_code_provider_without_active_reauth_fails(tmp_path, monkeypatch)
     assert ok is False
     assert "no reauth in progress" in message.lower()
     assert fake_tmux.send_keys_calls == []
+
+
+def test_the_dashboard_poll_says_when_a_session_is_running_elsewhere(tmp_path, monkeypatch):
+    # (#159) The phone reads this provider, not `crr status`.
+    fake_tmux = FakeReauthTmux()
+    captured = _web_captured(monkeypatch, tmp_path, fake_tmux)
+    sid = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    JournalStore(tmp_path).write(cli.discovery.build_adopted_entry(
+        sid, "/home/u/proj", "2026-08-03T00:00:00+00:00", shell="fish"))
+    monkeypatch.setattr(cli, "_live_tmux_sessions", lambda config: set())
+    monkeypatch.setattr(cli.process_probe.PsProcessController, "resume_session_ids",
+                        lambda self: {sid})
+    assert captured["provider"]()["sessions"][0]["running_elsewhere"] is True
 
 
 def test_post_reauth_recovery_fires_once_on_expired_to_valid_transition(tmp_path, monkeypatch):

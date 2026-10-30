@@ -993,6 +993,15 @@ function renderCard(s, uncertain, groupColor, latest) {
     rcu.setAttribute("data-help", rcu.title);
     top.appendChild(rcu);
   }
+  // (#159) "crashed" alone reads as something to fix, and here it isn't: the
+  // conversation is up, and the watchdog is holding off on purpose.
+  if (s.running_elsewhere) {
+    var reb = el("span", "badge running-badge");
+    reb.textContent = "running elsewhere";
+    reb.title = "This conversation is already running outside crr, so the watchdog is leaving it alone. It revives once that copy stops. Reopen would start a second copy.";
+    reb.setAttribute("data-help", reb.title);
+    top.appendChild(reb);
+  }
   // Blocked on the USER, from Claude Code's own `waitingFor`. Its OWN branch,
   // deliberately not nested in the arms above: a reachable session renders no
   // badge, and a reachable session stuck on a permission prompt is precisely
@@ -1063,7 +1072,7 @@ function renderCard(s, uncertain, groupColor, latest) {
   }
 
   var actions = el("div", "actions");
-  function addBtn(label, op, danger, confirm) {
+  function addBtn(label, op, danger, confirm, run) {
     var b = el("button", danger ? "danger" : "");
     b.title = BUTTON_HELP[label] || "";
     var isArmed = function () {
@@ -1088,7 +1097,7 @@ function renderCard(s, uncertain, groupColor, latest) {
         confirmArmed = null;
         b.textContent = label;
       }
-      action(op, s.pid, b);
+      if (run) { run(b); } else { action(op, s.pid, b); }
     });
     actions.appendChild(b);
   }
@@ -1109,7 +1118,19 @@ function renderCard(s, uncertain, groupColor, latest) {
     return;
   }
   if (s.state === "crashed") {
-    addBtn("Reopen", "reopen", false, false);
+    // (#158) Adopting took this session out of Discoverable, so the card is
+    // the only place left to stop the other copy.
+    if (s.running_elsewhere && s.adopted) {
+      addBtn("Take over", "takeover", true, true, function (b) {
+        sidAction("takeover", s.session_id, b);
+      });
+    }
+    // (#159) Reopen starts a second copy here, so it takes a confirm.
+    if (s.running_elsewhere) {
+      addBtn("Reopen", "reopen", true, true);
+    } else {
+      addBtn("Reopen", "reopen", false, false);
+    }
     if (s.tmux_session) {
       addBtn("Un-tmux", "untmux", true, true);
     }

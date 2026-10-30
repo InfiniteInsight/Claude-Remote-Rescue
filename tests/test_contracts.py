@@ -62,6 +62,7 @@ def _session_card():
         "waiting_for": "",
         "autokick": "on",
         "adopted": False,
+        "running_elsewhere": False,
         "conflict": False,
         "attached": False,
         "skip_permissions": False,
@@ -416,7 +417,7 @@ def test_valid_sessions_payload_passes():
     contracts.validate_sessions_payload(_sessions_payload())
 
 
-def test_sessions_contract_version_is_18():
+def test_sessions_contract_version_is_19():
     # v4 adds last_active (T-A) + context_pressure (F2) to the session card.
     # v7 adds remote_control (spec 2026-08-07 — dropped-Remote-Control watchdog).
     # v8 adds autokick (same spec, Slice 3).
@@ -448,7 +449,7 @@ def test_sessions_contract_version_is_18():
     # interchangeable: only `credentials_file` carries timestamps. A v17
     # consumer would read a `cli_probe` "expired" as if a countdown came
     # with it.
-    assert contracts.SESSIONS_CONTRACT_VERSION == 18
+    assert contracts.SESSIONS_CONTRACT_VERSION == 19
 
 
 def test_states_enum_includes_parked():
@@ -1084,3 +1085,29 @@ def test_sessions_payload_requires_auth_source():
     }
     with pytest.raises(contracts.ContractError, match="missing key"):
         contracts.validate_sessions_payload(payload)
+
+
+# --- running_elsewhere (#159) ---------------------------------------------------
+
+
+def test_running_elsewhere_must_be_a_bool():
+    card = _session_card()
+    card["state"] = "crashed"  # or the state rule fires instead
+    card["running_elsewhere"] = "yes"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)
+
+
+def test_only_a_crashed_card_can_be_running_elsewhere():
+    # A live or parked card is the running copy, not a card waiting on one.
+    card = _session_card()
+    card["running_elsewhere"] = True
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_session_card(card)
+
+
+def test_a_crashed_card_can_be_running_elsewhere():
+    card = _session_card()
+    card["state"] = "crashed"
+    card["running_elsewhere"] = True
+    contracts.validate_session_card(card)

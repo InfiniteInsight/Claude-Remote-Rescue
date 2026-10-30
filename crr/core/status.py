@@ -1,4 +1,4 @@
-"""Status assembler — journal entries -> /api/sessions payload (contract v18).
+"""Status assembler — journal entries -> /api/sessions payload (contract v19).
 
 Pure core: takes already-scanned entries plus the BootIdentity and
 ProcessProbe ports, classifies each entry, and emits the versioned
@@ -33,6 +33,7 @@ from crr.core.classifier import CRASHED, classify, LIVE
 from crr.core.context_pressure import pressure as _pressure
 from crr.core.discovery import ADOPTED_BOOT_ID
 from crr.core.ports import BootIdentity, ProcessProbe
+from crr.core.reviver import resolved_session_name
 
 # Display-only state (spec 2026-08-09, Phase 0). NOT a classifier state:
 # `classify()` answers "may I act on this pid", and CRASHED is the right
@@ -156,6 +157,9 @@ def assemble_sessions(
     # live_tmux_sessions; core does no I/O.
     attached_tmux_sessions: set[str] | None = None,
     reachability_by_sid: Mapping[str, tuple[str, str]] | None = None,
+    # (#159) Session ids a live claude names on its command line, resolved
+    # ONCE per poll by the caller. None means the caller didn't ask.
+    running_sids: set[str] | None = None,
     # (#48) pid -> claude process groups it owns, from the composition
     # root's single per-poll snapshot. None means the probe was not run or
     # could not answer: no conflict is claimed on absent evidence.
@@ -317,6 +321,17 @@ def assemble_sessions(
                     degraded=autokick_degraded,
                 ),
                 "adopted": adopted,
+                # (#159) The sweep's own test, so the card can't disagree with
+                # what the watchdog does: crashed, crr's tmux session isn't
+                # up, and a process names this conversation. Unknown tmux
+                # state claims nothing, and the sweep skips that pass too.
+                "running_elsewhere": bool(
+                    state == CRASHED
+                    and running_sids
+                    and sid in running_sids
+                    and live_tmux_sessions is not None
+                    and resolved_session_name(entry) not in live_tmux_sessions
+                ),
                 "skip_permissions": entry["claude"].get("skip_permissions", False),
                 "revive_strikes": entry["revive_strikes"],
             }

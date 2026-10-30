@@ -22,6 +22,7 @@ import pytest
 
 from crr.core import contracts, settings
 from crr.core.discovery import ADOPTED_BOOT_ID, build_adopted_entry
+from crr.core.journal import new_entry
 from crr.core.status import assemble_sessions
 
 SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -157,3 +158,54 @@ def test_an_adopted_card_may_not_carry_a_fabricated_shell():
     card["shell"] = "bash"
     with pytest.raises(contracts.ContractError):
         contracts.validate_session_card(card)
+
+
+# --- running_elsewhere: the card says why the watchdog is leaving it (#159) ------
+
+def _adopted_card(**kwargs):
+    entry = build_adopted_entry(SID, "/home/u/p", "2026-01-01T00:00:00+00:00", shell="fish")
+    kwargs.setdefault("live_tmux_sessions", set())
+    return assemble_sessions([entry], FakeBoot(), FakeProbe(), **kwargs)["sessions"][0]
+
+
+def test_a_crashed_card_says_its_conversation_is_running_elsewhere():
+    assert _adopted_card(running_sids={SID})["running_elsewhere"] is True
+
+
+def test_a_live_session_is_not_running_elsewhere_from_itself():
+    # Every healthy shim session names its own sid on the command line
+    # (`claude --session-id <sid>`), so the probe sees all of them.
+    entry = new_entry(pid=4242, cwd="/home/u/p", host="tab", shell="fish",
+                      boot_id="boot-1", now="2026-01-01T00:00:00+00:00",
+                      claude={"session_id": SID, "sid_source": "injected",
+                              "started": "2026-01-01T00:00:00+00:00",
+                              "skip_permissions": False})
+    card = assemble_sessions([entry], FakeBoot(), FakeProbe(), running_sids={SID},
+                             live_tmux_sessions=set())["sessions"][0]
+    assert card["state"] == "live"
+    assert card["running_elsewhere"] is False
+
+
+def test_a_card_is_not_running_elsewhere_when_nothing_runs_it():
+    assert _adopted_card(running_sids=set())["running_elsewhere"] is False
+
+
+def test_an_unrelated_running_conversation_changes_nothing_on_the_card():
+    other = "11111111-2222-4333-8444-555555555555"
+    assert _adopted_card(running_sids={other})["running_elsewhere"] is False
+
+
+def test_no_process_answer_claims_nothing():
+    assert _adopted_card()["running_elsewhere"] is False
+
+
+def test_unknown_tmux_state_claims_nothing():
+    # The pane could be the copy `ps` sees, and the reviver skips this pass too.
+    assert _adopted_card(running_sids={SID}, live_tmux_sessions=None)["running_elsewhere"] is False
+
+
+def test_the_card_uses_the_watchdogs_own_tmux_name():
+    # An entry with no recorded name whose default-named session is up. The
+    # watchdog treats that as its own, so the card has to as well.
+    assert _adopted_card(running_sids={SID}, live_tmux_sessions={f"crr-{SID}"})[
+        "running_elsewhere"] is False

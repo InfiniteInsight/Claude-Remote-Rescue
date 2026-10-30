@@ -2300,6 +2300,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         attached_tmux_sessions=_attached_tmux_sessions(config),
         reachability_by_sid=_reachability_by_sid(
             scan.entries, probe, config, owners=_owners),
+        running_sids=process_probe.PsProcessController(
+            config.get("interop_timeout_seconds")).resume_session_ids(),
         claude_owners=_owners,
         context_tight_fraction=config.get("context_tight_fraction"),
         context_compact_fraction=config.get("context_compact_fraction"),
@@ -4028,7 +4030,11 @@ def _takeover(
          the FRESH tuple — a flag survives only when a kill actually lands
          (mirrors ``_reopen_ghost``'s rollback rule); an undeliverable kill
          clears the flag and fails with nothing else touched.
-      4. Adopt via ``_adopt`` (its own lock + re-check) AFTER the kill
+      4. An adoption placeholder doesn't count as tracked in step 3: it
+         owns no process, and once adopted this is the only way to stop the
+         live copy (#158). That sid needs no adopting, so step 5 is skipped,
+         and the next sweep revives it because nothing is running it now.
+      5. Adopt via ``_adopt`` (its own lock + re-check) AFTER the kill
          lock is released — the journal write only ever happens once a
          kill has actually landed. ``_adopt`` can still refuse past its own
          journal re-check (row no longer discoverable, a synthetic-pid
@@ -4067,10 +4073,12 @@ def _takeover(
         sleep(poll)
 
     with mutation_lock(sd):
-        journaled = {
-            e["claude"]["session_id"] for e in store.scan().entries if e.get("claude") is not None
-        }
-        if sid in journaled:
+        boots = [
+            e["boot_id"] for e in store.scan().entries
+            if (e.get("claude") or {}).get("session_id") == sid
+        ]
+        already_adopted = bool(boots)
+        if any(boot != discovery.ADOPTED_BOOT_ID for boot in boots):
             return False, f"{sid[:8]} is now tracked — not taking over"
         # Re-resolve under the lock: the wait loop above ran lock-free for
         # up to max_wait seconds, long enough for the step-1 process to
@@ -4089,9 +4097,11 @@ def _takeover(
             flags.clear(proc.ppid)  # no kill landed -> the flag must not linger
             return False, f"takeover: failed to stop live pid {proc.pid}: {exc}"
 
-    ok, msg = _adopt(store, sd, sid, competing_note=False)
     sid8 = sid[:8]
     prefix = f"took over {sid8} (stopped live pid {proc.pid})"
+    if already_adopted:
+        return True, f"{prefix}; the watchdog revives it on its next pass"
+    ok, msg = _adopt(store, sd, sid, competing_note=False)
     if ok:
         return True, f"{prefix}; {msg}"
     return False, f"{prefix} but adoption failed: {msg}"
@@ -5295,6 +5305,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
             # Likewise re-asked each poll, and likewise ONE probe pair for
             # the whole page rather than one per card (see its docstring).
             reachability_by_sid=_reachability_by_sid(entries, probe, config),
+            running_sids=controller.resume_session_ids(),
             context_tight_fraction=config.get("context_tight_fraction"),
             context_compact_fraction=config.get("context_compact_fraction"),
             autokick_config_default=config.get("remote_control_autokick"),
