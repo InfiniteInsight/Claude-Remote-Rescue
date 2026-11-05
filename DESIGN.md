@@ -288,6 +288,13 @@ the poll path).
 PATH declarations; every external binary the service calls must resolve
 in that PATH (a missing dir silently broke diagnostics until reviewed).
 
+**[lesson: PATH order]** (#165) A service PATH must resolve each binary to
+the file the installing shell does. Built per binary, tmux and ps put
+`/usr/bin` ahead of `~/.local/bin`, and an old npm `claude` in `/usr/bin` ran
+in every revival while the shell ran the auto-updated one. The binary dirs now
+keep the shell PATH's order. A tmux session takes the PATH of the process
+creating it, so the watchdog unit's PATH is the one that counts.
+
 ### Tab spawn adapter
 
 Auto-detected, config-overridable:

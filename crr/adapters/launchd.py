@@ -58,8 +58,9 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
     """Return (PATH string, list of unresolved SERVICE_BINARIES names).
 
     Dirs are ordered: crr's own dir, then the dirs of each resolved service
-    binary, then existing macOS dirs — deduped, order-preserving. Parallel
-    to (not shared with) systemd's resolver: the baseline dirs differ.
+    binary in the order the current PATH has them (``_in_shell_order``),
+    then existing macOS dirs — deduped. Parallel to (not shared with)
+    systemd's resolver: the baseline dirs differ.
     """
     dirs: list[str] = []
 
@@ -69,16 +70,36 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
 
     add(os.path.dirname(os.path.abspath(crr_bin)))
     missing: list[str] = []
+    found_dirs: list[str] = []
     for name in SERVICE_BINARIES:
         found = shutil.which(name)
         if found:
-            add(os.path.dirname(os.path.abspath(found)))
+            found_dirs.append(os.path.dirname(os.path.abspath(found)))
         else:
             missing.append(name)
+    for d in _in_shell_order(found_dirs, os.environ.get("PATH", "")):
+        add(d)
     for d in _MAC_PATH_DIRS:
         if os.path.isdir(d):
             add(d)
     return ":".join(dirs), missing
+
+
+def _in_shell_order(dirs: list[str], shell_path: str) -> list[str]:
+    """``dirs`` reordered as they appear in ``shell_path``.
+
+    ``which`` found each binary by walking that PATH, so any subset of its
+    dirs kept in the same order resolves every binary to the same file. Any
+    other order lets the dir found for one binary shadow another: adding dirs
+    per binary put tmux's /usr/bin ahead of claude's ~/.local/bin, and an old
+    /usr/bin/claude then ran in every revival (#165). Dirs not on that PATH
+    keep their place after the rest.
+    """
+    rank: dict[str, int] = {}
+    for i, entry in enumerate(shell_path.split(os.pathsep)):
+        if entry:
+            rank.setdefault(os.path.abspath(entry), i)
+    return sorted(dirs, key=lambda d: rank.get(d, len(rank)))
 
 
 def revive_agent_plist(crr_bin: str, path: str, interval_seconds: int) -> str:

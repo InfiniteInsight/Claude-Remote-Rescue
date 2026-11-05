@@ -131,6 +131,12 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- Revived sessions run the same Claude Code as your shell (#165). The
+  service PATH was built one binary at a time, so tmux's `/usr/bin` landed
+  ahead of `~/.local/bin`, and an old npm install in `/usr/bin` won over the
+  auto-updated one. The dirs now keep your PATH's order. Re-run `crr systemd
+  --install` (or `crr launchd --install`) to rewrite the units; sessions
+  already running keep their version until they're relaunched.
 - A session the watchdog is leaving alone no longer looks broken (#159). Its
   card now reads "running elsewhere" and asks for a confirm on Reopen, which
   would start a second copy (sessions contract v19, PAGE_VERSION 80). `crr
