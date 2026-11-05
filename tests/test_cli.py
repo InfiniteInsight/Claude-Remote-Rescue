@@ -2496,6 +2496,25 @@ def test_gc_names_removed_sid8s(tmp_path, monkeypatch, capsys):
     assert "removed: ['11111111']" in out
 
 
+def test_gc_prunes_dead_shells_from_earlier_boots(tmp_path, monkeypatch, capsys):
+    # (#171) Nothing else ever removes them, and they block re-keying.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.boot_identity, "detect", lambda: _FakeBoot())
+    store = JournalStore(tmp_path)
+    for pid, boot in ((11, "an-earlier-boot"), (12, _FakeBoot().current())):
+        shell = _live_entry(pid=pid, boot_id=boot)
+        shell["claude"] = None
+        store.write(shell)                                # 11 is stale: pruned; 12 is this boot: kept
+    with_claude = _live_entry(pid=13, boot_id="an-earlier-boot")
+    with_claude["claude"] = _claude_field("33333333-3333-4333-8333-333333333333")
+    store.write(with_claude)                                              # a conversation: kept
+
+    assert cli.main(["gc"]) == 0
+
+    assert sorted(e["pid"] for e in store.scan().entries) == [12, 13]
+    assert "1 stale shell" in capsys.readouterr().out
+
+
 def test_gc_omits_removed_line_when_nothing_removed(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     ArchiveStore(tmp_path)  # empty archive dir

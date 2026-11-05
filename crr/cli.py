@@ -4815,6 +4815,14 @@ def _cmd_gc(_args: argparse.Namespace) -> int:
     archive = ArchiveStore(sd)
     now = _now()
     removed_sid8s: list[str] = []
+    # (#171) Shells with no conversation from earlier boots: nothing else ever
+    # removes them, and they block re-keying revived sessions onto their pids.
+    try:
+        current_boot = boot_identity.detect().current()
+    except NotImplementedError:
+        current_boot = None  # no boot identity: nothing can be proved stale
+    store = JournalStore(sd)
+    stale_pids: list[int] = []
     with mutation_lock(sd):
         scan = archive.scan()
         for record in scan.records:
@@ -4822,8 +4830,14 @@ def _cmd_gc(_args: argparse.Namespace) -> int:
                 sid = record["entry"]["claude"]["session_id"]
                 archive.remove(sid)
                 removed_sid8s.append(sid[:8])
+        for entry in store.scan().entries:
+            if classifier.is_stale_shell(entry, current_boot):
+                store.remove(entry["pid"])
+                stale_pids.append(entry["pid"])
     for name, reason in scan.problems:
         print(f"crr gc: skipped unreadable archive file {name}: {reason}", file=sys.stderr)
+    print(f"gc: removed {len(stale_pids)} stale shell entr{'y' if len(stale_pids) == 1 else 'ies'} "
+          "(no conversation, from an earlier boot)")
     print(f"gc: removed {len(removed_sid8s)} archive record(s) older than {retention} days, "
           f"kept {len(scan.records) - len(removed_sid8s)}")
     if removed_sid8s:

@@ -10,7 +10,7 @@ reboot-recycled pid gets treated as the original session
 import pytest
 
 from crr.core import contracts
-from crr.core.classifier import classify, same_boot
+from crr.core.classifier import classify, is_stale_shell, same_boot
 
 
 _SAME_BOOT = "b8f3c0de-0000-4000-8000-000000000000"
@@ -142,3 +142,30 @@ def test_legacy_bare_boot_id_still_classifies_live_after_upgrade():
     boot = FakeBoot(f"{_K}@100")
     probe = FakeProbe(alive=True, tty=True)
     assert classify(_entry(boot_id=_K), boot, probe) == "live"
+
+
+# --- is_stale_shell: a leftover nothing will ever clean up (#171) -------------------
+
+def _shell(boot_id, claude=None):
+    entry = _entry(boot_id=boot_id)
+    entry["claude"] = claude
+    return entry
+
+
+def test_a_shell_with_no_conversation_from_an_earlier_boot_is_stale():
+    assert is_stale_shell(_shell("an-earlier-boot"), _SAME_BOOT) is True
+
+
+def test_a_shell_from_this_boot_is_not_stale():
+    # Its pid may be reused in this boot; nothing here proves it's dead.
+    assert is_stale_shell(_shell(_SAME_BOOT), _SAME_BOOT) is False
+
+
+def test_an_entry_carrying_a_conversation_is_never_stale():
+    claude = {"session_id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "sid_source": "injected",
+              "started": "2026-01-01T00:00:00Z"}
+    assert is_stale_shell(_shell("an-earlier-boot", claude), _SAME_BOOT) is False
+
+
+def test_nothing_is_stale_when_the_current_boot_is_unknown():
+    assert is_stale_shell(_shell("an-earlier-boot"), None) is False
