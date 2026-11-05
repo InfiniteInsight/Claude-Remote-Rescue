@@ -131,6 +131,13 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- Revived sessions are tracked again after a reboot (#171). Journal entries
+  for dead shells from earlier boots were never cleaned up, and a pane
+  revived soon after a boot takes a low pid one of them still claimed. crr
+  refused to overwrite the slot, so the session stayed keyed to a dead pid:
+  its card read crashed, Reopen only attached, and Kick and Close refused.
+  A shell with no conversation from an earlier boot no longer blocks the
+  slot, and `crr gc` now prunes them.
 - An `/exit` ends a conversation even in a tab crr doesn't track (#167). The
   watchdog used to revive such a conversation once that tab closed. It now
   reads Claude Code's own command history, and archives a conversation as

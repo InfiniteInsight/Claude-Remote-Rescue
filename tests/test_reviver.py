@@ -2029,3 +2029,70 @@ def test_an_exited_archive_record_is_restamped_for_its_reason(tmp_path):
 
     record = archive.read(_SID)
     assert record["reason"] == "exited" and record["v"] == 3
+
+
+# --- a leftover shell must not block re-keying (#171) ----------------------------------
+#
+# Panes revived soon after a boot get low pids, and dead shells from earlier
+# boots still claimed them, so revived sessions could never be tracked.
+
+def _seed_shell(store, pid, boot):
+    store.write(new_entry(pid=pid, cwd="/home/u/old", host="tab", shell="fish",
+                          boot_id=boot, now=_NOW, claude=None))
+
+
+def test_rekey_takes_a_slot_held_by_a_dead_shell_from_an_earlier_boot(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude())
+    _seed_shell(store, 2016, "an-earlier-boot")
+
+    _run(store, _PidTmux(pane_pid=2016))
+
+    assert store.read(2016)["claude"]["session_id"] == _claude()["session_id"]
+    with pytest.raises(KeyError):
+        store.read(1311532)
+
+
+def test_rekey_still_refuses_a_conversation_less_shell_from_this_boot(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude())
+    _seed_shell(store, 2016, FakeBoot().current())
+
+    _run(store, _PidTmux(pane_pid=2016))
+
+    assert store.read(2016)["claude"] is None
+    assert store.read(1311532)
+
+
+def test_rekey_still_refuses_another_conversation_from_an_earlier_boot(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 1311532, claude=_claude(_SID_A))
+    _seed(store, 2016, claude=_claude(_SID_B))  # _ENTRY_BOOT: an earlier boot
+
+    _run(store, _PidTmux(pane_pid=2016))
+
+    assert store.read(2016)["claude"]["session_id"] == _SID_B
+
+
+def test_an_archived_session_is_journaled_over_a_dead_shell(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    _seed_shell(store, 2016, "an-earlier-boot")
+
+    _run(store, _PidTmux(live=set(), pane_pid=2016), archive=archive)
+
+    assert store.read(2016)["claude"]["session_id"] == _claude()["session_id"]
+    with pytest.raises(KeyError):
+        archive.read(_claude()["session_id"])
+
+
+def test_an_archived_session_takes_its_own_slot_from_a_dead_shell(tmp_path):
+    # Pane pid unknown: the record goes back to its own pid, which a dead
+    # shell from an earlier boot may claim.
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path, pid=99)
+    _seed_shell(store, 99, "an-earlier-boot")
+
+    _run(store, _PidTmux(live={session_name({"claude": _claude()})}, pane_pid=None), archive=archive)
+
+    assert store.read(99)["claude"]["session_id"] == _claude()["session_id"]

@@ -44,7 +44,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 from crr.core import contracts
 from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
-from crr.core.classifier import CRASHED, classify, same_boot
+from crr.core.classifier import CRASHED, classify, is_stale_shell, same_boot
 from crr.core.journal import JournalStore, upgrade_entry
 from crr.core.ports import (
     BootIdentity,
@@ -301,6 +301,20 @@ def _try_open_tab(tab_spawner, name: str, tab_health=None, *,
         return False  # the revival is already durable; the tab is not
 
 
+def _may_take_slot(existing: Mapping[str, Any] | None, entry: Mapping[str, Any],
+                   current_boot: str | None) -> bool:
+    """Can ``entry`` be written into a journal slot that holds ``existing``?
+
+    Yes when the slot is empty, already holds this conversation, or holds a
+    stale shell from an earlier boot (#171). Anything else is refused rather
+    than clobbered, the same discipline adopt and retrack use.
+    """
+    if existing is None or is_stale_shell(existing, current_boot):
+        return True
+    return (existing.get("claude") or {}).get("session_id") == \
+        (entry.get("claude") or {}).get("session_id")
+
+
 def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
     """Re-key ``entry`` onto the pid actually running in tmux session ``name``.
 
@@ -321,7 +335,8 @@ def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
     Returns True if the entry moved. Declines (leaving everything untouched)
     when the pane pid is unknown — never guess a pid to point every pid-keyed
     op at — or when that slot already belongs to a different conversation,
-    the same refuse-rather-than-clobber discipline adopt/retrack use.
+    the same refuse-rather-than-clobber discipline adopt/retrack use. A stale
+    shell from an earlier boot doesn't count as belonging (#171).
     """
     live_pid = tmux.session_pid(name)
     if live_pid is None or live_pid == entry["pid"]:
@@ -332,11 +347,8 @@ def _rekey_onto_live_pid(store, tmux, boot_identity, entry, name, now) -> bool:
         existing = None
     except Exception:
         return False  # unreadable slot: refuse rather than guess
-    if existing is not None:
-        same = (existing.get("claude") or {}).get("session_id") == \
-            (entry.get("claude") or {}).get("session_id")
-        if not same:
-            return False
+    if not _may_take_slot(existing, entry, boot_identity.current()):
+        return False
     moved = dict(entry)
     moved["pid"] = live_pid
     moved["boot_id"] = boot_identity.current()
@@ -368,11 +380,8 @@ def _journal_from_archive(store, tmux, boot_identity, entry, name, now) -> bool:
             existing = None
         except Exception:
             return False
-        if existing is not None:
-            same = (existing.get("claude") or {}).get("session_id") == \
-                (entry.get("claude") or {}).get("session_id")
-            if not same:
-                return False
+        if not _may_take_slot(existing, entry, boot_identity.current()):
+            return False
         moved = dict(entry)
         moved["pid"] = live_pid
         moved["boot_id"] = boot_identity.current()
@@ -388,11 +397,8 @@ def _journal_from_archive(store, tmux, boot_identity, entry, name, now) -> bool:
         existing = None
     except Exception:
         return False
-    if existing is not None:
-        same = (existing.get("claude") or {}).get("session_id") == \
-            (entry.get("claude") or {}).get("session_id")
-        if not same:
-            return False
+    if not _may_take_slot(existing, entry, boot_identity.current()):
+        return False
     store.write(dict(entry))
     return True
 

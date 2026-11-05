@@ -71,3 +71,18 @@ def classify(
     if process_probe.has_controlling_tty(pid):
         return LIVE
     return GHOST
+
+
+def is_stale_shell(entry: Mapping[str, Any], current_boot: str | None) -> bool:
+    """A journal entry nothing will ever clean up: a shell with no
+    conversation, from an earlier boot (#171).
+
+    It holds nothing to protect. The shell died with that boot, and there is
+    no conversation to revive. But it still claims its pid's journal slot,
+    and a pane revived soon after a boot takes a low pid one of these claims.
+    Same-boot entries never count: their pid may be reused in this boot, and
+    nothing here proves the shell is gone. An unknown current boot proves
+    nothing either.
+    """
+    return (entry.get("claude") is None and current_boot is not None
+            and not same_boot(entry.get("boot_id"), current_boot))
