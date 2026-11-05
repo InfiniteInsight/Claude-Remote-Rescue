@@ -68,13 +68,16 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
         if d and d not in dirs:
             dirs.append(d)
 
-    add(os.path.dirname(os.path.abspath(crr_bin)))
+    own_dir = os.path.dirname(os.path.abspath(crr_bin))
+    add(own_dir)
     missing: list[str] = []
     found_dirs: list[str] = []
+    resolved: dict[str, str] = {}
     for name in SERVICE_BINARIES:
         found = shutil.which(name)
         if found:
             found_dirs.append(os.path.dirname(os.path.abspath(found)))
+            resolved[name] = os.path.abspath(found)
         else:
             missing.append(name)
     for d in _in_shell_order(found_dirs, os.environ.get("PATH", "")):
@@ -82,7 +85,22 @@ def resolve_service_path(crr_bin: str) -> tuple[str, list[str]]:
     for d in _MAC_PATH_DIRS:
         if os.path.isdir(d):
             add(d)
+    # crr's own dir leads, unless it holds a different copy of a binary the
+    # shell resolves elsewhere: crr beside an old npm claude in /usr/local/bin.
+    # Nothing calls crr by name on this PATH, so moving it back costs nothing.
+    if any(first_on_path(name, own_dir) not in (None, where) for name, where in resolved.items()):
+        dirs.remove(own_dir)
+        dirs.append(own_dir)
     return ":".join(dirs), missing
+
+
+def first_on_path(name: str, path: str) -> str | None:
+    """The executable ``name`` a lookup through ``path`` runs, or None."""
+    for directory in path.split(os.pathsep):
+        candidate = os.path.join(directory or ".", name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _in_shell_order(dirs: list[str], shell_path: str) -> list[str]:

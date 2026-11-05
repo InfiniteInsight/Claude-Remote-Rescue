@@ -187,3 +187,19 @@ def test_every_service_binary_resolves_to_what_the_shell_found(tmp_path, monkeyp
     assert missing == []
     for name in launchd.SERVICE_BINARIES:
         assert shutil.which(name, path=path) == shutil.which(name), name
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PATH semantics")
+def test_crrs_own_dir_never_shadows_the_shells_claude(tmp_path, monkeypatch):
+    # crr installed beside an old claude (npm's /usr/local prefix) must not
+    # put that claude ahead of the one the shell runs.
+    local = _install(tmp_path / "home" / ".local" / "bin", "claude")
+    own = _install(tmp_path / "usr" / "local" / "bin", "crr", "claude")
+    system = _install(tmp_path / "usr" / "bin", "tmux", "ps")
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (local, own, system))))
+
+    path, _ = launchd.resolve_service_path(str(own / "crr"))
+
+    for name in launchd.SERVICE_BINARIES:
+        assert shutil.which(name, path=path) == shutil.which(name), name
+    assert str(own) in path.split(os.pathsep)
