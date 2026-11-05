@@ -247,6 +247,33 @@ def test_list_sessions_returns_none_on_an_unrecognized_nonzero_exit(monkeypatch)
 # --- real tmux integration (gated on tmux installed) ---------------------
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_tmux_session_path(tmp_path, monkeypatch):
+    # (#165) crr relies on this: a new session runs with the PATH of the
+    # process that created it, not of whoever started the tmux server. So the
+    # watchdog unit's PATH decides which claude a revival runs.
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    out = tmp_path / "path.txt"
+    base = os.environ["PATH"]
+    t = tmux.RealTmux(timeout_seconds=10)
+    try:
+        monkeypatch.setenv("PATH", f"{first}{os.pathsep}{base}")
+        t.new_detached_session("crr-a", str(tmp_path), ["sleep", "30"])  # starts the server
+        monkeypatch.setenv("PATH", f"{second}{os.pathsep}{base}")
+        t.new_detached_session("crr-b", str(tmp_path),
+                               ["sh", "-c", f'echo "$PATH" > {out}; sleep 30'])
+        deadline = time.monotonic() + 5
+        while not (out.exists() and out.read_text()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert out.read_text().strip().split(os.pathsep)[0] == str(second)
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 def test_realtmux_creates_word_form_detached_session(tmp_path, monkeypatch):
     # Isolate from the user's tmux by pointing the server at a scratch dir.
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))

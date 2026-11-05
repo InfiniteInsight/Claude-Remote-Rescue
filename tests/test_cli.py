@@ -238,6 +238,19 @@ def test_web_server_allowed_hosts_callable_is_resolved_per_request(tmp_path):
         server.server_close()
 
 
+def test_systemd_says_which_claude_revivals_will_run(tmp_path, monkeypatch, capsys):
+    # (#165) The owner couldn't tell revivals ran an old claude. Say it.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
+    monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "claude").write_text("#!/bin/sh\n")
+    (bindir / "claude").chmod(0o755)
+    monkeypatch.setattr(cli.systemd, "resolve_service_path", lambda *a, **k: (str(bindir), []))
+    assert cli.main(["systemd"]) == 0
+    assert f"revivals will run {bindir / 'claude'}" in capsys.readouterr().err
+
+
 def test_systemd_print_emits_all_units_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path / "state" / "crr")
     monkeypatch.setattr(cli, "_resolve_crr_bin", lambda x: "/opt/crr/bin/crr")
