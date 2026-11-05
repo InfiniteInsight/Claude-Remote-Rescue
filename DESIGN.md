@@ -186,6 +186,14 @@ says so (`running_elsewhere`, from the sweep's own test) and asks for a confirm
 on Reopen. Take over refuses only what crr itself runs (`owns_a_process`, on the
 classifier), so it can reach any session the watchdog is leaving alone.
 
+**[lesson: /exit means closed]** (#167) The shim and the exit hook see a clean
+exit only where crr runs the shell or the pane. An `/exit` typed in a tab crr
+doesn't track was invisible, so the watchdog revived a conversation the user
+had ended. Claude Code logs every typed command, with its session id, in
+`~/.claude/history.jsonl`. A conversation whose newest `/exit` comes after its
+newest real turn is archived `closed` instead of revived. Unreadable files, or
+no turn to compare with, count as not exited, so the fallback is a revival.
+
 ### Session operations (all classifier-gated, pid-keyed)
 
 `kick` (restart claude in place, same conversation), `close` (remote

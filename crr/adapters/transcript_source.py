@@ -13,6 +13,7 @@ is near the tail, so this stays cheap even on a multi-megabyte transcript
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -49,6 +50,74 @@ class RealTranscriptSource:
             return TranscriptProbe(True, path.stat().st_mtime)
         except Exception:
             return TranscriptProbe(None, None)
+
+
+    def last_turn(self, session_id: str) -> float | None:
+        """Epoch seconds of the newest real turn, or None. Never raises.
+
+        A real turn is any record ``transcript.turn_boundary`` doesn't call
+        "other": prompts and assistant records, not the bookkeeping Claude
+        Code writes on its way out after an ``/exit`` (#167).
+        """
+        try:
+            path = find_transcript(session_id, home=self._home or Path.home())
+            if path is None:
+                return None
+            for line in _reversed_lines(path):
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if transcript.turn_boundary(record) == "other":
+                    continue
+                stamp = record.get("timestamp")
+                if isinstance(stamp, str) and stamp:
+                    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            return None
+        except Exception:
+            return None
+
+
+# Typed commands that end a Claude Code session.
+_EXIT_COMMANDS = ("/exit", "/quit")
+
+
+class RealExitLog:
+    """The ExitLog port over Claude Code's ``~/.claude/history.jsonl`` (#167).
+
+    Claude Code appends every typed command there, with its session id and a
+    millisecond timestamp. The file is undocumented, so anything unexpected
+    degrades to "no /exit seen", which only ever means a revival.
+    """
+
+    def __init__(self, home: Path | None = None):
+        self._home = home
+
+    def last_exits(self) -> dict[str, float]:
+        path = (self._home or Path.home()) / ".claude" / "history.jsonl"
+        exits: dict[str, float] = {}
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    # Cheap prefilter: nearly every line is a prompt.
+                    if '/exit"' not in line and '/quit"' not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("display", "")).strip() not in _EXIT_COMMANDS:
+                        continue
+                    sid, stamp = row.get("sessionId"), row.get("timestamp")
+                    if not isinstance(sid, str) or isinstance(stamp, bool) \
+                            or not isinstance(stamp, (int, float)):
+                        continue
+                    exits[sid] = max(exits.get(sid, 0.0), stamp / 1000)
+        except OSError:
+            return {}
+        return exits
 
 
 def find_transcript(session_id: str, home: Path | None = None) -> Path | None:

@@ -17,6 +17,7 @@ import pytest
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
 from crr.core.reviver import (
+    ended_by_exit,
     owns_a_process,
     attach_argv,
     exit_hook_argv,
@@ -81,7 +82,7 @@ class FakeTmux:
 
 
 def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enabled=True,
-         transcripts=None, attached=None, running_sids=None):
+         transcripts=None, attached=None, running_sids=None, exits=None):
     scan = entries_store.scan()
     return revive_crashed(
         scan.entries, FakeBoot(), FakeProbe(), tmux, entries_store,
@@ -89,6 +90,7 @@ def _run(entries_store, tmux, max_strikes=3, archive=None, remote_control_enable
         max_strikes=max_strikes, now=_NOW,
         remote_control_enabled=remote_control_enabled,
         transcripts=transcripts, attached=attached, running_sids=running_sids,
+        exits=exits,
     )
 
 
@@ -645,7 +647,7 @@ def test_revive_skips_the_entire_pass_when_tmux_liveness_is_unknown(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())  # would ordinarily be revived
     outcome = _run(store, FakeTmux(live=None))
-    assert outcome == ([], [], [], True, [], {}, [], [])
+    assert outcome == ([], [], [], True, [], {}, [], [], [])
     assert outcome.skipped is True
     entry = store.read(42)
     assert entry["revive_strikes"] == 0          # no strike accrued
@@ -661,7 +663,7 @@ def test_revive_skips_archived_candidates_too_when_tmux_liveness_is_unknown(tmp_
     )
     archive.archive(entry, "superseded-on-register", _NOW)  # a revival candidate
     outcome = _run(store, FakeTmux(live=None), archive=archive)
-    assert outcome == ([], [], [], True, [], {}, [], [])
+    assert outcome == ([], [], [], True, [], {}, [], [], [])
     assert outcome.skipped is True
     assert archive.read(_claude()["session_id"])["reason"] == "superseded-on-register"  # untouched
 
@@ -1815,3 +1817,137 @@ def test_a_default_named_tmux_session_counts_with_no_recorded_name():
 def test_unknown_tmux_state_counts_as_owned():
     # This gates a kill, so "can't tell" has to mean "don't".
     assert owns_a_process(_entry(), FakeBoot(), FakeProbe(), None) is True
+
+
+# --- a /exit is a deliberate close (#167) -------------------------------------------
+
+@pytest.mark.parametrize("last_exit, last_turn, expected", [
+    (200.0, 100.0, True),    # exited after the last turn
+    (100.0, 100.0, True),    # same instant still counts
+    (100.0, 200.0, False),   # resumed and used after an old /exit
+    (None, 100.0, False),    # never exited
+    (200.0, None, False),    # no turn to compare with: revive, as before
+])
+def test_ended_by_exit(last_exit, last_turn, expected):
+    assert ended_by_exit(last_exit, last_turn) is expected
+
+
+class FakeExits:
+    def __init__(self, exits=None, error=None):
+        self._exits, self._error = dict(exits or {}), error
+
+    def last_exits(self):
+        if self._error:
+            raise self._error
+        return dict(self._exits)
+
+
+class FakeTurns(FakeTranscripts):
+    def __init__(self, turns, probes=None):
+        super().__init__(probes)
+        self._turns = dict(turns)
+
+    def last_turn(self, session_id):
+        return self._turns.get(session_id)
+
+
+_SID = _claude()["session_id"]
+
+
+def test_an_exited_conversation_is_closed_not_revived(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+
+    outcome = _run(store, tmux, archive=archive, transcripts=FakeTurns({_SID: 100.0}),
+                   exits=FakeExits({_SID: 200.0}))
+
+    assert tmux.created == []
+    assert outcome.closed == [42]
+    assert archive.read(_SID)["reason"] == "closed"
+    with pytest.raises(KeyError):
+        store.read(42)
+
+
+def test_a_conversation_used_after_an_old_exit_still_revives(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    tmux = FakeTmux()
+
+    outcome = _run(store, tmux, transcripts=FakeTurns({_SID: 300.0}),
+                   exits=FakeExits({_SID: 200.0}))
+
+    assert outcome.revived == [42]
+    assert outcome.closed == []
+
+
+def test_a_conversation_never_exited_revives(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: 100.0}), exits=FakeExits({}))
+
+    assert outcome.revived == [42]
+
+
+def test_running_elsewhere_wins_over_an_old_exit(tmp_path):
+    # The /exit came from one copy; another is still running.
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: 100.0}),
+                   exits=FakeExits({_SID: 200.0}), running_sids={_SID})
+
+    assert outcome.running_elsewhere == [42]
+    assert outcome.closed == []
+    assert store.read(42) is not None
+
+
+def test_an_exited_archive_record_is_closed_in_place(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    tmux = FakeTmux()
+
+    outcome = _run(store, tmux, archive=archive, transcripts=FakeTurns({_SID: 100.0}),
+                   exits=FakeExits({_SID: 200.0}))
+
+    assert tmux.created == []
+    assert outcome.closed == [99]
+    assert archive.read(_SID)["reason"] == "closed"
+
+
+def test_an_exit_at_the_strike_cap_closes_rather_than_gives_up(tmp_path):
+    # The user ended it; "gave up" would say crr failed to keep it up.
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude(), strikes=3)
+
+    outcome = _run(store, FakeTmux(), archive=archive, max_strikes=3,
+                   transcripts=FakeTurns({_SID: 100.0}), exits=FakeExits({_SID: 200.0}))
+
+    assert outcome.gave_up == []
+    assert archive.read(_SID)["reason"] == "closed"
+
+
+def test_an_unreadable_exit_log_falls_back_to_reviving(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: 100.0}),
+                   exits=FakeExits(error=OSError("unreadable")))
+
+    assert outcome.revived == [42]
+
+
+def test_a_parked_session_is_never_closed_by_the_exit_check(tmp_path):
+    # Its own tmux session is up: the exit hook owns its clean exit.
+    store = JournalStore(tmp_path)
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, claude=_claude(), tmux_session=name)
+
+    outcome = _run(store, FakeTmux(live={name}), transcripts=FakeTurns({_SID: 100.0}),
+                   exits=FakeExits({_SID: 200.0}))
+
+    assert outcome.closed == []
+    assert outcome.reset == [42]

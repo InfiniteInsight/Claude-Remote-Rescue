@@ -2894,6 +2894,9 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
                 # (#153) Without this the sweep starts a second claude on a
                 # conversation already running outside crr.
                 running_sids=controller.resume_session_ids(),
+                # (#167) And without this it revives a conversation the user
+                # ended with /exit in a tab crr doesn't track.
+                exits=transcript_source.RealExitLog(),
             )
     for name, reason in scan.problems:
         print(f"crr revive: skipped unreadable journal file {name}: {reason}", file=sys.stderr)
@@ -2915,6 +2918,8 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     )
     if outcome.gave_up:
         print(f"gave up: {outcome.gave_up}")
+    if outcome.closed:
+        print(f"closed after /exit (won't revive): {outcome.closed}")
     if outcome.running_elsewhere:
         # #153: nothing is wrong with these, so name them apart from the
         # failures, and say when they'll be picked up.
@@ -3363,7 +3368,7 @@ def _post_reauth_recovery(
 
     A CRASHED session whose conversation is already running is skipped, like
     the sweep skips it (#153): nobody is watching this path to choose a
-    second copy.
+    second copy. So is one the user ended with ``/exit`` (#167).
     """
     kick_store = bridge_kicks.KickHistoryStore(sd)
     entries = [e for e in store.scan().entries if e.get("claude") is not None]
@@ -3372,12 +3377,16 @@ def _post_reauth_recovery(
 
     states = session_state.read_all()
     running = controller.resume_session_ids()
+    exit_times = transcript_source.RealExitLog().last_exits()
+    transcripts = transcript_source.RealTranscriptSource()
     for entry in entries:
         pid = entry["pid"]
         sid = entry["claude"]["session_id"]
         kind = classifier.classify(entry, boot, probe)
         if kind == classifier.CRASHED:
             if sid in running:
+                continue
+            if sid in exit_times and reviver.ended_by_exit(exit_times[sid], transcripts.last_turn(sid)):
                 continue
             with mutation_lock(sd):
                 spawner, tabs_expected = _tab_spawner(config)
@@ -4470,6 +4479,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 attached=tmux_spawner.attached_sessions(),
                 running_sids=process_probe.PsProcessController(
                     config.get("interop_timeout_seconds")).resume_session_ids(),
+                exits=transcript_source.RealExitLog(),
             )
         rescue.mark_revived(sd, boot_id)
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()

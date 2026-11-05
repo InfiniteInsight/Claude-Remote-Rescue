@@ -26,6 +26,8 @@ terminal for this module, but restorable by a human.
 A journal entry can be CRASHED while its conversation runs in a tab crr isn't
 tracking. Reviving it would start a second claude on the same transcript, so
 a session already running outside crr is left alone until it stops (#153).
+A conversation the user ended with ``/exit`` is never revived (#167), even
+when it was typed somewhere crr doesn't track.
 
 Pure core: takes the ports + the journal and archive stores, so it is
 fully testable with fakes and touches no OS directly.
@@ -45,6 +47,7 @@ from crr.core.classifier import CRASHED, classify, same_boot
 from crr.core.journal import JournalStore, upgrade_entry
 from crr.core.ports import (
     BootIdentity,
+    ExitLog,
     ProcessProbe,
     TabSpawnTimeout,
     TmuxSpawner,
@@ -89,6 +92,7 @@ class RevivalOutcome(NamedTuple):
     strike_counts: dict[int, int] = {}  # revived pid -> its NEW strike count
     host_crash_loop: list[int] = []  # pids parked past the host-death cap (#147)
     running_elsewhere: list[int] = []  # pids left alone: already running outside crr (#153)
+    closed: list[int] = []  # pids archived as closed: the user ended them with /exit (#167)
 
 
 def session_name(entry: Mapping[str, Any]) -> str:
@@ -119,6 +123,16 @@ def resolved_session_name(entry: Mapping[str, Any]) -> str:
     recorded name is what makes the rename safe with no migration step.
     """
     return entry.get("tmux_session") or session_name(entry)
+
+
+def ended_by_exit(last_exit: float | None, last_turn: float | None) -> bool:
+    """Did the user ``/exit`` after the conversation's last real turn? (#167)
+
+    A conversation resumed and used after an old ``/exit`` has a later turn,
+    so it still revives. Unknown on either side is False, which means a
+    revival: the behaviour from before this check existed.
+    """
+    return last_exit is not None and last_turn is not None and last_exit >= last_turn
 
 
 def owns_a_process(entry: Mapping[str, Any], boot_identity: BootIdentity,
@@ -508,6 +522,7 @@ def revive_crashed(
     max_host_deaths: int | None = None,
     host_death_stable_seconds: float | None = None,
     running_sids: set[str] | None = None,
+    exits: ExitLog | None = None,
 ) -> RevivalOutcome:
     live = tmux.list_sessions()
     if live is None:
@@ -527,6 +542,29 @@ def revive_crashed(
     strike_counts: dict[int, int] = {}
     host_crash_loop: list[int] = []
     running_elsewhere: list[int] = []
+    closed: list[int] = []
+    exit_times: Mapping[str, float] | None = None
+
+    def _was_exited(action: str, e: Mapping[str, Any]) -> bool:
+        # (#167) Read lazily: most passes never get here. Asked only where
+        # nothing is running the conversation, so a session left alone above
+        # is never closed by an /exit from another copy.
+        nonlocal exit_times
+        if action not in _ASSUMES_NOT_RUNNING or exits is None or transcripts is None:
+            return False
+        if exit_times is None:
+            try:
+                exit_times = exits.last_exits()
+            except Exception:
+                exit_times = {}  # the port promises not to raise; never break the pass
+        sid = (e.get("claude") or {}).get("session_id")
+        if sid not in exit_times:
+            return False
+        try:
+            last_turn = transcripts.last_turn(sid)
+        except Exception:
+            return False
+        return ended_by_exit(exit_times[sid], last_turn)
 
     def _is_running_elsewhere(action: str, e: Mapping[str, Any]) -> bool:
         # An inconclusive process probe arrives as an empty set, so this
@@ -596,6 +634,11 @@ def revive_crashed(
         pid = entry["pid"]
         if _is_running_elsewhere(action, entry):
             running_elsewhere.append(pid)
+        elif _was_exited(action, entry):
+            # The user ended it. Terminal, same shape as the close flag above.
+            archive.archive(entry, "closed", now)
+            store.remove(pid)
+            closed.append(pid)
         elif action == "hold":
             pass  # alive but frozen: strikes kept, nothing written
         elif action == "reset-nochange":
@@ -687,6 +730,10 @@ def revive_crashed(
         sid = (entry.get("claude") or {}).get("session_id")
         if _is_running_elsewhere(action, entry):
             running_elsewhere.append(pid)
+        elif _was_exited(action, entry):
+            record["reason"] = "closed"
+            archive.write(record)
+            closed.append(pid)
         elif action == "hold":
             pass  # alive but frozen: strikes kept, record untouched
         elif action == "reset-nochange":
@@ -727,4 +774,4 @@ def revive_crashed(
     return RevivalOutcome(revived, gave_up, reset,
                           unresumable=unresumable, strike_counts=strike_counts,
                           host_crash_loop=host_crash_loop,
-                          running_elsewhere=running_elsewhere)
+                          running_elsewhere=running_elsewhere, closed=closed)
