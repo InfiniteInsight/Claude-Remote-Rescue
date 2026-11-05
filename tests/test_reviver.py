@@ -16,6 +16,7 @@ import pytest
 
 from crr.core.archive import ArchiveStore
 from crr.core.journal import JournalStore, new_entry
+from crr.core.flags import FlagStore
 from crr.core.reviver import (
     ended_by_exit,
     owns_a_process,
@@ -1500,7 +1501,7 @@ def test_a_revival_that_keeps_killing_its_host_is_parked_as_host_crash_loop(tmp_
     assert all(o.gave_up == [] for o in outcomes)
     record = archive.read(_claude()["session_id"])
     assert record["reason"] == "host-crash-loop"
-    assert record["v"] == 2
+    assert record["v"] >= 2  # the reason arrived in v2
 
 
 def test_the_crash_loop_incident_parks_every_bystander_and_a_healthy_boot_leaves_them(
@@ -1561,7 +1562,7 @@ def test_an_archived_record_at_the_host_death_cap_is_parked_in_place(tmp_path):
     assert tmux.created == []
     record = archive.read(_claude()["session_id"])
     assert record["reason"] == "host-crash-loop"
-    assert record["v"] == 2
+    assert record["v"] >= 2  # the reason arrived in v2
 
 
 def test_strike_give_up_still_archives_as_gave_up_not_host_crash_loop(tmp_path):
@@ -1821,15 +1822,17 @@ def test_unknown_tmux_state_counts_as_owned():
 
 # --- a /exit is a deliberate close (#167) -------------------------------------------
 
-@pytest.mark.parametrize("last_exit, last_turn, expected", [
-    (200.0, 100.0, True),    # exited after the last turn
-    (100.0, 100.0, True),    # same instant still counts
-    (100.0, 200.0, False),   # resumed and used after an old /exit
-    (None, 100.0, False),    # never exited
-    (200.0, None, False),    # no turn to compare with: revive, as before
+@pytest.mark.parametrize("last_exit, last_turn, opened, expected", [
+    (200.0, 100.0, 50.0, True),    # exited after the last turn and the last open
+    (100.0, 100.0, 100.0, True),   # same instant still counts
+    (100.0, 200.0, 50.0, False),   # resumed and used after an old /exit
+    (200.0, 100.0, 300.0, False),  # opened again after the /exit: Adopt, Reopen, a resume
+    (None, 100.0, 50.0, False),    # never exited
+    (200.0, None, 50.0, False),    # no turn to compare with: revive, as before
+    (200.0, 100.0, None, False),   # no open time to compare with: revive, as before
 ])
-def test_ended_by_exit(last_exit, last_turn, expected):
-    assert ended_by_exit(last_exit, last_turn) is expected
+def test_ended_by_exit(last_exit, last_turn, opened, expected):
+    assert ended_by_exit(last_exit, last_turn, opened) is expected
 
 
 class FakeExits:
@@ -1852,6 +1855,8 @@ class FakeTurns(FakeTranscripts):
 
 
 _SID = _claude()["session_id"]
+# Seeded entries were opened at _NOW. An /exit has to come after that to count.
+_T0 = datetime.fromisoformat(_NOW.replace("Z", "+00:00")).timestamp()
 
 
 def test_an_exited_conversation_is_closed_not_revived(tmp_path):
@@ -1860,12 +1865,12 @@ def test_an_exited_conversation_is_closed_not_revived(tmp_path):
     _seed(store, 42, claude=_claude())
     tmux = FakeTmux()
 
-    outcome = _run(store, tmux, archive=archive, transcripts=FakeTurns({_SID: 100.0}),
-                   exits=FakeExits({_SID: 200.0}))
+    outcome = _run(store, tmux, archive=archive, transcripts=FakeTurns({_SID: _T0 + 100}),
+                   exits=FakeExits({_SID: _T0 + 200}))
 
     assert tmux.created == []
     assert outcome.closed == [42]
-    assert archive.read(_SID)["reason"] == "closed"
+    assert archive.read(_SID)["reason"] == "exited"
     with pytest.raises(KeyError):
         store.read(42)
 
@@ -1875,8 +1880,8 @@ def test_a_conversation_used_after_an_old_exit_still_revives(tmp_path):
     _seed(store, 42, claude=_claude())
     tmux = FakeTmux()
 
-    outcome = _run(store, tmux, transcripts=FakeTurns({_SID: 300.0}),
-                   exits=FakeExits({_SID: 200.0}))
+    outcome = _run(store, tmux, transcripts=FakeTurns({_SID: _T0 + 300}),
+                   exits=FakeExits({_SID: _T0 + 200}))
 
     assert outcome.revived == [42]
     assert outcome.closed == []
@@ -1886,7 +1891,7 @@ def test_a_conversation_never_exited_revives(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())
 
-    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: 100.0}), exits=FakeExits({}))
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: _T0 + 100}), exits=FakeExits({}))
 
     assert outcome.revived == [42]
 
@@ -1896,8 +1901,8 @@ def test_running_elsewhere_wins_over_an_old_exit(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())
 
-    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: 100.0}),
-                   exits=FakeExits({_SID: 200.0}), running_sids={_SID})
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: _T0 + 100}),
+                   exits=FakeExits({_SID: _T0 + 200}), running_sids={_SID})
 
     assert outcome.running_elsewhere == [42]
     assert outcome.closed == []
@@ -1909,12 +1914,12 @@ def test_an_exited_archive_record_is_closed_in_place(tmp_path):
     archive = _archived_entry(tmp_path)
     tmux = FakeTmux()
 
-    outcome = _run(store, tmux, archive=archive, transcripts=FakeTurns({_SID: 100.0}),
-                   exits=FakeExits({_SID: 200.0}))
+    outcome = _run(store, tmux, archive=archive, transcripts=FakeTurns({_SID: _T0 + 100}),
+                   exits=FakeExits({_SID: _T0 + 200}))
 
     assert tmux.created == []
     assert outcome.closed == [99]
-    assert archive.read(_SID)["reason"] == "closed"
+    assert archive.read(_SID)["reason"] == "exited"
 
 
 def test_an_exit_at_the_strike_cap_closes_rather_than_gives_up(tmp_path):
@@ -1924,17 +1929,17 @@ def test_an_exit_at_the_strike_cap_closes_rather_than_gives_up(tmp_path):
     _seed(store, 42, claude=_claude(), strikes=3)
 
     outcome = _run(store, FakeTmux(), archive=archive, max_strikes=3,
-                   transcripts=FakeTurns({_SID: 100.0}), exits=FakeExits({_SID: 200.0}))
+                   transcripts=FakeTurns({_SID: _T0 + 100}), exits=FakeExits({_SID: _T0 + 200}))
 
     assert outcome.gave_up == []
-    assert archive.read(_SID)["reason"] == "closed"
+    assert archive.read(_SID)["reason"] == "exited"
 
 
 def test_an_unreadable_exit_log_falls_back_to_reviving(tmp_path):
     store = JournalStore(tmp_path)
     _seed(store, 42, claude=_claude())
 
-    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: 100.0}),
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: _T0 + 100}),
                    exits=FakeExits(error=OSError("unreadable")))
 
     assert outcome.revived == [42]
@@ -1946,8 +1951,81 @@ def test_a_parked_session_is_never_closed_by_the_exit_check(tmp_path):
     name = session_name({"claude": _claude()})
     _seed(store, 42, claude=_claude(), tmux_session=name)
 
-    outcome = _run(store, FakeTmux(live={name}), transcripts=FakeTurns({_SID: 100.0}),
-                   exits=FakeExits({_SID: 200.0}))
+    outcome = _run(store, FakeTmux(live={name}), transcripts=FakeTurns({_SID: _T0 + 100}),
+                   exits=FakeExits({_SID: _T0 + 200}))
 
     assert outcome.closed == []
     assert outcome.reset == [42]
+
+
+def test_a_deliberate_open_after_an_exit_cancels_it(tmp_path):
+    # Adopting, reopening or resuming a conversation after its /exit is the
+    # user asking for it back, so the old /exit must not close it again.
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())  # opened at _NOW
+
+    outcome = _run(store, FakeTmux(), transcripts=FakeTurns({_SID: _T0 - 200}),
+                   exits=FakeExits({_SID: _T0 - 100}))
+
+    assert outcome.revived == [42]
+    assert outcome.closed == []
+
+
+def test_closing_clears_an_armed_relaunch(tmp_path):
+    # Kick arms a relaunch; a closed session must not leave it armed.
+    store = JournalStore(tmp_path)
+    flags = FlagStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    flags.arm_relaunch(42, _SID, boot_id="b")
+
+    outcome = revive_crashed(
+        store.scan().entries, FakeBoot(), FakeProbe(), FakeTmux(), store, ArchiveStore(tmp_path),
+        max_strikes=3, now=_NOW, remote_control_enabled=True, flags=flags,
+        transcripts=FakeTurns({_SID: _T0 + 100}), exits=FakeExits({_SID: _T0 + 200}),
+    )
+
+    assert outcome.closed == [42]
+    assert flags.read(42) is None
+
+
+def test_an_exit_at_the_host_death_cap_closes_rather_than_parks(tmp_path):
+    store = JournalStore(tmp_path)
+    archive = ArchiveStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+    store.write({**store.read(42), "revived_boot": "kernel@0", "host_deaths": 4,
+                 "revived_at": _NOW})
+
+    outcome = revive_crashed(
+        store.scan().entries, _Life(5), FakeProbe(), FakeTmux(), store, archive,
+        max_strikes=3, now=_NOW, remote_control_enabled=True,
+        max_host_deaths=4, host_death_stable_seconds=600,
+        transcripts=FakeTurns({_SID: _T0 + 100}), exits=FakeExits({_SID: _T0 + 200}),
+    )
+
+    assert outcome.host_crash_loop == []
+    assert outcome.closed == [42]
+    assert archive.read(_SID)["reason"] == "exited"
+
+
+def test_an_exit_log_without_transcripts_closes_nothing(tmp_path):
+    store = JournalStore(tmp_path)
+    _seed(store, 42, claude=_claude())
+
+    outcome = _run(store, FakeTmux(), exits=FakeExits({_SID: _T0 + 200}))
+
+    assert outcome.revived == [42]
+
+
+def test_an_exited_archive_record_is_restamped_for_its_reason(tmp_path):
+    # "exited" arrived in archive v3, so a rewritten v1 record must say v3.
+    store = JournalStore(tmp_path)
+    archive = _archived_entry(tmp_path)
+    old = archive.read(_SID)
+    old["v"] = 1  # as an older build wrote it
+    archive.write(old)
+
+    _run(store, FakeTmux(), archive=archive, transcripts=FakeTurns({_SID: _T0 + 100}),
+         exits=FakeExits({_SID: _T0 + 200}))
+
+    record = archive.read(_SID)
+    assert record["reason"] == "exited" and record["v"] == 3

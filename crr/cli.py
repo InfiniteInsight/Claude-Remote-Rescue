@@ -3386,7 +3386,8 @@ def _post_reauth_recovery(
         if kind == classifier.CRASHED:
             if sid in running:
                 continue
-            if sid in exit_times and reviver.ended_by_exit(exit_times[sid], transcripts.last_turn(sid)):
+            if sid in exit_times and reviver.ended_by_exit(
+                    exit_times[sid], transcripts.last_turn(sid), reviver.opened_at(entry)):
                 continue
             with mutation_lock(sd):
                 spawner, tabs_expected = _tab_spawner(config)

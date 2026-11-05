@@ -100,21 +100,21 @@ class RealExitLog:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     # Cheap prefilter: nearly every line is a prompt.
-                    if '/exit"' not in line and '/quit"' not in line:
+                    if "/exit" not in line and "/quit" not in line:
                         continue
                     try:
                         row = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("display", "")).strip() not in _EXIT_COMMANDS:
-                        continue
-                    sid, stamp = row.get("sessionId"), row.get("timestamp")
-                    if not isinstance(sid, str) or isinstance(stamp, bool) \
-                            or not isinstance(stamp, (int, float)):
-                        continue
-                    exits[sid] = max(exits.get(sid, 0.0), stamp / 1000)
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get("display", "")).strip() not in _EXIT_COMMANDS:
+                            continue
+                        sid, stamp = row.get("sessionId"), row.get("timestamp")
+                        if not isinstance(sid, str) or isinstance(stamp, bool) \
+                                or not isinstance(stamp, (int, float)):
+                            continue
+                        exits[sid] = max(exits.get(sid, 0.0), stamp / 1000)
+                    except (ValueError, OverflowError, TypeError):
+                        continue  # one odd row, never the whole log
         except OSError:
             return {}
         return exits

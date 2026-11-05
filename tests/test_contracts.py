@@ -862,7 +862,7 @@ def test_v1_archive_records_still_validate_under_v2():
     # #147 bumps (a v1 build has no case for `host-crash-loop`) and keeps
     # that guarantee the other way: any version up to the current one is
     # readable, so every v1 record already on disk stays valid unmigrated.
-    assert contracts.ARCHIVE_CONTRACT_VERSION == 2
+    assert contracts.ARCHIVE_CONTRACT_VERSION >= 2
     contracts.validate_archive_record(_archive_record())  # stored v1 stays valid
     old = _archive_record()
     old["reason"] = "gave-up"
@@ -1129,3 +1129,21 @@ def test_take_over_needs_something_running_elsewhere():
     card["can_take_over"] = True
     with pytest.raises(contracts.ContractError):
         contracts.validate_session_card(card)
+
+
+def test_exited_is_an_archive_v3_reason():
+    # #167: a close crr inferred from Claude Code's history, kept apart from
+    # the "closed" its own shim and exit hook record.
+    assert contracts.ARCHIVE_CONTRACT_VERSION == 3
+    r = _archive_record()
+    r["v"] = 3
+    r["reason"] = "exited"
+    contracts.validate_archive_record(r)  # must not raise
+
+
+def test_a_v2_record_cannot_carry_the_v3_exited_reason():
+    r = _archive_record()
+    r["v"] = 2
+    r["reason"] = "exited"
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_archive_record(r)

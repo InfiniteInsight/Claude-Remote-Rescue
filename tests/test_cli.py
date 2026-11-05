@@ -12,7 +12,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6022,6 +6022,8 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     kicked_pids = []
     monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
 
+    # Never read the real ~/.claude/history.jsonl (#167).
+    monkeypatch.setattr(cli.transcript_source.RealExitLog, "last_exits", lambda self: {})
     cli._post_reauth_recovery(
         store, archive, _Boot(), _Probe(), _Controller(), flags,
         cfg.Config(), sd, tmux_spawner=None,
@@ -6067,6 +6069,8 @@ def test_post_reauth_recovery_leaves_a_running_conversation_alone(tmp_path, monk
     reopened = []
     monkeypatch.setattr(ops, "reopen", lambda *a, **kw: reopened.append(a[7]))
 
+    # Never read the real ~/.claude/history.jsonl (#167).
+    monkeypatch.setattr(cli.transcript_source.RealExitLog, "last_exits", lambda self: {})
     cli._post_reauth_recovery(
         store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
         FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
@@ -6106,17 +6110,34 @@ def test_post_reauth_recovery_leaves_an_exited_conversation_closed(tmp_path, mon
 
     monkeypatch.setattr(session_state, "read_all", lambda: {})
     monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
-    monkeypatch.setattr(transcript_source.RealExitLog, "last_exits", lambda self: {sid: 200.0})
-    monkeypatch.setattr(transcript_source.RealTranscriptSource, "last_turn", lambda self, s: 100.0)
+    opened = datetime(2026, 8, 21, tzinfo=timezone.utc).timestamp()  # the entry's `updated`
+    exits = {sid: opened + 200}
+    monkeypatch.setattr(transcript_source.RealExitLog, "last_exits", lambda self: exits)
+    monkeypatch.setattr(transcript_source.RealTranscriptSource, "last_turn",
+                        lambda self, s: opened + 100)
     reopened = []
     monkeypatch.setattr(ops, "reopen", lambda *a, **kw: reopened.append(a[7]))
 
-    cli._post_reauth_recovery(
-        store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
-        FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
-    )
+    def recover():
+        cli._post_reauth_recovery(
+            store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
+            FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
+        )
 
+    recover()
     assert reopened == []
+
+    # Used again after that /exit: it comes back.
+    exits[sid] = opened + 50
+    recover()
+    assert reopened == [1001]
+
+    # Exited after its last turn, but opened again since: it comes back too.
+    monkeypatch.setattr(transcript_source.RealTranscriptSource, "last_turn",
+                        lambda self, s: opened - 100)
+    exits[sid] = opened - 50
+    recover()
+    assert reopened == [1001, 1001]
 
 
 def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch):
@@ -6180,6 +6201,8 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
     kicked_pids = []
     monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
 
+    # Never read the real ~/.claude/history.jsonl (#167).
+    monkeypatch.setattr(cli.transcript_source.RealExitLog, "last_exits", lambda self: {})
     cli._post_reauth_recovery(
         store, archive, _Boot(), _Probe(), _Controller(), flags,
         cfg.Config(), sd, tmux_spawner=None,

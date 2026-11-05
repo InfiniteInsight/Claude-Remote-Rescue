@@ -190,9 +190,12 @@ classifier), so it can reach any session the watchdog is leaving alone.
 exit only where crr runs the shell or the pane. An `/exit` typed in a tab crr
 doesn't track was invisible, so the watchdog revived a conversation the user
 had ended. Claude Code logs every typed command, with its session id, in
-`~/.claude/history.jsonl`. A conversation whose newest `/exit` comes after its
-newest real turn is archived `closed` instead of revived. Unreadable files, or
+`~/.claude/history.jsonl`. A conversation is archived `exited` instead of
+revived when its newest `/exit` comes at or after both its newest real turn
+and the entry's `updated`, which every deliberate open (Adopt, Reopen, Retrack,
+a resume) writes, so reopening takes an old `/exit` back. Unreadable files, or
 no turn to compare with, count as not exited, so the fallback is a revival.
+Ctrl+D or closing the window leaves no history row, so those still revive.
 
 ### Session operations (all classifier-gated, pid-keyed)
 

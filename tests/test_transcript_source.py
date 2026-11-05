@@ -653,6 +653,7 @@ def test_probe_never_raises_on_a_broken_home(tmp_path):
 
 _EXIT_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 _OTHER = "11111111-2222-4333-8444-555555555555"
+_THIRD = "22222222-3333-4444-8555-666666666666"
 
 
 def _history(home, *rows):
@@ -671,9 +672,12 @@ def test_exit_log_keeps_the_newest_exit_per_session(tmp_path):
              {"display": "/quit", "timestamp": 4000, "sessionId": _OTHER},
              "not json /exit\"",
              {"display": "/exit", "timestamp": 5000},
-             {"display": "/exit", "timestamp": "6000", "sessionId": _OTHER})
+             {"display": "/exit", "timestamp": "6000", "sessionId": _OTHER},
+             {"display": "/exit", "timestamp": 10 ** 400, "sessionId": _OTHER},
+             {"display": "/exit ", "timestamp": 7000, "sessionId": _THIRD})
     exits = transcript_source.RealExitLog(home=tmp_path).last_exits()
-    assert exits == {_EXIT_SID: 3.0, _OTHER: 4.0}
+    # A row that can't be read is skipped, never the whole log.
+    assert exits == {_EXIT_SID: 3.0, _OTHER: 4.0, _THIRD: 7.0}
 
 
 def test_exit_log_without_a_history_file_reports_nothing(tmp_path):

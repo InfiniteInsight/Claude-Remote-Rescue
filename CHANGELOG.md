@@ -131,12 +131,14 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
-- An `/exit` now always ends a conversation, even in a tab crr doesn't track
-  (#167). The watchdog used to revive such a conversation once that tab
-  closed. It now reads Claude Code's own command history and archives a
-  conversation `closed` when its last `/exit` comes after its last turn.
-  `crr revive` names those sessions, and post-reauth recovery skips them.
-  A conversation resumed and used after an old `/exit` still revives.
+- An `/exit` ends a conversation even in a tab crr doesn't track (#167). The
+  watchdog used to revive such a conversation once that tab closed. It now
+  reads Claude Code's own command history, and archives a conversation as
+  `exited` (archive contract v3) when its last `/exit` comes after both its
+  last turn and the last time it was opened. `crr revive` names those
+  sessions, and post-reauth recovery skips them. Adopting, reopening or
+  resuming it afterwards brings it back. Ctrl+D leaves no history row, so
+  it isn't covered.
 - A session the watchdog is leaving alone no longer looks broken (#159). Its
   card now reads "running elsewhere" and asks for a confirm on Reopen, which
   would start a second copy (sessions contract v19, PAGE_VERSION 80). `crr
