@@ -160,3 +160,46 @@ def test_generated_plists_pass_plutil_lint(tmp_path):
     for p in launchd.write_agents(tmp_path, agents):
         result = subprocess.run(["plutil", "-lint", str(p)], capture_output=True, text=True)
         assert result.returncode == 0, f"{p.name}: {result.stdout}{result.stderr}"
+
+
+# --- PATH order (#165) ----------------------------------------------------------------
+
+def _install(directory, *names):
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        binary = directory / name
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+    return directory
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PATH semantics; the unit targets macOS")
+def test_every_service_binary_resolves_to_what_the_shell_found(tmp_path, monkeypatch):
+    # tmux and ps live in /usr/bin, claude in ~/.local/bin, and an old claude
+    # sits in /usr/bin too. Adding dirs per binary put /usr/bin first, so the
+    # service ran the old claude while the shell ran the new one.
+    local = _install(tmp_path / "home" / ".local" / "bin", "claude")
+    system = _install(tmp_path / "usr" / "bin", "tmux", "ps", "claude")
+    monkeypatch.setenv("PATH", f"{local}{os.pathsep}{system}")
+
+    path, missing = launchd.resolve_service_path("/opt/crr/bin/crr")
+
+    assert missing == []
+    for name in launchd.SERVICE_BINARIES:
+        assert shutil.which(name, path=path) == shutil.which(name), name
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PATH semantics")
+def test_crrs_own_dir_never_shadows_the_shells_claude(tmp_path, monkeypatch):
+    # crr installed beside an old claude (npm's /usr/local prefix) must not
+    # put that claude ahead of the one the shell runs.
+    local = _install(tmp_path / "home" / ".local" / "bin", "claude")
+    own = _install(tmp_path / "usr" / "local" / "bin", "crr", "claude")
+    system = _install(tmp_path / "usr" / "bin", "tmux", "ps")
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (local, own, system))))
+
+    path, _ = launchd.resolve_service_path(str(own / "crr"))
+
+    for name in launchd.SERVICE_BINARIES:
+        assert shutil.which(name, path=path) == shutil.which(name), name
+    assert str(own) in path.split(os.pathsep)

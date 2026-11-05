@@ -139,6 +139,15 @@ No tag or release has been cut yet. This section describes everything on
   sessions, and post-reauth recovery skips them. Adopting, reopening or
   resuming it afterwards brings it back. Ctrl+D leaves no history row, so
   it isn't covered.
+- Revived sessions run the same Claude Code as your shell (#165). The
+  service PATH was built one binary at a time, so tmux's `/usr/bin` landed
+  ahead of `~/.local/bin`, and an old npm install in `/usr/bin` won over the
+  auto-updated one. The dirs now keep your PATH's order, and crr's own dir no
+  longer shadows a binary either. To pick this up, re-run `crr systemd
+  --install` (or `crr launchd --install`), which now says which `claude`
+  revivals will run, then `systemctl --user restart crr-web` so the
+  dashboard's Reopen uses the new PATH too. Sessions already running keep
+  their version until they're relaunched.
 - A session the watchdog is leaving alone no longer looks broken (#159). Its
   card now reads "running elsewhere" and asks for a confirm on Reopen, which
   would start a second copy (sessions contract v19, PAGE_VERSION 80). `crr

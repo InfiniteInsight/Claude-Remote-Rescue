@@ -5696,6 +5696,10 @@ def _cmd_systemd(args: argparse.Namespace) -> int:
         ),
     }
 
+    # (#165) Which claude revivals run decides their version, and the shell's
+    # own can be shadowed. Say it, so a stale one is visible.
+    print(f"crr systemd: revivals will run {systemd.first_on_path('claude', path) or 'no claude'}",
+          file=sys.stderr)
     # extras (wt.exe/wsl.exe) only degrade tab spawning, never revival —
     # reused verbatim, the revival wording below would overclaim for them.
     critical_missing = [m for m in missing if m not in extras]
@@ -5785,6 +5789,8 @@ def _cmd_launchd(args: argparse.Namespace) -> int:
     config = _load_config()
     crr_bin = _resolve_service_bin(args.crr_bin)
     path, missing = launchd.resolve_service_path(crr_bin)
+    print(f"crr launchd: revivals will run {launchd.first_on_path('claude', path) or 'no claude'}",
+          file=sys.stderr)
     # State dir is NOT baked: state_dir.resolve("Darwin", …) is env-independent,
     # so the agent resolves the same dir the shims write to via HOME alone.
     interval = config.get("watchdog_interval_seconds")
