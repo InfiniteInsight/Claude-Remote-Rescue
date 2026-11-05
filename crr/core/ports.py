@@ -298,6 +298,24 @@ class TranscriptSource(Protocol):
         """Never raises — failures degrade to ``TranscriptProbe(None, None)``."""
         ...
 
+    def last_turn(self, session_id: str) -> float | None:
+        """Epoch seconds of the newest real turn (a user prompt or assistant
+        record), or None when there is none or it can't be read (#167)."""
+        ...
+
+
+class ExitLog(Protocol):
+    """When the user last typed ``/exit`` in each conversation (#167).
+
+    Read from Claude Code's own command history, which the shims never see,
+    so a conversation ended in a tab crr doesn't track still counts.
+    """
+
+    def last_exits(self) -> Mapping[str, float]:
+        """Session id -> epoch seconds of its newest ``/exit`` or ``/quit``.
+        An unreadable log is empty: no claim of an exit."""
+        ...
+
 
 class DiagnosticsSource(Protocol):
     """Platform "why did it die" source (journald / log+pmset / winevent).

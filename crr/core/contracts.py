@@ -96,7 +96,11 @@ DIAGNOSTICS_CONTRACT_VERSION = 3
 #    reason widening this one bumps, so the validator now accepts any
 #    1 <= v <= current (v1 records on disk stay valid, unmigrated) and a
 #    reason may not appear in a record stamped before its version.
-ARCHIVE_CONTRACT_VERSION = 2
+# v3 adds the `exited` reason (#167): a close crr inferred from an /exit in
+#    Claude Code's own command history, kept apart from the "closed" its
+#    shim and exit hook observe, so the lineage says how crr knew. Same
+#    widening as v2: no new key, and older records stay valid unmigrated.
+ARCHIVE_CONTRACT_VERSION = 3
 
 # --------------------------------------------------------------------------
 # The five lazy API payloads (#36). Every one of these shipped unversioned:
@@ -389,11 +393,15 @@ ARCHIVE_REASONS = (
     # the lineage says which one happened; `crr reopen --sid` /
     # `--host-crash-loop` and the dashboard restore it.
     "host-crash-loop",
+    # Terminal (#167, archive v3): the user ended the conversation with /exit,
+    # seen in Claude Code's command history rather than by crr's shim or exit
+    # hook. Not retrackable; Adopt from Discoverable brings it back.
+    "exited",
 )
 # The archive version each reason first appeared in. A record stamped
 # earlier than its reason's version is a shape no build ever wrote — a
 # rewrite that changed the reason but forgot to restamp `v`.
-_ARCHIVE_REASON_SINCE = {"host-crash-loop": 2}
+_ARCHIVE_REASON_SINCE = {"host-crash-loop": 2, "exited": 3}
 
 
 class ContractError(ValueError):

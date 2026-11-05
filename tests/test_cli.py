@@ -12,7 +12,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2217,6 +2217,32 @@ def test_revive_names_sessions_left_alone_because_they_already_run(tmp_path, mon
     assert "[4242]" in out
 
 
+def test_revive_names_sessions_closed_by_exit(tmp_path, monkeypatch, capsys):
+    _revive_with_stub_tmux(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cli.reviver, "revive_crashed",
+        lambda *a, **k: cli.reviver.RevivalOutcome([], [], [], closed=[4242]),
+    )
+    assert cli.main(["revive"]) == 0
+    out = capsys.readouterr().out
+    assert "closed after /exit" in out
+    assert "[4242]" in out
+
+
+def test_revive_reads_the_exit_log(tmp_path, monkeypatch):
+    # (#167) Without this wiring the check never runs.
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["exits"] = kw.get("exits")
+        return cli.reviver.RevivalOutcome([], [], [])
+
+    _revive_with_stub_tmux(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
+    assert cli.main(["revive"]) == 0
+    assert isinstance(seen["exits"], cli.transcript_source.RealExitLog)
+
+
 def test_revive_omits_the_left_alone_line_when_none(tmp_path, monkeypatch, capsys):
     _revive_with_stub_tmux(monkeypatch, tmp_path)
     monkeypatch.setattr(cli.reviver, "revive_crashed",
@@ -4240,11 +4266,13 @@ def test_rescue_check_revive_pass_knows_what_is_already_running(tmp_path, monkey
 
     def spy(*a, **kw):
         seen["running_sids"] = kw.get("running_sids")
+        seen["exits"] = kw.get("exits")
         return cli.reviver.RevivalOutcome([], [], [])
 
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
     cli.main(["rescue-check"])
     assert seen["running_sids"] == {"a-running-sid"}
+    assert isinstance(seen["exits"], cli.transcript_source.RealExitLog)  # (#167)
 
 
 def test_exec_seam_is_forbidden_unless_a_test_stubs_it():
@@ -6007,6 +6035,8 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
     kicked_pids = []
     monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
 
+    # Never read the real ~/.claude/history.jsonl (#167).
+    monkeypatch.setattr(cli.transcript_source.RealExitLog, "last_exits", lambda self: {})
     cli._post_reauth_recovery(
         store, archive, _Boot(), _Probe(), _Controller(), flags,
         cfg.Config(), sd, tmux_spawner=None,
@@ -6052,12 +6082,75 @@ def test_post_reauth_recovery_leaves_a_running_conversation_alone(tmp_path, monk
     reopened = []
     monkeypatch.setattr(ops, "reopen", lambda *a, **kw: reopened.append(a[7]))
 
+    # Never read the real ~/.claude/history.jsonl (#167).
+    monkeypatch.setattr(cli.transcript_source.RealExitLog, "last_exits", lambda self: {})
     cli._post_reauth_recovery(
         store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
         FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
     )
 
     assert reopened == []
+
+
+def test_post_reauth_recovery_leaves_an_exited_conversation_closed(tmp_path, monkeypatch):
+    # (#167) The user ended it with /exit; a reauth is no reason to bring it back.
+    from crr.adapters import session_state, transcript_source
+    from crr.core import ops
+    from crr.core.flags import FlagStore
+
+    store = JournalStore(tmp_path)
+    sid = "8a1b2c3d-0000-4a6b-8c7d-9e0f1a2b3c4d"
+    store.write(new_entry(
+        pid=1001, cwd="/home/u/project", host="tmux", shell="zsh",
+        boot_id="a-previous-boot", now="2026-08-21T00:00:00Z",
+        claude={"session_id": sid, "sid_source": "injected",
+                "started": "2026-08-21T00:00:00Z", "skip_permissions": False}))
+
+    class _Boot:
+        def current(self):
+            return "current-boot"
+
+    class _Probe:
+        def is_alive(self, pid):
+            return True
+
+        def has_controlling_tty(self, pid):
+            return True
+
+    class _Controller:
+        def resume_session_ids(self):
+            return set()
+
+    monkeypatch.setattr(session_state, "read_all", lambda: {})
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, False))
+    opened = datetime(2026, 8, 21, tzinfo=timezone.utc).timestamp()  # the entry's `updated`
+    exits = {sid: opened + 200}
+    monkeypatch.setattr(transcript_source.RealExitLog, "last_exits", lambda self: exits)
+    monkeypatch.setattr(transcript_source.RealTranscriptSource, "last_turn",
+                        lambda self, s: opened + 100)
+    reopened = []
+    monkeypatch.setattr(ops, "reopen", lambda *a, **kw: reopened.append(a[7]))
+
+    def recover():
+        cli._post_reauth_recovery(
+            store, ArchiveStore(tmp_path), _Boot(), _Probe(), _Controller(),
+            FlagStore(tmp_path), cfg.Config(), tmp_path, tmux_spawner=None,
+        )
+
+    recover()
+    assert reopened == []
+
+    # Used again after that /exit: it comes back.
+    exits[sid] = opened + 50
+    recover()
+    assert reopened == [1001]
+
+    # Exited after its last turn, but opened again since: it comes back too.
+    monkeypatch.setattr(transcript_source.RealTranscriptSource, "last_turn",
+                        lambda self, s: opened - 100)
+    exits[sid] = opened - 50
+    recover()
+    assert reopened == [1001, 1001]
 
 
 def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch):
@@ -6121,6 +6214,8 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
     kicked_pids = []
     monkeypatch.setattr(cli, "_do_kick", lambda entry, *a, **kw: kicked_pids.append(entry["pid"]))
 
+    # Never read the real ~/.claude/history.jsonl (#167).
+    monkeypatch.setattr(cli.transcript_source.RealExitLog, "last_exits", lambda self: {})
     cli._post_reauth_recovery(
         store, archive, _Boot(), _Probe(), _Controller(), flags,
         cfg.Config(), sd, tmux_spawner=None,

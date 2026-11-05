@@ -5,6 +5,7 @@ No real conversation content: the test writes its own JSONL transcript
 """
 
 import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 
@@ -646,3 +647,68 @@ def test_probe_never_raises_on_a_broken_home(tmp_path):
     probe = src.probe("8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
     assert probe.exists is None
     assert probe.mtime is None
+
+
+# --- RealExitLog + last_turn: the /exit signal (#167) --------------------------------
+
+_EXIT_SID = "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+_OTHER = "11111111-2222-4333-8444-555555555555"
+_THIRD = "22222222-3333-4444-8555-666666666666"
+
+
+def _history(home, *rows):
+    path = home / ".claude" / "history.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(
+        (row if isinstance(row, str) else json.dumps(row, separators=(",", ":"))) + "\n"
+        for row in rows), encoding="utf-8")
+
+
+def test_exit_log_keeps_the_newest_exit_per_session(tmp_path):
+    _history(tmp_path,
+             {"display": "/exit", "timestamp": 1000, "sessionId": _EXIT_SID},
+             {"display": "fix the bug", "timestamp": 2000, "sessionId": _EXIT_SID},
+             {"display": "/exit", "timestamp": 3000, "sessionId": _EXIT_SID},
+             {"display": "/quit", "timestamp": 4000, "sessionId": _OTHER},
+             "not json /exit\"",
+             {"display": "/exit", "timestamp": 5000},
+             {"display": "/exit", "timestamp": "6000", "sessionId": _OTHER},
+             {"display": "/exit", "timestamp": 10 ** 400, "sessionId": _OTHER},
+             {"display": "/exit ", "timestamp": 7000, "sessionId": _THIRD})
+    exits = transcript_source.RealExitLog(home=tmp_path).last_exits()
+    # A row that can't be read is skipped, never the whole log.
+    assert exits == {_EXIT_SID: 3.0, _OTHER: 4.0, _THIRD: 7.0}
+
+
+def test_exit_log_without_a_history_file_reports_nothing(tmp_path):
+    assert transcript_source.RealExitLog(home=tmp_path).last_exits() == {}
+
+
+def _transcript(home, sid, *records):
+    project = home / ".claude" / "projects" / "-home-u-proj"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{sid}.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+
+def _at(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def test_last_turn_skips_the_records_written_on_the_way_out(tmp_path):
+    # Claude writes bookkeeping records after /exit; only real turns count.
+    _transcript(tmp_path, _EXIT_SID,
+                {"type": "user", "timestamp": _at(100), "message": {"role": "user", "content": "hi"}},
+                {"type": "assistant", "timestamp": _at(200),
+                 "message": {"role": "assistant", "stop_reason": "end_turn",
+                             "content": [{"type": "text", "text": "hello"}]}},
+                {"type": "system", "subtype": "bridge_status", "timestamp": _at(900)})
+    src = transcript_source.RealTranscriptSource(home=tmp_path)
+    assert src.last_turn(_EXIT_SID) == 200.0
+
+
+def test_last_turn_is_none_without_a_real_turn(tmp_path):
+    _transcript(tmp_path, _EXIT_SID, {"type": "system", "subtype": "bridge_status", "timestamp": _at(900)})
+    src = transcript_source.RealTranscriptSource(home=tmp_path)
+    assert src.last_turn(_EXIT_SID) is None
+    assert src.last_turn(_OTHER) is None  # no transcript at all
