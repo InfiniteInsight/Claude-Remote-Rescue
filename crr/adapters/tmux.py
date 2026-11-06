@@ -34,6 +34,17 @@ def _new_session_cmd(name: str, cwd: str, argv: Sequence[str]) -> list[str]:
     return ["tmux", "new-session", "-d", "-s", name, "-c", cwd, "--", *argv]
 
 
+def _forward_title_cmds(name: str) -> list[list[str]]:
+    # Claude Code names the pane after the conversation (an OSC title), but
+    # tmux keeps it to itself unless set-titles is on, so a tab attached to a
+    # revived session reads "wsl.exe" instead. Session-scoped (-t, never -g):
+    # the user's own tmux sessions keep their configuration.
+    return [
+        ["tmux", "set-option", "-t", name, "set-titles", "on"],
+        ["tmux", "set-option", "-t", name, "set-titles-string", "#{pane_title}"],
+    ]
+
+
 def _session_pid_cmd(name: str) -> list[str]:
     return ["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"]
 
@@ -165,6 +176,18 @@ class RealTmux:
             _new_session_cmd(name, cwd, argv),
             capture_output=True, text=True, timeout=self._timeout, check=True,
         )
+        self.forward_title(name)
+
+    def forward_title(self, name: str) -> None:
+        """Make tmux pass ``name``'s pane title (the conversation name) to the
+        terminal tab attached to it. Cosmetic and best-effort: a failure here
+        must never cost the revival or the tab, so nothing is raised.
+        """
+        for cmd in _forward_title_cmds(name):
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, timeout=self._timeout)
+            except (subprocess.TimeoutExpired, OSError):
+                return
 
     def kill_session(self, name: str) -> None:
         subprocess.run(

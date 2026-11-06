@@ -2096,3 +2096,31 @@ def test_an_archived_session_takes_its_own_slot_from_a_dead_shell(tmp_path):
     _run(store, _PidTmux(live={session_name({"claude": _claude()})}, pane_pid=None), archive=archive)
 
     assert store.read(99)["claude"]["session_id"] == _claude()["session_id"]
+
+
+# --- the revived tab carries the conversation's name ---------------------
+# Claude Code sets the pane title to the conversation name; tmux must pass
+# it to the outer terminal or the tab reads "wsl.exe". The revival and the
+# tmux session are untouched by this — it is only what the tab shows.
+
+def test_a_kicked_revival_forwards_the_title_before_opening_the_tab(tmp_path):
+    events = []
+
+    class _TitleTmux(FakeTmux):
+        def forward_title(self, name):
+            events.append(("forward_title", name))
+
+    class _OrderedTab(_Tab):
+        def open_tab(self, argv, cwd=None):
+            events.append(("open_tab", argv[-1]))
+            super().open_tab(argv, cwd)
+
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 899149, claude=_claude())
+    flags = _Flags({899149: ("relaunch", _claude()["session_id"], _CURRENT_BOOT)})
+    revive_crashed(store.scan().entries, FakeBoot(), FakeProbe(), _TitleTmux(), store,
+                   archive, max_strikes=3, now=_NOW, remote_control_enabled=True,
+                   flags=flags, tab_spawner=_OrderedTab())
+    kinds = [k for k, _ in events]
+    assert kinds == ["forward_title", "open_tab"], events
+    assert events[0][1] == events[1][1]

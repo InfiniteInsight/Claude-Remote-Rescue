@@ -353,6 +353,44 @@ def test_open_tab_reports_whether_a_tab_actually_landed():
     assert landed is False
 
 
+class _TitleTmux(FakeTmux):
+    def __init__(self, events, live=()):
+        super().__init__(live=live)
+        self.events = events
+
+    def forward_title(self, name):
+        self.events.append(("forward_title", name))
+
+
+class _OrderedTab(FakeTabSpawner):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def open_tab(self, argv, cwd=None):
+        self.events.append(("open_tab", argv[-1]))
+        super().open_tab(argv, cwd)
+
+
+def test_open_tab_forwards_the_conversation_title_first():
+    # A reopened tab should carry the conversation's name, not "wsl.exe":
+    # tmux must be told to pass the pane title out BEFORE the tab attaches
+    # (this also covers sessions that were already running).
+    events = []
+    ops._open_tab(_OrderedTab(events), "crr-8a1b2c3d", tmux=_TitleTmux(events))
+    assert events == [("forward_title", "crr-8a1b2c3d"), ("open_tab", "crr-8a1b2c3d")]
+
+
+def test_open_tab_survives_a_failing_forward_title():
+    # Cosmetic only: a failing forward_title must not stop the tab.
+    class _Boom(FakeTmux):
+        def forward_title(self, name):
+            raise RuntimeError("tmux gone")
+
+    suffix, landed = ops._open_tab(FakeTabSpawner(), "crr-8a1b2c3d", tmux=_Boom())
+    assert landed is True
+
+
 # --- Finding 5: unconfirmed launches must not read as verified successes --
 #
 # The spec's bolded constraint: "Do not let a fire-and-forget launch
