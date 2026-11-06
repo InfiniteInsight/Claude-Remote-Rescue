@@ -273,6 +273,52 @@ def test_tmux_session_path(tmp_path, monkeypatch):
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
 
+def test_forward_title_commands_are_session_scoped(monkeypatch):
+    # A reopened tab otherwise reads "wsl.exe": Claude Code sets the pane
+    # title to the conversation name, but tmux (set-titles off) never
+    # passes it to the outer terminal. Scope to the one session (-t, no -g)
+    # so the user's own tmux sessions keep their configuration.
+    calls = []
+    monkeypatch.setattr(
+        tmux.subprocess, "run",
+        lambda cmd, **k: calls.append(cmd) or _Result(0),
+    )
+    tmux.RealTmux(timeout_seconds=5).forward_title("crr-abc")
+    assert calls == [
+        ["tmux", "set-option", "-t", "crr-abc", "set-titles", "on"],
+        ["tmux", "set-option", "-t", "crr-abc", "set-titles-string", "#{pane_title}"],
+    ]
+    assert all("-g" not in c for c in calls)
+
+
+def test_forward_title_never_raises(monkeypatch):
+    # Cosmetic: a tmux failure must not cost the revival or the tab.
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("tmux", 5)
+    monkeypatch.setattr(tmux.subprocess, "run", boom)
+    tmux.RealTmux(timeout_seconds=5).forward_title("crr-abc")  # no exception
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_new_session_forwards_the_pane_title(tmp_path, monkeypatch):
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    t = tmux.RealTmux(timeout_seconds=10)
+    try:
+        t.new_detached_session("crr-title", str(tmp_path), ["sleep", "300"])
+
+        def opt(name):
+            return subprocess.run(
+                ["tmux", "show-options", "-v", "-t", "crr-title", name],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+
+        assert opt("set-titles") == "on"
+        assert opt("set-titles-string") == "#{pane_title}"
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 def test_realtmux_creates_word_form_detached_session(tmp_path, monkeypatch):
     # Isolate from the user's tmux by pointing the server at a scratch dir.

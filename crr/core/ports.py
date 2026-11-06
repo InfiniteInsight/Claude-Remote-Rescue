@@ -164,6 +164,14 @@ class TmuxSpawner(Protocol):
         """
         ...
 
+    def forward_title(self, name: str) -> None:
+        """Have tmux pass session ``name``'s pane title (Claude Code sets it
+        to the conversation name) on to the terminal tab attached to it, so
+        a reopened tab is named after the conversation instead of the host
+        shell. Cosmetic and best-effort: implementations must not raise.
+        """
+        ...
+
     def list_sessions(self) -> set[str] | None:
         """Return the set of currently-live tmux session names, or None.
 

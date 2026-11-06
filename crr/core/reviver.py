@@ -269,8 +269,24 @@ def attach_argv(name: str) -> list[str]:
     return ["tmux", "attach", "-t", name]
 
 
+def forward_title(tmux, name: str) -> None:
+    """Ask ``tmux`` to pass ``name``'s pane title to the tab that attaches.
+
+    Claude Code names the pane after the conversation; without this the
+    reopened tab reads "wsl.exe". Purely cosmetic, so it never raises and
+    tolerates a ``tmux`` that is absent or predates the method.
+    """
+    method = getattr(tmux, "forward_title", None)
+    if method is None:
+        return
+    try:
+        method(name)
+    except Exception:
+        pass
+
+
 def _try_open_tab(tab_spawner, name: str, tab_health=None, *,
-                   now: str = "", boot_id: str = "") -> bool:
+                   now: str = "", boot_id: str = "", tmux=None) -> bool:
     """Best-effort visible tab attaching to ``name``. Never raises.
 
     Deliberately local rather than reusing ``ops._open_tab``: ``ops``
@@ -290,6 +306,7 @@ def _try_open_tab(tab_spawner, name: str, tab_health=None, *,
         available = tab_spawner.available()
         if not available:
             return False
+        forward_title(tmux, name)
         tab_spawner.open_tab(attach_argv(name))
         tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
         return True
@@ -724,7 +741,8 @@ def revive_crashed(
                         flags.clear(pid)
                     else:
                         _try_open_tab(tab_spawner, name, tab_health,
-                                      now=now, boot_id=boot_identity.current())
+                                      now=now, boot_id=boot_identity.current(),
+                                      tmux=tmux)
                         flags.clear(pid)
             revived.append(pid)
             strike_counts[pid] = updated["revive_strikes"]

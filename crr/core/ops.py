@@ -26,6 +26,7 @@ from crr.core.reviver import (
     HOST_CRASH_LOOP,
     TERMINAL_ARCHIVE_REASONS,
     attach_argv,
+    forward_title as _forward_title,
     exit_hook_argv,
     resolved_session_name,
     revival_argv,
@@ -196,7 +197,7 @@ def reopen(
             entry["updated"] = now
             store.write(entry)
             suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
-                                        now=now, boot_id=boot.current())
+                                        now=now, boot_id=boot.current(), tmux=tmux)
             return OpResult(True, f"restarted {name}" + suffix,
                             degraded=tabs_expected and not landed)
         # LIVE without tmux: signal claude to restart (same as kick),
@@ -236,7 +237,7 @@ def reopen(
         store.write(entry)
         base = f"reopened {pid} as {name}"
     suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
-                                now=now, boot_id=boot.current())
+                                now=now, boot_id=boot.current(), tmux=tmux)
     return OpResult(True, base + suffix, degraded=tabs_expected and not landed)
 
 
@@ -308,7 +309,7 @@ def _reopen_ghost(
 
     if name in live:
         suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
-                                    now=now, boot_id=boot.current())
+                                    now=now, boot_id=boot.current(), tmux=tmux)
         return OpResult(
             True, f"restored {pid}'s conversation as {name} (already running){kill_suffix}"
             + suffix, degraded=tabs_expected and not landed
@@ -332,7 +333,7 @@ def _reopen_ghost(
             degraded=True,
         )
     suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
-                                now=now, boot_id=boot.current())
+                                now=now, boot_id=boot.current(), tmux=tmux)
     return OpResult(
         True, f"restored {pid}'s conversation into detached tmux as {name}{kill_suffix}"
         + suffix, degraded=tabs_expected and not landed
@@ -487,6 +488,7 @@ def detmux(
                                "(detmux re-homes revived sessions only)")
     if tab_spawner is None:
         return OpResult(False, "no terminal tab spawner available on this host")
+    _forward_title(tmux, name)
     try:
         tab_spawner.open_tab(attach_argv(name))
     except TabSpawnTimeout as exc:
@@ -829,6 +831,7 @@ def _open_tab(
     tab_health: "TabHealthStore | None" = None,
     now: str = "",
     boot_id: str = "",
+    tmux: "TmuxSpawner | None" = None,
 ) -> tuple[str, bool]:
     """Open a visible tab attaching to ``name``; return (suffix, landed).
 
@@ -845,6 +848,7 @@ def _open_tab(
     """
     if tab_spawner is None:
         return f" (no tab spawner on this host — attach with: tmux attach -t {name})", False
+    _forward_title(tmux, name)
     try:
         tab_spawner.open_tab(attach_argv(name))
         tab_health_module.record_from_spawner(tab_health, tab_spawner, now=now, boot_id=boot_id)
