@@ -30,6 +30,7 @@ from pathlib import Path
 
 from crr import __version__
 from crr.core.config import CONFIG_DEFAULTS_VERSION, DEFAULTS
+from crr.core.service import UnitState
 
 
 def _stamp() -> str:
@@ -43,6 +44,13 @@ TIMER_NAME = "crr-revive.timer"
 USER_MANAGER_FALLBACK_UNIT = "crr-user-manager.service"
 WEB_SERVICE_NAME = "crr-web.service"
 AWAKE_SERVICE_NAME = "crr-awake.service"
+
+# crr's three units under the names the user sees (`crr service status`).
+CRR_UNITS = (
+    ("watchdog", TIMER_NAME),
+    ("dashboard", WEB_SERVICE_NAME),
+    ("keep-awake", AWAKE_SERVICE_NAME),
+)
 
 # Binaries `crr revive` shells out to (directly or via the revived command).
 SERVICE_BINARIES = ("tmux", "ps", "claude")
@@ -419,3 +427,46 @@ def user_manager_fallback_uninstall_argv() -> list[str]:
 def _shq(text: str) -> str:
     """Single-quote ``text`` for the bash -c script (no shlex import churn)."""
     return "'" + text.replace("'", "'\\''") + "'"
+
+
+def unit_states(timeout: float) -> list[UnitState] | None:
+    """Installed/enabled/active for each of ``CRR_UNITS``, in that order.
+
+    None when the user manager can't answer: no systemctl, no user bus (WSL
+    without systemd, a bare SSH session), a timeout, or output that doesn't
+    cover every unit. A unit that isn't installed still gets a row.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "show", *(unit for _, unit in CRR_UNITS),
+             "-p", "Id,LoadState,UnitFileState,ActiveState"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    props: dict[str, dict[str, str]] = {}
+    block: dict[str, str] = {}
+    for line in [*(r.stdout or "").splitlines(), ""]:
+        if line.strip():
+            key, _, value = line.partition("=")
+            block[key] = value
+        elif block:
+            if "Id" in block:
+                props[block["Id"]] = block
+            block = {}
+    states = []
+    for name, unit in CRR_UNITS:
+        found = props.get(unit)
+        if found is None:
+            return None
+        states.append(UnitState(
+            name, unit,
+            installed=found.get("LoadState") not in (None, "", "not-found"),
+            enabled=found.get("UnitFileState") in ("enabled", "enabled-runtime"),
+            active=found.get("ActiveState") == "active",
+        ))
+    return states

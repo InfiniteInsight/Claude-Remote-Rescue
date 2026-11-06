@@ -20,7 +20,7 @@ import pytest
 
 from conftest import set_home, simulate_wsl_uid  # tests/ is on sys.path (no __init__.py)
 from crr import cli
-from crr.adapters import boot_identity, process_probe, session_state, state_dir
+from crr.adapters import boot_identity, process_probe, session_state, state_dir, systemd
 from crr.core import config as cfg
 from crr.core import contracts
 from crr.core import dashboard_auth
@@ -8701,3 +8701,140 @@ def test_load_config_overlay_survives_a_bad_config_toml(tmp_path, monkeypatch, c
     config = cli._load_config()
     assert config.get("dashboard_port") == 9000
     assert "ignoring bad config" in capsys.readouterr().err
+
+
+# --- crr service status (#161) ----------------------------------------------
+
+def _svc_units(*, installed=True, enabled=True, active=True):
+    from crr.core.service import UnitState
+    return [UnitState(name, unit, installed, enabled, active)
+            for name, unit in systemd.CRR_UNITS]
+
+
+def _service_status(monkeypatch, tmp_path, capsys, *, units, system="Linux", args=()):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(systemd, "unit_states", lambda timeout: units)
+    rc = cli.main(["service", "status", *args])
+    cap = capsys.readouterr()
+    return rc, cap
+
+
+def test_service_status_json_validates(monkeypatch, tmp_path, capsys):
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0
+    assert payload["backend"] == "systemd"
+    assert payload["state"] == "running"
+    assert payload["dashboard_url"] == f"http://127.0.0.1:{cfg.DEFAULTS['dashboard_port']}/"
+    assert [s["name"] for s in payload["services"]] == ["watchdog", "dashboard", "keep-awake"]
+    assert payload["dashboard_login"] is False
+    assert cap.err == ""
+
+
+def test_service_status_passes_the_interop_timeout(monkeypatch, tmp_path, capsys):
+    seen = []
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(systemd, "unit_states", lambda timeout: seen.append(timeout) or _svc_units())
+    assert cli.main(["service", "status", "--json"]) == 0
+    assert seen == [cfg.DEFAULTS["interop_timeout_seconds"]]
+
+
+def test_service_status_reports_unsupported_without_a_user_manager(monkeypatch, tmp_path, capsys):
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=None, args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0                       # a report, not an action
+    assert payload["backend"] == "unsupported"
+    assert "no systemd user manager" in payload["reason"]
+    assert payload["state"] == "not-installed"
+    assert len(payload["services"]) == 3
+    assert not any(s["installed"] or s["active"] for s in payload["services"])
+    assert "Traceback" not in cap.err
+
+
+def test_service_status_reports_unsupported_off_linux(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(systemd, "unit_states",
+                        lambda timeout: pytest.fail("must not probe systemd off Linux"))
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    assert cli.main(["service", "status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    contracts.validate_service_payload(payload)
+    assert payload["backend"] == "unsupported"
+    assert "not Linux" in payload["reason"]
+
+
+def test_service_status_not_installed_points_at_systemd_install(monkeypatch, tmp_path, capsys):
+    rc, cap = _service_status(
+        monkeypatch, tmp_path, capsys,
+        units=_svc_units(installed=False, enabled=False, active=False), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0
+    assert payload["backend"] == "systemd"
+    assert payload["state"] == "not-installed"
+    assert "crr systemd --install" in payload["reason"]
+
+
+def test_service_status_text_has_one_line_per_unit_and_the_state(monkeypatch, tmp_path, capsys):
+    units = _svc_units()
+    units[1] = units[1]._replace(active=False)
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys, units=units)
+    assert rc == 0
+    lines = cap.out.splitlines()
+    for name, unit in systemd.CRR_UNITS:
+        assert any(line.startswith(name) and unit in line for line in lines)
+    assert any("partial" in line for line in lines)
+
+
+def test_service_status_text_says_why_unsupported(monkeypatch, tmp_path, capsys):
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys, units=None)
+    assert rc == 0
+    assert "unsupported" in cap.out and "no systemd user manager" in cap.out
+
+
+def test_service_status_reports_dashboard_login(monkeypatch, tmp_path, capsys):
+    dashboard_auth.DashboardAuthStore(tmp_path).enable("correct horse", "correct horse")
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert payload["dashboard_login"] is True
+    assert cap.err == ""
+
+
+def test_service_status_survives_a_corrupt_auth_file(monkeypatch, tmp_path, capsys):
+    # The dashboard fails closed on a corrupt auth store (login required), so
+    # the report says login is on, and names the file on stderr.
+    (tmp_path / dashboard_auth.FILENAME).write_text("{not json", encoding="utf-8")
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0
+    assert payload["dashboard_login"] is True
+    assert dashboard_auth.FILENAME in cap.err
+    assert "Traceback" not in cap.err
+
+
+def test_service_status_survives_an_auth_store_that_raises(monkeypatch, tmp_path, capsys):
+    def boom(self):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr(dashboard_auth.DashboardAuthStore, "login_enabled", boom)
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0
+    assert payload["dashboard_login"] is False
+    assert dashboard_auth.FILENAME in cap.err
+
+
+def test_service_without_an_action_is_a_usage_error(capsys):
+    assert cli.main(["service"]) == 2
+    assert "usage" in capsys.readouterr().err

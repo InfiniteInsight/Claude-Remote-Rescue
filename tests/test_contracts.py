@@ -1200,3 +1200,46 @@ def test_config_payload_error_names_the_offending_element_type():
     payload["keys"]["host_allowlist_extras"]["value"] = ["a", 1]
     with pytest.raises(contracts.ContractError, match="list of str.*int"):
         contracts.validate_config_payload(payload)
+
+
+def _service_payload():
+    return {
+        "contract": contracts.SERVICE_CONTRACT_VERSION,
+        "backend": "systemd",
+        "reason": "",
+        "state": "running",
+        "services": [
+            {"name": "watchdog", "unit": "crr-revive.timer",
+             "installed": True, "enabled": True, "active": True},
+        ],
+        "dashboard_url": "http://127.0.0.1:8377/",
+        "dashboard_login": False,
+    }
+
+
+def test_valid_service_payload_passes():
+    assert contracts.SERVICE_CONTRACT_VERSION == 1
+    contracts.validate_service_payload(_service_payload())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.update(contract=2),
+    lambda p: p.update(backend="launchd"),
+    lambda p: p.update(state="broken"),
+    lambda p: p.update(reason=None),
+    lambda p: p.update(dashboard_url=8377),
+    lambda p: p.update(dashboard_login="no"),
+    lambda p: p.update(extra=1),
+    lambda p: p.pop("dashboard_login"),
+    lambda p: p.update(services={}),
+    lambda p: p["services"][0].update(active="yes"),
+    lambda p: p["services"][0].update(name=3),
+    lambda p: p["services"][0].pop("enabled"),
+    lambda p: p["services"][0].update(extra=1),
+    lambda p: p["services"].append("watchdog"),
+])
+def test_invalid_service_payload_is_refused(mutate):
+    payload = copy.deepcopy(_service_payload())
+    mutate(payload)
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_service_payload(payload)

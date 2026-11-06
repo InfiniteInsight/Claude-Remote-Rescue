@@ -396,3 +396,70 @@ def test_crrs_own_dir_never_shadows_the_shells_claude(tmp_path, monkeypatch):
     for name in systemd.SERVICE_BINARIES:
         assert shutil.which(name, path=path) == shutil.which(name), name
     assert str(own) in path.split(os.pathsep)
+
+
+# --- unit_states: `crr service status`' probe of crr's own units (#161) ---
+
+_SHOW_OUT = (
+    "Id=crr-revive.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+    "\n"
+    "Id=crr-web.service\nLoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"
+    "\n"
+    "Id=crr-awake.service\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\n"
+)
+
+
+def _fake_systemctl(monkeypatch, *, stdout="", returncode=0, exc=None, calls=None):
+    monkeypatch.setattr(systemd.shutil, "which", lambda name: "/usr/bin/systemctl")
+
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append((argv, kwargs))
+        if exc is not None:
+            raise exc
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(systemd.subprocess, "run", fake_run)
+
+
+def test_crr_units_names_the_three_units():
+    assert systemd.CRR_UNITS == (
+        ("watchdog", systemd.TIMER_NAME),
+        ("dashboard", systemd.WEB_SERVICE_NAME),
+        ("keep-awake", systemd.AWAKE_SERVICE_NAME),
+    )
+
+
+def test_unit_states_parses_systemctl_show(monkeypatch):
+    calls = []
+    _fake_systemctl(monkeypatch, stdout=_SHOW_OUT, calls=calls)
+    states = systemd.unit_states(3.0)
+    assert [tuple(s) for s in states] == [
+        ("watchdog", "crr-revive.timer", True, True, True),
+        ("dashboard", "crr-web.service", True, False, False),
+        ("keep-awake", "crr-awake.service", False, False, False),
+    ]
+    argv, kwargs = calls[0]
+    assert argv[:3] == ["systemctl", "--user", "show"]
+    assert argv[argv.index("-p") + 1] == "Id,LoadState,UnitFileState,ActiveState"
+    for _, unit in systemd.CRR_UNITS:
+        assert unit in argv
+    assert kwargs["timeout"] == 3.0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"returncode": 1, "stdout": ""},                       # no user bus
+    {"stdout": ""},                                        # answered nothing
+    {"stdout": "Id=crr-revive.timer\nLoadState=loaded\n"},  # missing units
+    {"exc": subprocess.TimeoutExpired("systemctl", 3)},
+    {"exc": FileNotFoundError("systemctl")},
+    {"exc": PermissionError("systemctl")},
+])
+def test_unit_states_is_none_when_the_user_manager_cannot_answer(monkeypatch, kwargs):
+    _fake_systemctl(monkeypatch, **kwargs)
+    assert systemd.unit_states(3.0) is None
+
+
+def test_unit_states_is_none_without_systemctl(monkeypatch):
+    monkeypatch.setattr(systemd.shutil, "which", lambda name: None)
+    assert systemd.unit_states(3.0) is None

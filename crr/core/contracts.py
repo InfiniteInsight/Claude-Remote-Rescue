@@ -148,6 +148,13 @@ TUNNEL_PAYLOAD_CONTRACT_VERSION = 2
 # store crr could not read means some `origin` may be wrong, and a consumer
 # that cannot see that would present a guess as the truth.
 CONFIG_CONTRACT_VERSION = 1
+# `crr service status --json` (#161) — what the Windows tray's Control tab and
+# its icon read: which of crr's three systemd user units are installed,
+# enabled and running, and where the dashboard answers.
+# v1: brand new, no prior shape. `backend` and `reason` are part of the
+# contract so a host with no systemd user manager reads as "unsupported, and
+# why" rather than as three units that happen to be missing.
+SERVICE_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -750,6 +757,14 @@ TUNNEL_PAYLOAD_KEYS = (
 )
 TUNNEL_HEALTH_STATES = ("up", "down", "unknown", "none")
 
+SERVICE_PAYLOAD_KEYS = (
+    "contract", "backend", "reason", "state", "services", "dashboard_url",
+    "dashboard_login",
+)
+SERVICE_UNIT_FIELDS = ("name", "unit", "installed", "enabled", "active")
+SERVICE_BACKENDS = ("systemd", "unsupported")
+SERVICE_STATES = ("not-installed", "running", "stopped", "partial")
+
 CONFIG_PAYLOAD_KEYS = ("contract", "defaults_version", "keys", "degraded")
 CONFIG_KEY_FIELDS = ("value", "default", "origin", "type", "apply")
 # Where a value came from: the crr-owned overlay or a dashboard store
@@ -959,6 +974,28 @@ def validate_config_payload(payload: Any) -> None:
                 raise ContractError(
                     f"{what} '{field}' must be {expected}, "
                     f"got {_config_value_type_name(fields[field], fields['type'])}")
+
+
+def validate_service_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid `crr service status
+    --json` body."""
+    payload = _require_mapping(payload, "service payload")
+    _require_exact_keys(payload, SERVICE_PAYLOAD_KEYS, "service payload")
+    _require_contract(payload, SERVICE_CONTRACT_VERSION, "service")
+    _require_enum(payload["backend"], SERVICE_BACKENDS, "service 'backend'")
+    _require_type(payload["reason"], str, "service 'reason'")
+    _require_enum(payload["state"], SERVICE_STATES, "service 'state'")
+    _require_type(payload["dashboard_url"], str, "service 'dashboard_url'")
+    _require_type(payload["dashboard_login"], bool, "service 'dashboard_login'")
+    _require_type(payload["services"], list, "service 'services'")
+    for i, row in enumerate(payload["services"]):
+        what = f"service 'services'[{i}]"
+        row = _require_mapping(row, what)
+        _require_exact_keys(row, SERVICE_UNIT_FIELDS, what)
+        for field in ("name", "unit"):
+            _require_type(row[field], str, f"{what} '{field}'")
+        for field in ("installed", "enabled", "active"):
+            _require_type(row[field], bool, f"{what} '{field}'")
 
 
 # --------------------------------------------------------------------------

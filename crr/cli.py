@@ -58,6 +58,8 @@ from crr.core import harden
 from crr.core import power
 from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, holder_hold, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, tunnel, web, whoami
 from crr.core import terminal_reopen
+from crr.core import service as service_core
+from crr.core.service import UnitState
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
 from crr.core import config_overrides
@@ -757,6 +759,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "unset", help="drop a change made with `crr config set`")
     conf_unset.add_argument("key", help="a config key")
     conf.set_defaults(func=_cmd_config)
+
+    svc = sub.add_parser("service", help="report on or control crr's own background units")
+    svc_sub = svc.add_subparsers(dest="service_action", metavar="{status}")
+    svc_status = svc_sub.add_parser(
+        "status",
+        help="which of the watchdog, dashboard and keep-awake units are "
+             "installed, enabled and running",
+    )
+    svc_status.add_argument(
+        "--json", action="store_true",
+        help="print the contracted JSON payload (backend, state, per-unit flags, "
+             "dashboard URL, whether dashboard login is on)",
+    )
+    svc.set_defaults(func=_cmd_service)
 
     # Shim-facing commands (called by the shell hooks, by absolute path).
     reg = sub.add_parser("register", help="[shim] journal a shell at start")
@@ -6787,6 +6803,78 @@ def _cmd_config(args: argparse.Namespace) -> int:
     for key, fields in payload["keys"].items():
         print(f"{key} = {fields['value']!r}  ({fields['origin']})")
     return 0
+
+
+def _cmd_service(args: argparse.Namespace) -> int:
+    if getattr(args, "service_action", None) == "status":
+        return _service_status(args.json)
+    print("usage: crr service status [--json]", file=sys.stderr)
+    return 2
+
+
+def _service_status(as_json: bool) -> int:
+    """Report on crr's three units. A report, not an action: exit 0 whenever a
+    valid payload is printed, including on a host with no systemd user manager."""
+    config = _load_config()
+    units = None
+    if platform.system() != "Linux":
+        backend, reason = "unsupported", "not Linux"
+    else:
+        units = systemd.unit_states(config.get("interop_timeout_seconds"))
+        if units is None:
+            backend, reason = "unsupported", "no systemd user manager"
+        elif not any(u.installed for u in units):
+            # A Scheduled Tasks install (`crr schtasks`) lands here too.
+            backend, reason = "systemd", (
+                "crr is not installed as systemd user units; "
+                "run `crr systemd --install`")
+        else:
+            backend, reason = "systemd", ""
+    if units is None:
+        units = [UnitState(name, unit, False, False, False)
+                 for name, unit in systemd.CRR_UNITS]
+    payload = service_core.status_payload(
+        backend, reason, units,
+        f"http://127.0.0.1:{config.get('dashboard_port')}/",
+        _dashboard_login_on(state_dir.state_dir()))
+    # Validate our own output before emitting it, as `crr status --json` does.
+    contracts.validate_service_payload(payload)
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(f"backend: {backend}" + (f" ({reason})" if reason else ""))
+    for row in payload["services"]:
+        flags = ", ".join(
+            label for label, on in (("installed", row["installed"]),
+                                    ("enabled", row["enabled"]),
+                                    ("active", row["active"])) if on)
+        print(f"{row['name']:<11} {row['unit']:<18} {flags or 'not installed'}")
+    print(f"state: {payload['state']}")
+    print(f"dashboard: {payload['dashboard_url']} "
+          f"(login {'on' if payload['dashboard_login'] else 'off'})")
+    return 0
+
+
+def _dashboard_login_on(sd: Path) -> bool:
+    """Is a dashboard passphrase required? Never raises.
+
+    A corrupt auth file counts as on: the dashboard fails closed on it
+    (login required until the file is repaired), so reporting "off" would
+    tell the Control tab the opposite of what a browser sees. Either way the
+    file is named on stderr.
+    """
+    store = dashboard_auth.DashboardAuthStore(sd)
+    try:
+        if store.is_corrupt():
+            print(f"crr service: {dashboard_auth.FILENAME} is unreadable; the "
+                  "dashboard refuses logins until it is repaired or deleted",
+                  file=sys.stderr)
+            return True
+        return store.login_enabled()
+    except Exception as exc:  # a status report must not die on a bad store
+        print(f"crr service: could not read {dashboard_auth.FILENAME}: {exc}",
+              file=sys.stderr)
+        return False
 
 
 def _config_owned_overrides(config: cfg.Config, sd: Path) -> tuple[dict[str, Any], list[str]]:
