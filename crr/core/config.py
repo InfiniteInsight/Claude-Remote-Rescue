@@ -17,11 +17,14 @@ takes a plain overrides mapping so tests need no files.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import tomllib
 from pathlib import Path
 from typing import Any, Mapping
+
+from crr.core import contracts
 
 # Bump when a default value changes meaning, so a consumer pinning
 # behavior can detect the shift.
@@ -388,8 +391,7 @@ DEFAULTS: dict[str, Any] = {
 # it from a Config. Every DEFAULTS key must be listed here: a new key fails
 # tests/test_config.py::test_every_config_key_has_an_apply_rule until it gets
 # a rule, so a setting can never reach the tray with no answer.
-APPLY_KINDS = ("live", "restart-web", "restart-awake", "reinstall", "windows-installer",
-              "fixed")
+APPLY_KINDS = contracts.CONFIG_APPLY_KINDS
 
 APPLY_RULES: dict[str, str] = {
     # --- windows-installer: keys an installer bakes in ----------------------
@@ -611,3 +613,51 @@ class Config:
             else:
                 out[key] = (default, "default")
         return out
+
+
+def _type_name(default: Any) -> str:
+    # bool before int: bool is an int subclass.
+    if isinstance(default, bool):
+        return "bool"
+    if isinstance(default, int):
+        return "int"
+    if isinstance(default, float):
+        return "float"
+    if isinstance(default, list):
+        return "list"
+    return "str"
+
+
+def effective_payload(
+    config: Config, *, owned: Mapping[str, Any], degraded: bool
+) -> dict[str, Any]:
+    """The `crr config --effective --json` body (``contracts`` v1).
+
+    ``owned`` holds the values of the dashboard-owned keys that a dashboard
+    store (settings.json, exclusions.json) overrides, already resolved by the
+    caller: a key present in ``owned`` is reported with origin ``override``
+    and that value; every other key is reported as ``config`` resolves it.
+    ``degraded`` says some store could not be read, so some origin may be
+    wrong. Pure: it reads nothing.
+    """
+    unknown = set(owned) - set(DEFAULTS)
+    if unknown:
+        raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
+    keys: dict[str, dict[str, Any]] = {}
+    for key, (value, origin) in sorted(config.effective().items()):
+        if key in owned:
+            value, origin = owned[key], "override"
+        default = DEFAULTS[key]
+        keys[key] = {
+            "value": copy.deepcopy(value),
+            "default": copy.deepcopy(default),
+            "origin": origin,
+            "type": _type_name(default),
+            "apply": APPLY_RULES[key],
+        }
+    return {
+        "contract": contracts.CONFIG_CONTRACT_VERSION,
+        "defaults_version": CONFIG_DEFAULTS_VERSION,
+        "keys": keys,
+        "degraded": degraded,
+    }

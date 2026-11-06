@@ -416,3 +416,68 @@ def test_parse_config_value_refuses_bad_json_and_non_lists():
 def test_parse_config_value_refuses_an_unknown_key():
     with pytest.raises(cfg.ConfigError):
         cfg.parse_config_value("no_such_key", "1")
+
+
+# --- effective_payload: the contracted shape `crr config --effective --json` prints
+
+def _payload(config=None, owned=None, degraded=False):
+    return cfg.effective_payload(config or cfg.Config(), owned=owned or {}, degraded=degraded)
+
+
+def test_effective_payload_validates():
+    from crr.core import contracts
+    config = cfg.Config({"zombie_strikes": 7}, overlay={"power_block": "sleep"})
+    payload = _payload(config, owned={"remote_control_autokick": False})
+    contracts.validate_config_payload(payload)   # must not raise
+    assert payload["contract"] == contracts.CONFIG_CONTRACT_VERSION
+    assert payload["defaults_version"] == cfg.CONFIG_DEFAULTS_VERSION
+    assert payload["degraded"] is False
+    assert set(payload["keys"]) == set(cfg.DEFAULTS)
+    assert tuple(payload["keys"]["zombie_strikes"]) == contracts.CONFIG_KEY_FIELDS
+    assert list(payload["keys"]) == sorted(cfg.DEFAULTS)
+
+
+def test_effective_payload_reports_value_default_origin_type_and_apply():
+    config = cfg.Config({"zombie_strikes": 7, "terminal": "kitty"},
+                        overlay={"power_block": "sleep", "context_tight_fraction": 0.5})
+    keys = _payload(config)["keys"]
+    assert keys["zombie_strikes"] == {
+        "value": 7, "default": 5, "origin": "configured", "type": "int",
+        "apply": cfg.APPLY_RULES["zombie_strikes"]}
+    assert keys["power_block"] == {
+        "value": "sleep", "default": "off", "origin": "override", "type": "str",
+        "apply": "live"}
+    assert keys["close_grace_seconds"]["origin"] == "default"
+    assert keys["close_grace_seconds"]["value"] == keys["close_grace_seconds"]["default"]
+    assert keys["context_tight_fraction"]["type"] == "float"
+    assert keys["rescue_auto_open"]["type"] == "bool"      # not "int"
+    assert keys["host_allowlist_extras"]["type"] == "list"
+    assert keys["reply_tail_lines"]["apply"] == "fixed"
+    for key, fields in keys.items():
+        assert fields["apply"] == cfg.APPLY_RULES[key]
+
+
+def test_dashboard_overrides_show_as_override():
+    config = cfg.Config({"remote_control_autokick": True})
+    owned = {"remote_control_autokick": False, "tunnel_provider": "cloudflare"}
+    keys = _payload(config, owned=owned)["keys"]
+    assert keys["tunnel_provider"]["value"] == "cloudflare"
+    assert keys["tunnel_provider"]["origin"] == "override"
+    assert keys["tunnel_provider"]["default"] == "tailscale"
+    assert keys["remote_control_autokick"]["value"] is False
+    assert keys["remote_control_autokick"]["origin"] == "override"
+    assert keys["remote_control_autokick"]["default"] is True
+    # a dashboard key with nothing stored keeps the config.toml/default answer
+    assert keys["cloudflare_hostname"]["origin"] == "default"
+
+
+def test_effective_payload_does_not_alias_the_defaults():
+    keys = _payload()["keys"]
+    keys["host_allowlist_extras"]["default"].append("x")
+    keys["host_allowlist_extras"]["value"].append("y")
+    assert cfg.DEFAULTS["host_allowlist_extras"] == []
+
+
+def test_effective_payload_refuses_an_owned_value_for_an_unknown_key():
+    with pytest.raises(cfg.ConfigError):
+        _payload(owned={"no_such_key": 1})

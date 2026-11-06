@@ -737,7 +737,13 @@ def _build_parser() -> argparse.ArgumentParser:
     conf.add_argument(
         "--effective",
         action="store_true",
-        help="print every key with its value and origin (configured|default)",
+        help="print every key with its value and origin (override|configured|default)",
+    )
+    conf.add_argument(
+        "--json",
+        action="store_true",
+        help="with --effective: print the contracted JSON payload (value, default, "
+             "origin, type, apply per key)",
     )
     conf_sub = conf.add_subparsers(dest="config_action", metavar="{set,unset}")
     conf_set = conf_sub.add_parser(
@@ -6760,13 +6766,62 @@ def _cmd_config(args: argparse.Namespace) -> int:
     if action == "unset":
         return _config_change(args.key, None)
     if not args.effective:
-        print("usage: crr config --effective | set KEY VALUE | unset KEY", file=sys.stderr)
+        print("usage: crr config --effective [--json] | set KEY VALUE | unset KEY",
+              file=sys.stderr)
         return 2
+    sd = state_dir.state_dir()
     config = _load_config()
-    print(f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}")
-    for key, (value, origin) in sorted(config.effective().items()):
-        print(f"{key} = {value!r}  ({origin})")
+    owned, degraded_stores = _config_owned_overrides(config, sd)
+    payload = cfg.effective_payload(
+        config, owned=owned, degraded=bool(degraded_stores))
+    # Validate our own output before emitting it, as `crr status --json` does.
+    contracts.validate_config_payload(payload)
+    if degraded_stores:
+        # A degraded overlay is already warned about by _load_config.
+        print("crr config: could not read " + ", ".join(degraded_stores)
+              + "; some origins below may be wrong", file=sys.stderr)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(f"# defaults version: {payload['defaults_version']}")
+    for key, fields in payload["keys"].items():
+        print(f"{key} = {fields['value']!r}  ({fields['origin']})")
     return 0
+
+
+def _config_owned_overrides(config: cfg.Config, sd: Path) -> tuple[dict[str, Any], list[str]]:
+    """``(owned, unreadable)`` for ``cfg.effective_payload``.
+
+    ``owned`` maps each dashboard-owned key a dashboard store currently
+    overrides to its effective value (the stores' own notion of "not set"
+    applies: no global autokick, an empty tunnel field, an empty managed
+    exclusions list). ``unreadable`` names the store files that exist but
+    could not be read, including the crr-owned overlay.
+    """
+    owned: dict[str, Any] = {}
+    unreadable: list[str] = []
+    sstore = settings.SettingsStore(sd)
+    autokick = sstore.read_global_autokick()
+    if autokick is not None:
+        owned["remote_control_autokick"] = autokick
+    tunnel_fields = sstore.read_tunnel()
+    for field, key in (("provider", "tunnel_provider"),
+                       ("cloudflare_tunnel_name", "cloudflare_tunnel_name"),
+                       ("cloudflare_hostname", "cloudflare_hostname")):
+        value = tunnel_fields.get(field)
+        if value:
+            owned[key] = value
+    xstore = exclusions.ExclusionStore(sd)
+    managed = xstore.read()
+    if managed:
+        owned["discover_exclude_dirs"] = exclusions.effective(
+            config.get("discover_exclude_dirs"), managed)
+    for store, filename in ((ConfigOverridesStore(sd), config_overrides.FILENAME),
+                            (sstore, settings.FILENAME),
+                            (xstore, exclusions.FILENAME)):
+        if store.is_degraded():
+            unreadable.append(filename)
+    return owned, unreadable
 
 
 def main(argv: Sequence[str] | None = None) -> int:

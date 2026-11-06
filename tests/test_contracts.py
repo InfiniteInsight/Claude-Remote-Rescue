@@ -1147,3 +1147,49 @@ def test_a_v2_record_cannot_carry_the_v3_exited_reason():
     r["reason"] = "exited"
     with pytest.raises(contracts.ContractError):
         contracts.validate_archive_record(r)
+
+
+# --------------------------------------------------------------------------
+# `crr config --effective --json` payload (#161)
+# --------------------------------------------------------------------------
+
+def _config_payload():
+    return {
+        "contract": 1,
+        "defaults_version": 29,
+        "degraded": False,
+        "keys": {
+            "zombie_strikes": {"value": 7, "default": 5, "origin": "override",
+                               "type": "int", "apply": "restart-web"},
+            "host_allowlist_extras": {"value": [], "default": [], "origin": "default",
+                                      "type": "list", "apply": "restart-web"},
+        },
+    }
+
+
+def test_valid_config_payload_passes():
+    assert contracts.CONFIG_CONTRACT_VERSION == 1
+    contracts.validate_config_payload(_config_payload())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.update(contract=2),
+    lambda p: p.update(degraded="no"),
+    lambda p: p.update(defaults_version=True),
+    lambda p: p.update(extra=1),
+    lambda p: p.pop("keys"),
+    lambda p: p.update(keys=[]),
+    lambda p: p["keys"]["zombie_strikes"].update(origin="guessed"),
+    lambda p: p["keys"]["zombie_strikes"].update(type="number"),
+    lambda p: p["keys"]["zombie_strikes"].update(apply="eventually"),
+    lambda p: p["keys"]["zombie_strikes"].update(value="seven"),
+    lambda p: p["keys"]["zombie_strikes"].update(default=5.0),
+    lambda p: p["keys"]["zombie_strikes"].pop("default"),
+    lambda p: p["keys"]["zombie_strikes"].update(extra=1),
+    lambda p: p["keys"]["host_allowlist_extras"].update(value=[1]),
+])
+def test_config_payload_violations_are_rejected(mutate):
+    payload = copy.deepcopy(_config_payload())
+    mutate(payload)
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_config_payload(payload)

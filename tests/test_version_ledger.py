@@ -88,6 +88,11 @@ def test_config_overrides_store_ledger_has_no_holes():
                        contracts.CONFIG_OVERRIDES_STORE_VERSION)
 
 
+def test_config_contract_ledger_has_no_holes():
+    _assert_contiguous(_SRC / "contracts.py", "CONFIG_CONTRACT_VERSION",
+                       contracts.CONFIG_CONTRACT_VERSION)
+
+
 def test_status_docstring_version_matches_the_shipped_contract():
     """The drift that regressed: run-2 F1 fixed "contract v2" -> v3, and the
     same docstring was later found saying v4 against a shipped v8."""

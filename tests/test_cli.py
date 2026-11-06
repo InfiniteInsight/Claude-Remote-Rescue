@@ -1491,6 +1491,144 @@ def test_config_effective_still_works_without_a_subcommand(tmp_path, monkeypatch
     assert cli.main(["config"]) == 2
 
 
+def _effective_json(capsys):
+    cap = capsys.readouterr()
+    return json.loads(cap.out), cap.err
+
+
+def test_effective_json_validates_and_reports_every_key(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload, err = _effective_json(capsys)
+    contracts.validate_config_payload(payload)
+    assert payload["degraded"] is False
+    assert set(payload["keys"]) == set(cfg.DEFAULTS)
+    assert payload["keys"]["zombie_strikes"]["origin"] == "configured"   # config.toml
+    assert payload["keys"]["zombie_strikes"]["value"] == 4
+    assert payload["keys"]["close_grace_seconds"]["origin"] == "default"
+    assert err == ""
+
+
+def test_effective_json_sees_the_overlay(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload, _ = _effective_json(capsys)
+    assert payload["keys"]["zombie_strikes"]["value"] == 7
+    assert payload["keys"]["zombie_strikes"]["origin"] == "override"
+    assert payload["keys"]["zombie_strikes"]["default"] == 5
+
+
+def test_dashboard_overrides_show_as_override_in_json(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "tunnel_provider", "cloudflare"]) == 0
+    assert cli.main(["config", "set", "remote_control_autokick", "off"]) == 0
+    assert cli.main(["config", "set", "cloudflare_hostname", "crr.example.com"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload, _ = _effective_json(capsys)
+    keys = payload["keys"]
+    assert (keys["tunnel_provider"]["value"], keys["tunnel_provider"]["origin"]) == (
+        "cloudflare", "override")
+    assert (keys["remote_control_autokick"]["value"],
+            keys["remote_control_autokick"]["origin"]) == (False, "override")
+    assert (keys["cloudflare_hostname"]["value"],
+            keys["cloudflare_hostname"]["origin"]) == ("crr.example.com", "override")
+    assert keys["cloudflare_tunnel_name"]["origin"] == "default"   # nothing stored
+    assert payload["degraded"] is False
+
+
+def test_an_unset_dashboard_override_falls_back_to_the_lower_layer(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch, toml="remote_control_autokick = false\n")
+    assert cli.main(["config", "set", "remote_control_autokick", "on"]) == 0
+    assert cli.main(["config", "unset", "remote_control_autokick"]) == 0
+    assert cli.main(["config", "set", "cloudflare_hostname", "a.example.com"]) == 0
+    assert cli.main(["config", "unset", "cloudflare_hostname"]) == 0   # stores "" -> unset
+    capsys.readouterr()
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    keys = _effective_json(capsys)[0]["keys"]
+    assert (keys["remote_control_autokick"]["value"],
+            keys["remote_control_autokick"]["origin"]) == (False, "configured")
+    assert keys["cloudflare_hostname"]["origin"] == "default"
+
+
+def test_excluded_dirs_show_the_merged_list_and_override_origin(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch, toml='discover_exclude_dirs = ["from-toml"]\n')
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    key = _effective_json(capsys)[0]["keys"]["discover_exclude_dirs"]
+    assert (key["value"], key["origin"]) == (["from-toml"], "configured")
+    assert cli.main(["config", "set", "discover_exclude_dirs", '["x", "from-toml"]']) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    key = _effective_json(capsys)[0]["keys"]["discover_exclude_dirs"]
+    assert key["value"] == ["from-toml", "x"]          # exclusions.effective(), de-duplicated
+    assert key["origin"] == "override"
+    assert key["default"] == [".claude-mem"]
+
+
+def test_effective_json_reports_a_degraded_overlay(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    (sd / "config_overrides.json").write_bytes(b"{not json")
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload, err = _effective_json(capsys)
+    contracts.validate_config_payload(payload)
+    assert payload["degraded"] is True
+    assert payload["keys"]["zombie_strikes"]["origin"] == "configured"   # toml + defaults
+    assert "Traceback" not in err
+
+
+def test_effective_json_reports_a_degraded_settings_store(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    (sd / "settings.json").write_bytes(b"{not json")
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload, err = _effective_json(capsys)
+    contracts.validate_config_payload(payload)
+    assert payload["degraded"] is True
+    assert "settings.json" in err
+    assert "Traceback" not in err
+
+
+def test_effective_json_reports_degraded_exclusions(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    (sd / "exclusions.json").write_bytes(b"{not json")
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload, err = _effective_json(capsys)
+    contracts.validate_config_payload(payload)
+    assert payload["degraded"] is True
+    assert "exclusions.json" in err
+    assert "Traceback" not in err
+
+
+def test_effective_text_shows_override_origins(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    assert cli.main(["config", "set", "power_block", "sleep"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--effective"]) == 0
+    out = capsys.readouterr().out
+    assert "zombie_strikes = 7  (override)" in out
+    assert "power_block = 'sleep'  (override)" in out
+    assert "dashboard_port = 8123  (configured)" in out
+    assert "close_grace_seconds = 5  (default)" in out
+
+
+def test_effective_text_shows_dashboard_owned_overrides(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch, toml='discover_exclude_dirs = ["from-toml"]\n')
+    assert cli.main(["config", "set", "discover_exclude_dirs", '["x"]']) == 0
+    assert cli.main(["config", "set", "tunnel_provider", "none"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--effective"]) == 0
+    out = capsys.readouterr().out
+    assert "discover_exclude_dirs = ['from-toml', 'x']  (override)" in out
+    assert "tunnel_provider = 'none'  (override)" in out
+
+
+def test_effective_json_without_effective_is_a_usage_error(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "--json"]) == 2
+
+
 def _live_entry(pid, boot_id):
     return {
         "v": contracts.JOURNAL_SCHEMA_VERSION,

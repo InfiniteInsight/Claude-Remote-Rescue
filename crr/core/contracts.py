@@ -141,6 +141,13 @@ MACHINES_CONTRACT_VERSION = 1
 # page seeds the CF fields from the OVERRIDE only, so effective values and
 # override values must travel as distinct answers.
 TUNNEL_PAYLOAD_CONTRACT_VERSION = 2
+# `crr config --effective --json` (#161) — what the Windows tray's Settings tab
+# lists: every setting with its effective value, its default, where the value
+# came from, its type, and how a change takes effect.
+# v1: brand new, no prior shape. `degraded` is part of the contract because a
+# store crr could not read means some `origin` may be wrong, and a consumer
+# that cannot see that would present a guess as the truth.
+CONFIG_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -743,6 +750,18 @@ TUNNEL_PAYLOAD_KEYS = (
 )
 TUNNEL_HEALTH_STATES = ("up", "down", "unknown", "none")
 
+CONFIG_PAYLOAD_KEYS = ("contract", "defaults_version", "keys", "degraded")
+CONFIG_KEY_FIELDS = ("value", "default", "origin", "type", "apply")
+# Where a value came from: the crr-owned overlay or a dashboard store
+# (override), the user's config.toml (configured), or the built-in (default).
+CONFIG_ORIGINS = ("default", "configured", "override")
+CONFIG_VALUE_TYPES = ("bool", "int", "float", "str", "list")
+# How a changed setting takes effect; crr.core.config.APPLY_RULES documents
+# each kind. Lives here (not in config.py) so the validator can check it
+# without contracts importing config.
+CONFIG_APPLY_KINDS = ("live", "restart-web", "restart-awake", "reinstall",
+                      "windows-installer", "fixed")
+
 
 def _require_contract(payload: Mapping[str, Any], expected: int, what: str) -> None:
     got = payload["contract"]
@@ -890,6 +909,47 @@ def validate_tunnel_payload(payload: Any) -> None:
             _require_type(payload[nullable], str, f"/api/tunnel '{nullable}'")
     if payload["url"] is not None:
         _require_type(payload["url"], str, "/api/tunnel 'url'")
+
+
+# --------------------------------------------------------------------------
+# `crr config --effective --json` payload.
+# --------------------------------------------------------------------------
+
+def _config_value_matches(value: Any, type_name: str) -> bool:
+    if type_name == "bool":
+        return isinstance(value, bool)
+    if type_name == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "float":
+        return isinstance(value, float)
+    if type_name == "str":
+        return isinstance(value, str)
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
+def validate_config_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid `crr config
+    --effective --json` body. Each key's ``value`` and ``default`` must have
+    the key's declared ``type``, so a consumer can render the row from the
+    payload alone."""
+    payload = _require_mapping(payload, "config payload")
+    _require_exact_keys(payload, CONFIG_PAYLOAD_KEYS, "config payload")
+    _require_contract(payload, CONFIG_CONTRACT_VERSION, "config")
+    _require_type(payload["defaults_version"], int, "config 'defaults_version'")
+    _require_type(payload["degraded"], bool, "config 'degraded'")
+    keys = _require_mapping(payload["keys"], "config 'keys'")
+    for name, fields in keys.items():
+        what = f"config key '{name}'"
+        fields = _require_mapping(fields, what)
+        _require_exact_keys(fields, CONFIG_KEY_FIELDS, what)
+        _require_enum(fields["origin"], CONFIG_ORIGINS, f"{what} 'origin'")
+        _require_enum(fields["type"], CONFIG_VALUE_TYPES, f"{what} 'type'")
+        _require_enum(fields["apply"], CONFIG_APPLY_KINDS, f"{what} 'apply'")
+        for field in ("value", "default"):
+            if not _config_value_matches(fields[field], fields["type"]):
+                raise ContractError(
+                    f"{what} '{field}' must be {fields['type']}, "
+                    f"got {type(fields[field]).__name__}")
 
 
 # --------------------------------------------------------------------------
