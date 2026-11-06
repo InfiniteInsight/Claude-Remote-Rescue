@@ -18,7 +18,7 @@
  * pure `trayMenuSpec`; this file only turns that into Electron objects.
  */
 import { Menu, Tray } from 'electron';
-import { trayMenuSpec, type MenuItemId } from './appLifecycle.js';
+import { menuSignature, trayMenuSpec, type MenuItemId } from './appLifecycle.js';
 import type { PollState, TrayIcon } from './poll.js';
 
 /** What the tray can ask the app to do. */
@@ -65,6 +65,11 @@ export function createTray(opts: TrayOptions): TrayHandle {
   let shownIcon: TrayIcon = initial.icon;
   const tray = new Tray(opts.image(shownIcon));
   let last: { state: PollState; busy: boolean } = { state: initial, busy: false };
+  // What the tray currently shows. The menu and tooltip are touched only when
+  // these change: on Windows, setContextMenu while the menu is open can close
+  // it under the user's cursor, and a poll lands every few seconds.
+  let shownSignature: string | undefined;
+  let shownTooltip: string | undefined;
 
   const click: Record<Exclude<MenuItemId, 'status' | 'loginItem'>, () => void> = {
     open: () => opts.host.show(),
@@ -81,6 +86,13 @@ export function createTray(opts: TrayOptions): TrayHandle {
       loginItemEnabled: opts.loginItem?.get() ?? false,
       busy,
     });
+    if (state.statusLine !== shownTooltip) {
+      shownTooltip = state.statusLine;
+      tray.setToolTip(state.statusLine);
+    }
+    const signature = menuSignature(items);
+    if (signature === shownSignature) return;
+    shownSignature = signature;
     const template: Electron.MenuItemConstructorOptions[] = items.map((item) => {
       if (item.id === 'status') {
         return { label: item.label, enabled: false };
@@ -95,7 +107,11 @@ export function createTray(opts: TrayOptions): TrayHandle {
           click: (menuItem) => {
             control?.set(menuItem.checked);
             // Reflect what the OS actually holds now, in case the write was
-            // refused (group policy, non-writable Run key).
+            // refused (group policy, non-writable Run key). Electron has
+            // already flipped the checkbox, so force a rebuild even when the
+            // OS state (and so the signature) is unchanged. The menu closed
+            // on this click, so rebuilding it is safe.
+            shownSignature = undefined;
             render();
           },
         };
@@ -106,7 +122,6 @@ export function createTray(opts: TrayOptions): TrayHandle {
         click: click[item.id],
       };
     });
-    tray.setToolTip(state.statusLine);
     tray.setContextMenu(Menu.buildFromTemplate(template));
   };
 

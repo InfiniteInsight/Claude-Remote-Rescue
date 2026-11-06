@@ -147,3 +147,15 @@ export function trayMenuSpec(opts: {
   items.push({ id: 'quit', label: TRAY_LABELS.quit, enabled: true });
   return items;
 }
+
+/**
+ * A stable string of everything visible in the menu: each item's id, label,
+ * enabled and checked. The tray rebuilds the context menu only when this
+ * changes, because on Windows `setContextMenu` while the menu is open can close
+ * it under the user's cursor, and a poll lands every few seconds.
+ */
+export function menuSignature(items: ReturnType<typeof trayMenuSpec>): string {
+  return JSON.stringify(
+    items.map((i) => [i.id, i.label, i.enabled, i.checked ?? null]),
+  );
+}

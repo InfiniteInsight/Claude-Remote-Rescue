@@ -13,6 +13,7 @@ import {
   shouldHideInsteadOfClose,
   shouldQuitOnWindowClosed,
   TRAY_LABELS,
+  menuSignature,
   trayMenuSpec,
   type MenuItemId,
 } from './appLifecycle.js';
@@ -260,5 +261,38 @@ describe('trayMenuSpec', () => {
 
   it('reflects the OS state in the login checkbox', () => {
     expect(item(spec(RUNNING, { loginItemEnabled: false }), 'loginItem')?.checked).toBe(false);
+  });
+});
+
+describe('menuSignature', () => {
+  it('test_menu_signature_stable_for_equal_specs', () => {
+    expect(menuSignature(spec(RUNNING))).toBe(menuSignature(spec(RUNNING)));
+    // A different but equal-looking state object gives the same signature.
+    const copy: PollState = JSON.parse(JSON.stringify(RUNNING));
+    expect(menuSignature(spec(copy))).toBe(menuSignature(spec(RUNNING)));
+  });
+
+  it('test_menu_signature_changes_with_label_or_enablement', () => {
+    const sigs = new Set([
+      menuSignature(spec(RUNNING)),
+      menuSignature(spec(STOPPED)), // Stop CRR vs Start CRR, dashboard disabled
+      menuSignature(spec(RUNNING, { busy: true })), // startStop disabled
+    ]);
+    expect(sigs.size).toBe(3);
+  });
+
+  it('changes with the status line and the login checkbox', () => {
+    expect(menuSignature(spec({ ...RUNNING, statusLine: 'other' }))).not.toBe(
+      menuSignature(spec(RUNNING)),
+    );
+    expect(menuSignature(spec(RUNNING, { loginItemEnabled: true }))).not.toBe(
+      menuSignature(spec(RUNNING, { loginItemEnabled: false })),
+    );
+  });
+
+  it('does not run fields together into a false match', () => {
+    const a = menuSignature([{ id: 'open', label: 'a|b', enabled: true }]);
+    const b = menuSignature([{ id: 'open', label: 'a', enabled: true }]);
+    expect(a).not.toBe(b);
   });
 });
