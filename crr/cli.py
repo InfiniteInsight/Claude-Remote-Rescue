@@ -733,12 +733,23 @@ def _build_parser() -> argparse.ArgumentParser:
     rec.add_argument("query", help="case-insensitive substring to search for")
     rec.set_defaults(func=_cmd_recall)
 
-    conf = sub.add_parser("config", help="inspect configuration")
+    conf = sub.add_parser("config", help="inspect or change configuration")
     conf.add_argument(
         "--effective",
         action="store_true",
         help="print every key with its value and origin (configured|default)",
     )
+    conf_sub = conf.add_subparsers(dest="config_action", metavar="{set,unset}")
+    conf_set = conf_sub.add_parser(
+        "set",
+        help="change a setting (stored in a crr-owned file, never config.toml)",
+    )
+    conf_set.add_argument("key", help="a config key (see `crr config --effective`)")
+    conf_set.add_argument(
+        "value", help="the new value; a list key takes JSON, e.g. '[\"a\", \"b\"]'")
+    conf_unset = conf_sub.add_parser(
+        "unset", help="drop a change made with `crr config set`")
+    conf_unset.add_argument("key", help="a config key")
     conf.set_defaults(func=_cmd_config)
 
     # Shim-facing commands (called by the shell hooks, by absolute path).
@@ -6639,9 +6650,114 @@ def _cmd_holder(args: argparse.Namespace) -> int:
     return rc
 
 
+# What to tell the user to run so a changed setting takes effect, by apply
+# kind (cfg.APPLY_RULES). "live" needs nothing. The stderr hint is a note, not
+# an action: `crr config set` never restarts anything itself.
+_APPLY_COMMANDS = {
+    "restart-web": "systemctl --user restart crr-web",
+    "restart-awake": "systemctl --user restart crr-awake",
+    "reinstall": "crr systemd --install",
+}
+
+
+def _apply_command(key: str, kind: str) -> str | None:
+    """The command that makes ``key``'s new value take effect, or None."""
+    if kind == "windows-installer":
+        # harden_* are written to the Windows policy by `crr harden --apply`;
+        # boot_* are baked into the tasks by the reachable-at-boot install.
+        return "crr harden --apply" if key.startswith("harden_") else \
+            "crr reachable-at-boot --install"
+    return _APPLY_COMMANDS.get(kind)
+
+
+def _display_value(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _config_store_unreadable(store_path: Path) -> int:
+    print(f"crr config: {store_path} cannot be read; fix or remove it before "
+          "changing settings", file=sys.stderr)
+    return 1
+
+
+def _config_change(key: str, text: str | None) -> int:
+    """``crr config set KEY TEXT`` (``text`` given) or ``unset KEY`` (None).
+
+    Writes only crr-owned stores, each under ``mutation_lock``: the overlay
+    (``config_overrides.json``) for most keys, and for the five keys the
+    dashboard already owns, the dashboard's own store. ``config.toml`` is the
+    user's hand-owned file and is never touched. Exit 2 for an unknown key, an
+    invalid value or a key crr never reads from settings; exit 1 when a store
+    crr would write is unreadable (refusing beats overwriting it).
+    """
+    verb = "set" if text is not None else "unset"
+    try:
+        if key not in cfg.DEFAULTS:
+            raise cfg.ConfigError(f"unknown config key(s): {[key]}")
+        kind = cfg.APPLY_RULES[key]
+        if kind == "fixed":
+            raise cfg.ConfigError(
+                f"config '{key}' is a built-in prior that crr does not read from "
+                "settings; it cannot be changed")
+        value = cfg.parse_config_value(key, text) if text is not None else None
+        sd = state_dir.state_dir()
+        changed = True
+        with mutation_lock(sd):
+            if key in config_overrides.OWNED_ELSEWHERE:
+                if key == "discover_exclude_dirs":
+                    exclusions.ExclusionStore(sd).write(value if verb == "set" else [])
+                else:
+                    sstore = settings.SettingsStore(sd)
+                    if sstore.is_degraded():
+                        return _config_store_unreadable(sd / settings.FILENAME)
+                    if key == "remote_control_autokick":
+                        sstore.write_global_autokick(value)
+                    else:
+                        field = "provider" if key == "tunnel_provider" else key
+                        fields = sstore.read_tunnel()
+                        if verb == "unset":
+                            fields[field] = None
+                        elif field == "provider":
+                            fields[field] = value
+                        else:
+                            # "" is how the dashboard says "no override"
+                            fields[field] = value or None
+                        sstore.write_tunnel(**fields)
+            else:
+                ostore = ConfigOverridesStore(sd)
+                if ostore.is_degraded():
+                    return _config_store_unreadable(sd / config_overrides.FILENAME)
+                if verb == "set":
+                    ostore.set(key, value)
+                else:
+                    changed = ostore.unset(key)
+    except (cfg.ConfigError, settings.SettingsError, exclusions.ExclusionError) as exc:
+        print(f"crr config: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"crr config: could not write the setting: {exc}", file=sys.stderr)
+        return 1
+    if not changed:
+        print(f"{key} was not overridden; nothing to unset")
+        return 0
+    if verb == "set":
+        print(f"set {key} = {_display_value(value)} (takes effect: {kind})")
+    else:
+        print(f"unset {key} (takes effect: {kind})")
+    command = _apply_command(key, kind)
+    if command:
+        print(f"crr config: run `{command}` for this to take effect", file=sys.stderr)
+    return 0
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
+    action = getattr(args, "config_action", None)
+    if action == "set":
+        return _config_change(args.key, args.value)
+    if action == "unset":
+        return _config_change(args.key, None)
     if not args.effective:
-        print("usage: crr config --effective", file=sys.stderr)
+        print("usage: crr config --effective | set KEY VALUE | unset KEY", file=sys.stderr)
         return 2
     config = _load_config()
     print(f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}")

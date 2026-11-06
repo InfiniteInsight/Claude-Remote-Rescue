@@ -350,3 +350,69 @@ def test_known_apply_rules():
     assert cfg.APPLY_RULES["harden_restart_lookback_days"] == "live"
     # An import-time injectable prior: crr reads no Config for it.
     assert cfg.APPLY_RULES["reply_tail_lines"] == "fixed"
+    # The five dashboard-owned keys: `crr config set` routes them to the
+    # dashboard's own stores (settings.json, exclusions.json), which the
+    # watchdog, poll and discovery re-read on every pass, not to config.toml.
+    assert cfg.APPLY_RULES["remote_control_autokick"] == "live"
+    assert cfg.APPLY_RULES["tunnel_provider"] == "live"
+    assert cfg.APPLY_RULES["discover_exclude_dirs"] == "live"
+
+
+@pytest.mark.parametrize("text", ["False", "off", "NO", "0"])
+def test_parse_config_value_bools_false(text):
+    assert cfg.parse_config_value("rescue_auto_open", text) is False
+
+
+@pytest.mark.parametrize("text", ["True", "on", "Yes", "1"])
+def test_parse_config_value_bools_true(text):
+    assert cfg.parse_config_value("rescue_auto_open", text) is True
+
+
+def test_parse_config_value_bools():
+    assert cfg.parse_config_value("remote_control_autokick", "False") is False
+    assert cfg.parse_config_value("remote_control_autokick", "off") is False
+    assert cfg.parse_config_value("remote_control_autokick", "1") is True
+
+
+def test_parse_config_value_refuses_a_word_for_a_bool():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("rescue_auto_open", "maybe")
+
+
+def test_parse_config_value_int_float_str_list():
+    assert cfg.parse_config_value("zombie_strikes", "7") == 7
+    assert cfg.parse_config_value("context_tight_fraction", "0.5") == 0.5
+    assert cfg.parse_config_value("terminal", " wt ") == " wt "
+    assert cfg.parse_config_value("host_allowlist_extras", '["a.example", "b"]') == [
+        "a.example", "b"]
+
+
+def test_parse_config_value_refuses_a_float_for_an_int():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("zombie_strikes", "5.0")
+
+
+def test_parse_config_value_refuses_text_for_an_int_or_float():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("zombie_strikes", "many")
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("context_tight_fraction", "high")
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("context_tight_fraction", "nan")
+
+
+def test_parse_config_value_refuses_a_list_with_a_number():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("host_allowlist_extras", '["a", 1]')
+
+
+def test_parse_config_value_refuses_bad_json_and_non_lists():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("host_allowlist_extras", "a, b")
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("host_allowlist_extras", '"a"')
+
+
+def test_parse_config_value_refuses_an_unknown_key():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("no_such_key", "1")

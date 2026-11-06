@@ -1268,6 +1268,216 @@ def test_config_effective_prints_defaults_version_header(capsys):
     assert lines[0] == f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}"
 
 
+_COMMENTED_TOML = (
+    "# my hand-written config -- crr must never rewrite this\n"
+    "zombie_strikes = 4   # tuned after the 2026 outage\n"
+    "\n"
+    "dashboard_port = 8123\n"
+    "# trailing comment\n"
+)
+
+
+def _config_sd(tmp_path, monkeypatch, toml=_COMMENTED_TOML):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    if toml is not None:
+        (tmp_path / "config.toml").write_text(toml, encoding="utf-8")
+    return tmp_path
+
+
+def test_set_writes_the_overlay(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    rc = cli.main(["config", "set", "zombie_strikes", "7"])
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "set zombie_strikes = 7 (takes effect: restart-web)" in cap.out
+    assert json.loads((sd / "config_overrides.json").read_text())["values"] == {
+        "zombie_strikes": 7}
+    assert cli._load_config().get("zombie_strikes") == 7
+
+
+def test_set_never_touches_config_toml(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    before = (sd / "config.toml").read_bytes()
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    assert cli.main(["config", "set", "discover_exclude_dirs", '["x"]']) == 0
+    assert cli.main(["config", "set", "remote_control_autokick", "off"]) == 0
+    assert (sd / "config.toml").read_bytes() == before
+    assert cli.main(["config", "unset", "zombie_strikes"]) == 0
+    assert cli.main(["config", "unset", "discover_exclude_dirs"]) == 0
+    assert cli.main(["config", "unset", "remote_control_autokick"]) == 0
+    assert (sd / "config.toml").read_bytes() == before
+
+
+def test_set_routes_autokick_to_the_dashboard_store(tmp_path, monkeypatch, capsys):
+    from crr.core import settings
+    sd = _config_sd(tmp_path, monkeypatch)
+    store = settings.SettingsStore(sd)
+    sid = "cccccccc-3333-4333-8333-333333333333"
+    store.write_session_autokick(sid, False)
+    assert cli.main(["config", "set", "remote_control_autokick", "False"]) == 0
+    assert "(takes effect: live)" in capsys.readouterr().out
+    assert store.read_global_autokick() is False
+    assert store.read_session_overrides() == {sid: False}   # carried forward
+    assert not (sd / "config_overrides.json").exists()
+    assert cli.main(["config", "unset", "remote_control_autokick"]) == 0
+    assert store.read_global_autokick() is None
+    assert store.read_session_overrides() == {sid: False}
+
+
+def test_set_routes_one_tunnel_field_and_keeps_the_others(tmp_path, monkeypatch, capsys):
+    from crr.core import settings
+    sd = _config_sd(tmp_path, monkeypatch)
+    store = settings.SettingsStore(sd)
+    store.write_tunnel(provider="cloudflare", cloudflare_tunnel_name="mine")
+    assert cli.main(["config", "set", "cloudflare_hostname", "crr.example.com"]) == 0
+    assert store.read_tunnel() == {
+        "provider": "cloudflare",
+        "cloudflare_tunnel_name": "mine",
+        "cloudflare_hostname": "crr.example.com",
+    }
+    assert cli.main(["config", "set", "tunnel_provider", "none"]) == 0
+    assert store.read_tunnel()["provider"] == "none"
+    assert store.read_tunnel()["cloudflare_hostname"] == "crr.example.com"
+    assert cli.main(["config", "unset", "cloudflare_tunnel_name"]) == 0
+    assert store.read_tunnel() == {
+        "provider": "none",
+        "cloudflare_tunnel_name": None,
+        "cloudflare_hostname": "crr.example.com",
+    }
+    assert not (sd / "config_overrides.json").exists()
+
+
+def test_set_refuses_an_unknown_tunnel_provider(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    rc = cli.main(["config", "set", "tunnel_provider", "carrier-pigeon"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "carrier-pigeon" in err
+    assert "Traceback" not in err
+
+
+def test_set_routes_exclusions_to_their_store(tmp_path, monkeypatch, capsys):
+    from crr.core import exclusions
+    sd = _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "discover_exclude_dirs", '["a", "b"]']) == 0
+    assert exclusions.ExclusionStore(sd).read() == ["a", "b"]
+    assert not (sd / "config_overrides.json").exists()
+    assert cli.main(["config", "unset", "discover_exclude_dirs"]) == 0
+    assert exclusions.ExclusionStore(sd).read() == []
+
+
+def test_unset_removes_the_override(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "unset", "zombie_strikes"]) == 0
+    assert "unset zombie_strikes" in capsys.readouterr().out
+    assert cli._load_config().get("zombie_strikes") == 4     # config.toml again
+    assert cli._load_config().effective()["zombie_strikes"] == (4, "configured")
+
+
+def test_unset_of_a_key_never_set_is_a_noop(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "unset", "zombie_strikes"]) == 0
+    assert "not overridden" in capsys.readouterr().out
+    assert not (sd / "config_overrides.json").exists()
+
+
+def test_set_unknown_key_exits_2(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "no_such_key", "1"]) == 2
+    assert "no_such_key" in capsys.readouterr().err
+    assert cli.main(["config", "unset", "no_such_key"]) == 2
+
+
+def test_set_bad_value_exits_2_with_a_message(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    for key, value in (("zombie_strikes", "5.0"), ("zombie_strikes", "many"),
+                       ("host_allowlist_extras", '["a", 1]'),
+                       ("rescue_auto_open", "maybe")):
+        assert cli.main(["config", "set", key, value]) == 2
+        err = capsys.readouterr().err
+        assert key in err
+        assert "Traceback" not in err
+    assert not (sd / "config_overrides.json").exists()
+
+
+def test_set_refuses_a_fixed_key(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    for action in (["set", "reply_tail_lines", "10"], ["unset", "reply_tail_lines"]):
+        assert cli.main(["config", *action]) == 2
+        err = capsys.readouterr().err
+        assert "reply_tail_lines" in err
+        assert "built-in prior" in err
+        assert "Traceback" not in err
+    assert not (sd / "config_overrides.json").exists()
+
+
+def test_set_refuses_when_the_overlay_is_unreadable(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    overlay = sd / "config_overrides.json"
+    overlay.write_bytes(b"{not json")
+    for action in (["set", "zombie_strikes", "7"], ["unset", "zombie_strikes"]):
+        assert cli.main(["config", *action]) == 1
+        err = capsys.readouterr().err
+        assert "config_overrides.json" in err
+        assert "Traceback" not in err
+    assert overlay.read_bytes() == b"{not json"
+
+
+def test_set_refuses_when_the_settings_store_is_unreadable(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    settings_file = sd / "settings.json"
+    settings_file.write_bytes(b"{not json")
+    for action in (["set", "remote_control_autokick", "off"],
+                   ["set", "tunnel_provider", "none"],
+                   ["unset", "cloudflare_hostname"]):
+        assert cli.main(["config", *action]) == 1
+        err = capsys.readouterr().err
+        assert "settings.json" in err
+        assert "Traceback" not in err
+    assert settings_file.read_bytes() == b"{not json"
+
+
+def test_set_names_the_restart_for_a_web_key(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    cap = capsys.readouterr()
+    assert "(takes effect: restart-web)" in cap.out
+    assert "systemctl --user restart crr-web" in cap.err
+
+
+def test_set_names_the_command_for_each_apply_kind(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "power_block_max_hours", "5"]) == 0
+    assert "systemctl --user restart crr-awake" in capsys.readouterr().err
+    assert cli.main(["config", "set", "dashboard_port", "9000"]) == 0
+    assert "crr systemd --install" in capsys.readouterr().err
+    assert cli.main(["config", "set", "power_block", "off"]) == 0
+    cap = capsys.readouterr()
+    assert "(takes effect: live)" in cap.out
+    assert cap.err == ""
+
+
+def test_set_names_the_installer_for_a_windows_installer_key(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "harden_active_hours_start", "9"]) == 0
+    cap = capsys.readouterr()
+    assert "(takes effect: windows-installer)" in cap.out
+    assert "crr harden --apply" in cap.err
+    assert cli.main(["config", "set", "boot_holder_rearm_minutes", "2"]) == 0
+    assert "crr reachable-at-boot --install" in capsys.readouterr().err
+
+
+def test_config_effective_still_works_without_a_subcommand(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--effective"]) == 0
+    assert "zombie_strikes = 7  (override)" in capsys.readouterr().out
+    assert cli.main(["config"]) == 2
+
+
 def _live_entry(pid, boot_id):
     return {
         "v": contracts.JOURNAL_SCHEMA_VERSION,

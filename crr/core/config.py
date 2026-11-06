@@ -17,6 +17,8 @@ takes a plain overrides mapping so tests need no files.
 
 from __future__ import annotations
 
+import json
+import math
 import tomllib
 from pathlib import Path
 from typing import Any, Mapping
@@ -416,9 +418,6 @@ APPLY_RULES: dict[str, str] = {
     "version_check_seconds": "restart-web",
     "last_prompt_display_cap": "restart-web",
     "host_allowlist_extras": "restart-web",
-    "tunnel_provider": "restart-web",
-    "cloudflare_tunnel_name": "restart-web",
-    "cloudflare_hostname": "restart-web",
     "terminal": "restart-web",
     "wt_profile": "restart-web",
     "confirm_arm_seconds": "restart-web",
@@ -437,16 +436,26 @@ APPLY_RULES: dict[str, str] = {
     "recall_per_session_cap": "restart-web",
     "recall_snippet_cap": "restart-web",
     "recall_scan_byte_budget": "restart-web",
-    "discover_exclude_dirs": "restart-web",
     "takeover_idle_seconds": "restart-web",
     "takeover_poll_seconds": "restart-web",
     "remote_control_watch": "restart-web",
-    "remote_control_autokick": "restart-web",
     "launcher_tag": "restart-web",
     "reauth_success_display_ms": "restart-web",
     "claude_auth_probe_timeout_seconds": "restart-web",
     "dashboard_session_hours": "restart-web",
     # --- live: every reader loads config afresh ------------------------------
+    # The five dashboard-owned keys. These rules describe a change made through
+    # `crr config set`, which routes them to the dashboard's own stores
+    # (settings.json, exclusions.json) and not to config.toml. Every reader
+    # re-reads those stores on each call (watchdog pass, dashboard poll or
+    # request, discovery, recall, tunnel command), so no restart is needed. The
+    # config.toml baseline of the same keys is read once by `crr web`, but
+    # `crr config set` never writes it.
+    "remote_control_autokick": "live",
+    "tunnel_provider": "live",
+    "cloudflare_tunnel_name": "live",
+    "cloudflare_hostname": "live",
+    "discover_exclude_dirs": "live",
     "host_death_max_revivals": "live",
     "host_death_stable_seconds": "live",
     "archive_retention_days": "live",
@@ -505,6 +514,58 @@ def check_value(key: str, value: Any) -> None:
         raise ConfigError(
             f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
         )
+
+
+_BOOL_WORDS = {
+    "true": True, "yes": True, "on": True, "1": True,
+    "false": False, "no": False, "off": False, "0": False,
+}
+
+
+def parse_config_value(key: str, text: str) -> Any:
+    """Turn the text a person typed into a value of ``key``'s type, or raise
+    ``ConfigError``.
+
+    bool: ``true|false|yes|no|on|off|1|0`` in any case. int: ``int(text)``
+    (``5.0`` is refused, not truncated). float: ``float(text)`` (``nan`` and
+    ``inf`` are refused). str: as given. list: JSON, a list of strings.
+    The result has passed ``check_value``.
+    """
+    if key not in DEFAULTS:
+        raise ConfigError(f"unknown config key(s): {[key]}")
+    default = DEFAULTS[key]
+    value: Any
+    if isinstance(default, bool):
+        word = text.strip().lower()
+        if word not in _BOOL_WORDS:
+            raise ConfigError(
+                f"config '{key}' must be true or false (yes/no, on/off, 1/0), got {text!r}")
+        value = _BOOL_WORDS[word]
+    elif isinstance(default, int):
+        try:
+            value = int(text)
+        except ValueError:
+            raise ConfigError(f"config '{key}' must be a whole number, got {text!r}") from None
+    elif isinstance(default, float):
+        try:
+            value = float(text)
+        except ValueError:
+            raise ConfigError(f"config '{key}' must be a number, got {text!r}") from None
+        if not math.isfinite(value):
+            raise ConfigError(f"config '{key}' must be a finite number, got {text!r}")
+    elif isinstance(default, list):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            raise ConfigError(
+                f"config '{key}' must be a JSON list of strings, e.g. [\"a\", \"b\"], "
+                f"got {text!r}") from None
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"config '{key}' must be a JSON list of strings, got {text!r}")
+    else:
+        value = text
+    check_value(key, value)
+    return value
 
 
 def _checked(layer: Mapping[str, Any] | None) -> dict[str, Any]:

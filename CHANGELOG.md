@@ -121,6 +121,15 @@ No tag or release has been cut yet. This section describes everything on
   diagnostics error display cap, previously hardcoded in `page.html`
   (`PAGE_VERSION` 13 → 14) — plus `model_tail_lines` (200), the
   transcript model-search tail window.
+- `crr config set KEY VALUE` and `crr config unset KEY` — change a setting
+  without editing `config.toml`, which crr never writes. Most keys go to a
+  crr-owned `config_overrides.json` layered over `config.toml`; the five the
+  dashboard already owns (`remote_control_autokick`, the three tunnel keys
+  and `discover_exclude_dirs`) go to the dashboard's own stores. The value
+  is validated (`False`/`off`/`1` parse as bools, `5.0` is refused for an
+  int, a list key takes JSON) and each change prints how it takes effect
+  (`live`, `restart-web`, ...) with the command to run. A key crr never
+  reads from settings, or an unreadable store, is refused.
 
 ### Changed
 
