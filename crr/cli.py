@@ -30,6 +30,7 @@ import tempfile
 import threading
 import textwrap
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,8 +59,12 @@ from crr.core import harden
 from crr.core import power
 from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, dashboard_auth, discovery, exclusions, holder_hold, ops, ports, qr, reachability, rescue, resume, reviver, settings, status, tab_health, takeover, tailnet, transcript, tunnel, web, whoami
 from crr.core import terminal_reopen
+from crr.core import service as service_core
+from crr.core.service import UnitState
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
+from crr.core import config_overrides
+from crr.core.config_overrides import ConfigOverridesStore
 from crr.core.flags import FlagStore
 from crr.core import journal
 from crr.core.journal import JournalStore, new_entry, write_json_atomic
@@ -81,18 +86,43 @@ def _git_short() -> str:
         return ""
 
 
-def _load_config() -> cfg.Config:
-    """Load config.toml (co-located in the crr state dir) over the defaults.
+# Corrupt-overlay warnings already printed by this process, by path:
+# _load_config() runs many times per process and the warning is once.
+_OVERLAY_WARNED: set[Path] = set()
 
-    A malformed config warns on stderr and falls back to defaults rather
-    than breaking every command (including the shim hot path).
+
+def _load_config() -> cfg.Config:
+    """Load config.toml (co-located in the crr state dir) over the defaults,
+    with the crr-owned ``config_overrides.json`` overlay on top of both.
+
+    A malformed config.toml or overlay warns on stderr and falls back
+    (to the defaults, or to config.toml plus the defaults) rather than
+    breaking every command (including the shim hot path). The overlay
+    warning is printed once per process.
     """
-    toml_path = state_dir.state_dir() / "config.toml"
+    return _load_config_noting_toml()[0]
+
+
+def _load_config_noting_toml() -> tuple[cfg.Config, bool]:
+    """``_load_config()``, plus whether config.toml was set aside as bad.
+
+    One bad entry makes the whole file fall back to the defaults, so a caller
+    that reports origins (``crr config --effective``) must be able to say so.
+    """
+    sd = state_dir.state_dir()
+    toml_path = sd / "config.toml"
+    store = ConfigOverridesStore(sd)
+    overlay = store.read()
+    overlay_path = sd / config_overrides.FILENAME
+    if store.is_degraded() and overlay_path not in _OVERLAY_WARNED:
+        _OVERLAY_WARNED.add(overlay_path)
+        print(f"crr: ignoring unreadable {overlay_path}; using config.toml and defaults",
+              file=sys.stderr)
     try:
-        return cfg.Config(cfg.load_toml_overrides(toml_path))
+        return cfg.Config(cfg.load_toml_overrides(toml_path), overlay=overlay), False
     except (cfg.ConfigError, ValueError, OSError) as exc:
         print(f"crr: ignoring bad config {toml_path}: {exc}", file=sys.stderr)
-        return cfg.Config()
+        return cfg.Config(overlay=overlay), True
 
 
 def _credentials_path(config: cfg.Config) -> Path:
@@ -373,6 +403,8 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=_cmd_doctor)
 
     qrp = sub.add_parser("qr", help="print a scannable QR of this machine's dashboard URL")
+    qrp.add_argument("--json", action="store_true",
+                     help="emit the versioned JSON payload instead of a terminal QR")
     qrp.set_defaults(func=_cmd_qr)
 
     st = sub.add_parser("status", help="list journaled sessions and their state")
@@ -715,13 +747,74 @@ def _build_parser() -> argparse.ArgumentParser:
     rec.add_argument("query", help="case-insensitive substring to search for")
     rec.set_defaults(func=_cmd_recall)
 
-    conf = sub.add_parser("config", help="inspect configuration")
+    conf = sub.add_parser("config", help="inspect or change configuration")
     conf.add_argument(
         "--effective",
         action="store_true",
-        help="print every key with its value and origin (configured|default)",
+        help="print every key with its value and origin (override|configured|default)",
     )
+    conf.add_argument(
+        "--json",
+        action="store_true",
+        help="with --effective: print the contracted JSON payload (value, default, "
+             "origin, type, apply per key)",
+    )
+    conf_sub = conf.add_subparsers(dest="config_action", metavar="{set,unset}")
+    conf_set = conf_sub.add_parser(
+        "set",
+        help="change a setting (stored in a crr-owned file, never config.toml)",
+    )
+    conf_set.add_argument("key", help="a config key (see `crr config --effective`)")
+    conf_set.add_argument(
+        "value", help="the new value; a list key takes JSON, e.g. '[\"a\", \"b\"]'. "
+                      "A value starting with - needs -- first: crr config set -- KEY VALUE")
+    conf_unset = conf_sub.add_parser(
+        "unset", help="drop a change made with `crr config set`")
+    conf_unset.add_argument("key", help="a config key")
     conf.set_defaults(func=_cmd_config)
+
+    svc = sub.add_parser("service", help="report on or control crr's own background units")
+    svc_sub = svc.add_subparsers(dest="service_action", metavar="{status,start,stop}")
+    svc_status = svc_sub.add_parser(
+        "status",
+        help="which of the watchdog, dashboard and keep-awake units are "
+             "installed, enabled and running",
+    )
+    svc_status.add_argument(
+        "--json", action="store_true",
+        help="print the contracted JSON payload (backend, state, per-unit flags, "
+             "dashboard URL, whether dashboard login is on)",
+    )
+    svc_sub.add_parser(
+        "start",
+        help="start the watchdog, dashboard and keep-awake units now (they stay enabled)",
+    )
+    svc_sub.add_parser(
+        "stop",
+        help="stop the three units now, runtime only: the units stay enabled and "
+             "running sessions are left alone; they come back at the next WSL restart, "
+             "reboot or `crr service start`. Refused while the dashboard's loaded unit "
+             "predates KillMode=process (run `crr systemd --install` first)",
+    )
+    svc.set_defaults(func=_cmd_service)
+
+    logs = sub.add_parser(
+        "logs",
+        help="show the journal of one of crr's own services (revive, web or awake)",
+    )
+    logs.add_argument(
+        "--service", choices=list(systemd.LOG_UNITS), default="revive",
+        help="which service's journal to read (default: revive, the watchdog)",
+    )
+    logs.add_argument(
+        "--lines", type=int, default=None, metavar="N",
+        help="how many recent lines to show (default: logs_default_lines, 200)",
+    )
+    logs.add_argument(
+        "--follow", action="store_true",
+        help="keep following the journal as new lines arrive (Ctrl-C to stop)",
+    )
+    logs.set_defaults(func=_cmd_logs)
 
     # Shim-facing commands (called by the shell hooks, by absolute path).
     reg = sub.add_parser("register", help="[shim] journal a shell at start")
@@ -1347,6 +1440,26 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _web_unit_refusal(who: str, doing: str, act: str, then: str, *,
+                      unknown: bool = False) -> str:
+    """Why crr will not stop or restart crr-web, and what to run instead.
+
+    #140: a crr-web unit from before KillMode=process ends its whole cgroup on
+    a stop or restart, and that cgroup holds the tmux servers the dashboard's
+    Reopen and Restore started, so the conversations in them end too.
+    ``crr systemd --install`` rewrites the unit with KillMode=process and
+    restarts nothing, after which ``then`` is safe. Shared by ``crr deploy``
+    and ``crr service stop`` so the two say the same thing. ``unknown`` is
+    for when the loaded KillMode could not be read at all.
+    """
+    why = ("crr could not read its loaded KillMode, so a " + act + " might"
+           if unknown else
+           "its installed unit predates KillMode=process, so a " + act + " would")
+    return (f"{who}: NOT {doing} crr-web.service — {why} kill "
+            "sessions restored from the dashboard. Run `crr systemd "
+            f"--install` (rewrites the units; restarts nothing), then `{then}`.")
+
+
 def _cmd_deploy(args: argparse.Namespace) -> int:
     """Install the current commit as the copy the SERVICES run (#61).
 
@@ -1425,11 +1538,9 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         # #140: this unit predates KillMode=process — restarting it kills
         # every session a dashboard Reopen/Restore started. Deployed, but
         # the running dashboard keeps the old code until it's safe.
-        print("crr deploy: NOT restarting crr-web.service — its installed "
-              "unit predates KillMode=process, so a restart would kill "
-              "sessions restored from the dashboard. Run `crr systemd "
-              "--install` (rewrites the units; restarts nothing), then "
-              "`systemctl --user restart crr-web.service`.", file=sys.stderr)
+        print(_web_unit_refusal("crr deploy", "restarting", "restart",
+                                "systemctl --user restart crr-web.service"),
+              file=sys.stderr)
     else:
         err = deploy_io.restart_service()
         if err:
@@ -1736,10 +1847,11 @@ def _cmd_harden(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_qr(_args: argparse.Namespace) -> int:
+def _cmd_qr(args: argparse.Namespace) -> int:
     """Print a scannable QR of this machine's dashboard URL via the ACTIVE
     tunnel provider (spec 2026-09-02) — tailscale by default, so the
-    pre-tunnel behavior is unchanged. Degrades informationally (rc 0)."""
+    pre-tunnel behavior is unchanged. Degrades informationally (rc 0).
+    ``--json`` prints the versioned payload the tray app draws its QR from."""
     config = _load_config()
     sd = state_dir.state_dir()
     try:
@@ -1747,10 +1859,15 @@ def _cmd_qr(_args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"crr qr: {exc}", file=sys.stderr)
         return 2
-    provider = _tunnel_provider(config, sel)
+    # One port for the provider's setup hint and the loopback URL, so the two
+    # can't disagree around a reinstall (R26).
+    port = _resolved_dashboard_port(config, "crr qr")
+    provider = _tunnel_provider(config, sel, dashboard_port=port)
+    if getattr(args, "json", False):
+        return _qr_json(config, provider, port,
+                        settings.SettingsStore(sd).is_degraded())
     url = provider.advertise_url() if provider is not None else None
     if url is None:
-        port = config.get("dashboard_port")
         print(f"http://127.0.0.1:{port}/  (loopback only)")
         hint = provider.setup_hint() if provider is not None else None
         if hint:
@@ -1759,6 +1876,87 @@ def _cmd_qr(_args: argparse.Namespace) -> int:
     print(qr.to_terminal(url))
     print(url)
     return 0
+
+
+def _qr_json(config: cfg.Config, provider, port: int, degraded: bool) -> int:
+    """`crr qr --json`: a report, exit 0 whenever a valid payload is printed,
+    including when there is no phone-reachable URL. A provider that raises
+    degrades its field to null with a note on stderr, never a traceback, and
+    sets ``degraded``. ``degraded`` comes in true when settings.json can't be
+    read (the tunnel selection may have fallen back to config.toml). The
+    setup hint is only asked for, and only reported, when there is no URL."""
+    url = hint = None
+    if provider is not None:
+        try:
+            url = provider.advertise_url()
+        except Exception as exc:  # a report must not die on a provider bug
+            degraded = True
+            print(f"crr qr: could not get the {provider.name()} URL: {exc}",
+                  file=sys.stderr)
+        if not url:
+            try:
+                hint = provider.setup_hint()
+            except Exception as exc:
+                degraded = True
+                print(f"crr qr: could not get the {provider.name()} setup hint: {exc}",
+                      file=sys.stderr)
+    loopback = f"http://127.0.0.1:{port}/"
+    payload = {
+        "contract": contracts.QR_CONTRACT_VERSION,
+        "provider": provider.name() if provider is not None else None,
+        "url": url or None,
+        "loopback_url": loopback,
+        "hint": hint or None,
+        "dashboard_reachable": _dashboard_answers(
+            loopback + "api/version", config.get("interop_timeout_seconds")),
+        "degraded": degraded,
+    }
+    # Validate our own output before emitting it, as `crr status --json` does.
+    contracts.validate_qr_payload(payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+    return 0
+
+
+def _resolved_dashboard_port(config: cfg.Config, who: str) -> int:
+    """The port the dashboard actually answers on (R26).
+
+    In order: the RUNNING crr-web's ``--port`` (its MainPID's argv), then the
+    installed unit's, then the config's ``dashboard_port``. A changed setting
+    only reaches the unit on reinstall, and the install's ``enable --now``
+    does not restart a running crr-web, so the process can be on an older
+    port than either. A disagreement with the config is noted on stderr
+    (prefixed with the calling command ``who``).
+    """
+    port = config.get("dashboard_port")
+    actual = systemd.running_web_port(
+        systemd.web_unit_props(config.get("interop_timeout_seconds")))
+    where, fix = "running", _DASHBOARD_PORT_APPLY
+    if actual is None:
+        actual = systemd.installed_web_port(Path.home())
+        where, fix = "installed", ["crr systemd --install"]
+    if actual is None:
+        return port
+    if actual != port:
+        print(f"{who}: dashboard_port is {port} in settings but the "
+              f"{where} dashboard uses {actual}; "
+              f"run {', then '.join(fix)} to apply", file=sys.stderr)
+    return actual
+
+
+def _dashboard_answers(url: str, timeout: float) -> bool:
+    """True only if a GET of ``url`` returns HTTP 200 within ``timeout``.
+
+    ``/api/version`` is exempt from the dashboard's login gate (it is the
+    probe the logged-out page polls), so a passphrase-protected dashboard
+    still answers 200 and anything else means it is not up. Never raises;
+    ignores proxy environment variables, since this is always loopback.
+    """
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(urllib.request.Request(url), timeout=timeout) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
 
 def _tunnel_selection(config: cfg.Config, sd) -> tunnel.TunnelSelection:
@@ -1789,12 +1987,15 @@ def _web_allowed_hosts(config: cfg.Config, sd) -> set[str]:
     return allowed
 
 
-def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection):
-    """The adapter for ``sel.provider`` — None for "none"."""
+def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection,
+                     dashboard_port: int | None = None):
+    """The adapter for ``sel.provider`` — None for "none". ``dashboard_port``
+    is where the dashboard really answers (``_resolved_dashboard_port``), when
+    the caller has it; the config's ``dashboard_port`` otherwise."""
     timeout = config.get("interop_timeout_seconds")
     if sel.provider == "tailscale":
-        return tailscale.RealTailscale(timeout,
-                                       dashboard_port=config.get("dashboard_port"))
+        port = dashboard_port if dashboard_port is not None else config.get("dashboard_port")
+        return tailscale.RealTailscale(timeout, dashboard_port=port)
     if sel.provider == "cloudflare":
         return cloudflared.RealCloudflared(timeout, sel.tunnel_name, sel.hostname)
     return None
@@ -2071,17 +2272,32 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     # for the systemctl check below — a second, independent _load_config()
     # call here would print its own "ignoring bad config" line on top of
     # this section's structured [WARN], the same fact said twice.
+    #
+    # The crr-owned overlay (config_overrides.json) is layered over it
+    # exactly as _load_config does, so doctor judges the same config the
+    # running loops use; an unreadable overlay gets its own structured line
+    # here for the same reason as a malformed config.toml.
+    overlay_store = ConfigOverridesStore(sd)
+    overlay = overlay_store.read()
+    overlay_path = sd / config_overrides.FILENAME
     toml_path = sd / "config.toml"
     if toml_path.is_file():
         try:
-            config = cfg.Config(cfg.load_toml_overrides(toml_path))
+            config = cfg.Config(cfg.load_toml_overrides(toml_path), overlay=overlay)
             _check("config.toml", True, str(toml_path))
         except (cfg.ConfigError, ValueError, OSError) as exc:
-            config = cfg.Config()  # same fallback _load_config() would use
+            config = cfg.Config(overlay=overlay)  # same fallback _load_config() would use
             _check("config.toml", False, f"{toml_path}: {exc}")
     else:
-        config = cfg.Config()
+        config = cfg.Config(overlay=overlay)
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
+    if overlay_store.is_degraded():
+        _check("config_overrides.json", False,
+               f"{overlay_path}: cannot be read; using config.toml and defaults "
+               "(fix or remove it)")
+    elif overlay_path.is_file():
+        _check("config_overrides.json", True,
+               f"{overlay_path}: {len(overlay)} setting(s) override config.toml")
 
     # Power hold (spec 2026-08-12, Task 6; state-file read fixed round 1,
     # 2026-08-13). Needs `config` (just resolved above), so this can't sit
@@ -6606,15 +6822,385 @@ def _cmd_holder(args: argparse.Namespace) -> int:
     return rc
 
 
+# What to tell the user to run so a changed setting takes effect, by apply
+# kind (cfg.APPLY_RULES). "live" needs nothing. The stderr hint is a note, not
+# an action: `crr config set` never restarts anything itself.
+_RESTART_WEB = "systemctl --user restart crr-web"
+# dashboard_port: the install writes the new port into the unit, but its
+# `enable --now` leaves a running crr-web on the old one until a restart. The
+# restart is safe after the install, which writes KillMode=process (#140).
+_DASHBOARD_PORT_APPLY = ["crr systemd --install", _RESTART_WEB]
+_APPLY_COMMANDS = {
+    "restart-web": [_RESTART_WEB],
+    "restart-awake": ["systemctl --user restart crr-awake"],
+    "reinstall": ["crr systemd --install"],
+}
+
+
+def _web_kill_mode(timeout: float) -> str | None:
+    """crr-web's loaded KillMode, or None when it can't be read."""
+    return systemd.loaded_kill_mode(systemd.web_unit_props(timeout))
+
+
+def _apply_commands(key: str, kind: str, timeout: float) -> list[str]:
+    """The commands, in order, that make ``key``'s new value take effect."""
+    if kind == "windows-installer":
+        # harden_* are written to the Windows policy by `crr harden --apply`;
+        # boot_* are baked into the tasks by the reachable-at-boot install.
+        return ["crr harden --apply" if key.startswith("harden_") else
+                "crr reachable-at-boot --install"]
+    if key == "dashboard_port":
+        return list(_DASHBOARD_PORT_APPLY)
+    if kind == "restart-web" and _web_kill_mode(timeout) != "process":
+        # Restarting a crr-web from before KillMode=process (#140), or one
+        # whose KillMode can't be read, may end conversations. The install
+        # rewrites the unit with KillMode=process, which makes the restart safe.
+        return ["crr systemd --install", _RESTART_WEB]
+    return list(_APPLY_COMMANDS.get(kind, []))
+
+
+def _display_value(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _config_store_unreadable(store_path: Path) -> int:
+    print(f"crr config: {store_path} cannot be read; fix or remove it before "
+          "changing settings", file=sys.stderr)
+    return 1
+
+
+def _config_change(key: str, text: str | None) -> int:
+    """``crr config set KEY TEXT`` (``text`` given) or ``unset KEY`` (None).
+
+    Writes only crr-owned stores, each under ``mutation_lock``: the overlay
+    (``config_overrides.json``) for most keys, and for the five keys the
+    dashboard already owns, the dashboard's own store. ``config.toml`` is the
+    user's hand-owned file and is never touched. Exit 2 for an unknown key, an
+    invalid value or a key crr never reads from settings; exit 1 when a store
+    crr would write is unreadable (refusing beats overwriting it).
+    """
+    verb = "set" if text is not None else "unset"
+    try:
+        if key not in cfg.DEFAULTS:
+            raise cfg.ConfigError(f"unknown config key(s): {[key]}")
+        kind = cfg.APPLY_RULES[key]
+        if kind == "fixed":
+            raise cfg.ConfigError(
+                f"config '{key}' is a built-in prior that crr does not read from "
+                "settings; it cannot be changed")
+        value = cfg.parse_config_value(key, text) if text is not None else None
+        sd = state_dir.state_dir()
+        changed = True
+        with mutation_lock(sd):
+            if key in config_overrides.OWNED_ELSEWHERE:
+                if key == "discover_exclude_dirs":
+                    xstore = exclusions.ExclusionStore(sd)
+                    if xstore.is_degraded():
+                        return _config_store_unreadable(sd / exclusions.FILENAME)
+                    if verb == "set":
+                        # R23: `--effective` shows config.toml's list plus the
+                        # managed one, and the tray sends that list back. Keep
+                        # config.toml's entries out of the managed list (only
+                        # config.toml can remove them) and report the result.
+                        baseline = _load_config().get("discover_exclude_dirs")
+                        managed = xstore.write([d for d in exclusions.normalize(value)
+                                                if d not in baseline])
+                        value = exclusions.effective(baseline, managed)
+                    else:
+                        xstore.write([])
+                else:
+                    sstore = settings.SettingsStore(sd)
+                    if sstore.is_degraded():
+                        return _config_store_unreadable(sd / settings.FILENAME)
+                    if key == "remote_control_autokick":
+                        sstore.write_global_autokick(value)
+                    else:
+                        field = "provider" if key == "tunnel_provider" else key
+                        fields = sstore.read_tunnel()
+                        if verb == "unset":
+                            fields[field] = None
+                        elif field == "provider":
+                            fields[field] = value
+                        else:
+                            # "" is how the dashboard says "no override"
+                            fields[field] = value or None
+                        sstore.write_tunnel(**fields)
+            else:
+                ostore = ConfigOverridesStore(sd)
+                if ostore.is_degraded():
+                    return _config_store_unreadable(sd / config_overrides.FILENAME)
+                if verb == "set":
+                    ostore.set(key, value)
+                else:
+                    changed = ostore.unset(key)
+    except (cfg.ConfigError, settings.SettingsError, exclusions.ExclusionError) as exc:
+        print(f"crr config: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"crr config: could not write the setting: {exc}", file=sys.stderr)
+        return 1
+    if not changed:
+        print(f"{key} was not overridden; nothing to unset")
+        return 0
+    if verb == "set":
+        print(f"set {key} = {_display_value(value)} (takes effect: {kind})")
+    else:
+        print(f"unset {key} (takes effect: {kind})")
+    commands = _apply_commands(key, kind, _load_config().get("interop_timeout_seconds"))
+    if commands:
+        steps = ", then ".join(f"`{c}`" for c in commands)
+        print(f"crr config: run {steps} for this to take effect", file=sys.stderr)
+    return 0
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
+    action = getattr(args, "config_action", None)
+    if action == "set":
+        return _config_change(args.key, args.value)
+    if action == "unset":
+        return _config_change(args.key, None)
     if not args.effective:
-        print("usage: crr config --effective", file=sys.stderr)
+        print("usage: crr config --effective [--json] | set KEY VALUE | unset KEY",
+              file=sys.stderr)
+        return 2
+    sd = state_dir.state_dir()
+    config, toml_bad = _load_config_noting_toml()
+    owned, degraded_stores = _config_owned_overrides(config, sd)
+    if toml_bad:
+        # Set aside whole, so every key it set reads `default` here.
+        degraded_stores.insert(0, "config.toml")
+    payload = cfg.effective_payload(
+        config, owned=owned, degraded=bool(degraded_stores))
+    # Validate our own output before emitting it, as `crr status --json` does.
+    contracts.validate_config_payload(payload)
+    if degraded_stores:
+        # A bad config.toml or overlay is already warned about by _load_config;
+        # this line says what that means for the origins.
+        print("crr config: could not read " + ", ".join(degraded_stores)
+              + "; some origins below may be wrong", file=sys.stderr)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+        return 0
+    print(f"# defaults version: {payload['defaults_version']}")
+    for key, fields in payload["keys"].items():
+        print(f"{key} = {fields['value']!r}  ({fields['origin']})")
+    return 0
+
+
+def _cmd_service(args: argparse.Namespace) -> int:
+    action = getattr(args, "service_action", None)
+    if action == "status":
+        return _service_status(args.json)
+    if action in ("start", "stop"):
+        return _service_action(action)
+    print("usage: crr service {status|start|stop} ...", file=sys.stderr)
+    return 2
+
+
+_SCHTASKS_INSTALL_REASON = (
+    "crr is installed as Windows Scheduled Tasks; the tray supports the systemd "
+    "install only (see crr schtasks --uninstall / crr systemd --install)")
+
+
+def _service_backend(config: cfg.Config) -> tuple[str, str, list[UnitState] | None]:
+    """``(backend, reason, units)``. ``units`` is None when the backend is
+    unsupported (not Linux, no systemd user manager to ask, or crr installed
+    as Windows Scheduled Tasks instead)."""
+    if platform.system() != "Linux":
+        return "unsupported", "not Linux", None
+    timeout = config.get("interop_timeout_seconds")
+    units = systemd.unit_states(timeout)
+    if units is None:
+        return "unsupported", "no systemd user manager", None
+    if not any(u.installed for u in units):
+        # R24: a `crr schtasks` install has no systemd units either, and the
+        # tray's Repair (`crr systemd --install`) would add a second watchdog
+        # and dashboard beside it. So it is unsupported, which also makes
+        # start, stop and logs exit 2 there.
+        if host.is_wsl() and scheduled_task.crr_tasks_installed(timeout):
+            return "unsupported", _SCHTASKS_INSTALL_REASON, None
+        return "systemd", (
+            "crr is not installed as systemd user units; "
+            "run `crr systemd --install`"), units
+    return "systemd", "", units
+
+
+def _cmd_logs(args: argparse.Namespace) -> int:
+    """``crr logs``: the journal of one of crr's own units, read with journalctl.
+
+    Units that are not installed are not an error here: old lines are still
+    worth showing, so journalctl runs anyway. An unsupported backend is.
+    """
+    if args.lines is not None and args.lines < 1:
+        print("crr logs: --lines must be a positive integer", file=sys.stderr)
         return 2
     config = _load_config()
-    print(f"# defaults version: {cfg.CONFIG_DEFAULTS_VERSION}")
-    for key, (value, origin) in sorted(config.effective().items()):
-        print(f"{key} = {value!r}  ({origin})")
+    _, reason, units = _service_backend(config)
+    if units is None:
+        print(f"crr logs: unsupported here ({reason}); crr's background units "
+              "need systemd", file=sys.stderr)
+        return 2
+    lines = args.lines if args.lines is not None else config.get("logs_default_lines")
+    argv = systemd.journal_argv(systemd.LOG_UNITS[args.service], lines, args.follow)
+    if args.follow:
+        try:
+            _exec(argv[0], argv)  # replaces this process, so killing crr stops journalctl
+        except OSError as exc:  # journalctl missing: no traceback
+            print(f"crr logs: could not run journalctl: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    try:
+        r = subprocess.run(argv)  # no capture: the journal goes straight to stdout
+    except OSError as exc:
+        print(f"crr logs: could not run journalctl: {exc}", file=sys.stderr)
+        return 1
+    return 0 if r.returncode == 0 else 1
+
+
+_REPAIR_LINE = "run crr systemd --install to repair a partial install"
+
+
+def _service_action(action: str) -> int:
+    """``crr service start|stop``: a runtime action on crr's three units.
+
+    Stop only stops the units; running sessions keep running. The units come back at the next WSL restart, reboot
+    or ``crr service start``, because they stay enabled.
+    """
+    config = _load_config()
+    _, reason, units = _service_backend(config)
+    if units is None:
+        print(f"crr service {action}: unsupported here ({reason}); "
+              "crr's background units need systemd", file=sys.stderr)
+        return 2
+    if service_core.overall_state(units) == "not-installed":
+        print(f"crr service {action}: crr is not installed as systemd user "
+              "units; run `crr systemd --install`", file=sys.stderr)
+        return 1
+    timeout = config.get("interop_timeout_seconds")
+    if action == "stop":
+        # Stopping an old crr-web (#140) ends the conversations in the tmux
+        # servers its cgroup holds. Unknown is refused too: a stop crr cannot
+        # vouch for must not run. Start is unaffected.
+        kill_mode = _web_kill_mode(timeout)
+        if kill_mode != "process":
+            print(_web_unit_refusal("crr service stop", "stopping", "stop",
+                                    "crr service stop", unknown=kill_mode is None),
+                  file=sys.stderr)
+            return 1
+    argv = systemd.start_argv() if action == "start" else systemd.stop_argv()
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # subprocess.run kills only the systemctl client; the job it queued
+        # keeps running, so this is not a failed or broken install.
+        print(f"crr service {action}: systemctl did not answer within {timeout} "
+              f"seconds; the {action} may still be in progress — check with "
+              "crr service status", file=sys.stderr)
+        return 1
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"crr service {action}: {exc}", file=sys.stderr)
+        print(_REPAIR_LINE, file=sys.stderr)
+        return 1
+    if r.returncode != 0:
+        if (r.stderr or "").strip():
+            print(r.stderr.rstrip("\n"), file=sys.stderr)
+        print(_REPAIR_LINE, file=sys.stderr)
+        return 1
+    if action == "stop":
+        print("stopped; crr comes back at the next WSL restart or reboot, "
+              "or with crr service start")
     return 0
+
+
+def _service_status(as_json: bool) -> int:
+    """Report on crr's three units. A report, not an action: exit 0 whenever a
+    valid payload is printed, including on a host with no systemd user manager."""
+    config = _load_config()
+    backend, reason, units = _service_backend(config)
+    if units is None:
+        units = [UnitState(name, unit, False, False, False)
+                 for name, unit in systemd.CRR_UNITS]
+    port = _resolved_dashboard_port(config, "crr service")
+    payload = service_core.status_payload(
+        backend, reason, units,
+        f"http://127.0.0.1:{port}/",
+        _dashboard_login_on(state_dir.state_dir()))
+    # Validate our own output before emitting it, as `crr status --json` does.
+    contracts.validate_service_payload(payload)
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+        return 0
+    print(f"backend: {backend}" + (f" ({reason})" if reason else ""))
+    for row in payload["services"]:
+        flags = ", ".join(
+            label for label, on in (("installed", row["installed"]),
+                                    ("enabled", row["enabled"]),
+                                    ("active", row["active"])) if on)
+        print(f"{row['name']:<11} {row['unit']:<18} {flags or 'not installed'}")
+    print(f"state: {payload['state']}")
+    print(f"dashboard: {payload['dashboard_url']} "
+          f"(login {'on' if payload['dashboard_login'] else 'off'})")
+    return 0
+
+
+def _dashboard_login_on(sd: Path) -> bool:
+    """Is a dashboard passphrase required? Never raises.
+
+    A corrupt auth file counts as on: the dashboard fails closed on it
+    (login required until the file is repaired), so reporting "off" would
+    tell the Control tab the opposite of what a browser sees. Any other
+    failure to read it counts as on too, for the same reason (R16). Either
+    way the file is named on stderr.
+    """
+    store = dashboard_auth.DashboardAuthStore(sd)
+    try:
+        if store.is_corrupt():
+            print(f"crr service: {dashboard_auth.FILENAME} is unreadable; the "
+                  "dashboard refuses logins until it is repaired or deleted",
+                  file=sys.stderr)
+            return True
+        return store.login_enabled()
+    except Exception as exc:  # a status report must not die on a bad store
+        print(f"crr service: could not read {dashboard_auth.FILENAME}: {exc}",
+              file=sys.stderr)
+        return True
+
+
+def _config_owned_overrides(config: cfg.Config, sd: Path) -> tuple[dict[str, Any], list[str]]:
+    """``(owned, unreadable)`` for ``cfg.effective_payload``.
+
+    ``owned`` maps each dashboard-owned key a dashboard store currently
+    overrides to its effective value (the stores' own notion of "not set"
+    applies: no global autokick, an empty tunnel field, an empty managed
+    exclusions list). ``unreadable`` names the store files that exist but
+    could not be read, including the crr-owned overlay.
+    """
+    owned: dict[str, Any] = {}
+    unreadable: list[str] = []
+    sstore = settings.SettingsStore(sd)
+    # What the watchdog acts on (off while the store is unreadable), as the
+    # dashboard card shows it — not the raw stored value.
+    autokick = sstore.effective_global_autokick()
+    if autokick is not None:
+        owned["remote_control_autokick"] = autokick
+    tunnel_fields = sstore.read_tunnel()
+    for field, key in (("provider", "tunnel_provider"),
+                       ("cloudflare_tunnel_name", "cloudflare_tunnel_name"),
+                       ("cloudflare_hostname", "cloudflare_hostname")):
+        value = tunnel_fields.get(field)
+        if value:
+            owned[key] = value
+    xstore = exclusions.ExclusionStore(sd)
+    managed = xstore.read()
+    if managed:
+        owned["discover_exclude_dirs"] = exclusions.effective(
+            config.get("discover_exclude_dirs"), managed)
+    for store, filename in ((ConfigOverridesStore(sd), config_overrides.FILENAME),
+                            (sstore, settings.FILENAME),
+                            (xstore, exclusions.FILENAME)):
+        if store.is_degraded():
+            unreadable.append(filename)
+    return owned, unreadable
 
 
 def main(argv: Sequence[str] | None = None) -> int:

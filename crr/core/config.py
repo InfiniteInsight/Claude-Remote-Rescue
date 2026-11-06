@@ -6,8 +6,8 @@ threshold decisions join ``DEFAULTS`` at introduction time, not at audit
 time (that rule is why this module exists before most of its consumers
 do).
 
-``effective()`` reports each key's value AND its origin (``configured``
-vs ``default``) so a consumer can always distinguish an explicit choice
+``effective()`` reports each key's value AND its origin (``override`` for
+the crr-owned overlay, ``configured`` for config.toml, ``default``) so a consumer can always distinguish an explicit choice
 from an assumed one — defaults drive kill decisions, and an invisible
 default is an invisible prior. It backs ``crr config --effective``.
 
@@ -17,9 +17,14 @@ takes a plain overrides mapping so tests need no files.
 
 from __future__ import annotations
 
+import copy
+import json
+import math
 import tomllib
 from pathlib import Path
 from typing import Any, Mapping
+
+from crr.core import contracts
 
 # Bump when a default value changes meaning, so a consumer pinning
 # behavior can detect the shift.
@@ -121,7 +126,9 @@ from typing import Any, Mapping
 # v29: added diagnose_scan_cap (#148 — journald host-event query reads up to
 # this many lines BEFORE classification; the event cap is applied after, so
 # benign matches and WSL kernel-log replays can't crowd out a real OOM)
-CONFIG_DEFAULTS_VERSION = 29
+# v30: added logs_default_lines (#161 — `crr logs` without --lines shows this
+# many journal lines of the chosen service)
+CONFIG_DEFAULTS_VERSION = 30
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -149,6 +156,8 @@ DEFAULTS: dict[str, Any] = {
     # repeats ~5 lines x restarts. 5000 covers hundreds of restarts of a tight
     # pre-filter; it bounds memory, it is not a severity judgment.
     "diagnose_scan_cap": 5000,
+    # #161: `crr logs` without --lines. A display size, not a severity judgment.
+    "logs_default_lines": 200,
     "diagnose_macos_lookback": "1d",  # macOS `log show --last` window (no boot index on macOS)
     "diagnose_macos_timeout_seconds": 30,  # macOS `log show` is slow to start; own timeout
     "interop_timeout_seconds": 5,  # per external-command guard in diagnostics/probes
@@ -365,6 +374,123 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+# What makes a changed setting take effect. The tray app reads this to tell
+# the user what to do after a change:
+#   live              nothing: every reader loads config afresh (each crr
+#                     command, each watchdog pass, each keep-awake poll)
+#   restart-web       restart the dashboard: `crr web` loads config once at
+#                     startup and its request closures keep that object
+#   restart-awake     restart keep-awake: `crr awake` builds its power holder
+#                     once at startup
+#   reinstall         reinstall the units: the value is baked into the
+#                     systemd/launchd/Scheduled Task definitions
+#   windows-installer rerun a Windows installer: some installer bakes the key
+#                     in (it needs elevation or asks questions). A boot_ or
+#                     harden_ prefix alone does not qualify a key
+#   fixed             crr reads no Config for this key (it is an import-time
+#                     injectable prior), so setting it has no effect
+# A key read in several places gets the strongest kind any reader needs, in
+# this order: windows-installer > reinstall > restart-web > restart-awake >
+# live. fixed is outside that order: a key is fixed only when NO reader takes
+# it from a Config. Every DEFAULTS key must be listed here: a new key fails
+# tests/test_config.py::test_every_config_key_has_an_apply_rule until it gets
+# a rule, so a setting can never reach the tray with no answer.
+APPLY_KINDS = contracts.CONFIG_APPLY_KINDS
+
+APPLY_RULES: dict[str, str] = {
+    # --- windows-installer: keys an installer bakes in ----------------------
+    "boot_preferred_tailnet": "windows-installer",
+    "boot_holder_rearm_minutes": "windows-installer",
+    "harden_active_hours_start": "windows-installer",
+    "harden_active_hours_end": "windows-installer",
+    # --- reinstall: baked into the service definitions ---------------------
+    "dashboard_port": "reinstall",
+    "watchdog_interval_seconds": "reinstall",
+    "web_restart_seconds": "reinstall",
+    # --- restart-awake: `crr awake` builds its holder once ------------------
+    "power_block_max_hours": "restart-awake",
+    # --- restart-web: read by `crr web` from the config it loads once -------
+    "zombie_strikes": "restart-web",
+    "close_grace_seconds": "restart-web",
+    "interop_timeout_seconds": "restart-web",
+    "tab_spawn_timeout_seconds": "restart-web",
+    "diagnose_lookback_boots": "restart-web",
+    "diagnose_event_cap": "restart-web",
+    "diagnose_line_cap": "restart-web",
+    "diagnose_scan_cap": "restart-web",
+    "diagnose_macos_lookback": "restart-web",
+    "diagnose_macos_timeout_seconds": "restart-web",
+    "dashboard_poll_seconds": "restart-web",
+    "version_check_seconds": "restart-web",
+    "last_prompt_display_cap": "restart-web",
+    "host_allowlist_extras": "restart-web",
+    "terminal": "restart-web",
+    "wt_profile": "restart-web",
+    "confirm_arm_seconds": "restart-web",
+    "notice_seconds": "restart-web",
+    "reload_delay_ms": "restart-web",
+    "diag_error_display_cap": "restart-web",
+    "flash_ms": "restart-web",
+    "filter_debounce_ms": "restart-web",
+    "longpress_ms": "restart-web",
+    "longpress_move_px": "restart-web",
+    "model_tail_lines": "restart-web",
+    "remote_control": "restart-web",
+    "context_tight_fraction": "restart-web",
+    "context_compact_fraction": "restart-web",
+    "recall_match_cap": "restart-web",
+    "recall_per_session_cap": "restart-web",
+    "recall_snippet_cap": "restart-web",
+    "recall_scan_byte_budget": "restart-web",
+    "takeover_idle_seconds": "restart-web",
+    "takeover_poll_seconds": "restart-web",
+    "remote_control_watch": "restart-web",
+    "launcher_tag": "restart-web",
+    "reauth_success_display_ms": "restart-web",
+    "claude_auth_probe_timeout_seconds": "restart-web",
+    "dashboard_session_hours": "restart-web",
+    # --- live: every reader loads config afresh ------------------------------
+    # The five dashboard-owned keys. These rules describe a change made through
+    # `crr config set`, which routes them to the dashboard's own stores
+    # (settings.json, exclusions.json) and not to config.toml. Every reader
+    # re-reads those stores on each call (watchdog pass, dashboard poll or
+    # request, discovery, recall, tunnel command), so no restart is needed. The
+    # config.toml baseline of the same keys is read once by `crr web`, but
+    # `crr config set` never writes it.
+    "remote_control_autokick": "live",
+    "tunnel_provider": "live",
+    "cloudflare_tunnel_name": "live",
+    "cloudflare_hostname": "live",
+    "discover_exclude_dirs": "live",
+    "host_death_max_revivals": "live",
+    "host_death_stable_seconds": "live",
+    "archive_retention_days": "live",
+    "rescue_prompt_timeout_seconds": "live",
+    "logs_default_lines": "live",
+    "rescue_auto_open": "live",
+    "takeover_max_wait_seconds": "live",
+    # Diagnostic thresholds read fresh by doctor / reachable-at-boot / harden;
+    # no installer bakes them in.
+    "boot_headless_window_seconds": "live",
+    "harden_restart_lookback_days": "live",
+    "bridge_kick_cooldown_seconds": "live",
+    "bridge_kick_max_attempts": "live",
+    # `crr awake` re-reads config after every poll, so these need no restart.
+    "power_block": "live",
+    "power_block_requires_ac": "live",
+    "power_poll_seconds": "live",
+    "power_state_max_age_multiplier": "live",
+    # --- fixed: import-time injectable priors (#37), read from DEFAULTS and
+    # never from a Config (web.DISCOVERABLE_PAGE,
+    # transcript_source.REPLY_TAIL_LINES / CWD_SCAN_LINES, the
+    # context_pressure default), so setting them has no effect.
+    "discoverable_page_size": "fixed",
+    "reply_tail_lines": "fixed",
+    "cwd_scan_lines": "fixed",
+    "context_bytes_per_token": "fixed",
+}
+
+
 class ConfigError(ValueError):
     """A config override is invalid (unknown key or wrong value type)."""
 
@@ -378,35 +504,176 @@ def load_toml_overrides(path: Path | str) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
-class Config:
-    def __init__(self, overrides: Mapping[str, Any] | None = None) -> None:
-        overrides = dict(overrides or {})
-        unknown = set(overrides) - set(DEFAULTS)
-        if unknown:
-            raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
-        # Type-check each override against its default so a mistyped config.toml
-        # fails loudly rather than injecting e.g. a str where logic wants an int.
-        for key, value in overrides.items():
-            default = DEFAULTS[key]
-            # bool is an int subclass; keep them from cross-matching.
-            if isinstance(value, bool) != isinstance(default, bool) or not isinstance(value, type(default)):
+def check_value(key: str, value: Any) -> None:
+    """Raise ``ConfigError`` unless ``key`` is a known key and ``value`` has
+    the type of its default.
+
+    The one type rule for every layer that carries config values (the
+    ``config.toml`` overrides, and the crr-owned overlay in
+    ``crr.core.config_overrides``), so a mistyped value fails loudly rather
+    than injecting e.g. a str where logic wants an int.
+    """
+    if key not in DEFAULTS:
+        raise ConfigError(f"unknown config key(s): {[key]}")
+    default = DEFAULTS[key]
+    # bool is an int subclass; keep them from cross-matching.
+    if isinstance(value, bool) != isinstance(default, bool) or not isinstance(value, type(default)):
+        raise ConfigError(
+            f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
+        )
+    # NaN and infinity are floats, but no setting means them, and either one
+    # would put non-standard JSON (NaN, Infinity) in `--effective --json`.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ConfigError(f"config '{key}' must be a finite number, got {value!r}")
+    # Every list setting is a list of strings (all DEFAULTS lists are, and the
+    # contracted `--effective --json` payload says so).
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, str):
                 raise ConfigError(
-                    f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
-                )
-        self._overrides = overrides
+                    f"config '{key}' must be a list of str, got a {type(item).__name__} element")
+
+
+_BOOL_WORDS = {
+    "true": True, "yes": True, "on": True, "1": True,
+    "false": False, "no": False, "off": False, "0": False,
+}
+
+
+def parse_config_value(key: str, text: str) -> Any:
+    """Turn the text a person typed into a value of ``key``'s type, or raise
+    ``ConfigError``.
+
+    bool: ``true|false|yes|no|on|off|1|0`` in any case. int: ``int(text)``
+    (``5.0`` is refused, not truncated). float: ``float(text)`` (``nan`` and
+    ``inf`` are refused). str: as given. list: JSON, a list of strings.
+    The result has passed ``check_value``.
+    """
+    if key not in DEFAULTS:
+        raise ConfigError(f"unknown config key(s): {[key]}")
+    default = DEFAULTS[key]
+    value: Any
+    if isinstance(default, bool):
+        word = text.strip().lower()
+        if word not in _BOOL_WORDS:
+            raise ConfigError(
+                f"config '{key}' must be true or false (yes/no, on/off, 1/0), got {text!r}")
+        value = _BOOL_WORDS[word]
+    elif isinstance(default, int):
+        try:
+            value = int(text)
+        except ValueError:
+            raise ConfigError(f"config '{key}' must be a whole number, got {text!r}") from None
+    elif isinstance(default, float):
+        try:
+            value = float(text)
+        except ValueError:
+            raise ConfigError(f"config '{key}' must be a number, got {text!r}") from None
+        if not math.isfinite(value):
+            raise ConfigError(f"config '{key}' must be a finite number, got {text!r}")
+    elif isinstance(default, list):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            raise ConfigError(
+                f"config '{key}' must be a JSON list of strings, e.g. [\"a\", \"b\"], "
+                f"got {text!r}") from None
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"config '{key}' must be a JSON list of strings, got {text!r}")
+    else:
+        value = text
+    check_value(key, value)
+    return value
+
+
+def _checked(layer: Mapping[str, Any] | None) -> dict[str, Any]:
+    layer = dict(layer or {})
+    unknown = set(layer) - set(DEFAULTS)
+    if unknown:
+        raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
+    for key, value in layer.items():
+        check_value(key, value)
+    return layer
+
+
+class Config:
+    """``overlay`` (crr-owned ``config_overrides.json``) beats ``overrides``
+    (the user's hand-owned ``config.toml``), which beats ``DEFAULTS``."""
+
+    def __init__(
+        self,
+        overrides: Mapping[str, Any] | None = None,
+        *,
+        overlay: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._overrides = _checked(overrides)
+        self._overlay = _checked(overlay)
 
     def get(self, key: str) -> Any:
         if key not in DEFAULTS:
             raise KeyError(key)
+        if key in self._overlay:
+            return self._overlay[key]
         return self._overrides.get(key, DEFAULTS[key])
 
     def effective(self) -> dict[str, tuple[Any, str]]:
-        """Return ``{key: (value, origin)}`` for every known key."""
-        return {
-            key: (
-                (self._overrides[key], "configured")
-                if key in self._overrides
-                else (default, "default")
-            )
-            for key, default in DEFAULTS.items()
+        """Return ``{key: (value, origin)}`` for every known key. The origin
+        is ``override`` (crr-owned overlay), ``configured`` (config.toml) or
+        ``default``."""
+        out: dict[str, tuple[Any, str]] = {}
+        for key, default in DEFAULTS.items():
+            if key in self._overlay:
+                out[key] = (self._overlay[key], "override")
+            elif key in self._overrides:
+                out[key] = (self._overrides[key], "configured")
+            else:
+                out[key] = (default, "default")
+        return out
+
+
+def _type_name(default: Any) -> str:
+    # bool before int: bool is an int subclass.
+    if isinstance(default, bool):
+        return "bool"
+    if isinstance(default, int):
+        return "int"
+    if isinstance(default, float):
+        return "float"
+    if isinstance(default, list):
+        return "list"
+    return "str"
+
+
+def effective_payload(
+    config: Config, *, owned: Mapping[str, Any], degraded: bool
+) -> dict[str, Any]:
+    """The `crr config --effective --json` body (``contracts`` v1).
+
+    ``owned`` holds the values of the dashboard-owned keys that a dashboard
+    store (settings.json, exclusions.json) overrides, already resolved by the
+    caller: a key present in ``owned`` is reported with origin ``override``
+    and that value; every other key is reported as ``config`` resolves it.
+    ``degraded`` says some store could not be read, so some origin may be
+    wrong. Pure: it reads nothing.
+    """
+    unknown = set(owned) - set(DEFAULTS)
+    if unknown:
+        raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
+    keys: dict[str, dict[str, Any]] = {}
+    for key, (value, origin) in sorted(config.effective().items()):
+        if key in owned:
+            value, origin = owned[key], "override"
+        default = DEFAULTS[key]
+        keys[key] = {
+            "value": copy.deepcopy(value),
+            "default": copy.deepcopy(default),
+            "origin": origin,
+            "type": _type_name(default),
+            "apply": APPLY_RULES[key],
         }
+    return {
+        "contract": contracts.CONFIG_CONTRACT_VERSION,
+        "defaults_version": CONFIG_DEFAULTS_VERSION,
+        "keys": keys,
+        "degraded": degraded,
+    }

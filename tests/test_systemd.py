@@ -396,3 +396,229 @@ def test_crrs_own_dir_never_shadows_the_shells_claude(tmp_path, monkeypatch):
     for name in systemd.SERVICE_BINARIES:
         assert shutil.which(name, path=path) == shutil.which(name), name
     assert str(own) in path.split(os.pathsep)
+
+
+# --- unit_states: `crr service status`' probe of crr's own units (#161) ---
+
+_SHOW_OUT = (
+    "Id=crr-revive.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+    "\n"
+    "Id=crr-web.service\nLoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"
+    "\n"
+    "Id=crr-awake.service\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\n"
+)
+
+
+def _fake_systemctl(monkeypatch, *, stdout="", returncode=0, exc=None, calls=None):
+    monkeypatch.setattr(systemd.shutil, "which", lambda name: "/usr/bin/systemctl")
+
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append((argv, kwargs))
+        if exc is not None:
+            raise exc
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(systemd.subprocess, "run", fake_run)
+
+
+def test_crr_units_names_the_three_units():
+    assert systemd.CRR_UNITS == (
+        ("watchdog", systemd.TIMER_NAME),
+        ("dashboard", systemd.WEB_SERVICE_NAME),
+        ("keep-awake", systemd.AWAKE_SERVICE_NAME),
+    )
+
+
+def test_unit_states_parses_systemctl_show(monkeypatch):
+    calls = []
+    _fake_systemctl(monkeypatch, stdout=_SHOW_OUT, calls=calls)
+    states = systemd.unit_states(3.0)
+    assert [tuple(s) for s in states] == [
+        ("watchdog", "crr-revive.timer", True, True, True),
+        ("dashboard", "crr-web.service", True, False, False),
+        ("keep-awake", "crr-awake.service", False, False, False),
+    ]
+    argv, kwargs = calls[0]
+    assert argv[:3] == ["systemctl", "--user", "show"]
+    assert argv[argv.index("-p") + 1] == "Id,LoadState,UnitFileState,ActiveState"
+    for _, unit in systemd.CRR_UNITS:
+        assert unit in argv
+    assert kwargs["timeout"] == 3.0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"returncode": 1, "stdout": ""},                       # no user bus
+    {"stdout": ""},                                        # answered nothing
+    {"stdout": "Id=crr-revive.timer\nLoadState=loaded\n"},  # missing units
+    {"exc": subprocess.TimeoutExpired("systemctl", 3)},
+    {"exc": FileNotFoundError("systemctl")},
+    {"exc": PermissionError("systemctl")},
+])
+def test_unit_states_is_none_when_the_user_manager_cannot_answer(monkeypatch, kwargs):
+    _fake_systemctl(monkeypatch, **kwargs)
+    assert systemd.unit_states(3.0) is None
+
+
+def test_unit_states_is_none_without_systemctl(monkeypatch):
+    monkeypatch.setattr(systemd.shutil, "which", lambda name: None)
+    assert systemd.unit_states(3.0) is None
+
+
+# --- the port the installed dashboard really runs on (#161) ---
+
+@pytest.mark.parametrize("exec_start, port", [
+    ("/opt/crr/bin/crr web --port 8377", 8377),
+    ("/home/u/my bin/crr web --port 9000", 9000),
+    ("/opt/crr/bin/crr web --port=9001", 9001),
+    ("/opt/crr/bin/crr web", None),
+    ("/opt/crr/bin/crr web --port abc", None),
+    ("/opt/crr/bin/crr web --port 99999", None),
+])
+def test_parse_web_port_reads_execstart(exec_start, port):
+    unit = f"[Service]\nType=simple\nExecStart={exec_start}\nRestart=on-failure\n"
+    assert systemd.parse_web_port(unit) == port
+
+
+def test_parse_web_port_round_trips_the_unit_the_adapter_writes():
+    unit = systemd.web_service_unit("/opt/crr/bin/crr", "/usr/bin", "/state", 9123)
+    assert systemd.parse_web_port(unit) == 9123
+
+
+def test_installed_web_port_reads_the_unit_file(tmp_path):
+    assert systemd.installed_web_port(tmp_path) is None          # nothing installed
+    systemd.write_units(systemd.unit_dir(tmp_path), {
+        systemd.WEB_SERVICE_NAME: systemd.web_service_unit("/x/crr", "/bin", "/s", 8444)})
+    assert systemd.installed_web_port(tmp_path) == 8444
+
+
+# --- crr-web as the user manager has it loaded (#161, C1) -------------------
+
+_WEB_SHOW_OUT = "MainPID=4242\nKillMode=process\nLoadState=loaded\nActiveState=active\n"
+
+
+@pytest.mark.real_service_probes
+def test_web_unit_props_reads_the_loaded_values(monkeypatch):
+    calls = []
+    _fake_systemctl(monkeypatch, stdout=_WEB_SHOW_OUT, calls=calls)
+    assert systemd.web_unit_props(3.0) == {
+        "MainPID": "4242", "KillMode": "process",
+        "LoadState": "loaded", "ActiveState": "active"}
+    argv, kwargs = calls[0]
+    assert argv == ["systemctl", "--user", "show", "crr-web.service",
+                    "-p", "LoadState,ActiveState,KillMode,MainPID"]
+    assert kwargs["timeout"] == 3.0
+
+
+@pytest.mark.real_service_probes
+@pytest.mark.parametrize("kwargs", [
+    {"returncode": 1, "stdout": ""},                       # no user bus
+    {"stdout": ""},                                        # answered nothing
+    {"exc": subprocess.TimeoutExpired("systemctl", 3)},
+    {"exc": FileNotFoundError("systemctl")},
+])
+def test_web_unit_props_is_none_when_the_user_manager_cannot_answer(monkeypatch, kwargs):
+    _fake_systemctl(monkeypatch, **kwargs)
+    assert systemd.web_unit_props(3.0) is None
+
+
+@pytest.mark.real_service_probes
+def test_web_unit_props_is_none_without_systemctl(monkeypatch):
+    monkeypatch.setattr(systemd.shutil, "which", lambda name: None)
+    assert systemd.web_unit_props(3.0) is None
+
+
+@pytest.mark.parametrize("props, kill_mode", [
+    ({"LoadState": "loaded", "KillMode": "process"}, "process"),
+    ({"LoadState": "loaded", "KillMode": "control-group"}, "control-group"),
+    # A unit systemd could not find still reports the default control-group;
+    # that says nothing about a unit file, so it is unknown.
+    ({"LoadState": "not-found", "KillMode": "control-group"}, None),
+    ({"LoadState": "loaded", "KillMode": ""}, None),
+    ({}, None),
+    (None, None),
+])
+def test_loaded_kill_mode(props, kill_mode):
+    assert systemd.loaded_kill_mode(props) == kill_mode
+
+
+# --- the port the RUNNING dashboard listens on (#161, I5) -------------------
+
+@pytest.mark.parametrize("raw, port", [
+    (b"/app/bin/python3\0/app/bin/crr\0web\0--port\08377\0", 8377),
+    (b"/app/bin/crr\0web\0--port=9001\0", 9001),
+    (b"/home/u/my bin/crr\0web\0--port\09000\0", 9000),   # spaces survive NULs
+    (b"/app/bin/crr\0web\0", None),                          # no --port
+    (b"/app/bin/crr\0revive\0--port\08377\0", None),       # not `crr web`
+    (b"/app/bin/crr\0web\0--port\0abc\0", None),
+    (b"/app/bin/crr\0web\0--port\099999\0", None),
+    (b"", None),
+])
+def test_parse_cmdline_port(raw, port):
+    assert systemd.parse_cmdline_port(raw) == port
+
+
+@pytest.mark.parametrize("props, pid", [
+    ({"ActiveState": "active", "MainPID": "4242"}, 4242),
+    ({"ActiveState": "inactive", "MainPID": "4242"}, None),
+    ({"ActiveState": "active", "MainPID": "0"}, None),       # no main process
+    ({"ActiveState": "active", "MainPID": "x"}, None),
+    ({"ActiveState": "active"}, None),
+    (None, None),
+])
+def test_running_main_pid(props, pid):
+    assert systemd.running_main_pid(props) == pid
+
+
+def test_running_web_port_reads_the_main_pids_cmdline(tmp_path):
+    (tmp_path / "4242").mkdir()
+    (tmp_path / "4242" / "cmdline").write_bytes(b"/app/crr\0web\0--port\08377\0")
+    active = {"ActiveState": "active", "MainPID": "4242"}
+    assert systemd.running_web_port(active, proc_root=tmp_path) == 8377
+    assert systemd.running_web_port({**active, "MainPID": "5"}, proc_root=tmp_path) is None
+    assert systemd.running_web_port({**active, "ActiveState": "inactive"},
+                                    proc_root=tmp_path) is None
+    assert systemd.running_web_port(None, proc_root=tmp_path) is None
+
+
+def test_running_web_port_defaults_to_the_module_proc_root(tmp_path, monkeypatch):
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "cmdline").write_bytes(b"crr\0web\0--port\09100\0")
+    monkeypatch.setattr(systemd, "PROC_ROOT", tmp_path)
+    assert systemd.running_web_port({"ActiveState": "active", "MainPID": "7"}) == 9100
+
+
+# --- crr service start / stop (#161) ----------------------------------------
+
+def test_start_argv():
+    assert systemd.start_argv() == [
+        "systemctl", "--user", "start",
+        "crr-revive.timer", "crr-web.service", "crr-awake.service"]
+
+
+def test_stop_argv():
+    assert systemd.stop_argv() == [
+        "systemctl", "--user", "stop",
+        "crr-revive.timer", "crr-web.service", "crr-awake.service"]
+
+
+# --- crr logs (#161) ----------------------------------------------------------
+
+def test_log_units_map_the_three_service_names():
+    assert systemd.LOG_UNITS == {
+        "revive": "crr-revive.service",
+        "web": "crr-web.service",
+        "awake": "crr-awake.service",
+    }
+
+
+def test_journal_argv():
+    assert systemd.journal_argv("crr-web.service", 200, False) == [
+        "journalctl", "--user", "-u", "crr-web.service", "-n", "200",
+        "--no-pager", "-o", "short-iso"]
+
+
+def test_journal_argv_follow_appends_f():
+    assert systemd.journal_argv("crr-revive.service", 5, True) == [
+        "journalctl", "--user", "-u", "crr-revive.service", "-n", "5",
+        "--no-pager", "-o", "short-iso", "-f"]

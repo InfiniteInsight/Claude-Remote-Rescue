@@ -1147,3 +1147,164 @@ def test_a_v2_record_cannot_carry_the_v3_exited_reason():
     r["reason"] = "exited"
     with pytest.raises(contracts.ContractError):
         contracts.validate_archive_record(r)
+
+
+# --------------------------------------------------------------------------
+# `crr config --effective --json` payload (#161)
+# --------------------------------------------------------------------------
+
+def _config_payload():
+    return {
+        "contract": 1,
+        "defaults_version": 29,
+        "degraded": False,
+        "keys": {
+            "zombie_strikes": {"value": 7, "default": 5, "origin": "override",
+                               "type": "int", "apply": "restart-web"},
+            "host_allowlist_extras": {"value": [], "default": [], "origin": "default",
+                                      "type": "list", "apply": "restart-web"},
+        },
+    }
+
+
+def test_valid_config_payload_passes():
+    assert contracts.CONFIG_CONTRACT_VERSION == 1
+    contracts.validate_config_payload(_config_payload())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.update(contract=2),
+    lambda p: p.update(degraded="no"),
+    lambda p: p.update(defaults_version=True),
+    lambda p: p.update(extra=1),
+    lambda p: p.pop("keys"),
+    lambda p: p.update(keys=[]),
+    lambda p: p["keys"]["zombie_strikes"].update(origin="guessed"),
+    lambda p: p["keys"]["zombie_strikes"].update(type="number"),
+    lambda p: p["keys"]["zombie_strikes"].update(apply="eventually"),
+    lambda p: p["keys"]["zombie_strikes"].update(value="seven"),
+    lambda p: p["keys"]["zombie_strikes"].update(default=5.0),
+    lambda p: p["keys"]["zombie_strikes"].pop("default"),
+    lambda p: p["keys"]["zombie_strikes"].update(extra=1),
+    lambda p: p["keys"]["host_allowlist_extras"].update(value=[1]),
+])
+def test_config_payload_violations_are_rejected(mutate):
+    payload = copy.deepcopy(_config_payload())
+    mutate(payload)
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_config_payload(payload)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_config_payload_refuses_a_float_that_is_not_finite(bad):
+    payload = copy.deepcopy(_config_payload())
+    payload["keys"]["context_tight_fraction"] = {
+        "value": 0.7, "default": 0.7, "origin": "default",
+        "type": "float", "apply": "restart-web"}
+    contracts.validate_config_payload(payload)          # finite: fine
+    for field in ("value", "default"):
+        broken = copy.deepcopy(payload)
+        broken["keys"]["context_tight_fraction"][field] = bad
+        with pytest.raises(contracts.ContractError):
+            contracts.validate_config_payload(broken)
+
+
+def test_config_payload_error_names_the_offending_element_type():
+    payload = copy.deepcopy(_config_payload())
+    payload["keys"]["host_allowlist_extras"]["value"] = ["a", 1]
+    with pytest.raises(contracts.ContractError, match="list of str.*int"):
+        contracts.validate_config_payload(payload)
+
+
+def _service_payload():
+    return {
+        "contract": contracts.SERVICE_CONTRACT_VERSION,
+        "backend": "systemd",
+        "reason": "",
+        "state": "running",
+        "services": [
+            {"name": "watchdog", "unit": "crr-revive.timer",
+             "installed": True, "enabled": True, "active": True},
+        ],
+        "dashboard_url": "http://127.0.0.1:8377/",
+        "dashboard_login": False,
+    }
+
+
+def test_valid_service_payload_passes():
+    assert contracts.SERVICE_CONTRACT_VERSION == 1
+    contracts.validate_service_payload(_service_payload())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.update(contract=2),
+    lambda p: p.update(backend="launchd"),
+    lambda p: p.update(state="broken"),
+    lambda p: p.update(reason=None),
+    lambda p: p.update(dashboard_url=8377),
+    lambda p: p.update(dashboard_login="no"),
+    lambda p: p.update(extra=1),
+    lambda p: p.pop("dashboard_login"),
+    lambda p: p.update(services={}),
+    lambda p: p["services"][0].update(active="yes"),
+    lambda p: p["services"][0].update(name=3),
+    lambda p: p["services"][0].pop("enabled"),
+    lambda p: p["services"][0].update(extra=1),
+    lambda p: p["services"].append("watchdog"),
+])
+def test_invalid_service_payload_is_refused(mutate):
+    payload = copy.deepcopy(_service_payload())
+    mutate(payload)
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_service_payload(payload)
+
+
+def _qr_payload():
+    return {
+        "contract": contracts.QR_CONTRACT_VERSION,
+        "provider": "tailscale",
+        "url": "https://lovelace.tail3af2d9.ts.net/",
+        "loopback_url": "http://127.0.0.1:8377/",
+        "hint": None,
+        "dashboard_reachable": True,
+        "degraded": False,
+    }
+
+
+def test_valid_qr_payload_passes():
+    assert contracts.QR_CONTRACT_VERSION == 1
+    # `degraded` is still v1 and last: it was added before v1 shipped (R25).
+    assert contracts.QR_PAYLOAD_KEYS == (
+        "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable",
+        "degraded")
+    contracts.validate_qr_payload(_qr_payload())
+
+
+def test_qr_payload_with_no_tunnel_passes():
+    payload = _qr_payload()
+    payload.update(provider=None, url=None, hint=None, dashboard_reachable=False)
+    contracts.validate_qr_payload(payload)
+    payload.update(provider="tailscale", hint="tailscale serve --bg 8377", degraded=True)
+    contracts.validate_qr_payload(payload)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.update(contract=2),
+    lambda p: p.update(provider=3),
+    lambda p: p.update(url=3),
+    lambda p: p.update(hint=3),
+    lambda p: p.update(loopback_url=None),
+    lambda p: p.update(loopback_url=8377),
+    lambda p: p.update(dashboard_reachable="yes"),
+    lambda p: p.update(dashboard_reachable=None),
+    lambda p: p.update(extra=1),
+    lambda p: p.pop("hint"),
+    lambda p: p.update(degraded="no"),
+    lambda p: p.update(degraded=None),
+    lambda p: p.pop("degraded"),
+])
+def test_invalid_qr_payload_is_refused(mutate):
+    payload = copy.deepcopy(_qr_payload())
+    mutate(payload)
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_qr_payload(payload)

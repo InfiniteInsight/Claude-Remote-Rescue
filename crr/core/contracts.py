@@ -12,6 +12,7 @@ Pure stdlib, no imports from adapters or cli (this is core).
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Iterable, Mapping
 
@@ -141,6 +142,31 @@ MACHINES_CONTRACT_VERSION = 1
 # page seeds the CF fields from the OVERRIDE only, so effective values and
 # override values must travel as distinct answers.
 TUNNEL_PAYLOAD_CONTRACT_VERSION = 2
+# `crr config --effective --json` (#161) — what the Windows tray's Settings tab
+# lists: every setting with its effective value, its default, where the value
+# came from, its type, and how a change takes effect.
+# v1: brand new, no prior shape. `degraded` is part of the contract because a
+# store crr could not read means some `origin` may be wrong, and a consumer
+# that cannot see that would present a guess as the truth.
+CONFIG_CONTRACT_VERSION = 1
+# `crr service status --json` (#161) — what the Windows tray's Control tab and
+# its icon read: which of crr's three systemd user units are installed,
+# enabled and running, and where the dashboard answers.
+# v1: brand new, no prior shape. `backend` and `reason` are part of the
+# contract so a host with no systemd user manager reads as "unsupported, and
+# why" rather than as three units that happen to be missing.
+SERVICE_CONTRACT_VERSION = 1
+# `crr qr --json` (#161) — what the Windows tray's Control tab draws a QR from:
+# the URL a phone can reach (through a tailnet or tunnel), the setup hint when
+# there is none, the loopback URL, and whether the dashboard answers there.
+# v1: brand new, no prior shape. `url`, `provider` and `hint` are null rather
+# than empty strings when absent, so "no phone-reachable URL" cannot be
+# mistaken for a URL; `hint` is null whenever `url` is set; and
+# `dashboard_reachable` is measured, never assumed. `degraded` (added before
+# v1 shipped, R25) is true when settings.json could not be read, so the tunnel
+# selection may have fallen back to config.toml, or when a provider call
+# failed, so a null `url` or `hint` may not mean "none".
+QR_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -158,6 +184,10 @@ KICKS_STORE_VERSION = 1
 # v1: dashboard login — optional passphrase auth gate (spec 2026-08-26; see
 # crr.core.dashboard_auth). Brand new store: no prior unversioned shape.
 DASHBOARD_AUTH_STORE_VERSION = 1
+# v1: config_overrides.json (#161) — the crr-owned overlay of settings
+# changes, layered over the user's hand-owned config.toml (which crr never
+# writes). Brand new: no prior unversioned shape.
+CONFIG_OVERRIDES_STORE_VERSION = 1
 # v1: WSL holder hold flag (#138) — pause/stop the crr-wsl-boot holder.
 # Lives on the WINDOWS side (the task must decide before it starts WSL) and
 # is read by the generated PowerShell launcher as well as crr, which both
@@ -739,6 +769,31 @@ TUNNEL_PAYLOAD_KEYS = (
 )
 TUNNEL_HEALTH_STATES = ("up", "down", "unknown", "none")
 
+SERVICE_PAYLOAD_KEYS = (
+    "contract", "backend", "reason", "state", "services", "dashboard_url",
+    "dashboard_login",
+)
+SERVICE_UNIT_FIELDS = ("name", "unit", "installed", "enabled", "active")
+SERVICE_BACKENDS = ("systemd", "unsupported")
+SERVICE_STATES = ("not-installed", "running", "stopped", "partial")
+
+QR_PAYLOAD_KEYS = (
+    "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable",
+    "degraded",
+)
+
+CONFIG_PAYLOAD_KEYS = ("contract", "defaults_version", "keys", "degraded")
+CONFIG_KEY_FIELDS = ("value", "default", "origin", "type", "apply")
+# Where a value came from: the crr-owned overlay or a dashboard store
+# (override), the user's config.toml (configured), or the built-in (default).
+CONFIG_ORIGINS = ("default", "configured", "override")
+CONFIG_VALUE_TYPES = ("bool", "int", "float", "str", "list")
+# How a changed setting takes effect; crr.core.config.APPLY_RULES documents
+# each kind. Lives here (not in config.py) so the validator can check it
+# without contracts importing config.
+CONFIG_APPLY_KINDS = ("live", "restart-web", "restart-awake", "reinstall",
+                      "windows-installer", "fixed")
+
 
 def _require_contract(payload: Mapping[str, Any], expected: int, what: str) -> None:
     got = payload["contract"]
@@ -886,6 +941,93 @@ def validate_tunnel_payload(payload: Any) -> None:
             _require_type(payload[nullable], str, f"/api/tunnel '{nullable}'")
     if payload["url"] is not None:
         _require_type(payload["url"], str, "/api/tunnel 'url'")
+
+
+# --------------------------------------------------------------------------
+# `crr config --effective --json` payload.
+# --------------------------------------------------------------------------
+
+def _config_value_matches(value: Any, type_name: str) -> bool:
+    if type_name == "bool":
+        return isinstance(value, bool)
+    if type_name == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "float":
+        # NaN and Infinity are not JSON; a strict parser rejects the payload.
+        return isinstance(value, float) and math.isfinite(value)
+    if type_name == "str":
+        return isinstance(value, str)
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
+def _config_value_type_name(value: Any, type_name: str) -> str:
+    """What a mismatched value actually was; names a list's odd element."""
+    if type_name == "float" and isinstance(value, float):
+        return f"a non-finite float ({value!r})"
+    if type_name == "list" and isinstance(value, list):
+        bad = next(v for v in value if not isinstance(v, str))
+        return f"a list with a {type(bad).__name__} element"
+    return type(value).__name__
+
+
+def validate_config_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid `crr config
+    --effective --json` body. Each key's ``value`` and ``default`` must have
+    the key's declared ``type``, so a consumer can render the row from the
+    payload alone."""
+    payload = _require_mapping(payload, "config payload")
+    _require_exact_keys(payload, CONFIG_PAYLOAD_KEYS, "config payload")
+    _require_contract(payload, CONFIG_CONTRACT_VERSION, "config")
+    _require_type(payload["defaults_version"], int, "config 'defaults_version'")
+    _require_type(payload["degraded"], bool, "config 'degraded'")
+    keys = _require_mapping(payload["keys"], "config 'keys'")
+    for name, fields in keys.items():
+        what = f"config key '{name}'"
+        fields = _require_mapping(fields, what)
+        _require_exact_keys(fields, CONFIG_KEY_FIELDS, what)
+        _require_enum(fields["origin"], CONFIG_ORIGINS, f"{what} 'origin'")
+        _require_enum(fields["type"], CONFIG_VALUE_TYPES, f"{what} 'type'")
+        _require_enum(fields["apply"], CONFIG_APPLY_KINDS, f"{what} 'apply'")
+        for field in ("value", "default"):
+            if not _config_value_matches(fields[field], fields["type"]):
+                expected = "list of str" if fields["type"] == "list" else fields["type"]
+                raise ContractError(
+                    f"{what} '{field}' must be {expected}, "
+                    f"got {_config_value_type_name(fields[field], fields['type'])}")
+
+
+def validate_service_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid `crr service status
+    --json` body."""
+    payload = _require_mapping(payload, "service payload")
+    _require_exact_keys(payload, SERVICE_PAYLOAD_KEYS, "service payload")
+    _require_contract(payload, SERVICE_CONTRACT_VERSION, "service")
+    _require_enum(payload["backend"], SERVICE_BACKENDS, "service 'backend'")
+    _require_type(payload["reason"], str, "service 'reason'")
+    _require_enum(payload["state"], SERVICE_STATES, "service 'state'")
+    _require_type(payload["dashboard_url"], str, "service 'dashboard_url'")
+    _require_type(payload["dashboard_login"], bool, "service 'dashboard_login'")
+    _require_type(payload["services"], list, "service 'services'")
+    for i, row in enumerate(payload["services"]):
+        what = f"service 'services'[{i}]"
+        row = _require_mapping(row, what)
+        _require_exact_keys(row, SERVICE_UNIT_FIELDS, what)
+        for field in ("name", "unit"):
+            _require_type(row[field], str, f"{what} '{field}'")
+        for field in ("installed", "enabled", "active"):
+            _require_type(row[field], bool, f"{what} '{field}'")
+
+
+def validate_qr_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid `crr qr --json` body."""
+    payload = _require_mapping(payload, "qr payload")
+    _require_exact_keys(payload, QR_PAYLOAD_KEYS, "qr payload")
+    _require_contract(payload, QR_CONTRACT_VERSION, "qr")
+    for field in ("provider", "url", "hint"):
+        _require_type(payload[field], (str, type(None)), f"qr '{field}'")
+    _require_type(payload["loopback_url"], str, "qr 'loopback_url'")
+    _require_type(payload["dashboard_reachable"], bool, "qr 'dashboard_reachable'")
+    _require_type(payload["degraded"], bool, "qr 'degraded'")
 
 
 # --------------------------------------------------------------------------

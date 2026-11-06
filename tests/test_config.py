@@ -113,8 +113,11 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # task repeats so a distro-only restart re-arms it).
     # v29 (2026-10-09): diagnose_scan_cap (#148 — journald host events are
     # classified from up to this many scanned lines, then capped).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 29
+    # v30 (2026-11-06): logs_default_lines (#161 — `crr logs` without --lines).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 30
     assert cfg.DEFAULTS["diagnose_scan_cap"] == 5000
+    assert cfg.DEFAULTS["logs_default_lines"] == 200
+    assert cfg.APPLY_RULES["logs_default_lines"] == "live"
 
 
 def test_zombie_strikes_default_is_five():
@@ -325,3 +328,191 @@ def test_tunnel_provider_defaults():
     assert cfg.DEFAULTS["tunnel_provider"] == "tailscale"
     assert cfg.DEFAULTS["cloudflare_tunnel_name"] == ""
     assert cfg.DEFAULTS["cloudflare_hostname"] == ""
+
+
+def test_every_config_key_has_an_apply_rule():
+    # A new DEFAULTS key with no rule fails here: the tray app must be able
+    # to say what makes any setting take effect.
+    assert set(cfg.APPLY_RULES) == set(cfg.DEFAULTS)
+    assert all(kind in cfg.APPLY_KINDS for kind in cfg.APPLY_RULES.values())
+
+
+def test_known_apply_rules():
+    assert cfg.APPLY_RULES["dashboard_port"] == "reinstall"
+    assert cfg.APPLY_RULES["boot_preferred_tailnet"] == "windows-installer"
+    assert cfg.APPLY_RULES["power_block"] == "live"
+    assert cfg.APPLY_RULES["dashboard_poll_seconds"] == "restart-web"
+    # Read once into the dashboard's page at startup (web.make_web_handler),
+    # so an edit needs a dashboard restart; the watchdog re-reads it per pass.
+    assert cfg.APPLY_RULES["zombie_strikes"] == "restart-web"
+    # The keep-awake holder is built once; its other keys are re-read per poll.
+    assert cfg.APPLY_RULES["power_block_max_hours"] == "restart-awake"
+    # Diagnostic thresholds no installer bakes in: the boot_/harden_ prefix
+    # alone does not make a key windows-installer.
+    assert cfg.APPLY_RULES["boot_headless_window_seconds"] == "live"
+    assert cfg.APPLY_RULES["harden_restart_lookback_days"] == "live"
+    # An import-time injectable prior: crr reads no Config for it.
+    assert cfg.APPLY_RULES["reply_tail_lines"] == "fixed"
+    # The five dashboard-owned keys: `crr config set` routes them to the
+    # dashboard's own stores (settings.json, exclusions.json), which the
+    # watchdog, poll and discovery re-read on every pass, not to config.toml.
+    assert cfg.APPLY_RULES["remote_control_autokick"] == "live"
+    assert cfg.APPLY_RULES["tunnel_provider"] == "live"
+    assert cfg.APPLY_RULES["discover_exclude_dirs"] == "live"
+
+
+@pytest.mark.parametrize("text", ["False", "off", "NO", "0"])
+def test_parse_config_value_bools_false(text):
+    assert cfg.parse_config_value("rescue_auto_open", text) is False
+
+
+@pytest.mark.parametrize("text", ["True", "on", "Yes", "1"])
+def test_parse_config_value_bools_true(text):
+    assert cfg.parse_config_value("rescue_auto_open", text) is True
+
+
+def test_parse_config_value_bools():
+    assert cfg.parse_config_value("remote_control_autokick", "False") is False
+    assert cfg.parse_config_value("remote_control_autokick", "off") is False
+    assert cfg.parse_config_value("remote_control_autokick", "1") is True
+
+
+def test_parse_config_value_refuses_a_word_for_a_bool():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("rescue_auto_open", "maybe")
+
+
+def test_parse_config_value_int_float_str_list():
+    assert cfg.parse_config_value("zombie_strikes", "7") == 7
+    assert cfg.parse_config_value("context_tight_fraction", "0.5") == 0.5
+    assert cfg.parse_config_value("terminal", " wt ") == " wt "
+    assert cfg.parse_config_value("host_allowlist_extras", '["a.example", "b"]') == [
+        "a.example", "b"]
+
+
+def test_parse_config_value_refuses_a_float_for_an_int():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("zombie_strikes", "5.0")
+
+
+def test_parse_config_value_refuses_text_for_an_int_or_float():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("zombie_strikes", "many")
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("context_tight_fraction", "high")
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("context_tight_fraction", "nan")
+
+
+def test_parse_config_value_refuses_a_list_with_a_number():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("host_allowlist_extras", '["a", 1]')
+
+
+def test_parse_config_value_refuses_bad_json_and_non_lists():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("host_allowlist_extras", "a, b")
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("host_allowlist_extras", '"a"')
+
+
+def test_parse_config_value_refuses_an_unknown_key():
+    with pytest.raises(cfg.ConfigError):
+        cfg.parse_config_value("no_such_key", "1")
+
+
+# --- effective_payload: the contracted shape `crr config --effective --json` prints
+
+def _payload(config=None, owned=None, degraded=False):
+    return cfg.effective_payload(config or cfg.Config(), owned=owned or {}, degraded=degraded)
+
+
+def test_effective_payload_validates():
+    from crr.core import contracts
+    config = cfg.Config({"zombie_strikes": 7}, overlay={"power_block": "sleep"})
+    payload = _payload(config, owned={"remote_control_autokick": False})
+    contracts.validate_config_payload(payload)   # must not raise
+    assert payload["contract"] == contracts.CONFIG_CONTRACT_VERSION
+    assert payload["defaults_version"] == cfg.CONFIG_DEFAULTS_VERSION
+    assert payload["degraded"] is False
+    assert set(payload["keys"]) == set(cfg.DEFAULTS)
+    assert tuple(payload["keys"]["zombie_strikes"]) == contracts.CONFIG_KEY_FIELDS
+    assert list(payload["keys"]) == sorted(cfg.DEFAULTS)
+
+
+def test_effective_payload_reports_value_default_origin_type_and_apply():
+    config = cfg.Config({"zombie_strikes": 7, "terminal": "kitty"},
+                        overlay={"power_block": "sleep", "context_tight_fraction": 0.5})
+    keys = _payload(config)["keys"]
+    assert keys["zombie_strikes"] == {
+        "value": 7, "default": 5, "origin": "configured", "type": "int",
+        "apply": cfg.APPLY_RULES["zombie_strikes"]}
+    assert keys["power_block"] == {
+        "value": "sleep", "default": "off", "origin": "override", "type": "str",
+        "apply": "live"}
+    assert keys["close_grace_seconds"]["origin"] == "default"
+    assert keys["close_grace_seconds"]["value"] == keys["close_grace_seconds"]["default"]
+    assert keys["context_tight_fraction"]["type"] == "float"
+    assert keys["rescue_auto_open"]["type"] == "bool"      # not "int"
+    assert keys["host_allowlist_extras"]["type"] == "list"
+    assert keys["reply_tail_lines"]["apply"] == "fixed"
+    for key, fields in keys.items():
+        assert fields["apply"] == cfg.APPLY_RULES[key]
+
+
+def test_dashboard_overrides_show_as_override():
+    config = cfg.Config({"remote_control_autokick": True})
+    owned = {"remote_control_autokick": False, "tunnel_provider": "cloudflare"}
+    keys = _payload(config, owned=owned)["keys"]
+    assert keys["tunnel_provider"]["value"] == "cloudflare"
+    assert keys["tunnel_provider"]["origin"] == "override"
+    assert keys["tunnel_provider"]["default"] == "tailscale"
+    assert keys["remote_control_autokick"]["value"] is False
+    assert keys["remote_control_autokick"]["origin"] == "override"
+    assert keys["remote_control_autokick"]["default"] is True
+    # a dashboard key with nothing stored keeps the config.toml/default answer
+    assert keys["cloudflare_hostname"]["origin"] == "default"
+
+
+def test_effective_payload_does_not_alias_the_defaults():
+    keys = _payload()["keys"]
+    keys["host_allowlist_extras"]["default"].append("x")
+    keys["host_allowlist_extras"]["value"].append("y")
+    assert cfg.DEFAULTS["host_allowlist_extras"] == []
+
+
+def test_effective_payload_refuses_an_owned_value_for_an_unknown_key():
+    with pytest.raises(cfg.ConfigError):
+        _payload(owned={"no_such_key": 1})
+
+
+def test_every_list_default_holds_strings():
+    # check_value relies on this: a list setting is a list of strings.
+    for key, default in cfg.DEFAULTS.items():
+        if isinstance(default, list):
+            assert all(isinstance(v, str) for v in default), key
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_check_value_refuses_a_float_that_is_not_finite(bad):
+    # A config.toml can say `nan` or `inf`; the tray's JSON.parse rejects the
+    # whole --effective payload if one ever reaches stdout.
+    with pytest.raises(cfg.ConfigError, match="context_tight_fraction"):
+        cfg.check_value("context_tight_fraction", bad)
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config({"takeover_idle_seconds": bad})
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config(overlay={"takeover_idle_seconds": bad})
+    cfg.check_value("context_tight_fraction", 0.5)   # must not raise
+
+
+def test_check_value_refuses_a_list_with_a_non_string():
+    for bad in ([1], ["a", 2], [None], [["a"]], [True]):
+        with pytest.raises(cfg.ConfigError, match="host_allowlist_extras"):
+            cfg.check_value("host_allowlist_extras", bad)
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config({"host_allowlist_extras": [1]})
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config(overlay={"discover_exclude_dirs": [1]})
+    cfg.check_value("host_allowlist_extras", ["a", "b"])   # must not raise
+    cfg.check_value("host_allowlist_extras", [])

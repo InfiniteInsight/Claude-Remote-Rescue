@@ -30,6 +30,7 @@ from pathlib import Path
 
 from crr import __version__
 from crr.core.config import CONFIG_DEFAULTS_VERSION, DEFAULTS
+from crr.core.service import UnitState
 
 
 def _stamp() -> str:
@@ -43,6 +44,13 @@ TIMER_NAME = "crr-revive.timer"
 USER_MANAGER_FALLBACK_UNIT = "crr-user-manager.service"
 WEB_SERVICE_NAME = "crr-web.service"
 AWAKE_SERVICE_NAME = "crr-awake.service"
+
+# crr's three units under the names the user sees (`crr service status`).
+CRR_UNITS = (
+    ("watchdog", TIMER_NAME),
+    ("dashboard", WEB_SERVICE_NAME),
+    ("keep-awake", AWAKE_SERVICE_NAME),
+)
 
 # Binaries `crr revive` shells out to (directly or via the revived command).
 SERVICE_BINARIES = ("tmux", "ps", "claude")
@@ -265,6 +273,134 @@ def web_unit_spares_sessions(home: Path) -> bool | None:
     return any(line.strip() == "KillMode=process" for line in text.splitlines())
 
 
+# crr-web as the user manager has it LOADED (#161). `crr service stop` and
+# `crr config set`'s restart hint read KillMode; the dashboard port reads
+# MainPID. The loaded values, not the unit file: the file on disk can be newer
+# than what systemd loaded (no daemon-reload yet), and the loaded unit is what
+# a stop or restart acts on.
+WEB_RUNTIME_PROPS = ("LoadState", "ActiveState", "KillMode", "MainPID")
+
+
+def web_unit_props(timeout: float) -> dict[str, str] | None:
+    """crr-web.service's ``WEB_RUNTIME_PROPS`` from ``systemctl --user show``.
+
+    None when the user manager can't answer: no systemctl, no user bus, a
+    timeout, or no output. A unit that isn't installed still answers (with
+    LoadState=not-found); the helpers below read that as unknown.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "show", WEB_SERVICE_NAME,
+             "-p", ",".join(WEB_RUNTIME_PROPS)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    props: dict[str, str] = {}
+    for line in (r.stdout or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            props[key.strip()] = value.strip()
+    return props or None
+
+
+def loaded_kill_mode(props: dict[str, str] | None) -> str | None:
+    """crr-web's loaded KillMode, or None when it is unknown.
+
+    Unknown covers no answer and a unit that isn't loaded: systemd reports
+    the default ``control-group`` for a unit it could not find, which says
+    nothing about any unit file. Only ``process`` (#140) spares the tmux
+    servers a dashboard Reopen/Restore started in crr-web's cgroup.
+    """
+    if not props or props.get("LoadState") != "loaded":
+        return None
+    return props.get("KillMode") or None
+
+
+def _port_from_words(words: list[str]) -> int | None:
+    """The valid ``--port N`` / ``--port=N`` in an argv, or None."""
+    for i, word in enumerate(words):
+        if word == "--port" and i + 1 < len(words):
+            raw = words[i + 1]
+        elif word.startswith("--port="):
+            raw = word[len("--port="):]
+        else:
+            continue
+        if raw.isdigit() and 0 < int(raw) < 65536:
+            return int(raw)
+    return None
+
+
+def parse_web_port(unit_text: str) -> int | None:
+    """The ``--port`` in a crr-web unit's ExecStart, or None if it has none
+    or it isn't a valid port. Reads what ``web_service_unit`` writes."""
+    for line in unit_text.splitlines():
+        if not line.startswith("ExecStart="):
+            continue
+        port = _port_from_words(line[len("ExecStart="):].split())
+        if port is not None:
+            return port
+    return None
+
+
+# Where running_web_port reads a process's argv; a test seam.
+PROC_ROOT = Path("/proc")
+
+
+def running_main_pid(props: dict[str, str] | None) -> int | None:
+    """crr-web's main pid from ``web_unit_props``, or None unless it is
+    active with a main process (systemd reports MainPID=0 for none)."""
+    if not props or props.get("ActiveState") != "active":
+        return None
+    raw = props.get("MainPID", "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else None
+
+
+def parse_cmdline_port(raw: bytes) -> int | None:
+    """The ``--port`` of a ``crr web`` process from its ``/proc/<pid>/cmdline``
+    (NUL-separated argv), or None when it isn't ``crr web`` or has no valid
+    port. NULs, not spaces, separate the words, so a path with a space in it
+    stays one word."""
+    words = [w.decode("utf-8", "replace") for w in raw.split(b"\0") if w]
+    if "web" not in words:
+        return None
+    return _port_from_words(words)
+
+
+def running_web_port(props: dict[str, str] | None,
+                     proc_root: Path | None = None) -> int | None:
+    """The port the RUNNING crr-web listens on, from its main process's argv.
+
+    This beats the unit file: ``crr systemd --install`` rewrites the unit but
+    its ``enable --now`` does not restart a running crr-web, so until a
+    restart the process is still on the port it started with. None when
+    crr-web isn't active, or its argv can't be read or carries no port.
+    """
+    pid = running_main_pid(props)
+    if pid is None:
+        return None
+    try:
+        raw = ((proc_root or PROC_ROOT) / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    return parse_cmdline_port(raw)
+
+
+def installed_web_port(home: Path) -> int | None:
+    """The port the INSTALLED crr-web unit serves on; None when no unit is
+    installed or its ExecStart carries no readable port. This, not config, is
+    where the running dashboard is until `crr systemd --install` is re-run."""
+    try:
+        text = (unit_dir(home) / WEB_SERVICE_NAME).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    return parse_web_port(text)
+
+
 def unit_dir(home: Path) -> Path:
     return home / ".config" / "systemd" / "user"
 
@@ -419,3 +555,73 @@ def user_manager_fallback_uninstall_argv() -> list[str]:
 def _shq(text: str) -> str:
     """Single-quote ``text`` for the bash -c script (no shlex import churn)."""
     return "'" + text.replace("'", "'\\''") + "'"
+
+
+def unit_states(timeout: float) -> list[UnitState] | None:
+    """Installed/enabled/active for each of ``CRR_UNITS``, in that order.
+
+    None when the user manager can't answer: no systemctl, no user bus (WSL
+    without systemd, a bare SSH session), a timeout, or output that doesn't
+    cover every unit. A unit that isn't installed still gets a row.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "show", *(unit for _, unit in CRR_UNITS),
+             "-p", "Id,LoadState,UnitFileState,ActiveState"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    props: dict[str, dict[str, str]] = {}
+    block: dict[str, str] = {}
+    for line in [*(r.stdout or "").splitlines(), ""]:
+        if line.strip():
+            key, _, value = line.partition("=")
+            block[key] = value
+        elif block:
+            if "Id" in block:
+                props[block["Id"]] = block
+            block = {}
+    states = []
+    for name, unit in CRR_UNITS:
+        found = props.get(unit)
+        if found is None:
+            return None
+        states.append(UnitState(
+            name, unit,
+            installed=found.get("LoadState") not in (None, "", "not-found"),
+            enabled=found.get("UnitFileState") in ("enabled", "enabled-runtime"),
+            active=found.get("ActiveState") == "active",
+        ))
+    return states
+
+
+def start_argv() -> list[str]:
+    """``crr service start``: bring crr's three units up now (enable is untouched)."""
+    return ["systemctl", "--user", "start", *(unit for _, unit in CRR_UNITS)]
+
+
+def stop_argv() -> list[str]:
+    """``crr service stop``: a runtime stop only. The units stay enabled, so a
+    WSL restart, a reboot or ``crr service start`` brings crr back. Running
+    sessions keep running."""
+    return ["systemctl", "--user", "stop", *(unit for _, unit in CRR_UNITS)]
+
+
+# `crr logs --service`: the units that have a journal worth reading. The timer
+# has none of its own; its service (`crr-revive.service`) is the one that logs.
+LOG_UNITS = {"revive": SERVICE_NAME, "web": WEB_SERVICE_NAME, "awake": AWAKE_SERVICE_NAME}
+
+
+def journal_argv(unit: str, lines: int, follow: bool) -> list[str]:
+    """``crr logs``: the last ``lines`` journal lines of a user unit, plus
+    ``-f`` to keep following it."""
+    argv = ["journalctl", "--user", "-u", unit, "-n", str(lines),
+            "--no-pager", "-o", "short-iso"]
+    if follow:
+        argv.append("-f")
+    return argv

@@ -13,9 +13,16 @@ rounded up (and that rounding is surfaced, not hidden).
 
 UNVERIFIED from Linux CI: builders are unit-tested; the real schtasks
 round-trip is author-verified on Windows (task #8).
+
+One read-only probe does run here: ``crr_tasks_installed`` asks
+``schtasks.exe /Query`` whether crr's tasks exist, for ``crr service`` (#161).
 """
 
 from __future__ import annotations
+
+import shutil
+import subprocess
+import time
 
 REVIVE_TASK = "CRR Revive"
 WEB_TASK = "CRR Web"
@@ -57,6 +64,35 @@ def create_web_task_command(
 ) -> list[str]:
     tr = _wsl_invocation(crr_bin, ["web", "--port", str(port)], distro)
     return ["schtasks.exe", "/Create", "/TN", WEB_TASK, "/TR", tr, "/SC", "ONLOGON", "/F"]
+
+
+def query_task_command(name: str) -> list[str]:
+    """Read-only: exits 0 when the task ``name`` exists."""
+    return ["schtasks.exe", "/Query", "/TN", name]
+
+
+def crr_tasks_installed(timeout: float) -> bool:
+    """Is crr installed as Windows Scheduled Tasks (either of its two tasks)?
+
+    Both queries share one ``timeout`` budget. No schtasks.exe, a failure or
+    a timeout all mean "not found": this only decides how ``crr service``
+    describes a host with no systemd units, and must never raise.
+    """
+    if shutil.which("schtasks.exe") is None:
+        return False
+    deadline = time.monotonic() + timeout
+    for name in (REVIVE_TASK, WEB_TASK):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            r = subprocess.run(query_task_command(name), stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=remaining)
+        except (subprocess.SubprocessError, OSError):
+            return False
+        if r.returncode == 0:
+            return True
+    return False
 
 
 def delete_task_commands() -> list[list[str]]:
