@@ -3,8 +3,8 @@
 `cli._kick_dropped_bridges` is the separate, LIVE-acting pass appended to
 `crr revive` after the existing crashed-session revival. Driven entirely by
 fakes: a fake boot/probe (mirrors test_reviver.py's shape) decide the
-classifier state, a fake controller reports which claude process groups are
-alive under the journaled shell, and `read_session_state` /
+classifier state and reports which claude processes are alive under the
+journaled shell, and `read_session_state` /
 `read_takeover_signal` / `kick` are injected so no real state file, process
 or transcript is ever touched. Every test asserts on the fake `kick` being
 called (or not) — never on a real process.
@@ -41,11 +41,22 @@ class FakeBoot:
 
 
 class FakeProbe:
-    """A LIVE-classifying probe by default; flip either flag for other states."""
+    """A LIVE-classifying probe by default; flip either flag for other states.
 
-    def __init__(self, alive=True, tty=True):
+    `claude_pids` supplies `pid_matched`: the check that the state file
+    describes THIS session's live claude rather than a dead or recycled pid.
+    Default: one live claude process whose pid is the state file's pid.
+    """
+
+    def __init__(self, alive=True, tty=True, pids=(_CLAUDE_PID,)):
         self._alive = alive
         self._tty = tty
+        self._pids = list(pids)
+        self.asked = []
+
+    def claude_pids(self, shell_pids):
+        self.asked.append(list(shell_pids))
+        return {p: list(self._pids) for p in shell_pids}
 
     def is_alive(self, pid):
         return self._alive
@@ -55,12 +66,9 @@ class FakeProbe:
 
 
 class FakeController:
-    """Stands in for `PsProcessController`.
-
-    `claude_groups(shell_pid)` is the only method this step calls: it
-    supplies `pid_matched`, the check that the state file describes THIS
-    session's live claude rather than a dead or recycled pid. Default: one
-    live claude job whose group id matches the state file's pid.
+    """Stands in for `PsProcessController`, which only the kick itself may
+    use. Detection must not consult it (#184): its `claude_groups` answers
+    "which groups may I signal", which is narrower than "is claude running".
     """
 
     def __init__(self, groups=(_CLAUDE_PID,)):
@@ -347,20 +355,36 @@ def test_an_unknown_reachability_is_never_kicked(tmp_path, state, why):
     assert recorder.calls == [], why
 
 
-def test_pid_matching_asks_the_controller_about_the_journaled_shell(tmp_path):
+def test_pid_matching_asks_the_probe_about_the_journaled_shell(tmp_path):
     # `pid_matched` is not a liveness check on the state file's pid — a
     # recycled pid is alive and belongs to something unrelated. It asks
-    # whether that pid is one of THIS shell's live claude jobs.
+    # whether that pid is one of THIS shell's live claude processes.
     store = JournalStore(tmp_path)
     store.write(_entry())
-    controller = FakeController(groups=())   # no live claude under this shell
+    probe = FakeProbe(pids=())               # no live claude under this shell
     recorder = _Recorder()
 
     _run(store.scan().entries, settings.SettingsStore(tmp_path), tmp_path, recorder,
-         controller=controller)
+         probe=probe)
 
-    assert controller.asked == [_PID]        # the journaled SHELL pid
+    assert probe.asked == [[_PID]]           # the journaled SHELL pid
     assert recorder.calls == []              # -> unknown, not a kick
+
+
+def test_a_claude_sharing_its_launchers_group_is_still_matched(tmp_path):
+    # #184: claude running, but not leading its own process group (launched
+    # without job control). `claude_groups` returns nothing for it, because
+    # its group is the launcher's and must never be signalled. Detection
+    # keyed on that answer read every such session as `unknown` and never
+    # kicked it; measured live 2026-11-06 on 5 of 7 sessions.
+    store = JournalStore(tmp_path)
+    store.write(_entry())
+    recorder = _Recorder()
+
+    _run(store.scan().entries, settings.SettingsStore(tmp_path), tmp_path, recorder,
+         probe=FakeProbe(pids=(_CLAUDE_PID,)), controller=FakeController(groups=()))
+
+    assert recorder.calls == [_PID]
 
 
 # --------------------------------------------------------------------------

@@ -204,7 +204,7 @@ def reopen(
         # threading skip_permissions through the flag so the shim picks it up.
         groups = controller.claude_groups(pid)
         if not groups:
-            return OpResult(False, f"session {pid}: no running claude process found")
+            return OpResult(False, _no_claude_group(probe, pid))
         skip_perms = entry["claude"].get("skip_permissions", False)
         flags.arm_relaunch(pid, entry["claude"]["session_id"],
                            boot_id=boot.current(), skip_permissions=skip_perms)
@@ -340,6 +340,23 @@ def _reopen_ghost(
     )
 
 
+def _no_claude_group(probe: ProcessProbe, pid: int) -> str:
+    """Why there is no claude group to signal under ``pid``.
+
+    Usually there is no claude. But a claude that shares a LIVE shell's own
+    process group (one started without job control, #184) is running, and
+    the only group signal that reaches it would also kill the user's shell,
+    which crr never does. Reporting "no running claude process found" for
+    it would be false, and it is what autokick now records when it detects
+    such a session but cannot restart it.
+    """
+    if probe.claude_pids([pid]).get(pid):
+        return (f"session {pid}: claude is running in the shell's own process group, "
+                "and crr won't signal that group because it would kill the shell — "
+                "exit claude in that terminal and resume it")
+    return f"session {pid}: no running claude process found"
+
+
 def close(
     store: JournalStore,
     controller: "ProcessController",
@@ -369,7 +386,7 @@ def close(
     # exit must be allowed to find it there.
     groups = controller.claude_groups(pid, include_shell_group=bool(entry.get("tmux_session")))
     if not groups:
-        return OpResult(False, f"session {pid}: no running claude process found")
+        return OpResult(False, _no_claude_group(probe, pid))
     flags.arm_close(pid, boot_id=boot.current())
     landed, errors = _signal_groups(controller, groups, grace)
     if landed == 0:
@@ -412,7 +429,7 @@ def kick(
     parked = bool(entry.get("tmux_session"))
     groups = controller.claude_groups(pid, include_shell_group=parked)
     if not groups:
-        return OpResult(False, f"session {pid}: no running claude process found")
+        return OpResult(False, _no_claude_group(probe, pid))
     flags.arm_relaunch(pid, entry["claude"]["session_id"], boot_id=boot.current(),
                        skip_permissions=entry["claude"].get("skip_permissions", False))
     landed, errors = _signal_groups(controller, groups, grace)

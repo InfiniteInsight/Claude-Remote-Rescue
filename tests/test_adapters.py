@@ -560,6 +560,71 @@ def test_child_groups_selects_only_claude_children():
     assert pp._child_groups(rows, 100) == [200, 400, 500]
 
 
+# --- _child_claude_pids: the DETECTION question (#184) ----------------------
+# "Is this pid a claude process under this journaled shell?" is a question
+# about processes, not groups. Keying it on group ids made every claude that
+# did not lead its own group invisible to autokick, the reachability badge,
+# keep-awake and the duplicate-conversation guard (measured 2026-11-06:
+# keep-awake counted 2 of 7 running claudes). Signalling stays group-based in
+# `_child_groups`; only detection widens.
+
+def test_child_claude_pids_returns_a_job_controlled_claude():
+    rows = [(100, 1, 100, "-fish"), (200, 100, 200, "claude"), (201, 200, 200, "node")]
+    assert pp._child_claude_pids(rows, shell_pid=100) == [200]
+
+
+def test_child_claude_pids_returns_a_claude_sharing_the_shell_group():
+    # The case `_child_groups` must refuse to SIGNAL (it would kill the shell)
+    # is still a running claude, and detection must see it.
+    rows = [(100, 1, 100, "sh"), (200, 100, 100, "claude")]
+    assert pp._child_claude_pids(rows, shell_pid=100) == [200]
+
+
+def test_child_claude_pids_returns_the_journaled_pid_when_it_is_claude():
+    # A revived session journaled under the claude process itself (#58).
+    rows = [(200, 50, 200, "claude"), (201, 200, 200, "node")]
+    assert pp._child_claude_pids(rows, shell_pid=200) == [200]
+
+
+def test_child_claude_pids_selects_only_direct_claude_children():
+    rows = [
+        (100, 1, 100, "-fish"),
+        (200, 100, 200, "claude"),
+        (300, 100, 300, "make"),                      # not claude
+        (400, 100, 100, "/usr/local/bin/claude"),     # shares the shell group
+        (600, 200, 200, "claude-helper"),             # grandchild: not ours
+        (700, 1, 700, "claude"),                      # someone else's claude
+    ]
+    assert pp._child_claude_pids(rows, 100) == [200, 400]
+
+
+def test_child_claude_pids_empty_when_shell_absent_or_childless():
+    assert pp._child_claude_pids([(100, 1, 100, "-fish")], shell_pid=100) == []
+    assert pp._child_claude_pids([(200, 100, 200, "claude")], shell_pid=100) == []
+
+
+def test_probe_claude_pids_batches_one_snapshot(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=(
+            "100 1 100 -fish\n200 100 200 claude\n"
+            "300 1 300 sh\n301 300 300 claude --resume x\n"), stderr="")
+
+    monkeypatch.setattr(pp.subprocess, "run", fake_run)
+    out = pp.PsProcessProbe(2.0).claude_pids([100, 300, 999])
+    assert out == {100: [200], 300: [301], 999: []}
+    assert len(calls) == 1
+
+
+def test_probe_claude_pids_degrades_to_empty(monkeypatch):
+    monkeypatch.setattr(pp.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 1, stdout="", stderr="boom"))
+    assert pp.PsProcessProbe(2.0).claude_pids([100]) == {}
+    assert pp.PsProcessProbe(2.0).claude_pids([]) == {}
+
+
 # --- find_resume_process (`crr adopt --takeover` live-process resolver) ---
 #
 # A shim/watchdog-launched claude carries `claude --resume <sid>` on argv
@@ -992,3 +1057,32 @@ def test_fish_prefix_gives_the_command_its_own_process_group(tmp_path, monkeypat
         assert _pgid(child) != _pgid(pane)
     finally:
         subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="POSIX process groups; the python-as-claude stand-in "
+                           "is only verified to show as `claude` in ps on Linux")
+def test_a_claude_sharing_its_launchers_group_is_detected_but_not_signalled(tmp_path):
+    """#184, with real processes. The five sessions running when this was
+    written had exactly this shape (launched before #178): claude in its
+    launcher's process group. Detection must see it; signalling must still
+    refuse the group, since for a live shell that group IS the shell."""
+    (tmp_path / "claude").symlink_to(sys.executable)
+    env = dict(os.environ, PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    # `; true` stops sh from exec'ing claude, so sh stays as the parent.
+    # start_new_session makes sh its group's leader, as a pane process is.
+    launcher = subprocess.Popen(
+        ["sh", "-c", 'claude -c "import time; time.sleep(300)"; true'],
+        env=env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        pids: list[int] = []
+        while not pids and time.monotonic() < deadline:
+            pids = pp.PsProcessProbe(5).claude_pids([launcher.pid]).get(launcher.pid, [])
+            time.sleep(0.05)
+        assert len(pids) == 1, "a claude sharing the launcher's group must be detected"
+        assert _pgid(pids[0]) == launcher.pid, "precondition: it shares the group"
+        assert pp.PsProcessController(5).claude_groups(launcher.pid) == []
+    finally:
+        os.killpg(launcher.pid, 9)
+        launcher.wait()

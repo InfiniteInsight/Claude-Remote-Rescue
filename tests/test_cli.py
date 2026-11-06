@@ -1938,7 +1938,7 @@ def test_status_json_reports_reachability_from_the_state_file(tmp_path, monkeypa
     _no_tail_facts(monkeypatch)
     monkeypatch.setattr(cli.session_state, "read_all",
                         lambda: {_SID: _state(None, pid=4242)})
-    monkeypatch.setattr(process_probe.PsProcessProbe, "claude_group_pids",
+    monkeypatch.setattr(process_probe.PsProcessProbe, "claude_pids",
                         lambda self, pids: {shell_pid: [4242]})
 
     assert cli.main(["status", "--json"]) == 0
@@ -1959,7 +1959,7 @@ def test_status_json_declines_to_believe_a_state_file_whose_pid_is_not_ours(tmp_
     _no_tail_facts(monkeypatch)
     monkeypatch.setattr(cli.session_state, "read_all",
                         lambda: {_SID: _state(None, pid=4242)})
-    monkeypatch.setattr(process_probe.PsProcessProbe, "claude_group_pids",
+    monkeypatch.setattr(process_probe.PsProcessProbe, "claude_pids",
                         lambda self, pids: {})
 
     assert cli.main(["status", "--json"]) == 0
@@ -1987,7 +1987,7 @@ def test_status_json_probes_the_process_table_once_for_all_cards(tmp_path, monke
                         lambda: {_SID: _state("bridge-abc", pid=4242)})
     calls = []
     monkeypatch.setattr(
-        process_probe.PsProcessProbe, "claude_group_pids",
+        process_probe.PsProcessProbe, "claude_pids",
         lambda self, pids: (calls.append(list(pids)), {})[1],
     )
 
@@ -2026,7 +2026,7 @@ def test_reachability_lookup_is_skipped_entirely_when_watch_is_off():
     def boom(*a, **kw):
         raise AssertionError("watch is off — nothing should have been read")
 
-    probe = SimpleNamespace(claude_group_pids=boom)
+    probe = SimpleNamespace(claude_pids=boom)
     assert cli._reachability_by_sid(
         entries, probe, cfg.Config({"remote_control_watch": False}),
         read_session_state=boom,
@@ -2035,7 +2035,7 @@ def test_reachability_lookup_is_skipped_entirely_when_watch_is_off():
 
 def test_reachability_lookup_reads_when_watch_is_on():
     entries = [{"pid": 1, "claude": {"session_id": _SID}}]
-    probe = SimpleNamespace(claude_group_pids=lambda pids: {1: [77]})
+    probe = SimpleNamespace(claude_pids=lambda pids: {1: [77]})
     got = cli._reachability_by_sid(
         entries, probe, cfg.Config({"remote_control_watch": True}),
         read_session_state=lambda: {_SID: _state(None, pid=77)},
@@ -6636,6 +6636,9 @@ def test_post_reauth_recovery_resets_counters_reopens_crashed_kicks_unreachable(
         def has_controlling_tty(self, pid):
             return True
 
+        def claude_pids(self, pids):
+            return {p: [p + 5000] for p in pids}  # the state files' claude pids
+
     class _Controller:
         def resume_session_ids(self):
             return set()
@@ -6829,6 +6832,9 @@ def test_post_reauth_recovery_skips_idle_session_mid_turn(tmp_path, monkeypatch)
 
         def has_controlling_tty(self, pid):
             return True
+
+        def claude_pids(self, pids):
+            return {p: [p + 5000] for p in pids}  # the state files' claude pids
 
     class _Controller:
         def resume_session_ids(self):
@@ -7533,7 +7539,7 @@ def test_reachability_matches_a_tmux_revived_session_via_the_live_snapshot(tmp_p
                 "skip_permissions": False}))
 
     class LiveClaudeLeadsItsGroup:
-        def claude_group_pids(self, pids): return {p: [p] for p in pids}
+        def claude_pids(self, pids): return {p: [p] for p in pids}
 
     state = session_state.SessionState(
         pid=1960, bridge_session_id=None, field_present=True,
@@ -7567,7 +7573,7 @@ def test_a_dead_pid_state_file_never_licenses_a_claim(tmp_path, monkeypatch):
                 "skip_permissions": False}))
 
     class PidIsGone:
-        def claude_group_pids(self, pids): return {p: [] for p in pids}
+        def claude_pids(self, pids): return {p: [] for p in pids}
 
     stale = session_state.SessionState(
         pid=999999, bridge_session_id="session_from_before_the_reboot",
@@ -7613,7 +7619,7 @@ def test_conflict_check_is_silent_and_clear_when_nothing_else_owns_the_sid(
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _seed_conflict(tmp_path, _CSID)
     monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
-                        lambda t: type("P", (), {"claude_group_pids":
+                        lambda t: type("P", (), {"claude_pids":
                                                  lambda s, pids: {1687: [], 1957: []}})())
     assert cli.main(["conflict-check", "--sid", _CSID]) == 0
     out = capsys.readouterr()
@@ -7626,7 +7632,7 @@ def test_one_existing_owner_already_blocks(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _seed_conflict(tmp_path, _CSID)
     monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
-                        lambda t: type("P", (), {"claude_group_pids":
+                        lambda t: type("P", (), {"claude_pids":
                                                  lambda s, pids: {1957: [1957]}})())
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     assert cli.main(["conflict-check", "--sid", _CSID]) != 0
@@ -7639,7 +7645,7 @@ def test_conflict_check_aborts_without_a_tty_rather_than_creating_a_second_agent
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _seed_conflict(tmp_path, _CSID)
     monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
-                        lambda t: type("P", (), {"claude_group_pids":
+                        lambda t: type("P", (), {"claude_pids":
                                                  lambda s, pids: {1687: [11], 1957: [1957]}})())
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     rc = cli.main(["conflict-check", "--sid", _CSID])
@@ -7653,7 +7659,7 @@ def test_conflict_check_kills_the_others_when_the_user_chooses_to(
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _seed_conflict(tmp_path, _CSID)
     monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
-                        lambda t: type("P", (), {"claude_group_pids":
+                        lambda t: type("P", (), {"claude_pids":
                                                  lambda s, pids: {1687: [11], 1957: [1957]}})())
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
@@ -7669,7 +7675,7 @@ def test_conflict_check_aborts_when_the_user_declines(tmp_path, monkeypatch, cap
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _seed_conflict(tmp_path, _CSID)
     monkeypatch.setattr(cli.process_probe, "PsProcessProbe",
-                        lambda t: type("P", (), {"claude_group_pids":
+                        lambda t: type("P", (), {"claude_pids":
                                                  lambda s, pids: {1687: [11], 1957: [1957]}})())
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
@@ -7690,7 +7696,7 @@ def test_conflict_check_aborts_when_the_user_declines(tmp_path, monkeypatch, cap
 # still aborts: a bad guess costs a keystroke, never a session.
 
 def _probe_owning(pids_by_owner):
-    return lambda t: type("P", (), {"claude_group_pids":
+    return lambda t: type("P", (), {"claude_pids":
                                     lambda s, pids: pids_by_owner})()
 
 

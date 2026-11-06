@@ -280,10 +280,10 @@ def _reachability_by_sid(
     - ONE ``read_session_state()`` directory scan, which also resolves
       newest-file-wins per sid (23 of 70 sids on the author's machine had
       more than one state file, one of them nineteen).
-    - ONE batched ``claude_group_pids`` snapshot. ``claude_groups`` forks a
-      full ``ps -A`` per call — affordable in the 30s watchdog, ruinous on
-      a 5s dashboard poll (17 cards ≈ 204 forks/minute, forever). Same
-      shape as ``status``'s ``controlling_ttys`` batch.
+    - ONE batched ``claude_pids`` snapshot rather than a ``ps -A`` per card,
+      which would be ruinous on a 5s dashboard poll (17 cards ≈ 204
+      forks/minute, forever). Same shape as ``status``'s
+      ``controlling_ttys`` batch.
 
     ``remote_control_watch`` (review fix-wave 2026-08-07, FIX 2 —
     IMPORTANT) gates both reads, not just the badge, so a user who turns
@@ -302,15 +302,12 @@ def _reachability_by_sid(
     if not states:
         return {}
     sessions = [e for e in entries if e.get("claude") is not None]
-    # HONEST LIMIT, restated from `_kick_dropped_bridges`: `claude_group_pids`
-    # returns process GROUP ids, while the state file records claude's own
-    # pid. They coincide when claude leads its group — the normal job-control
-    # case, and true for all 18 claude processes on the author's machine —
-    # but this is a HEURISTIC, not an exact identity. A mismatch fails CLOSED
-    # (no match -> `unknown` -> no kick, no claim), so the cost is a missed
-    # detection, never a wrong restart or a fabricated badge.
-    groups = (owners if owners is not None
-              else probe.claude_group_pids([e["pid"] for e in sessions]))
+    # Claude processes, not process groups (#184): the state file records
+    # claude's own pid, and a claude that does not lead its group is still
+    # the running claude. Matching group ids instead left every such
+    # session `unknown` (5 of 7 on 2026-11-06).
+    claude_pids = (owners if owners is not None
+                   else probe.claude_pids([e["pid"] for e in sessions]))
     out: dict[str, tuple[str, str]] = {}
     for entry in sessions:
         sid = entry["claude"]["session_id"]
@@ -334,10 +331,10 @@ def _reachability_by_sid(
         # After a reboot the journaled pid is dead while its state file
         # survives, so the card asserted `reachable` and "waiting on you"
         # about a process that no longer exists (adversarial review
-        # 2026-08-10). The branch is also redundant: `_child_groups` returns
-        # `[shell_pgid]` when the journaled pid IS claude (#58), so every
-        # LIVE revived session matches here anyway.
-        matched = state.pid is not None and state.pid in groups.get(entry["pid"], ())
+        # 2026-08-10). The branch is also redundant: `claude_pids` returns
+        # the journaled pid itself when it IS claude (#58), so every LIVE
+        # revived session matches here anyway.
+        matched = state.pid is not None and state.pid in claude_pids.get(entry["pid"], ())
         reach = reachability.reachability(
             state.bridge_session_id,
             pid_matched=matched,
@@ -1011,7 +1008,7 @@ def _power_poll_once(holder, source, entries, owners, config) -> power.Decision:
 def _power_entries_and_owners(store, probe):
     """Journaled claude sessions and their live owner pids (one snapshot)."""
     entries = [e for e in store.scan().entries if e.get("claude") is not None]
-    owners = probe.claude_group_pids([e["pid"] for e in entries])
+    owners = probe.claude_pids([e["pid"] for e in entries])
     return entries, owners
 
 
@@ -2505,7 +2502,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     scan = store.scan()
     settings_store = settings.SettingsStore(sd)
-    _owners = probe.claude_group_pids(
+    _owners = probe.claude_pids(
         [e["pid"] for e in scan.entries if e.get("claude") is not None])
     payload = status.assemble_sessions(
         scan.entries,
@@ -2952,7 +2949,7 @@ def _cmd_conflict_check(args: argparse.Namespace) -> int:
         return 0  # nothing to resume from this cwd — nothing to conflict with
     probe = process_probe.PsProcessProbe(config.get("interop_timeout_seconds"))
     sessions = [e for e in store.scan().entries if e.get("claude") is not None]
-    owners = probe.claude_group_pids([e["pid"] for e in sessions])
+    owners = probe.claude_pids([e["pid"] for e in sessions])
     pids = status.owners_of_sid(sessions, owners, sid)
     if len(pids) < 1:
         return 0  # nothing else is on this conversation
@@ -3356,17 +3353,14 @@ def _kick_dropped_bridges(
         # live session: 117 of 133 state files on the author's machine
         # belonged to dead pids and 2 to RECYCLED pids owned by unrelated
         # processes, so a liveness check alone returns a confident wrong
-        # answer. The question asked is "is this pid one of the claude jobs
-        # under THIS journaled shell", which `claude_groups` answers.
-        #
-        # HONEST LIMIT: `claude_groups` returns process GROUP ids, while the
-        # state file records claude's own pid. They coincide when claude is
-        # its group's leader — the normal job-control case, and the one the
-        # journal records — but not necessarily otherwise. The mismatch
-        # fails CLOSED (no match -> `unknown` -> no kick), so the cost is a
-        # missed detection, never a wrong restart.
+        # answer. The question asked is "is this pid one of the claude
+        # processes under THIS journaled shell", which the read-only
+        # `claude_pids` answers. Not `controller.claude_groups`: that answers
+        # "which groups may be signalled" and leaves out a claude sharing its
+        # launcher's group, which made autokick blind to every such session
+        # (#184). Whether such a claude can then be KICKED is `kick`'s call.
         pid_matched = (
-            state.pid is not None and state.pid in controller.claude_groups(pid)
+            state.pid is not None and state.pid in probe.claude_pids([pid]).get(pid, ())
         )
         reach = reachability.reachability(
             state.bridge_session_id,
@@ -3621,7 +3615,9 @@ def _post_reauth_recovery(
             state = states.get(sid)
             if state is None:
                 continue  # nothing readable to act on (mirrors `_reachability_by_sid`)
-            pid_matched = state.pid is not None and state.pid in controller.claude_groups(pid)
+            # Detection asks the probe, never `claude_groups` (#184).
+            pid_matched = (state.pid is not None
+                           and state.pid in probe.claude_pids([pid]).get(pid, ()))
             reach = reachability.reachability(
                 state.bridge_session_id, pid_matched=pid_matched, field_present=state.field_present,
             )

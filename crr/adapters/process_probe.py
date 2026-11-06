@@ -145,17 +145,19 @@ class PsProcessProbe:
             return set()
         return _parse_tty_pids(result.stdout)
 
-    def claude_group_pids(self, shell_pids: Sequence[int]) -> dict[int, list[int]]:
-        """Claude process-group ids per shell pid, from ONE ``ps`` snapshot.
+    def claude_pids(self, shell_pids: Sequence[int]) -> dict[int, list[int]]:
+        """Claude process pids per journaled pid, from ONE ``ps`` snapshot.
 
-        The read-only, batched counterpart to
-        ``ProcessController.claude_groups`` (the parallel of
-        ``controlling_ttys`` vs ``has_controlling_tty``). The reachability
-        detector needs "does this state file's pid belong to a claude job
-        under this journaled shell" for every card on every 5s poll;
-        ``claude_groups`` forks a full ``ps -A`` per call, which the 30s
-        watchdog can afford and the dashboard cannot — 17 cards would cost
-        ~204 forks a minute, forever.
+        The DETECTION question — "is a claude running under this journaled
+        pid, and which one" — kept apart from ``ProcessController.
+        claude_groups``, which answers the narrower SIGNALLING question
+        "which groups may I kill". A claude that shares its launcher's group
+        is running but must not be group-signalled; when detection borrowed
+        the signalling answer it went blind to every such claude (#184).
+
+        Batched because the reachability detector needs it for every card on
+        every 5s poll; one ``ps -A`` per card would cost the dashboard ~204
+        forks a minute, forever.
 
         It lives on the read-only probe deliberately: the status path must
         not be handed ``terminate_group`` just to answer a question about
@@ -177,7 +179,7 @@ class PsProcessProbe:
         if result.returncode != 0:
             return {}
         rows = _parse_ps_rows(result.stdout)
-        return {pid: _child_groups(rows, pid) for pid in ids}
+        return {pid: _child_claude_pids(rows, pid) for pid in ids}
 
 
 def _ps_snapshot_argv() -> list[str]:
@@ -289,6 +291,25 @@ def _child_groups(
     if include_shell_group and own_group_has_claude and shell_pgid not in groups:
         groups.append(shell_pgid)
     return groups
+
+
+def _child_claude_pids(rows: list[tuple[int, int, int, str]], shell_pid: int) -> list[int]:
+    """The claude processes running under ``shell_pid``, whatever their group.
+
+    Same selection as ``_child_groups`` (ancestry plus the claude argv0
+    basename, never a global pattern), but it returns pids and keeps a
+    claude that shares the shell's own group. That claude is running; it is
+    only unsafe to SIGNAL by group, which is ``_child_groups``' concern, not
+    this one's (#184). A journaled pid that is itself claude (a revived
+    session, #58) is its own answer.
+    """
+    shell = next((r for r in rows if r[0] == shell_pid), None)
+    if shell is None:
+        return []
+    if _is_claude_argv0(shell[3]):
+        return [shell_pid]
+    return [pid for pid, ppid, _pgid, argv0 in rows
+            if ppid == shell_pid and _is_claude_argv0(argv0)]
 
 
 def parent_of(pid: int, timeout: float = 5.0) -> int | None:
