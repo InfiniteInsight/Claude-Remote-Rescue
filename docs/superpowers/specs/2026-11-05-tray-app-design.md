@@ -1,7 +1,7 @@
 # CRR tray app: a Windows desktop home for Claude-Remote-Rescue
 
 **Date:** 2026-11-05
-**Status:** design, pending the owner's approval. Builder check done, and its questions are answered here.
+**Status:** approved by the owner on 2026-11-05. On 2026-11-06 the owner decided to reuse the Qwen launcher's code. Builder check done, and its questions are answered here.
 **Issue:** #161
 
 ## Intent
@@ -42,6 +42,8 @@ The owner built the Qwen Remote Launcher (`packages/launcher-app` in InfiniteIns
 - **Needs attention:** any session is crashed, running elsewhere, or has two agents.
 - **Stopped or unreachable.**
 
+Keep-awake is optional, so keep-awake alone being stopped doesn't count as stopped (my call).
+
 **Window tabs:**
 
 - **Control.** One status row each for the watchdog, the dashboard and keep-awake, plus:
@@ -49,6 +51,8 @@ The owner built the Qwen Remote Launcher (`packages/launcher-app` in InfiniteIns
   - the Start/Stop button
   - the QR code and the URL it encodes
   - whether a dashboard passphrase is set
+
+  If crr's units aren't installed, the tab says so and offers Repair, which runs `crr systemd --install` (my call). If the URL is loopback-only, so a phone couldn't use it, the tab shows how to set up a tailnet or tunnel URL instead of a QR (my call).
 - **Sessions.** The crr dashboard page itself (approach A below).
 - **Logs.** A live tail of crr's service logs, with a picker for watchdog, dashboard or keep-awake.
 - **Settings.** Every key from `crr config --effective`, grouped and editable. Each shows whether it's configured or the default, with a way to reset it to the default.
@@ -161,6 +165,9 @@ Each is its own issue, PR and contract.
    - **Result:** the app opens each tab with `wt.exe new-tab … wsl.exe -d <distro> --cd <cwd> -e <argv>`, then reports back with `crr tray done --id <id> --ok|--error <text>`.
    - **Liveness:** crr treats the tray as alive while the heartbeat is fresh, under a named, versioned config multiple of the poll interval. Otherwise the existing tiers (wt, aumid, console) run as today.
    - **Timeout:** a tray request that isn't claimed in time is withdrawn, and the next tier runs, so one tab never opens twice.
+   - **What the app will run (my call):** only requests whose argv starts with `tmux attach`, `crr`, or a shell crr launches (fish, bash, zsh). Anything else is refused and reported with `crr tray done --error`.
+     - It escapes Windows Terminal's `;` separator in every argument, so no argument can start a second `wt.exe` command.
+     - Each request carries its distro and Windows Terminal profile, and the app uses those rather than its own picker.
    - The request queue, heartbeat and result shapes are versioned contracts, and `tab_health` gains a `tray` tier.
 6. **Dashboard additions.** These were agreed in the mockups, and with approach A they belong in the dashboard, so the phone gets them too.
    - **State filters, added to the existing "Show" dropdown** rather than replacing it, so its "Phone: not connected" option stays.
@@ -170,7 +177,11 @@ Each is its own issue, PR and contract.
 
 ## The app (`tray/`)
 
-- **Stack.** Electron, TypeScript, esbuild bundling, vitest for tests, and electron-builder for a Windows x64 unpacked build. That's the same toolchain as the Qwen launcher. Write fresh code informed by the launcher's structure rather than copying its files, so crr's MIT licence stays uncomplicated. (My call.)
+- **Stack.** Electron, TypeScript, esbuild bundling, vitest for tests, and electron-builder for a Windows x64 unpacked build. That's the same toolchain as the Qwen launcher.
+- **Reuse the Qwen launcher's code (owner's decision).** Copy its tested modules into `tray/` and adapt them, rather than rewriting them: status polling, log line framing (`LineFramer`), the `wsl.exe` wrapper, the terminal launcher, the app lifecycle and the tray. Their tests come along too.
+  - Each copied file keeps its Apache-2.0 header ("Copyright 2025 Qwen Team") and gains a line saying it was modified for crr. Apache-2.0 asks for both.
+  - `tray/LICENSE-APACHE` holds the licence text. `tray/NOTICE` names the source: `packages/launcher-app` in InfiniteInsight/qwen-code. The source has no NOTICE file of its own to carry over.
+  - Files written new for crr are MIT, like the rest of the repo.
 - **Main process.** It owns:
   - the tray
   - the window
