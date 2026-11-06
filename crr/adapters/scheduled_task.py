@@ -86,8 +86,8 @@ def crr_tasks_installed(timeout: float) -> bool:
         if remaining <= 0:
             return False
         try:
-            r = subprocess.run(query_task_command(name), capture_output=True,
-                               text=True, timeout=remaining)
+            r = subprocess.run(query_task_command(name), stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=remaining)
         except (subprocess.SubprocessError, OSError):
             return False
         if r.returncode == 0:

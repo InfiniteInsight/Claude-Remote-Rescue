@@ -1,6 +1,8 @@
 """Windows Scheduled Task builder tests (Phase 4). Pure; runs anywhere."""
 
+import os
 import subprocess
+import sys
 
 import pytest
 
@@ -80,7 +82,40 @@ def test_crr_tasks_installed(monkeypatch, answers, found):
     assert st.crr_tasks_installed(3.0) is found
     assert calls[0][0] == st.query_task_command(st.REVIVE_TASK)
     assert all(0 < kwargs["timeout"] <= 3.0 for _, kwargs in calls)
-    assert all(kwargs.get("capture_output") for _, kwargs in calls)
+    assert all(kwargs.get("stdout") is subprocess.DEVNULL for _, kwargs in calls)
+
+
+# schtasks.exe answers in the OEM code page (cp850 here), which is not UTF-8.
+# These run a real subprocess: a faked subprocess.run never decodes anything.
+_CP850_NOT_FOUND = (
+    "printf 'Erreur : le syst\\202me ne trouve pas la t\\203che sp\\202cifi\\202e.\\n'"
+)
+
+
+@pytest.mark.real_service_probes
+@pytest.mark.skipif(sys.platform == "win32", reason="runs a #!/bin/sh stand-in")
+def test_crr_tasks_installed_survives_non_utf8_output(monkeypatch, tmp_path):
+    fake = tmp_path / "schtasks.exe"
+    fake.write_bytes(
+        b"#!/bin/sh\n"
+        + _CP850_NOT_FOUND.encode() + b" >&2\n"
+        + b"exit 1\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert st.crr_tasks_installed(5.0) is False
+
+
+@pytest.mark.real_service_probes
+@pytest.mark.skipif(sys.platform == "win32", reason="runs a #!/bin/sh stand-in")
+def test_crr_tasks_installed_true_with_non_utf8_stdout(monkeypatch, tmp_path):
+    fake = tmp_path / "schtasks.exe"
+    fake.write_bytes(
+        b"#!/bin/sh\n"
+        + _CP850_NOT_FOUND.encode() + b"\n"
+        + b"exit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert st.crr_tasks_installed(5.0) is True
 
 
 @pytest.mark.real_service_probes
