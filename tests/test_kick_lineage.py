@@ -137,10 +137,11 @@ def test_a_watchdog_kick_records_its_justification(tmp_path, capsys):
         def is_alive(self, pid): return True
         def has_controlling_tty(self, pid): return True
         def controlling_ttys(self, pids): return set(pids)
+        def claude_pids(self, pids): return {p: [5150] for p in pids}
 
+    # `claude_pids` (on the probe) supplies `pid_matched`: the state file's
+    # pid must be one of this shell's live claude processes (#184).
     class FakeController:
-        """`claude_groups` supplies `pid_matched`: the state file's pid must
-        be one of this shell's live claude jobs."""
         def claude_groups(self, shell_pid): return [5150]
 
     cli._kick_dropped_bridges(
@@ -569,6 +570,7 @@ def _transition_sweep(tmp_path, states, entries=1, clock_at=10_000.0):
         def is_alive(self, pid): return True
         def has_controlling_tty(self, pid): return True
         def controlling_ttys(self, pids): return set(pids)
+        def claude_pids(self, pids): return {p: [5150] for p in pids}
 
     class FakeController:
         def claude_groups(self, shell_pid): return [5150]

@@ -38,8 +38,12 @@ class FakeBoot:
 
 
 class FakeProbe:
-    def __init__(self, alive=True, tty=True):
+    def __init__(self, alive=True, tty=True, claude=()):
         self._alive, self._tty = alive, tty
+        self._claude = list(claude)   # claude pids running under any shell
+
+    def claude_pids(self, shell_pids):
+        return {p: list(self._claude) for p in shell_pids}
 
     def is_alive(self, pid):
         return self._alive
@@ -1820,6 +1824,31 @@ def test_kick_refuses_a_crashed_session(tmp_path):
     assert res.ok is False
     assert flags.armed == {}
     assert ctrl.terminated == []
+
+
+def test_kick_says_why_when_claude_shares_a_live_shells_group(tmp_path):
+    # #184: claude IS running, but in the live shell's own process group
+    # (launched without job control). The only group signal that reaches it
+    # would also kill the user's shell, so kick refuses. It must say that,
+    # not "no running claude process found", which would be false.
+    store = JournalStore(tmp_path)
+    _seed(store, 10, boot="B", claude=_claude())
+    probe = FakeProbe(alive=True, tty=True, claude=[5150])
+    ctrl, flags = FakeController(groups=[]), FakeFlags()
+    res = ops.kick(store, ctrl, flags, FakeBoot("B"), probe, 10, grace=5)
+    assert res.ok is False
+    assert "no running claude" not in res.message
+    assert "shell's own process group" in res.message
+    assert flags.armed == {} and ctrl.terminated == []
+
+
+def test_kick_still_says_no_claude_when_none_is_running(tmp_path):
+    store = JournalStore(tmp_path)
+    boot, probe = _live(store, 10)
+    ctrl, flags = FakeController(groups=[]), FakeFlags()
+    res = ops.kick(store, ctrl, flags, boot, probe, 10, grace=5)
+    assert res.ok is False
+    assert "no running claude process found" in res.message
 
 
 def test_kick_refuses_a_claude_less_shell(tmp_path):

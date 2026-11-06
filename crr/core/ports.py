@@ -72,19 +72,22 @@ class ProcessProbe(Protocol):
         """
         ...
 
-    def claude_group_pids(self, shell_pids: Sequence[int]) -> dict[int, list[int]]:
-        """Claude process-group ids per shell pid, from ONE process snapshot.
+    def claude_pids(self, shell_pids: Sequence[int]) -> dict[int, list[int]]:
+        """The pids of the claude processes running under each journaled
+        pid, from ONE process snapshot.
 
-        The read-only, BATCHED counterpart to
-        ``ProcessController.claude_groups`` (same relation as
-        ``controlling_ttys`` to ``has_controlling_tty``). It is on the probe
-        rather than the controller on purpose: the reachability detector on
-        the poll path needs this answer for every card and must not be
-        handed signalling power to get it.
+        Every detector asks this: reachability (autokick and the badge
+        compare it with the state file's pid), keep-awake's live count, and
+        the duplicate-conversation guard. It counts a claude whatever its
+        process group. ``ProcessController.claude_groups`` answers a
+        narrower question, "which groups may be signalled", and leaves out
+        a claude that shares its launcher's group; detection that borrowed
+        that answer went blind to such sessions (#184). It is on the probe
+        rather than the controller so that detectors get no signalling power.
 
-        A shell pid with no claude jobs maps to an empty list. An
-        inconclusive probe returns ``{}`` — the caller must read a missing
-        or empty entry as "cannot confirm", never as a confirmed mismatch.
+        A pid with no claude under it maps to an empty list. An inconclusive
+        probe returns ``{}``. The caller must read a missing or empty entry
+        as "cannot confirm", never as a confirmed mismatch.
         """
         ...
 

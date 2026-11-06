@@ -58,7 +58,7 @@ def test_live_claude_count_is_zero_when_nothing_is_owned():
 
 
 def test_live_claude_count_treats_a_missing_owner_entry_as_not_live():
-    # `claude_group_pids` omits pids it could not resolve. Absent is not
+    # `claude_pids` omits pids it could not resolve. Absent is not
     # alive — the spine rule, applied to the thing that decides whether
     # crr keeps a laptop awake.
     assert cli._live_claude_count([{"pid": 9}], {}) == 0
