@@ -117,3 +117,23 @@ def test_unset_reports_whether_anything_was_removed(tmp_path):
     assert store.unset("zombie_strikes") is True
     assert store.read() == {"dashboard_port": 9000}
     assert store.unset("zombie_strikes") is False
+
+
+@pytest.mark.parametrize("body", [
+    "{not json",
+    '{"v": 99, "values": {"zombie_strikes": 7}}',
+    '{"v": 1, "values": [1]}',
+])
+def test_set_refuses_to_overwrite_a_degraded_overlay(tmp_path, body):
+    # Values a newer crr or a hand edit put there must never be destroyed.
+    path = tmp_path / config_overrides.FILENAME
+    path.write_text(body, encoding="utf-8")
+    before = path.read_bytes()
+    store = ConfigOverridesStore(tmp_path)
+    with pytest.raises(cfg.ConfigError, match=config_overrides.FILENAME):
+        store.set("dashboard_port", 9000)
+    with pytest.raises(cfg.ConfigError, match=config_overrides.FILENAME):
+        store.unset("zombie_strikes")
+    assert path.read_bytes() == before
+    # Reads still degrade, so commands keep working.
+    assert store.read() == {}

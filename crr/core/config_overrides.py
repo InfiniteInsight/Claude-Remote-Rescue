@@ -87,20 +87,32 @@ class ConfigOverridesStore:
             {"v": contracts.CONFIG_OVERRIDES_STORE_VERSION, "values": values},
         )
 
+    def _refuse_if_degraded(self) -> None:
+        """Never write over a file crr cannot fully read: it may hold values
+        a newer crr or the user's hand edit put there. Reads still degrade."""
+        if self.is_degraded():
+            raise cfg.ConfigError(
+                f"{self._path} cannot be read; fix or remove it before changing settings"
+            )
+
     def set(self, key: str, value: Any) -> None:
         """Store ``value`` for ``key``, or raise ``cfg.ConfigError`` for an
-        unknown key, a mistyped value, or a key owned by a dashboard store."""
+        unknown key, a mistyped value, a key owned by a dashboard store, or
+        an overlay file that cannot be read (see ``_refuse_if_degraded``)."""
         if key in OWNED_ELSEWHERE:
             raise cfg.ConfigError(
                 f"config '{key}' is managed from the dashboard, not the overlay"
             )
         cfg.check_value(key, value)
+        self._refuse_if_degraded()
         values = self.read()
         values[key] = value
         self._write(values)
 
     def unset(self, key: str) -> bool:
-        """Remove ``key``; True when there was something to remove."""
+        """Remove ``key``; True when there was something to remove. Raises
+        ``cfg.ConfigError`` for an overlay file that cannot be read."""
+        self._refuse_if_degraded()
         values = self.read()
         if key not in values:
             return False
