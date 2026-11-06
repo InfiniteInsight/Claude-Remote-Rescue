@@ -185,7 +185,7 @@ def test_reopen_wraps_the_spawn_with_the_exit_hook(tmp_path):
     assert res.ok
     assert tmux.created[0][2] == [
         "sh", "-c",
-        'claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
+        'set -m; claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
         "sh", "--resume", _SID,
     ]
 
@@ -907,7 +907,18 @@ def test_detmux_spawn_failure_keeps_bookkeeping(tmp_path):
 
 def test_tracked_resume_argv_fish_stays_interactive_after_the_command():
     e = {"claude": {"session_id": _SID}, "shell": "fish"}
-    assert ops.tracked_resume_argv(e) == ["fish", "-i", "-C", f"claude --resume {_SID}"]
+    assert ops.tracked_resume_argv(e) == [
+        "fish", "-i", "-C", f"status job-control full; claude --resume {_SID}",
+    ]
+
+
+def test_tracked_resume_argv_fish_gives_claude_its_own_process_group():
+    # fish runs a -C command before it turns job control on, so claude
+    # landed in fish's own group: autokick never matched it (read "unknown")
+    # and kick found "no running claude process". The prefix is proven
+    # against a real fish in test_adapters.py.
+    e = {"claude": {"session_id": _SID}, "shell": "fish"}
+    assert ops.tracked_resume_argv(e)[3].startswith(ops.FISH_OWN_JOB_GROUP)
 
 
 def test_tracked_resume_argv_bash_runs_in_an_interactive_shell():
@@ -932,7 +943,7 @@ def test_tracked_resume_argv_includes_skip_permissions_when_set():
     e = {"claude": {"session_id": _SID, "skip_permissions": True}, "shell": "fish"}
     assert ops.tracked_resume_argv(e) == [
         "fish", "-i", "-C",
-        f"claude --resume {_SID} --dangerously-skip-permissions",
+        f"status job-control full; claude --resume {_SID} --dangerously-skip-permissions",
     ]
 
 
