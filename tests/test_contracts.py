@@ -1265,21 +1265,26 @@ def _qr_payload():
         "provider": "tailscale",
         "url": "https://lovelace.tail3af2d9.ts.net/",
         "loopback_url": "http://127.0.0.1:8377/",
-        "hint": "tailscale serve --bg 8377",
+        "hint": None,
         "dashboard_reachable": True,
+        "degraded": False,
     }
 
 
 def test_valid_qr_payload_passes():
     assert contracts.QR_CONTRACT_VERSION == 1
+    # `degraded` is still v1 and last: it was added before v1 shipped (R25).
     assert contracts.QR_PAYLOAD_KEYS == (
-        "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable")
+        "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable",
+        "degraded")
     contracts.validate_qr_payload(_qr_payload())
 
 
 def test_qr_payload_with_no_tunnel_passes():
     payload = _qr_payload()
     payload.update(provider=None, url=None, hint=None, dashboard_reachable=False)
+    contracts.validate_qr_payload(payload)
+    payload.update(provider="tailscale", hint="tailscale serve --bg 8377", degraded=True)
     contracts.validate_qr_payload(payload)
 
 
@@ -1294,6 +1299,9 @@ def test_qr_payload_with_no_tunnel_passes():
     lambda p: p.update(dashboard_reachable=None),
     lambda p: p.update(extra=1),
     lambda p: p.pop("hint"),
+    lambda p: p.update(degraded="no"),
+    lambda p: p.update(degraded=None),
+    lambda p: p.pop("degraded"),
 ])
 def test_invalid_qr_payload_is_refused(mutate):
     payload = copy.deepcopy(_qr_payload())

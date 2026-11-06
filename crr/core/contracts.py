@@ -161,7 +161,11 @@ SERVICE_CONTRACT_VERSION = 1
 # there is none, the loopback URL, and whether the dashboard answers there.
 # v1: brand new, no prior shape. `url`, `provider` and `hint` are null rather
 # than empty strings when absent, so "no phone-reachable URL" cannot be
-# mistaken for a URL; `dashboard_reachable` is measured, never assumed.
+# mistaken for a URL; `hint` is null whenever `url` is set; and
+# `dashboard_reachable` is measured, never assumed. `degraded` (added before
+# v1 shipped, R25) is true when settings.json could not be read, so the tunnel
+# selection may have fallen back to config.toml, or when a provider call
+# failed, so a null `url` or `hint` may not mean "none".
 QR_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
@@ -775,6 +779,7 @@ SERVICE_STATES = ("not-installed", "running", "stopped", "partial")
 
 QR_PAYLOAD_KEYS = (
     "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable",
+    "degraded",
 )
 
 CONFIG_PAYLOAD_KEYS = ("contract", "defaults_version", "keys", "degraded")
@@ -1022,6 +1027,7 @@ def validate_qr_payload(payload: Any) -> None:
         _require_type(payload[field], (str, type(None)), f"qr '{field}'")
     _require_type(payload["loopback_url"], str, "qr 'loopback_url'")
     _require_type(payload["dashboard_reachable"], bool, "qr 'dashboard_reachable'")
+    _require_type(payload["degraded"], bool, "qr 'degraded'")
 
 
 # --------------------------------------------------------------------------

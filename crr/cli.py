@@ -1862,7 +1862,8 @@ def _cmd_qr(args: argparse.Namespace) -> int:
     port = _resolved_dashboard_port(config, "crr qr")
     provider = _tunnel_provider(config, sel, dashboard_port=port)
     if getattr(args, "json", False):
-        return _qr_json(config, provider, port)
+        return _qr_json(config, provider, port,
+                        settings.SettingsStore(sd).is_degraded())
     url = provider.advertise_url() if provider is not None else None
     if url is None:
         print(f"http://127.0.0.1:{port}/  (loopback only)")
@@ -1875,22 +1876,28 @@ def _cmd_qr(args: argparse.Namespace) -> int:
     return 0
 
 
-def _qr_json(config: cfg.Config, provider, port: int) -> int:
+def _qr_json(config: cfg.Config, provider, port: int, degraded: bool) -> int:
     """`crr qr --json`: a report, exit 0 whenever a valid payload is printed,
     including when there is no phone-reachable URL. A provider that raises
-    degrades its field to null with a note on stderr, never a traceback."""
+    degrades its field to null with a note on stderr, never a traceback, and
+    sets ``degraded``. ``degraded`` comes in true when settings.json can't be
+    read (the tunnel selection may have fallen back to config.toml). The
+    setup hint is only asked for, and only reported, when there is no URL."""
     url = hint = None
     if provider is not None:
         try:
             url = provider.advertise_url()
         except Exception as exc:  # a report must not die on a provider bug
+            degraded = True
             print(f"crr qr: could not get the {provider.name()} URL: {exc}",
                   file=sys.stderr)
-        try:
-            hint = provider.setup_hint()
-        except Exception as exc:
-            print(f"crr qr: could not get the {provider.name()} setup hint: {exc}",
-                  file=sys.stderr)
+        if not url:
+            try:
+                hint = provider.setup_hint()
+            except Exception as exc:
+                degraded = True
+                print(f"crr qr: could not get the {provider.name()} setup hint: {exc}",
+                      file=sys.stderr)
     loopback = f"http://127.0.0.1:{port}/"
     payload = {
         "contract": contracts.QR_CONTRACT_VERSION,
@@ -1900,6 +1907,7 @@ def _qr_json(config: cfg.Config, provider, port: int) -> int:
         "hint": hint or None,
         "dashboard_reachable": _dashboard_answers(
             loopback + "api/version", config.get("interop_timeout_seconds")),
+        "degraded": degraded,
     }
     # Validate our own output before emitting it, as `crr status --json` does.
     contracts.validate_qr_payload(payload)

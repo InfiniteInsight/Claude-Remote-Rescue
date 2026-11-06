@@ -8333,6 +8333,8 @@ def test_qr_json_with_an_advertised_url(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert payload["provider"] == "cloudflare"
     assert payload["url"] == "https://crr.example.com/"
+    assert payload["hint"] is None          # a hint only when there is no url
+    assert payload["degraded"] is False
     port = cfg.DEFAULTS["dashboard_port"]
     assert payload["loopback_url"] == f"http://127.0.0.1:{port}/"
     assert payload["dashboard_reachable"] is True
@@ -8414,8 +8416,35 @@ def test_qr_json_survives_a_provider_error(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert payload["provider"] == "tailscale"
     assert payload["url"] is None and payload["hint"] is None
+    assert payload["degraded"] is True      # a null url here may not mean "no tunnel"
     assert "tailscale exploded" in cap.err and "no hint either" in cap.err
     assert "Traceback" not in cap.err
+
+
+def test_qr_json_reports_a_degraded_settings_store(monkeypatch, tmp_path, capsys):
+    # The tunnel selection falls back to config.toml while settings.json can't
+    # be read, so the provider shown may not be the one the user picked.
+    (tmp_path / "settings.json").write_bytes(b"{not json")
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys,
+                       provider=_FakeTunnelProvider(url="https://crr.example.com/"))
+    payload = json.loads(cap.out)
+    contracts.validate_qr_payload(payload)
+    assert rc == 0
+    assert payload["degraded"] is True
+    assert "Traceback" not in cap.err
+
+
+def test_qr_text_output_is_unchanged_by_the_json_hint_rule(tmp_path, monkeypatch, capsys):
+    # M2 nulls the JSON hint when there is a url; the text output never showed
+    # a hint next to a url, and still doesn't.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
+    fake = _FakeTunnelProvider(url="https://crr.example.com/")
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
+    assert cli.main(["qr"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[-1] == "https://crr.example.com/"
+    assert "run the setup" not in out
 
 
 def test_qr_json_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
