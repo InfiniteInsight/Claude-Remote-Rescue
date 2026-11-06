@@ -158,6 +158,10 @@ KICKS_STORE_VERSION = 1
 # v1: dashboard login — optional passphrase auth gate (spec 2026-08-26; see
 # crr.core.dashboard_auth). Brand new store: no prior unversioned shape.
 DASHBOARD_AUTH_STORE_VERSION = 1
+# v1: config_overrides.json (#161) — the crr-owned overlay of settings
+# changes, layered over the user's hand-owned config.toml (which crr never
+# writes). Brand new: no prior unversioned shape.
+CONFIG_OVERRIDES_STORE_VERSION = 1
 # v1: WSL holder hold flag (#138) — pause/stop the crr-wsl-boot holder.
 # Lives on the WINDOWS side (the task must decide before it starts WSL) and
 # is read by the generated PowerShell launcher as well as crr, which both

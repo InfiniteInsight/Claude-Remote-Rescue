@@ -8215,3 +8215,39 @@ def test_shell_exit_deregister_does_not_retire_other_copies(tmp_path, monkeypatc
     _seed_claude(store, 4_000_001, sid, _STALE_BOOT)
     assert cli.main(["deregister", "--pid", "4000002"]) == 0
     assert store.read(4_000_001)["claude"]["session_id"] == sid
+
+
+def test_load_config_layers_the_overlay(tmp_path, monkeypatch):
+    # config_overrides.json (crr-owned) beats the user's config.toml.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text("zombie_strikes = 4\ndashboard_port = 8123\n", encoding="utf-8")
+    (tmp_path / "config_overrides.json").write_text(
+        json.dumps({"v": 1, "values": {"zombie_strikes": 7}}), encoding="utf-8")
+    config = cli._load_config()
+    assert config.get("zombie_strikes") == 7
+    assert config.get("dashboard_port") == 8123
+    assert config.effective()["zombie_strikes"] == (7, "override")
+
+
+def test_load_config_warns_once_on_a_corrupt_overlay(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_OVERLAY_WARNED", set())
+    (tmp_path / "config.toml").write_text("zombie_strikes = 4\n", encoding="utf-8")
+    (tmp_path / "config_overrides.json").write_text("{not json", encoding="utf-8")
+    first = cli._load_config()
+    second = cli._load_config()
+    err = capsys.readouterr().err
+    # Falls back to config.toml plus defaults, and says so exactly once.
+    assert first.get("zombie_strikes") == second.get("zombie_strikes") == 4
+    assert err.count("config_overrides.json") == 1
+    assert err.count("\n") == 1
+
+
+def test_load_config_overlay_survives_a_bad_config_toml(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text('zombie_strikes = "x"\n', encoding="utf-8")
+    (tmp_path / "config_overrides.json").write_text(
+        json.dumps({"v": 1, "values": {"dashboard_port": 9000}}), encoding="utf-8")
+    config = cli._load_config()
+    assert config.get("dashboard_port") == 9000
+    assert "ignoring bad config" in capsys.readouterr().err

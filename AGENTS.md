@@ -86,9 +86,9 @@ the declaration codifies what the code already does.
 - **Priors (P5):** `crr/core/config.py` DEFAULTS (versioned;
   `crr config --effective` reports origins).
 - **Contracts (P7):** journal v1 · sessions v9 · diagnostics v3 · archive v1
-  · `PAGE_VERSION` · `CONFIG_DEFAULTS_VERSION`. Each version constant in
-  `crr/core/contracts.py` carries a per-version ledger comment saying what
-  that bump changed; `tests/test_version_ledger.py` fails on a hole.
+  · config_overrides v1 · `PAGE_VERSION` · `CONFIG_DEFAULTS_VERSION`. Each
+  version constant in `crr/core/contracts.py` carries a per-version ledger
+  comment saying what that bump changed; `tests/test_version_ledger.py` fails on a hole.
   **Dashboard-managed stores** — `exclusions.json`, `settings.json`,
   `bridge_kicks.json` in the state dir — are read back by later crr builds
   and so need the same treatment; see #36.

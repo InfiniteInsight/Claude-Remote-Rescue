@@ -6,8 +6,8 @@ threshold decisions join ``DEFAULTS`` at introduction time, not at audit
 time (that rule is why this module exists before most of its consumers
 do).
 
-``effective()`` reports each key's value AND its origin (``configured``
-vs ``default``) so a consumer can always distinguish an explicit choice
+``effective()`` reports each key's value AND its origin (``override`` for
+the crr-owned overlay, ``configured`` for config.toml, ``default``) so a consumer can always distinguish an explicit choice
 from an assumed one — defaults drive kill decisions, and an invisible
 default is an invisible prior. It backs ``crr config --effective``.
 
@@ -378,35 +378,65 @@ def load_toml_overrides(path: Path | str) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
+def check_value(key: str, value: Any) -> None:
+    """Raise ``ConfigError`` unless ``key`` is a known key and ``value`` has
+    the type of its default.
+
+    The one type rule for every layer that carries config values (the
+    ``config.toml`` overrides, and the crr-owned overlay in
+    ``crr.core.config_overrides``), so a mistyped value fails loudly rather
+    than injecting e.g. a str where logic wants an int.
+    """
+    if key not in DEFAULTS:
+        raise ConfigError(f"unknown config key(s): {[key]}")
+    default = DEFAULTS[key]
+    # bool is an int subclass; keep them from cross-matching.
+    if isinstance(value, bool) != isinstance(default, bool) or not isinstance(value, type(default)):
+        raise ConfigError(
+            f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
+        )
+
+
+def _checked(layer: Mapping[str, Any] | None) -> dict[str, Any]:
+    layer = dict(layer or {})
+    unknown = set(layer) - set(DEFAULTS)
+    if unknown:
+        raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
+    for key, value in layer.items():
+        check_value(key, value)
+    return layer
+
+
 class Config:
-    def __init__(self, overrides: Mapping[str, Any] | None = None) -> None:
-        overrides = dict(overrides or {})
-        unknown = set(overrides) - set(DEFAULTS)
-        if unknown:
-            raise ConfigError(f"unknown config key(s): {sorted(unknown)}")
-        # Type-check each override against its default so a mistyped config.toml
-        # fails loudly rather than injecting e.g. a str where logic wants an int.
-        for key, value in overrides.items():
-            default = DEFAULTS[key]
-            # bool is an int subclass; keep them from cross-matching.
-            if isinstance(value, bool) != isinstance(default, bool) or not isinstance(value, type(default)):
-                raise ConfigError(
-                    f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
-                )
-        self._overrides = overrides
+    """``overlay`` (crr-owned ``config_overrides.json``) beats ``overrides``
+    (the user's hand-owned ``config.toml``), which beats ``DEFAULTS``."""
+
+    def __init__(
+        self,
+        overrides: Mapping[str, Any] | None = None,
+        *,
+        overlay: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._overrides = _checked(overrides)
+        self._overlay = _checked(overlay)
 
     def get(self, key: str) -> Any:
         if key not in DEFAULTS:
             raise KeyError(key)
+        if key in self._overlay:
+            return self._overlay[key]
         return self._overrides.get(key, DEFAULTS[key])
 
     def effective(self) -> dict[str, tuple[Any, str]]:
-        """Return ``{key: (value, origin)}`` for every known key."""
-        return {
-            key: (
-                (self._overrides[key], "configured")
-                if key in self._overrides
-                else (default, "default")
-            )
-            for key, default in DEFAULTS.items()
-        }
+        """Return ``{key: (value, origin)}`` for every known key. The origin
+        is ``override`` (crr-owned overlay), ``configured`` (config.toml) or
+        ``default``."""
+        out: dict[str, tuple[Any, str]] = {}
+        for key, default in DEFAULTS.items():
+            if key in self._overlay:
+                out[key] = (self._overlay[key], "override")
+            elif key in self._overrides:
+                out[key] = (self._overrides[key], "configured")
+            else:
+                out[key] = (default, "default")
+        return out

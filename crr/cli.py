@@ -60,6 +60,8 @@ from crr.core import auth, boot_survival, bridge_kicks, classifier, contracts, d
 from crr.core import terminal_reopen
 from crr.core import diagnostics as diag_core
 from crr.core.archive import ArchiveStore, is_expired
+from crr.core import config_overrides
+from crr.core.config_overrides import ConfigOverridesStore
 from crr.core.flags import FlagStore
 from crr.core import journal
 from crr.core.journal import JournalStore, new_entry, write_json_atomic
@@ -81,18 +83,34 @@ def _git_short() -> str:
         return ""
 
 
-def _load_config() -> cfg.Config:
-    """Load config.toml (co-located in the crr state dir) over the defaults.
+# Corrupt-overlay warnings already printed by this process, by path:
+# _load_config() runs many times per process and the warning is once.
+_OVERLAY_WARNED: set[Path] = set()
 
-    A malformed config warns on stderr and falls back to defaults rather
-    than breaking every command (including the shim hot path).
+
+def _load_config() -> cfg.Config:
+    """Load config.toml (co-located in the crr state dir) over the defaults,
+    with the crr-owned ``config_overrides.json`` overlay on top of both.
+
+    A malformed config.toml or overlay warns on stderr and falls back
+    (to the defaults, or to config.toml plus the defaults) rather than
+    breaking every command (including the shim hot path). The overlay
+    warning is printed once per process.
     """
-    toml_path = state_dir.state_dir() / "config.toml"
+    sd = state_dir.state_dir()
+    toml_path = sd / "config.toml"
+    store = ConfigOverridesStore(sd)
+    overlay = store.read()
+    overlay_path = sd / config_overrides.FILENAME
+    if store.is_degraded() and overlay_path not in _OVERLAY_WARNED:
+        _OVERLAY_WARNED.add(overlay_path)
+        print(f"crr: ignoring unreadable {overlay_path}; using config.toml and defaults",
+              file=sys.stderr)
     try:
-        return cfg.Config(cfg.load_toml_overrides(toml_path))
+        return cfg.Config(cfg.load_toml_overrides(toml_path), overlay=overlay)
     except (cfg.ConfigError, ValueError, OSError) as exc:
         print(f"crr: ignoring bad config {toml_path}: {exc}", file=sys.stderr)
-        return cfg.Config()
+        return cfg.Config(overlay=overlay)
 
 
 def _credentials_path(config: cfg.Config) -> Path:
