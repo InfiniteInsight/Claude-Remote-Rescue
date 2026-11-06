@@ -375,22 +375,26 @@ DEFAULTS: dict[str, Any] = {
 #                     once at startup
 #   reinstall         reinstall the units: the value is baked into the
 #                     systemd/launchd/Scheduled Task definitions
-#   windows-installer rerun a Windows installer (boot_*/harden_* settings)
+#   windows-installer rerun a Windows installer: some installer bakes the key
+#                     in (it needs elevation or asks questions). A boot_ or
+#                     harden_ prefix alone does not qualify a key
+#   fixed             crr reads no Config for this key (it is an import-time
+#                     injectable prior), so setting it has no effect
 # A key read in several places gets the strongest kind any reader needs, in
 # this order: windows-installer > reinstall > restart-web > restart-awake >
-# live. Every DEFAULTS key must be listed here: a new key fails
+# live. fixed is outside that order: a key is fixed only when NO reader takes
+# it from a Config. Every DEFAULTS key must be listed here: a new key fails
 # tests/test_config.py::test_every_config_key_has_an_apply_rule until it gets
 # a rule, so a setting can never reach the tray with no answer.
-APPLY_KINDS = ("live", "restart-web", "restart-awake", "reinstall", "windows-installer")
+APPLY_KINDS = ("live", "restart-web", "restart-awake", "reinstall", "windows-installer",
+              "fixed")
 
 APPLY_RULES: dict[str, str] = {
-    # --- windows-installer: every boot_* and harden_* key -----------------
-    "boot_headless_window_seconds": "windows-installer",
+    # --- windows-installer: keys an installer bakes in ----------------------
     "boot_preferred_tailnet": "windows-installer",
     "boot_holder_rearm_minutes": "windows-installer",
     "harden_active_hours_start": "windows-installer",
     "harden_active_hours_end": "windows-installer",
-    "harden_restart_lookback_days": "windows-installer",
     # --- reinstall: baked into the service definitions ---------------------
     "dashboard_port": "reinstall",
     "watchdog_interval_seconds": "reinstall",
@@ -449,6 +453,10 @@ APPLY_RULES: dict[str, str] = {
     "rescue_prompt_timeout_seconds": "live",
     "rescue_auto_open": "live",
     "takeover_max_wait_seconds": "live",
+    # Diagnostic thresholds read fresh by doctor / reachable-at-boot / harden;
+    # no installer bakes them in.
+    "boot_headless_window_seconds": "live",
+    "harden_restart_lookback_days": "live",
     "bridge_kick_cooldown_seconds": "live",
     "bridge_kick_max_attempts": "live",
     # `crr awake` re-reads config after every poll, so these need no restart.
@@ -456,14 +464,14 @@ APPLY_RULES: dict[str, str] = {
     "power_block_requires_ac": "live",
     "power_poll_seconds": "live",
     "power_state_max_age_multiplier": "live",
-    # Nothing reads these from a Config yet: each is an import-time default
-    # (web.DISCOVERABLE_PAGE, transcript_source.REPLY_TAIL_LINES /
-    # CWD_SCAN_LINES, the context_pressure default), so no running process
-    # holds a configured value to refresh.
-    "discoverable_page_size": "live",
-    "reply_tail_lines": "live",
-    "cwd_scan_lines": "live",
-    "context_bytes_per_token": "live",
+    # --- fixed: import-time injectable priors (#37), read from DEFAULTS and
+    # never from a Config (web.DISCOVERABLE_PAGE,
+    # transcript_source.REPLY_TAIL_LINES / CWD_SCAN_LINES, the
+    # context_pressure default), so setting them has no effect.
+    "discoverable_page_size": "fixed",
+    "reply_tail_lines": "fixed",
+    "cwd_scan_lines": "fixed",
+    "context_bytes_per_token": "fixed",
 }
 
 

@@ -344,3 +344,9 @@ def test_known_apply_rules():
     assert cfg.APPLY_RULES["zombie_strikes"] == "restart-web"
     # The keep-awake holder is built once; its other keys are re-read per poll.
     assert cfg.APPLY_RULES["power_block_max_hours"] == "restart-awake"
+    # Diagnostic thresholds no installer bakes in: the boot_/harden_ prefix
+    # alone does not make a key windows-installer.
+    assert cfg.APPLY_RULES["boot_headless_window_seconds"] == "live"
+    assert cfg.APPLY_RULES["harden_restart_lookback_days"] == "live"
+    # An import-time injectable prior: crr reads no Config for it.
+    assert cfg.APPLY_RULES["reply_tail_lines"] == "fixed"
