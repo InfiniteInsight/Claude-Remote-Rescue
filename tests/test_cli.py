@@ -1669,6 +1669,46 @@ def test_a_bad_list_in_config_toml_does_not_crash_effective(tmp_path, monkeypatc
     assert payload["keys"]["host_allowlist_extras"]["origin"] == "default"
 
 
+def _strict_json(text):
+    """json.loads that refuses NaN and Infinity, as the tray's JSON.parse does."""
+    def refuse(constant):
+        raise AssertionError(f"non-standard JSON constant {constant} on stdout")
+    return json.loads(text, parse_constant=refuse)
+
+
+@pytest.mark.parametrize("toml", [
+    "context_tight_fraction = nan\n",
+    "takeover_idle_seconds = inf\n",
+    "takeover_idle_seconds = -inf\n",
+])
+def test_a_non_finite_float_in_config_toml_falls_back_like_any_bad_value(
+        tmp_path, monkeypatch, capsys, toml):
+    _config_sd(tmp_path, monkeypatch, toml=toml)
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    cap = capsys.readouterr()
+    assert "ignoring bad config" in cap.err
+    assert "Traceback" not in cap.err
+    payload = _strict_json(cap.out)
+    contracts.validate_config_payload(payload)
+    key = toml.split(" =")[0]
+    assert payload["keys"][key]["origin"] == "default"
+    assert payload["keys"][key]["value"] == cfg.DEFAULTS[key]
+
+
+def test_a_non_finite_float_in_the_overlay_is_dropped(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch, toml=None)
+    (sd / "config_overrides.json").write_text(
+        '{"v": 1, "values": {"context_tight_fraction": NaN, "zombie_strikes": 7}}',
+        encoding="utf-8")
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    cap = capsys.readouterr()
+    payload = _strict_json(cap.out)
+    contracts.validate_config_payload(payload)
+    assert payload["keys"]["context_tight_fraction"]["origin"] == "default"
+    assert payload["keys"]["zombie_strikes"]["origin"] == "override"   # the rest survives
+    assert "Traceback" not in cap.err
+
+
 def test_effective_json_without_effective_is_a_usage_error(tmp_path, monkeypatch, capsys):
     _config_sd(tmp_path, monkeypatch)
     assert cli.main(["config", "--json"]) == 2

@@ -521,6 +521,10 @@ def check_value(key: str, value: Any) -> None:
         raise ConfigError(
             f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
         )
+    # NaN and infinity are floats, but no setting means them, and either one
+    # would put non-standard JSON (NaN, Infinity) in `--effective --json`.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ConfigError(f"config '{key}' must be a finite number, got {value!r}")
     # Every list setting is a list of strings (all DEFAULTS lists are, and the
     # contracted `--effective --json` payload says so).
     if isinstance(value, list):

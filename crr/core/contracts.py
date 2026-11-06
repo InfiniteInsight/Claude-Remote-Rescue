@@ -12,6 +12,7 @@ Pure stdlib, no imports from adapters or cli (this is core).
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Iterable, Mapping
 
@@ -947,7 +948,8 @@ def _config_value_matches(value: Any, type_name: str) -> bool:
     if type_name == "int":
         return isinstance(value, int) and not isinstance(value, bool)
     if type_name == "float":
-        return isinstance(value, float)
+        # NaN and Infinity are not JSON; a strict parser rejects the payload.
+        return isinstance(value, float) and math.isfinite(value)
     if type_name == "str":
         return isinstance(value, str)
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
@@ -955,6 +957,8 @@ def _config_value_matches(value: Any, type_name: str) -> bool:
 
 def _config_value_type_name(value: Any, type_name: str) -> str:
     """What a mismatched value actually was; names a list's odd element."""
+    if type_name == "float" and isinstance(value, float):
+        return f"a non-finite float ({value!r})"
     if type_name == "list" and isinstance(value, list):
         bad = next(v for v in value if not isinstance(v, str))
         return f"a list with a {type(bad).__name__} element"

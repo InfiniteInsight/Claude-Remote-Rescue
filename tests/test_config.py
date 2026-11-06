@@ -493,6 +493,19 @@ def test_every_list_default_holds_strings():
             assert all(isinstance(v, str) for v in default), key
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_check_value_refuses_a_float_that_is_not_finite(bad):
+    # A config.toml can say `nan` or `inf`; the tray's JSON.parse rejects the
+    # whole --effective payload if one ever reaches stdout.
+    with pytest.raises(cfg.ConfigError, match="context_tight_fraction"):
+        cfg.check_value("context_tight_fraction", bad)
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config({"takeover_idle_seconds": bad})
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config(overlay={"takeover_idle_seconds": bad})
+    cfg.check_value("context_tight_fraction", 0.5)   # must not raise
+
+
 def test_check_value_refuses_a_list_with_a_non_string():
     for bad in ([1], ["a", 2], [None], [["a"]], [True]):
         with pytest.raises(cfg.ConfigError, match="host_allowlist_extras"):

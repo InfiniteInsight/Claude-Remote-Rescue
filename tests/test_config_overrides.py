@@ -85,6 +85,18 @@ def test_read_drops_bad_values_one_at_a_time(tmp_path):
     assert store.is_degraded() is False
 
 
+def test_read_drops_a_value_that_is_not_finite(tmp_path):
+    # Python's json reads a hand-written NaN or Infinity; neither may reach
+    # the strict-JSON payloads crr prints.
+    (tmp_path / config_overrides.FILENAME).write_text(
+        '{"v": 1, "values": {"context_tight_fraction": NaN, '
+        '"takeover_idle_seconds": Infinity, "dashboard_port": 9000}}',
+        encoding="utf-8")
+    store = ConfigOverridesStore(tmp_path)
+    assert store.read() == {"dashboard_port": 9000}
+    assert store.is_degraded() is False
+
+
 def test_corrupt_overrides_degrade_to_toml_and_defaults(tmp_path):
     (tmp_path / config_overrides.FILENAME).write_text("{not json", encoding="utf-8")
     store = ConfigOverridesStore(tmp_path)

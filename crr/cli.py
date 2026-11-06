@@ -1892,7 +1892,7 @@ def _qr_json(config: cfg.Config, provider) -> int:
     }
     # Validate our own output before emitting it, as `crr status --json` does.
     contracts.validate_qr_payload(payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
     return 0
 
 
@@ -6927,7 +6927,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         print("crr config: could not read " + ", ".join(degraded_stores)
               + "; some origins below may be wrong", file=sys.stderr)
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
         return 0
     print(f"# defaults version: {payload['defaults_version']}")
     for key, fields in payload["keys"].items():
@@ -7064,7 +7064,7 @@ def _service_status(as_json: bool) -> int:
     # Validate our own output before emitting it, as `crr status --json` does.
     contracts.validate_service_payload(payload)
     if as_json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
         return 0
     print(f"backend: {backend}" + (f" ({reason})" if reason else ""))
     for row in payload["services"]:

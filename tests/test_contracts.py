@@ -1195,6 +1195,20 @@ def test_config_payload_violations_are_rejected(mutate):
         contracts.validate_config_payload(payload)
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_config_payload_refuses_a_float_that_is_not_finite(bad):
+    payload = copy.deepcopy(_config_payload())
+    payload["keys"]["context_tight_fraction"] = {
+        "value": 0.7, "default": 0.7, "origin": "default",
+        "type": "float", "apply": "restart-web"}
+    contracts.validate_config_payload(payload)          # finite: fine
+    for field in ("value", "default"):
+        broken = copy.deepcopy(payload)
+        broken["keys"]["context_tight_fraction"][field] = bad
+        with pytest.raises(contracts.ContractError):
+            contracts.validate_config_payload(broken)
+
+
 def test_config_payload_error_names_the_offending_element_type():
     payload = copy.deepcopy(_config_payload())
     payload["keys"]["host_allowlist_extras"]["value"] = ["a", 1]
