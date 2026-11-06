@@ -12,6 +12,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -8140,6 +8142,177 @@ def test_qr_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "ngrok" in err
+
+
+# --- crr qr --json (#161) ---------------------------------------------------
+
+def _qr_json(monkeypatch, tmp_path, capsys, *, provider, reachable=True,
+             probe_seen=None):
+    """Run `crr qr --json` with a fake provider and a stubbed dashboard probe."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)       # no installed crr-web unit unless a test writes one
+
+    def fake_probe(url, timeout):
+        if probe_seen is not None:
+            probe_seen.append((url, timeout))
+        return reachable
+
+    monkeypatch.setattr(cli, "_dashboard_answers", fake_probe)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: provider)
+    rc = cli.main(["qr", "--json"])
+    return rc, capsys.readouterr()
+
+
+def test_qr_json_with_an_advertised_url(monkeypatch, tmp_path, capsys):
+    fake = _FakeTunnelProvider(url="https://crr.example.com/")
+    seen = []
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys, provider=fake, probe_seen=seen)
+    payload = json.loads(cap.out)
+    contracts.validate_qr_payload(payload)
+    assert rc == 0
+    assert payload["provider"] == "cloudflare"
+    assert payload["url"] == "https://crr.example.com/"
+    port = cfg.DEFAULTS["dashboard_port"]
+    assert payload["loopback_url"] == f"http://127.0.0.1:{port}/"
+    assert payload["dashboard_reachable"] is True
+    # The probe asks the loopback dashboard's version endpoint, within the
+    # configured interop timeout.
+    assert seen == [(f"http://127.0.0.1:{port}/api/version",
+                     cfg.DEFAULTS["interop_timeout_seconds"])]
+    assert cap.err == ""
+    assert "\u2588" not in cap.out          # no terminal QR mixed into the JSON
+
+
+def test_qr_json_without_a_tunnel(monkeypatch, tmp_path, capsys):
+    fake = _FakeTunnelProvider(url=None)
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys, provider=fake)
+    payload = json.loads(cap.out)
+    contracts.validate_qr_payload(payload)
+    assert rc == 0
+    assert payload["url"] is None
+    assert payload["hint"]                  # the setup hint is what the tray shows instead
+    assert payload["loopback_url"].startswith("http://127.0.0.1:")
+
+
+def test_qr_json_with_the_provider_none(monkeypatch, tmp_path, capsys):
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys, provider=None)
+    payload = json.loads(cap.out)
+    contracts.validate_qr_payload(payload)
+    assert rc == 0
+    assert (payload["provider"], payload["url"], payload["hint"]) == (None, None, None)
+
+
+def test_qr_json_reports_an_unreachable_dashboard(monkeypatch, tmp_path, capsys):
+    fake = _FakeTunnelProvider(url="https://crr.example.com/")
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys, provider=fake, reachable=False)
+    payload = json.loads(cap.out)
+    contracts.validate_qr_payload(payload)
+    assert rc == 0
+    assert payload["dashboard_reachable"] is False
+
+
+def test_qr_json_loopback_url_uses_the_installed_port(monkeypatch, tmp_path, capsys):
+    _install_web_unit(tmp_path, 8377)
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    seen = []
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys,
+                       provider=_FakeTunnelProvider(url=None), probe_seen=seen)
+    payload = json.loads(cap.out)
+    assert rc == 0
+    assert payload["loopback_url"] == "http://127.0.0.1:8377/"
+    assert seen[0][0] == "http://127.0.0.1:8377/api/version"
+    assert "dashboard_port is 9000 in settings but the installed dashboard uses 8377" in cap.err
+
+
+def test_qr_text_loopback_line_uses_the_installed_port(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
+    _install_web_unit(tmp_path, 8377)
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_tunnel_provider",
+                        lambda config, sel: _FakeTunnelProvider(url=None))
+    rc = cli.main(["qr"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "http://127.0.0.1:8377/  (loopback only)" in out
+
+
+class _RaisingProvider(_FakeTunnelProvider):
+    def advertise_url(self):
+        raise RuntimeError("tailscale exploded")
+
+    def setup_hint(self):
+        raise RuntimeError("no hint either")
+
+
+def test_qr_json_survives_a_provider_error(monkeypatch, tmp_path, capsys):
+    rc, cap = _qr_json(monkeypatch, tmp_path, capsys,
+                       provider=_RaisingProvider(name="tailscale"))
+    payload = json.loads(cap.out)
+    contracts.validate_qr_payload(payload)
+    assert rc == 0
+    assert payload["provider"] == "tailscale"
+    assert payload["url"] is None and payload["hint"] is None
+    assert "tailscale exploded" in cap.err and "no hint either" in cap.err
+    assert "Traceback" not in cap.err
+
+
+def test_qr_json_unknown_provider_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    _write_bad_tunnel_provider(tmp_path)
+    rc = cli.main(["qr", "--json"])
+    cap = capsys.readouterr()
+    assert rc == 2
+    assert cap.out == ""
+    assert "ngrok" in cap.err
+
+
+class _FakeResponse:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _stub_opener(monkeypatch, behavior):
+    """Replace the probe's HTTP opener; ``behavior(request, timeout)``."""
+    class _Opener:
+        def open(self, request, timeout=None):
+            return behavior(request, timeout)
+    monkeypatch.setattr(cli.urllib.request, "build_opener", lambda *handlers: _Opener())
+
+
+def test_dashboard_answers_is_true_only_on_http_200(monkeypatch):
+    seen = []
+
+    def ok(request, timeout):
+        seen.append((request.full_url, timeout))
+        return _FakeResponse(200)
+
+    _stub_opener(monkeypatch, ok)
+    assert cli._dashboard_answers("http://127.0.0.1:8377/api/version", 3.0) is True
+    assert seen == [("http://127.0.0.1:8377/api/version", 3.0)]
+    _stub_opener(monkeypatch, lambda r, t: _FakeResponse(204))
+    assert cli._dashboard_answers("http://127.0.0.1:8377/api/version", 3.0) is False
+
+
+@pytest.mark.parametrize("exc", [
+    urllib.error.URLError("refused"),
+    urllib.error.HTTPError("http://x/", 503, "down", None, None),
+    TimeoutError("slow"),
+    ConnectionResetError("reset"),
+    ValueError("bad url"),
+])
+def test_dashboard_answers_is_false_on_any_failure(monkeypatch, exc):
+    def boom(request, timeout):
+        raise exc
+
+    _stub_opener(monkeypatch, boom)
+    assert cli._dashboard_answers("http://127.0.0.1:8377/api/version", 3.0) is False
 
 
 # --- host allowlist admits the Cloudflare hostname (spec 2026-09-02) -------

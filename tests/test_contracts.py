@@ -1243,3 +1243,46 @@ def test_invalid_service_payload_is_refused(mutate):
     mutate(payload)
     with pytest.raises(contracts.ContractError):
         contracts.validate_service_payload(payload)
+
+
+def _qr_payload():
+    return {
+        "contract": contracts.QR_CONTRACT_VERSION,
+        "provider": "tailscale",
+        "url": "https://lovelace.tail3af2d9.ts.net/",
+        "loopback_url": "http://127.0.0.1:8377/",
+        "hint": "tailscale serve --bg 8377",
+        "dashboard_reachable": True,
+    }
+
+
+def test_valid_qr_payload_passes():
+    assert contracts.QR_CONTRACT_VERSION == 1
+    assert contracts.QR_PAYLOAD_KEYS == (
+        "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable")
+    contracts.validate_qr_payload(_qr_payload())
+
+
+def test_qr_payload_with_no_tunnel_passes():
+    payload = _qr_payload()
+    payload.update(provider=None, url=None, hint=None, dashboard_reachable=False)
+    contracts.validate_qr_payload(payload)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.update(contract=2),
+    lambda p: p.update(provider=3),
+    lambda p: p.update(url=3),
+    lambda p: p.update(hint=3),
+    lambda p: p.update(loopback_url=None),
+    lambda p: p.update(loopback_url=8377),
+    lambda p: p.update(dashboard_reachable="yes"),
+    lambda p: p.update(dashboard_reachable=None),
+    lambda p: p.update(extra=1),
+    lambda p: p.pop("hint"),
+])
+def test_invalid_qr_payload_is_refused(mutate):
+    payload = copy.deepcopy(_qr_payload())
+    mutate(payload)
+    with pytest.raises(contracts.ContractError):
+        contracts.validate_qr_payload(payload)

@@ -155,6 +155,13 @@ CONFIG_CONTRACT_VERSION = 1
 # contract so a host with no systemd user manager reads as "unsupported, and
 # why" rather than as three units that happen to be missing.
 SERVICE_CONTRACT_VERSION = 1
+# `crr qr --json` (#161) — what the Windows tray's Control tab draws a QR from:
+# the URL a phone can reach (through a tailnet or tunnel), the setup hint when
+# there is none, the loopback URL, and whether the dashboard answers there.
+# v1: brand new, no prior shape. `url`, `provider` and `hint` are null rather
+# than empty strings when absent, so "no phone-reachable URL" cannot be
+# mistaken for a URL; `dashboard_reachable` is measured, never assumed.
+QR_CONTRACT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # The three dashboard-managed STORES (#36). These matter more than the
@@ -765,6 +772,10 @@ SERVICE_UNIT_FIELDS = ("name", "unit", "installed", "enabled", "active")
 SERVICE_BACKENDS = ("systemd", "unsupported")
 SERVICE_STATES = ("not-installed", "running", "stopped", "partial")
 
+QR_PAYLOAD_KEYS = (
+    "contract", "provider", "url", "loopback_url", "hint", "dashboard_reachable",
+)
+
 CONFIG_PAYLOAD_KEYS = ("contract", "defaults_version", "keys", "degraded")
 CONFIG_KEY_FIELDS = ("value", "default", "origin", "type", "apply")
 # Where a value came from: the crr-owned overlay or a dashboard store
@@ -996,6 +1007,17 @@ def validate_service_payload(payload: Any) -> None:
             _require_type(row[field], str, f"{what} '{field}'")
         for field in ("installed", "enabled", "active"):
             _require_type(row[field], bool, f"{what} '{field}'")
+
+
+def validate_qr_payload(payload: Any) -> None:
+    """Raise ContractError unless ``payload`` is a valid `crr qr --json` body."""
+    payload = _require_mapping(payload, "qr payload")
+    _require_exact_keys(payload, QR_PAYLOAD_KEYS, "qr payload")
+    _require_contract(payload, QR_CONTRACT_VERSION, "qr")
+    for field in ("provider", "url", "hint"):
+        _require_type(payload[field], (str, type(None)), f"qr '{field}'")
+    _require_type(payload["loopback_url"], str, "qr 'loopback_url'")
+    _require_type(payload["dashboard_reachable"], bool, "qr 'dashboard_reachable'")
 
 
 # --------------------------------------------------------------------------

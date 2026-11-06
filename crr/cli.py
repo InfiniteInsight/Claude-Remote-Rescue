@@ -30,6 +30,7 @@ import tempfile
 import threading
 import textwrap
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -393,6 +394,8 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=_cmd_doctor)
 
     qrp = sub.add_parser("qr", help="print a scannable QR of this machine's dashboard URL")
+    qrp.add_argument("--json", action="store_true",
+                     help="emit the versioned JSON payload instead of a terminal QR")
     qrp.set_defaults(func=_cmd_qr)
 
     st = sub.add_parser("status", help="list journaled sessions and their state")
@@ -1815,10 +1818,11 @@ def _cmd_harden(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_qr(_args: argparse.Namespace) -> int:
+def _cmd_qr(args: argparse.Namespace) -> int:
     """Print a scannable QR of this machine's dashboard URL via the ACTIVE
     tunnel provider (spec 2026-09-02) — tailscale by default, so the
-    pre-tunnel behavior is unchanged. Degrades informationally (rc 0)."""
+    pre-tunnel behavior is unchanged. Degrades informationally (rc 0).
+    ``--json`` prints the versioned payload the tray app draws its QR from."""
     config = _load_config()
     sd = state_dir.state_dir()
     try:
@@ -1827,9 +1831,11 @@ def _cmd_qr(_args: argparse.Namespace) -> int:
         print(f"crr qr: {exc}", file=sys.stderr)
         return 2
     provider = _tunnel_provider(config, sel)
+    if getattr(args, "json", False):
+        return _qr_json(config, provider)
     url = provider.advertise_url() if provider is not None else None
     if url is None:
-        port = config.get("dashboard_port")
+        port = _resolved_dashboard_port(config, "crr qr")
         print(f"http://127.0.0.1:{port}/  (loopback only)")
         hint = provider.setup_hint() if provider is not None else None
         if hint:
@@ -1838,6 +1844,72 @@ def _cmd_qr(_args: argparse.Namespace) -> int:
     print(qr.to_terminal(url))
     print(url)
     return 0
+
+
+def _qr_json(config: cfg.Config, provider) -> int:
+    """`crr qr --json`: a report, exit 0 whenever a valid payload is printed,
+    including when there is no phone-reachable URL. A provider that raises
+    degrades its field to null with a note on stderr, never a traceback."""
+    url = hint = None
+    if provider is not None:
+        try:
+            url = provider.advertise_url()
+        except Exception as exc:  # a report must not die on a provider bug
+            print(f"crr qr: could not get the {provider.name()} URL: {exc}",
+                  file=sys.stderr)
+        try:
+            hint = provider.setup_hint()
+        except Exception as exc:
+            print(f"crr qr: could not get the {provider.name()} setup hint: {exc}",
+                  file=sys.stderr)
+    loopback = f"http://127.0.0.1:{_resolved_dashboard_port(config, 'crr qr')}/"
+    payload = {
+        "contract": contracts.QR_CONTRACT_VERSION,
+        "provider": provider.name() if provider is not None else None,
+        "url": url or None,
+        "loopback_url": loopback,
+        "hint": hint or None,
+        "dashboard_reachable": _dashboard_answers(
+            loopback + "api/version", config.get("interop_timeout_seconds")),
+    }
+    # Validate our own output before emitting it, as `crr status --json` does.
+    contracts.validate_qr_payload(payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _resolved_dashboard_port(config: cfg.Config, who: str) -> int:
+    """The port the dashboard actually answers on.
+
+    The installed crr-web unit's port wins over the config's ``dashboard_port``:
+    a changed setting only applies on reinstall, so until then the running
+    dashboard is still on the unit's port. A disagreement is noted on stderr
+    (prefixed with the calling command ``who``).
+    """
+    port = config.get("dashboard_port")
+    installed_port = systemd.installed_web_port(Path.home())
+    if installed_port is not None and installed_port != port:
+        print(f"{who}: dashboard_port is {port} in settings but the "
+              f"installed dashboard uses {installed_port}; "
+              "run crr systemd --install to apply", file=sys.stderr)
+        return installed_port
+    return port
+
+
+def _dashboard_answers(url: str, timeout: float) -> bool:
+    """True only if a GET of ``url`` returns HTTP 200 within ``timeout``.
+
+    ``/api/version`` is exempt from the dashboard's login gate (it is the
+    probe the logged-out page polls), so a passphrase-protected dashboard
+    still answers 200 and anything else means it is not up. Never raises;
+    ignores proxy environment variables, since this is always loopback.
+    """
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(urllib.request.Request(url), timeout=timeout) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
 
 def _tunnel_selection(config: cfg.Config, sd) -> tunnel.TunnelSelection:
@@ -6944,15 +7016,7 @@ def _service_status(as_json: bool) -> int:
     if units is None:
         units = [UnitState(name, unit, False, False, False)
                  for name, unit in systemd.CRR_UNITS]
-    port = config.get("dashboard_port")
-    installed_port = systemd.installed_web_port(Path.home())
-    if installed_port is not None and installed_port != port:
-        # `dashboard_port` only applies on reinstall; the running dashboard
-        # is still on the installed unit's port, so that is the URL to give.
-        print(f"crr service: dashboard_port is {port} in settings but the "
-              f"installed dashboard uses {installed_port}; "
-              "run crr systemd --install to apply", file=sys.stderr)
-        port = installed_port
+    port = _resolved_dashboard_port(config, "crr service")
     payload = service_core.status_payload(
         backend, reason, units,
         f"http://127.0.0.1:{port}/",
