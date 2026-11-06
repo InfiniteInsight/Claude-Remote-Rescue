@@ -8971,10 +8971,17 @@ def test_stop_passes_systemctl_errors_through(monkeypatch, tmp_path, capsys):
     assert cap.out == ""
 
 
-def test_stop_survives_a_systemctl_timeout(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_service_action_timeout_is_still_in_progress_not_a_bad_install(
+        monkeypatch, tmp_path, capsys, action):
+    timeout = cfg.DEFAULTS["interop_timeout_seconds"]
     rc, cap, calls = _service_action(
-        monkeypatch, tmp_path, capsys, "stop", units=_svc_units(),
-        raises=subprocess.TimeoutExpired(["systemctl"], 5))
+        monkeypatch, tmp_path, capsys, action, units=_svc_units(),
+        raises=subprocess.TimeoutExpired(["systemctl"], timeout))
     assert rc == 1
+    assert (f"crr service {action}: systemctl did not answer within {timeout} "
+            "seconds; the " + action + " may still be in progress — check with "
+            "crr service status") in cap.err
+    assert "repair" not in cap.err
     assert "Traceback" not in cap.err
-    assert "run crr systemd --install to repair a partial install" in cap.err
+    assert cap.out == ""

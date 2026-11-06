@@ -6861,9 +6861,16 @@ def _service_action(action: str) -> int:
               "units; run `crr systemd --install`", file=sys.stderr)
         return 1
     argv = systemd.start_argv() if action == "start" else systemd.stop_argv()
+    timeout = config.get("interop_timeout_seconds")
     try:
-        r = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=config.get("interop_timeout_seconds"))
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # subprocess.run kills only the systemctl client; the job it queued
+        # keeps running, so this is not a failed or broken install.
+        print(f"crr service {action}: systemctl did not answer within {timeout} "
+              f"seconds; the {action} may still be in progress — check with "
+              "crr service status", file=sys.stderr)
+        return 1
     except (subprocess.SubprocessError, OSError) as exc:
         print(f"crr service {action}: {exc}", file=sys.stderr)
         print(_REPAIR_LINE, file=sys.stderr)
