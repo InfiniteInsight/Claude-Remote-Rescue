@@ -321,23 +321,73 @@ def loaded_kill_mode(props: dict[str, str] | None) -> str | None:
     return props.get("KillMode") or None
 
 
+def _port_from_words(words: list[str]) -> int | None:
+    """The valid ``--port N`` / ``--port=N`` in an argv, or None."""
+    for i, word in enumerate(words):
+        if word == "--port" and i + 1 < len(words):
+            raw = words[i + 1]
+        elif word.startswith("--port="):
+            raw = word[len("--port="):]
+        else:
+            continue
+        if raw.isdigit() and 0 < int(raw) < 65536:
+            return int(raw)
+    return None
+
+
 def parse_web_port(unit_text: str) -> int | None:
     """The ``--port`` in a crr-web unit's ExecStart, or None if it has none
     or it isn't a valid port. Reads what ``web_service_unit`` writes."""
     for line in unit_text.splitlines():
         if not line.startswith("ExecStart="):
             continue
-        words = line[len("ExecStart="):].split()
-        for i, word in enumerate(words):
-            if word == "--port" and i + 1 < len(words):
-                raw = words[i + 1]
-            elif word.startswith("--port="):
-                raw = word[len("--port="):]
-            else:
-                continue
-            if raw.isdigit() and 0 < int(raw) < 65536:
-                return int(raw)
+        port = _port_from_words(line[len("ExecStart="):].split())
+        if port is not None:
+            return port
     return None
+
+
+# Where running_web_port reads a process's argv; a test seam.
+PROC_ROOT = Path("/proc")
+
+
+def running_main_pid(props: dict[str, str] | None) -> int | None:
+    """crr-web's main pid from ``web_unit_props``, or None unless it is
+    active with a main process (systemd reports MainPID=0 for none)."""
+    if not props or props.get("ActiveState") != "active":
+        return None
+    raw = props.get("MainPID", "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else None
+
+
+def parse_cmdline_port(raw: bytes) -> int | None:
+    """The ``--port`` of a ``crr web`` process from its ``/proc/<pid>/cmdline``
+    (NUL-separated argv), or None when it isn't ``crr web`` or has no valid
+    port. NULs, not spaces, separate the words, so a path with a space in it
+    stays one word."""
+    words = [w.decode("utf-8", "replace") for w in raw.split(b"\0") if w]
+    if "web" not in words:
+        return None
+    return _port_from_words(words)
+
+
+def running_web_port(props: dict[str, str] | None,
+                     proc_root: Path | None = None) -> int | None:
+    """The port the RUNNING crr-web listens on, from its main process's argv.
+
+    This beats the unit file: ``crr systemd --install`` rewrites the unit but
+    its ``enable --now`` does not restart a running crr-web, so until a
+    restart the process is still on the port it started with. None when
+    crr-web isn't active, or its argv can't be read or carries no port.
+    """
+    pid = running_main_pid(props)
+    if pid is None:
+        return None
+    try:
+        raw = ((proc_root or PROC_ROOT) / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    return parse_cmdline_port(raw)
 
 
 def installed_web_port(home: Path) -> int | None:

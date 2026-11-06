@@ -8008,7 +8008,7 @@ class _FakeTunnelProvider:
 def test_tunnel_action_provider_up_down(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider()
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "up")
     assert result["ok"] is True
     assert fake.started_with == cli.cfg.DEFAULTS["dashboard_port"]
@@ -8020,7 +8020,7 @@ def test_tunnel_action_provider_up_down(tmp_path, monkeypatch):
 
 def test_tunnel_action_provider_none_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: None)
     result = cli._tunnel_action(cli.cfg.Config(), tmp_path, "up")
     assert result["ok"] is False and "none" in result["message"]
 
@@ -8028,7 +8028,7 @@ def test_tunnel_action_provider_none_refuses(tmp_path, monkeypatch):
 def test_tunnel_up_starts_active_provider_and_prints_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider()
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     rc = cli.main(["tunnel", "up"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8039,7 +8039,7 @@ def test_tunnel_up_starts_active_provider_and_prints_url(tmp_path, monkeypatch, 
 def test_tunnel_up_refusal_prints_message_and_exits_2(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(start_ok=False)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     rc = cli.main(["tunnel", "up"])
     err = capsys.readouterr().err
     assert rc == 2
@@ -8049,7 +8049,7 @@ def test_tunnel_up_refusal_prints_message_and_exits_2(tmp_path, monkeypatch, cap
 def test_tunnel_status_reports_provider_health_and_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(health_state="down", url=None)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     rc = cli.main(["tunnel", "status"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8059,7 +8059,7 @@ def test_tunnel_status_reports_provider_health_and_url(tmp_path, monkeypatch, ca
 def test_tunnel_down_stops_provider(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider()
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     rc = cli.main(["tunnel", "down"])
     assert rc == 0
     assert fake.stopped
@@ -8068,7 +8068,7 @@ def test_tunnel_down_stops_provider(tmp_path, monkeypatch, capsys):
 def test_tunnel_none_provider_says_so(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     (tmp_path / "x").mkdir()  # ensure tmp_path usable as sd
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: None)
     rc = cli.main(["tunnel", "status"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8116,7 +8116,7 @@ def test_tunnel_settings_provider_payload_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(name="tailscale", health_state="up",
                                url="https://x.ts.net/")
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     payload = cli._tunnel_payload(cli.cfg.Config(), tmp_path)
     cli.contracts.validate_tunnel_payload(payload)
     assert payload["provider"] == "tailscale"
@@ -8133,7 +8133,7 @@ def test_machines_provider_cloudflare_shows_self_url(tmp_path, monkeypatch):
         provider="cloudflare", cloudflare_tunnel_name="crr",
         cloudflare_hostname="crr.example.com")
     fake = _FakeTunnelProvider(name="cloudflare", url="https://crr.example.com/")
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     payload = cli._machines_payload(cli.cfg.Config(), tmp_path)
     cli.contracts.validate_machines_payload(payload)
     (row,) = payload["machines"]
@@ -8198,7 +8198,7 @@ def test_tunnel_payload_reports_override_fields_separately(tmp_path, monkeypatch
     # placeholder). Unset override -> None, never "".
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(name="cloudflare", url="https://cfg.example.com/")
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     config = cli.cfg.Config(overrides={"tunnel_provider": "cloudflare",
                                        "cloudflare_tunnel_name": "cfg-name",
                                        "cloudflare_hostname": "cfg.example.com"})
@@ -8266,7 +8266,7 @@ def test_tunnel_status_with_none_still_names_a_live_provider(tmp_path, monkeypat
 def test_qr_uses_active_tunnel_provider_url(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(url="https://crr.example.com/")
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     rc = cli.main(["qr"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8276,7 +8276,7 @@ def test_qr_uses_active_tunnel_provider_url(tmp_path, monkeypatch, capsys):
 def test_qr_falls_back_to_provider_setup_hint(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(url=None)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     rc = cli.main(["qr"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8286,7 +8286,7 @@ def test_qr_falls_back_to_provider_setup_hint(tmp_path, monkeypatch, capsys):
 
 def test_qr_provider_none_prints_loopback_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: None)
     rc = cli.main(["qr"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8318,7 +8318,8 @@ def _qr_json(monkeypatch, tmp_path, capsys, *, provider, reachable=True,
         return reachable
 
     monkeypatch.setattr(cli, "_dashboard_answers", fake_probe)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: provider)
+    monkeypatch.setattr(cli, "_tunnel_provider",
+                        lambda config, sel, dashboard_port=None: provider)
     rc = cli.main(["qr", "--json"])
     return rc, capsys.readouterr()
 
@@ -8390,7 +8391,7 @@ def test_qr_text_loopback_line_uses_the_installed_port(monkeypatch, tmp_path, ca
     _install_web_unit(tmp_path, 8377)
     (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
     monkeypatch.setattr(cli, "_tunnel_provider",
-                        lambda config, sel: _FakeTunnelProvider(url=None))
+                        lambda config, sel, dashboard_port=None: _FakeTunnelProvider(url=None))
     rc = cli.main(["qr"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -8505,7 +8506,7 @@ def test_web_allowed_hosts_ignores_bad_tunnel_config(tmp_path, monkeypatch):
 def test_reachable_at_boot_reports_tunnel_health_tri_state(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     fake = _FakeTunnelProvider(health_state="unknown")
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: fake)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: fake)
     # Boot-facts monkeypatching mirrored (verbatim, minus _load_config —
     # deliberately NOT stubbed: state_dir above already points _load_config
     # at an empty tmp_path, so it returns real cfg.Config() defaults, which
@@ -8523,7 +8524,7 @@ def test_reachable_at_boot_reports_tunnel_health_tri_state(tmp_path, monkeypatch
 
 def test_reachable_at_boot_reports_no_tunnel(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel: None)
+    monkeypatch.setattr(cli, "_tunnel_provider", lambda config, sel, dashboard_port=None: None)
     monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
     monkeypatch.setattr(cli.boot_windows, "read_facts",
                         lambda **k: cli.boot_windows.BootFacts(0.0, 39.0, None, True, False))
@@ -9165,8 +9166,82 @@ def test_service_status_survives_an_auth_store_that_raises(monkeypatch, tmp_path
     payload = json.loads(cap.out)
     contracts.validate_service_payload(payload)
     assert rc == 0
-    assert payload["dashboard_login"] is False
+    # Fails closed like a corrupt file (R16): "off" would promise an open
+    # dashboard that crr cannot vouch for.
+    assert payload["dashboard_login"] is True
     assert dashboard_auth.FILENAME in cap.err
+
+
+_SCHTASKS_REASON = (
+    "crr is installed as Windows Scheduled Tasks; the tray supports the systemd "
+    "install only (see crr schtasks --uninstall / crr systemd --install)")
+
+
+def test_service_status_reports_a_scheduled_tasks_install_as_unsupported(
+        monkeypatch, tmp_path, capsys):
+    # The tray's Repair runs `crr systemd --install`, which would add a second
+    # watchdog and dashboard next to the Scheduled Tasks ones.
+    from crr.adapters import scheduled_task
+    seen = []
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(scheduled_task, "crr_tasks_installed",
+                        lambda timeout: seen.append(timeout) or True)
+    rc, cap = _service_status(
+        monkeypatch, tmp_path, capsys,
+        units=_svc_units(installed=False, enabled=False, active=False), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0
+    assert payload["backend"] == "unsupported"
+    assert payload["reason"] == _SCHTASKS_REASON
+    assert seen == [cfg.DEFAULTS["interop_timeout_seconds"]]
+
+
+def test_service_status_without_scheduled_tasks_is_not_installed(monkeypatch, tmp_path, capsys):
+    from crr.adapters import scheduled_task
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(scheduled_task, "crr_tasks_installed", lambda timeout: False)
+    rc, cap = _service_status(
+        monkeypatch, tmp_path, capsys,
+        units=_svc_units(installed=False, enabled=False, active=False), args=["--json"])
+    payload = json.loads(cap.out)
+    assert (payload["backend"], payload["state"]) == ("systemd", "not-installed")
+    assert "crr systemd --install" in payload["reason"]
+
+
+def test_scheduled_tasks_are_only_probed_on_wsl_with_nothing_installed(
+        monkeypatch, tmp_path, capsys):
+    from crr.adapters import scheduled_task
+    monkeypatch.setattr(scheduled_task, "crr_tasks_installed",
+                        lambda timeout: pytest.fail("must not probe schtasks.exe"))
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: False)
+    rc, cap = _service_status(
+        monkeypatch, tmp_path, capsys,
+        units=_svc_units(installed=False, enabled=False, active=False), args=["--json"])
+    assert json.loads(cap.out)["backend"] == "systemd"
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    assert json.loads(cap.out)["backend"] == "systemd"
+
+
+@pytest.mark.parametrize("argv", [["service", "start"], ["service", "stop"], ["logs"]])
+def test_a_scheduled_tasks_install_makes_start_stop_and_logs_exit_2(
+        monkeypatch, tmp_path, capsys, argv):
+    from crr.adapters import scheduled_task
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli.host, "is_wsl", lambda: True)
+    monkeypatch.setattr(systemd, "unit_states", lambda timeout: _svc_units(
+        installed=False, enabled=False, active=False))
+    monkeypatch.setattr(scheduled_task, "crr_tasks_installed", lambda timeout: True)
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda *a, **k: pytest.fail("must not run systemctl or journalctl"))
+    assert cli.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "Windows Scheduled Tasks" in err
+    assert "Traceback" not in err
 
 
 def test_service_without_an_action_is_a_usage_error(capsys):
@@ -9210,6 +9285,95 @@ def test_matching_installed_and_configured_ports_say_nothing(monkeypatch, tmp_pa
     assert json.loads(cap.out)["dashboard_url"] == (
         f"http://127.0.0.1:{cfg.DEFAULTS['dashboard_port']}/")
     assert cap.err == ""
+
+
+def _running_web(monkeypatch, tmp_path, port, pid=4242):
+    """A crr-web the user manager reports active, whose /proc cmdline says ``port``."""
+    proc = tmp_path / "proc"
+    (proc / str(pid)).mkdir(parents=True)
+    (proc / str(pid) / "cmdline").write_bytes(
+        f"/app/bin/python3\0/app/bin/crr\0web\0--port\0{port}\0".encode())
+    monkeypatch.setattr(systemd, "PROC_ROOT", proc)
+    monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: {
+        "LoadState": "loaded", "ActiveState": "active",
+        "KillMode": "process", "MainPID": str(pid)})
+
+
+def test_dashboard_url_prefers_the_running_dashboards_port(monkeypatch, tmp_path, capsys):
+    # R26: `crr systemd --install` rewrites the unit but does not restart a
+    # running crr-web, so until the restart the old process is still on its
+    # old port, whatever the unit file says.
+    _install_web_unit(tmp_path, 9000)
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    _running_web(monkeypatch, tmp_path, 8377)
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    assert json.loads(cap.out)["dashboard_url"] == "http://127.0.0.1:8377/"
+    assert ("dashboard_port is 9000 in settings but the running dashboard uses 8377; "
+            "run crr systemd --install, then systemctl --user restart crr-web "
+            "to apply") in cap.err
+
+
+def test_dashboard_url_falls_back_to_the_unit_without_a_main_pid(monkeypatch, tmp_path, capsys):
+    _install_web_unit(tmp_path, 8377)
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: {
+        "LoadState": "loaded", "ActiveState": "inactive",
+        "KillMode": "process", "MainPID": "0"})
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    assert json.loads(cap.out)["dashboard_url"] == "http://127.0.0.1:8377/"
+    assert "the installed dashboard uses 8377" in cap.err
+
+
+def test_a_running_dashboard_on_the_configured_port_says_nothing(monkeypatch, tmp_path, capsys):
+    _install_web_unit(tmp_path, 8377)          # stale unit file, already restarted
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    _running_web(monkeypatch, tmp_path, 9000)
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    assert json.loads(cap.out)["dashboard_url"] == "http://127.0.0.1:9000/"
+    assert cap.err == ""
+
+
+def test_dashboard_port_hint_restarts_after_the_reinstall(tmp_path, monkeypatch, capsys):
+    # The install rewrites crr-web with KillMode=process, so the restart after
+    # it is safe; without the restart the running dashboard keeps the old port.
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "dashboard_port", "9001"]) == 0
+    assert capsys.readouterr().err == (
+        "crr config: run `crr systemd --install`, then "
+        "`systemctl --user restart crr-web` for this to take effect\n")
+    assert cli.main(["config", "set", "watchdog_interval_seconds", "90"]) == 0
+    assert capsys.readouterr().err == (
+        "crr config: run `crr systemd --install` for this to take effect\n")
+
+
+@pytest.mark.parametrize("running", [None, 8377])
+def test_qr_json_hint_and_loopback_url_agree_on_the_port(
+        monkeypatch, tmp_path, capsys, running):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
+    if running is None:
+        _install_web_unit(tmp_path, 8377)
+    else:
+        _install_web_unit(tmp_path, 9000)
+        _running_web(monkeypatch, tmp_path, running)
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+
+    class _ServeOff(cli.tailscale.RealTailscale):   # real __init__ and setup_hint
+        def status(self):
+            return {"Self": {"DNSName": "lovelace.tail3af2d9.ts.net."}}
+
+        def serve_status(self):
+            return None
+
+    monkeypatch.setattr(cli.tailscale, "RealTailscale", _ServeOff)
+    monkeypatch.setattr(cli, "_dashboard_answers", lambda url, timeout: True)
+    assert cli.main(["qr", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["loopback_url"] == "http://127.0.0.1:8377/"
+    assert payload["hint"] == "tailscale serve --bg 8377"
 
 
 # --- crr service start / stop (#161) ----------------------------------------

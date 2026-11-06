@@ -542,6 +542,52 @@ def test_loaded_kill_mode(props, kill_mode):
     assert systemd.loaded_kill_mode(props) == kill_mode
 
 
+# --- the port the RUNNING dashboard listens on (#161, I5) -------------------
+
+@pytest.mark.parametrize("raw, port", [
+    (b"/app/bin/python3\0/app/bin/crr\0web\0--port\08377\0", 8377),
+    (b"/app/bin/crr\0web\0--port=9001\0", 9001),
+    (b"/home/u/my bin/crr\0web\0--port\09000\0", 9000),   # spaces survive NULs
+    (b"/app/bin/crr\0web\0", None),                          # no --port
+    (b"/app/bin/crr\0revive\0--port\08377\0", None),       # not `crr web`
+    (b"/app/bin/crr\0web\0--port\0abc\0", None),
+    (b"/app/bin/crr\0web\0--port\099999\0", None),
+    (b"", None),
+])
+def test_parse_cmdline_port(raw, port):
+    assert systemd.parse_cmdline_port(raw) == port
+
+
+@pytest.mark.parametrize("props, pid", [
+    ({"ActiveState": "active", "MainPID": "4242"}, 4242),
+    ({"ActiveState": "inactive", "MainPID": "4242"}, None),
+    ({"ActiveState": "active", "MainPID": "0"}, None),       # no main process
+    ({"ActiveState": "active", "MainPID": "x"}, None),
+    ({"ActiveState": "active"}, None),
+    (None, None),
+])
+def test_running_main_pid(props, pid):
+    assert systemd.running_main_pid(props) == pid
+
+
+def test_running_web_port_reads_the_main_pids_cmdline(tmp_path):
+    (tmp_path / "4242").mkdir()
+    (tmp_path / "4242" / "cmdline").write_bytes(b"/app/crr\0web\0--port\08377\0")
+    active = {"ActiveState": "active", "MainPID": "4242"}
+    assert systemd.running_web_port(active, proc_root=tmp_path) == 8377
+    assert systemd.running_web_port({**active, "MainPID": "5"}, proc_root=tmp_path) is None
+    assert systemd.running_web_port({**active, "ActiveState": "inactive"},
+                                    proc_root=tmp_path) is None
+    assert systemd.running_web_port(None, proc_root=tmp_path) is None
+
+
+def test_running_web_port_defaults_to_the_module_proc_root(tmp_path, monkeypatch):
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "cmdline").write_bytes(b"crr\0web\0--port\09100\0")
+    monkeypatch.setattr(systemd, "PROC_ROOT", tmp_path)
+    assert systemd.running_web_port({"ActiveState": "active", "MainPID": "7"}) == 9100
+
+
 # --- crr service start / stop (#161) ----------------------------------------
 
 def test_start_argv():

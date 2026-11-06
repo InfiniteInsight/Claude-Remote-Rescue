@@ -213,11 +213,17 @@ def _no_real_service_probes(request, monkeypatch):
     unit file. ``None`` is exactly what a CI runner without a user manager
     answers, so this makes every host behave like CI.
 
-    Tests that need an answer stub ``systemd.web_unit_props`` themselves;
-    the adapter tests of the probe opt out with ``real_service_probes``.
+    The same goes for the Scheduled Task probe (``schtasks.exe /Query``),
+    which on a WSL developer machine would ask the real Windows host; "not
+    found" is what every non-WSL runner gets.
+
+    Tests that need an answer stub ``systemd.web_unit_props`` or
+    ``scheduled_task.crr_tasks_installed`` themselves; the adapter tests of
+    the probes opt out with ``real_service_probes``.
     """
     if "real_service_probes" in request.keywords:
         return
-    from crr.adapters import systemd
+    from crr.adapters import scheduled_task, systemd
 
     monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: None)
+    monkeypatch.setattr(scheduled_task, "crr_tasks_installed", lambda timeout: False)

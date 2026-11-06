@@ -1857,12 +1857,14 @@ def _cmd_qr(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"crr qr: {exc}", file=sys.stderr)
         return 2
-    provider = _tunnel_provider(config, sel)
+    # One port for the provider's setup hint and the loopback URL, so the two
+    # can't disagree around a reinstall (R26).
+    port = _resolved_dashboard_port(config, "crr qr")
+    provider = _tunnel_provider(config, sel, dashboard_port=port)
     if getattr(args, "json", False):
-        return _qr_json(config, provider)
+        return _qr_json(config, provider, port)
     url = provider.advertise_url() if provider is not None else None
     if url is None:
-        port = _resolved_dashboard_port(config, "crr qr")
         print(f"http://127.0.0.1:{port}/  (loopback only)")
         hint = provider.setup_hint() if provider is not None else None
         if hint:
@@ -1873,7 +1875,7 @@ def _cmd_qr(args: argparse.Namespace) -> int:
     return 0
 
 
-def _qr_json(config: cfg.Config, provider) -> int:
+def _qr_json(config: cfg.Config, provider, port: int) -> int:
     """`crr qr --json`: a report, exit 0 whenever a valid payload is printed,
     including when there is no phone-reachable URL. A provider that raises
     degrades its field to null with a note on stderr, never a traceback."""
@@ -1889,7 +1891,7 @@ def _qr_json(config: cfg.Config, provider) -> int:
         except Exception as exc:
             print(f"crr qr: could not get the {provider.name()} setup hint: {exc}",
                   file=sys.stderr)
-    loopback = f"http://127.0.0.1:{_resolved_dashboard_port(config, 'crr qr')}/"
+    loopback = f"http://127.0.0.1:{port}/"
     payload = {
         "contract": contracts.QR_CONTRACT_VERSION,
         "provider": provider.name() if provider is not None else None,
@@ -1906,21 +1908,29 @@ def _qr_json(config: cfg.Config, provider) -> int:
 
 
 def _resolved_dashboard_port(config: cfg.Config, who: str) -> int:
-    """The port the dashboard actually answers on.
+    """The port the dashboard actually answers on (R26).
 
-    The installed crr-web unit's port wins over the config's ``dashboard_port``:
-    a changed setting only applies on reinstall, so until then the running
-    dashboard is still on the unit's port. A disagreement is noted on stderr
+    In order: the RUNNING crr-web's ``--port`` (its MainPID's argv), then the
+    installed unit's, then the config's ``dashboard_port``. A changed setting
+    only reaches the unit on reinstall, and the install's ``enable --now``
+    does not restart a running crr-web, so the process can be on an older
+    port than either. A disagreement with the config is noted on stderr
     (prefixed with the calling command ``who``).
     """
     port = config.get("dashboard_port")
-    installed_port = systemd.installed_web_port(Path.home())
-    if installed_port is not None and installed_port != port:
+    actual = systemd.running_web_port(
+        systemd.web_unit_props(config.get("interop_timeout_seconds")))
+    where, fix = "running", _DASHBOARD_PORT_APPLY
+    if actual is None:
+        actual = systemd.installed_web_port(Path.home())
+        where, fix = "installed", ["crr systemd --install"]
+    if actual is None:
+        return port
+    if actual != port:
         print(f"{who}: dashboard_port is {port} in settings but the "
-              f"installed dashboard uses {installed_port}; "
-              "run crr systemd --install to apply", file=sys.stderr)
-        return installed_port
-    return port
+              f"{where} dashboard uses {actual}; "
+              f"run {', then '.join(fix)} to apply", file=sys.stderr)
+    return actual
 
 
 def _dashboard_answers(url: str, timeout: float) -> bool:
@@ -1967,12 +1977,15 @@ def _web_allowed_hosts(config: cfg.Config, sd) -> set[str]:
     return allowed
 
 
-def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection):
-    """The adapter for ``sel.provider`` — None for "none"."""
+def _tunnel_provider(config: cfg.Config, sel: tunnel.TunnelSelection,
+                     dashboard_port: int | None = None):
+    """The adapter for ``sel.provider`` — None for "none". ``dashboard_port``
+    is where the dashboard really answers (``_resolved_dashboard_port``), when
+    the caller has it; the config's ``dashboard_port`` otherwise."""
     timeout = config.get("interop_timeout_seconds")
     if sel.provider == "tailscale":
-        return tailscale.RealTailscale(timeout,
-                                       dashboard_port=config.get("dashboard_port"))
+        port = dashboard_port if dashboard_port is not None else config.get("dashboard_port")
+        return tailscale.RealTailscale(timeout, dashboard_port=port)
     if sel.provider == "cloudflare":
         return cloudflared.RealCloudflared(timeout, sel.tunnel_name, sel.hostname)
     return None
@@ -6803,6 +6816,10 @@ def _cmd_holder(args: argparse.Namespace) -> int:
 # kind (cfg.APPLY_RULES). "live" needs nothing. The stderr hint is a note, not
 # an action: `crr config set` never restarts anything itself.
 _RESTART_WEB = "systemctl --user restart crr-web"
+# dashboard_port: the install writes the new port into the unit, but its
+# `enable --now` leaves a running crr-web on the old one until a restart. The
+# restart is safe after the install, which writes KillMode=process (#140).
+_DASHBOARD_PORT_APPLY = ["crr systemd --install", _RESTART_WEB]
 _APPLY_COMMANDS = {
     "restart-web": [_RESTART_WEB],
     "restart-awake": ["systemctl --user restart crr-awake"],
@@ -6822,6 +6839,8 @@ def _apply_commands(key: str, kind: str, timeout: float) -> list[str]:
         # boot_* are baked into the tasks by the reachable-at-boot install.
         return ["crr harden --apply" if key.startswith("harden_") else
                 "crr reachable-at-boot --install"]
+    if key == "dashboard_port":
+        return list(_DASHBOARD_PORT_APPLY)
     if kind == "restart-web" and _web_kill_mode(timeout) != "process":
         # Restarting a crr-web from before KillMode=process (#140), or one
         # whose KillMode can't be read, may end conversations. The install
@@ -6968,16 +6987,28 @@ def _cmd_service(args: argparse.Namespace) -> int:
     return 2
 
 
+_SCHTASKS_INSTALL_REASON = (
+    "crr is installed as Windows Scheduled Tasks; the tray supports the systemd "
+    "install only (see crr schtasks --uninstall / crr systemd --install)")
+
+
 def _service_backend(config: cfg.Config) -> tuple[str, str, list[UnitState] | None]:
     """``(backend, reason, units)``. ``units`` is None when the backend is
-    unsupported (not Linux, or no systemd user manager to ask)."""
+    unsupported (not Linux, no systemd user manager to ask, or crr installed
+    as Windows Scheduled Tasks instead)."""
     if platform.system() != "Linux":
         return "unsupported", "not Linux", None
-    units = systemd.unit_states(config.get("interop_timeout_seconds"))
+    timeout = config.get("interop_timeout_seconds")
+    units = systemd.unit_states(timeout)
     if units is None:
         return "unsupported", "no systemd user manager", None
     if not any(u.installed for u in units):
-        # A Scheduled Tasks install (`crr schtasks`) lands here too.
+        # R24: a `crr schtasks` install has no systemd units either, and the
+        # tray's Repair (`crr systemd --install`) would add a second watchdog
+        # and dashboard beside it. So it is unsupported, which also makes
+        # start, stop and logs exit 2 there.
+        if host.is_wsl() and scheduled_task.crr_tasks_installed(timeout):
+            return "unsupported", _SCHTASKS_INSTALL_REASON, None
         return "systemd", (
             "crr is not installed as systemd user units; "
             "run `crr systemd --install`"), units
@@ -7107,8 +7138,9 @@ def _dashboard_login_on(sd: Path) -> bool:
 
     A corrupt auth file counts as on: the dashboard fails closed on it
     (login required until the file is repaired), so reporting "off" would
-    tell the Control tab the opposite of what a browser sees. Either way the
-    file is named on stderr.
+    tell the Control tab the opposite of what a browser sees. Any other
+    failure to read it counts as on too, for the same reason (R16). Either
+    way the file is named on stderr.
     """
     store = dashboard_auth.DashboardAuthStore(sd)
     try:
@@ -7121,7 +7153,7 @@ def _dashboard_login_on(sd: Path) -> bool:
     except Exception as exc:  # a status report must not die on a bad store
         print(f"crr service: could not read {dashboard_auth.FILENAME}: {exc}",
               file=sys.stderr)
-        return False
+        return True
 
 
 def _config_owned_overrides(config: cfg.Config, sd: Path) -> tuple[dict[str, Any], list[str]]:
