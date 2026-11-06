@@ -945,13 +945,16 @@ def test_a_revived_claude_is_matched_by_autokick(tmp_path, monkeypatch):
     monkeypatch.delenv("TMUX", raising=False)
     # A bare "claude" resolved through PATH, exactly as the reviver launches
     # it. (A long absolute argv0 would also be cut off by ps's 80-column
-    # args when not on a tty, which is not what this test is about.)
-    (tmp_path / "claude").symlink_to(shutil.which("sleep"))
+    # args when not on a tty, which is not what this test is about.) The
+    # stand-in is the Python interpreter, not `sleep`: the multicall
+    # coreutils on newer Ubuntu dispatch on argv0 and refuse to run as
+    # "claude".
+    (tmp_path / "claude").symlink_to(sys.executable)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     t = tmux.RealTmux(timeout_seconds=10)
     try:
-        t.new_detached_session("crr-pg", str(tmp_path),
-                               exit_hook_argv(["claude", "300"], "/bin/true"))
+        t.new_detached_session("crr-pg", str(tmp_path), exit_hook_argv(
+            ["claude", "-c", "import time; time.sleep(300)"], "/bin/true"))
         deadline = time.monotonic() + 5
         pane = None
         while pane is None and time.monotonic() < deadline:
