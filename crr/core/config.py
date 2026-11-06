@@ -126,7 +126,9 @@ from crr.core import contracts
 # v29: added diagnose_scan_cap (#148 — journald host-event query reads up to
 # this many lines BEFORE classification; the event cap is applied after, so
 # benign matches and WSL kernel-log replays can't crowd out a real OOM)
-CONFIG_DEFAULTS_VERSION = 29
+# v30: added logs_default_lines (#161 — `crr logs` without --lines shows this
+# many journal lines of the chosen service)
+CONFIG_DEFAULTS_VERSION = 30
 
 # The audit "config floor": each of these was a hardcoded prior the audit
 # caught (or a peer of one). Value is the versioned default.
@@ -154,6 +156,8 @@ DEFAULTS: dict[str, Any] = {
     # repeats ~5 lines x restarts. 5000 covers hundreds of restarts of a tight
     # pre-filter; it bounds memory, it is not a severity judgment.
     "diagnose_scan_cap": 5000,
+    # #161: `crr logs` without --lines. A display size, not a severity judgment.
+    "logs_default_lines": 200,
     "diagnose_macos_lookback": "1d",  # macOS `log show --last` window (no boot index on macOS)
     "diagnose_macos_timeout_seconds": 30,  # macOS `log show` is slow to start; own timeout
     "interop_timeout_seconds": 5,  # per external-command guard in diagnostics/probes
@@ -462,6 +466,7 @@ APPLY_RULES: dict[str, str] = {
     "host_death_stable_seconds": "live",
     "archive_retention_days": "live",
     "rescue_prompt_timeout_seconds": "live",
+    "logs_default_lines": "live",
     "rescue_auto_open": "live",
     "takeover_max_wait_seconds": "live",
     # Diagnostic thresholds read fresh by doctor / reachable-at-boot / harden;

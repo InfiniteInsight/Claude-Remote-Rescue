@@ -784,6 +784,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     svc.set_defaults(func=_cmd_service)
 
+    logs = sub.add_parser(
+        "logs",
+        help="show the journal of one of crr's own services (revive, web or awake)",
+    )
+    logs.add_argument(
+        "--service", choices=list(systemd.LOG_UNITS), default="revive",
+        help="which service's journal to read (default: revive, the watchdog)",
+    )
+    logs.add_argument(
+        "--lines", type=int, default=None, metavar="N",
+        help="how many recent lines to show (default: logs_default_lines, 200)",
+    )
+    logs.add_argument(
+        "--follow", action="store_true",
+        help="keep following the journal as new lines arrive (Ctrl-C to stop)",
+    )
+    logs.set_defaults(func=_cmd_logs)
+
     # Shim-facing commands (called by the shell hooks, by absolute path).
     reg = sub.add_parser("register", help="[shim] journal a shell at start")
     reg.add_argument("--pid", type=int, required=True)
@@ -6839,6 +6857,34 @@ def _service_backend(config: cfg.Config) -> tuple[str, str, list[UnitState] | No
             "crr is not installed as systemd user units; "
             "run `crr systemd --install`"), units
     return "systemd", "", units
+
+
+def _cmd_logs(args: argparse.Namespace) -> int:
+    """``crr logs``: the journal of one of crr's own units, read with journalctl.
+
+    Units that are not installed are not an error here: old lines are still
+    worth showing, so journalctl runs anyway. An unsupported backend is.
+    """
+    if args.lines is not None and args.lines < 1:
+        print("crr logs: --lines must be a positive integer", file=sys.stderr)
+        return 2
+    config = _load_config()
+    _, reason, units = _service_backend(config)
+    if units is None:
+        print(f"crr logs: unsupported here ({reason}); crr's background units "
+              "need systemd", file=sys.stderr)
+        return 2
+    lines = args.lines if args.lines is not None else config.get("logs_default_lines")
+    argv = systemd.journal_argv(systemd.LOG_UNITS[args.service], lines, args.follow)
+    if args.follow:
+        _exec(argv[0], argv)  # replaces this process, so killing crr stops journalctl
+        return 0
+    try:
+        r = subprocess.run(argv)  # no capture: the journal goes straight to stdout
+    except OSError as exc:
+        print(f"crr logs: could not run journalctl: {exc}", file=sys.stderr)
+        return 1
+    return 0 if r.returncode == 0 else 1
 
 
 _REPAIR_LINE = "run crr systemd --install to repair a partial install"

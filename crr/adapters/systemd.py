@@ -512,3 +512,18 @@ def stop_argv() -> list[str]:
     WSL restart, a reboot or ``crr service start`` brings crr back. Running
     sessions keep running."""
     return ["systemctl", "--user", "stop", *(unit for _, unit in CRR_UNITS)]
+
+
+# `crr logs --service`: the units that have a journal worth reading. The timer
+# has none of its own; its service (`crr-revive.service`) is the one that logs.
+LOG_UNITS = {"revive": SERVICE_NAME, "web": WEB_SERVICE_NAME, "awake": AWAKE_SERVICE_NAME}
+
+
+def journal_argv(unit: str, lines: int, follow: bool) -> list[str]:
+    """``crr logs``: the last ``lines`` journal lines of a user unit, plus
+    ``-f`` to keep following it."""
+    argv = ["journalctl", "--user", "-u", unit, "-n", str(lines),
+            "--no-pager", "-o", "short-iso"]
+    if follow:
+        argv.append("-f")
+    return argv

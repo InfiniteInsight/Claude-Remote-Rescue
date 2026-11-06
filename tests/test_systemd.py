@@ -504,3 +504,25 @@ def test_stop_argv():
     assert systemd.stop_argv() == [
         "systemctl", "--user", "stop",
         "crr-revive.timer", "crr-web.service", "crr-awake.service"]
+
+
+# --- crr logs (#161) ----------------------------------------------------------
+
+def test_log_units_map_the_three_service_names():
+    assert systemd.LOG_UNITS == {
+        "revive": "crr-revive.service",
+        "web": "crr-web.service",
+        "awake": "crr-awake.service",
+    }
+
+
+def test_journal_argv():
+    assert systemd.journal_argv("crr-web.service", 200, False) == [
+        "journalctl", "--user", "-u", "crr-web.service", "-n", "200",
+        "--no-pager", "-o", "short-iso"]
+
+
+def test_journal_argv_follow_appends_f():
+    assert systemd.journal_argv("crr-revive.service", 5, True) == [
+        "journalctl", "--user", "-u", "crr-revive.service", "-n", "5",
+        "--no-pager", "-o", "short-iso", "-f"]

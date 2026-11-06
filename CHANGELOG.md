@@ -134,6 +134,11 @@ No tag or release has been cut yet. This section describes everything on
   (watchdog timer, dashboard, keep-awake) now. Stop is a runtime stop only:
   it never disables a unit and never touches tmux, so running sessions keep
   running, and crr comes back at the next WSL restart, reboot, or `crr service start`.
+- `crr logs [--service revive|web|awake] [--lines N] [--follow]`: the journal of
+  one of crr's own services (the watchdog, the dashboard or keep-awake), read
+  with `journalctl --user`. `--follow` hands over to journalctl, so killing crr
+  stops it. Without `--lines`, the new `logs_default_lines` key (200) applies
+  (config defaults v30). Linux with systemd only; elsewhere it exits 2.
 
 ### Changed
 

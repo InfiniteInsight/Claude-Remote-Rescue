@@ -8985,3 +8985,95 @@ def test_service_action_timeout_is_still_in_progress_not_a_bad_install(
     assert "repair" not in cap.err
     assert "Traceback" not in cap.err
     assert cap.out == ""
+
+
+# --- crr logs (#161) ---------------------------------------------------------
+
+def _logs(monkeypatch, tmp_path, capsys, args, *, backend=None,
+          run_rc=0, run_raises=None):
+    """Run ``crr logs``; journalctl is faked, so the test never reads a real journal."""
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
+    backend = backend or ("systemd", "", _svc_units())
+    monkeypatch.setattr(cli, "_service_backend", lambda config: backend)
+    runs = []
+
+    def fake_run(argv, **kwargs):
+        runs.append((argv, kwargs))
+        if run_raises is not None:
+            raise run_raises
+        return subprocess.CompletedProcess(argv, run_rc)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["logs", *args])
+    return rc, capsys.readouterr(), runs
+
+
+def test_logs_snapshot_runs_journalctl_for_revive_by_default(monkeypatch, tmp_path, capsys):
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, [])
+    assert rc == 0
+    assert [argv for argv, _ in runs] == [[
+        "journalctl", "--user", "-u", "crr-revive.service",
+        "-n", str(cfg.DEFAULTS["logs_default_lines"]),
+        "--no-pager", "-o", "short-iso"]]
+    # No capture and no timeout: the output goes straight to stdout.
+    assert runs[0][1] == {}
+
+
+def test_logs_follow_execs_journalctl(monkeypatch, tmp_path, capsys):
+    execs = []
+    monkeypatch.setattr(cli, "_exec", lambda file, argv: execs.append((file, argv)))
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys,
+                          ["--service", "web", "--lines", "50", "--follow"])
+    assert execs == [("journalctl", [
+        "journalctl", "--user", "-u", "crr-web.service", "-n", "50",
+        "--no-pager", "-o", "short-iso", "-f"])]
+    assert runs == []
+
+
+def test_logs_default_lines_come_from_config(monkeypatch, tmp_path, capsys):
+    (tmp_path / "config.toml").write_text("logs_default_lines = 37\n", encoding="utf-8")
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, ["--service", "awake"])
+    assert rc == 0
+    assert runs[0][0][runs[0][0].index("-n") + 1] == "37"
+    assert runs[0][0][3] == "crr-awake.service"
+
+
+def test_logs_unsupported_exits_2(monkeypatch, tmp_path, capsys):
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, [],
+                          backend=("unsupported", "no systemd user manager", None))
+    assert rc == 2
+    assert "no systemd user manager" in cap.err
+    assert "Traceback" not in cap.err
+    assert runs == []
+
+
+def test_logs_unit_not_installed_still_runs_journalctl(monkeypatch, tmp_path, capsys):
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, [],
+                          backend=("systemd", "crr is not installed as systemd user units; "
+                                   "run `crr systemd --install`", []))
+    assert rc == 0
+    assert len(runs) == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_logs_rejects_a_non_positive_line_count(monkeypatch, tmp_path, capsys, value):
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, [f"--lines={value}"])
+    assert rc == 2
+    assert "--lines" in cap.err
+    assert "Traceback" not in cap.err
+    assert runs == []
+
+
+def test_logs_passes_the_exit_code_through(monkeypatch, tmp_path, capsys):
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, [], run_rc=1)
+    assert rc == 1
+    assert len(runs) == 1
+
+
+def test_logs_journalctl_missing_exits_1_without_traceback(monkeypatch, tmp_path, capsys):
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, [],
+                          run_raises=FileNotFoundError(2, "No such file", "journalctl"))
+    assert rc == 1
+    assert "journalctl" in cap.err
+    assert "Traceback" not in cap.err

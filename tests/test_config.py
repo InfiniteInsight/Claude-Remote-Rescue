@@ -113,8 +113,11 @@ def test_vestigial_keys_are_gone_and_version_bumped():
     # task repeats so a distro-only restart re-arms it).
     # v29 (2026-10-09): diagnose_scan_cap (#148 — journald host events are
     # classified from up to this many scanned lines, then capped).
-    assert cfg.CONFIG_DEFAULTS_VERSION == 29
+    # v30 (2026-11-06): logs_default_lines (#161 — `crr logs` without --lines).
+    assert cfg.CONFIG_DEFAULTS_VERSION == 30
     assert cfg.DEFAULTS["diagnose_scan_cap"] == 5000
+    assert cfg.DEFAULTS["logs_default_lines"] == 200
+    assert cfg.APPLY_RULES["logs_default_lines"] == "live"
 
 
 def test_zombie_strikes_default_is_five():
