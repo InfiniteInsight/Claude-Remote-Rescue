@@ -161,7 +161,8 @@ describe('parseSessionCounts', () => {
     expect(c.attention).toBe(2);
   });
 
-  it('accepts a newer contract and ignores other keys', () => {
+  it('test_future_sessions_contract_with_extra_fields_parses', () => {
+    const base = parseSessionCounts(fixture('status'));
     const c = parseSessionCounts(
       edited('status', (o) => {
         o.contract = 25;
@@ -169,7 +170,21 @@ describe('parseSessionCounts', () => {
         o.sessions[0].title = 'x';
       }),
     );
-    expect(c.total).toBeGreaterThan(0);
+    expect(c).toEqual(base);
+  });
+
+  it('test_unknown_session_state_counts_in_total_only', () => {
+    const base = parseSessionCounts(fixture('status'));
+    const c = parseSessionCounts(
+      edited('status', (o) => {
+        o.sessions[0].state = 'hibernating';
+        o.sessions[0].conflict = true;
+      }),
+    );
+    expect(c.total).toBe(base.total);
+    const named = (x: typeof c) => x.live + x.parked + x.crashed + x.ghost;
+    expect(named(c)).toBe(named(base) - 1);
+    expect(c.attention).toBe(1);
   });
 
   it('rejects an old or malformed payload', () => {
@@ -186,7 +201,7 @@ describe('parseSessionCounts', () => {
       parseSessionCounts(edited('status', (o) => (o.sessions = {}))),
     ).toThrow(ContractError);
     expect(() =>
-      parseSessionCounts(edited('status', (o) => (o.sessions[0].state = 'x'))),
+      parseSessionCounts(edited('status', (o) => (o.sessions[0].state = 5))),
     ).toThrow(ContractError);
     expect(() =>
       parseSessionCounts(

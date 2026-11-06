@@ -35,7 +35,7 @@ export class NotJsonError extends ContractError {
 }
 
 export interface ServiceUnit {
-  name: 'watchdog' | 'dashboard' | 'keep-awake';
+  name: string; // crr validates it only as a string, so a new unit name must not break us
   unit: string;
   installed: boolean;
   enabled: boolean;
@@ -223,12 +223,17 @@ export function parseSessionCounts(stdout: string): SessionCounts {
   payload.sessions.forEach((raw: unknown, i: number) => {
     const what = `status 'sessions'[${i}]`;
     const s = requireMapping(raw, what);
-    requireEnum(s.state, SESSION_STATES, `${what} 'state'`);
+    // Any string state is accepted: crr bumps the sessions contract often and a
+    // new label must not read as a version mismatch. Unknown states count in
+    // `total` only.
+    requireString(s.state, `${what} 'state'`);
     requireBool(s.running_elsewhere, `${what} 'running_elsewhere'`);
     requireBool(s.conflict, `${what} 'conflict'`);
-    const state = s.state as (typeof SESSION_STATES)[number];
+    const state = s.state as string;
     counts.total += 1;
-    counts[state] += 1;
+    if ((SESSION_STATES as readonly string[]).includes(state)) {
+      counts[state as (typeof SESSION_STATES)[number]] += 1;
+    }
     if (state === 'crashed' || s.running_elsewhere === true || s.conflict === true) {
       counts.attention += 1;
     }
