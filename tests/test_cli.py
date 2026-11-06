@@ -8713,6 +8713,7 @@ def _svc_units(*, installed=True, enabled=True, active=True):
 
 def _service_status(monkeypatch, tmp_path, capsys, *, units, system="Linux", args=()):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)      # no installed crr-web unit unless a test writes one
     monkeypatch.setattr(platform, "system", lambda: system)
     monkeypatch.setattr(systemd, "unit_states", lambda timeout: units)
     rc = cli.main(["service", "status", *args])
@@ -8838,3 +8839,41 @@ def test_service_status_survives_an_auth_store_that_raises(monkeypatch, tmp_path
 def test_service_without_an_action_is_a_usage_error(capsys):
     assert cli.main(["service"]) == 2
     assert "usage" in capsys.readouterr().err
+
+
+def _install_web_unit(home, port):
+    systemd.write_units(systemd.unit_dir(home), {
+        systemd.WEB_SERVICE_NAME: systemd.web_service_unit("/x/crr", "/bin", "/s", port)})
+
+
+def test_dashboard_url_uses_the_installed_port(monkeypatch, tmp_path, capsys):
+    # `crr config set dashboard_port 9000` only takes effect on reinstall; until
+    # then the running dashboard is still on the installed unit's port.
+    _install_web_unit(tmp_path, 8377)
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    payload = json.loads(cap.out)
+    contracts.validate_service_payload(payload)
+    assert rc == 0
+    assert payload["dashboard_url"] == "http://127.0.0.1:8377/"
+    assert ("dashboard_port is 9000 in settings but the installed dashboard uses 8377; "
+            "run crr systemd --install to apply") in cap.err
+
+
+def test_dashboard_url_uses_the_configured_port_without_an_installed_unit(
+        monkeypatch, tmp_path, capsys):
+    (tmp_path / "config.toml").write_text("dashboard_port = 9000\n", encoding="utf-8")
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    assert json.loads(cap.out)["dashboard_url"] == "http://127.0.0.1:9000/"
+    assert cap.err == ""
+
+
+def test_matching_installed_and_configured_ports_say_nothing(monkeypatch, tmp_path, capsys):
+    _install_web_unit(tmp_path, cfg.DEFAULTS["dashboard_port"])
+    rc, cap = _service_status(monkeypatch, tmp_path, capsys,
+                              units=_svc_units(), args=["--json"])
+    assert json.loads(cap.out)["dashboard_url"] == (
+        f"http://127.0.0.1:{cfg.DEFAULTS['dashboard_port']}/")
+    assert cap.err == ""

@@ -273,6 +273,36 @@ def web_unit_spares_sessions(home: Path) -> bool | None:
     return any(line.strip() == "KillMode=process" for line in text.splitlines())
 
 
+def parse_web_port(unit_text: str) -> int | None:
+    """The ``--port`` in a crr-web unit's ExecStart, or None if it has none
+    or it isn't a valid port. Reads what ``web_service_unit`` writes."""
+    for line in unit_text.splitlines():
+        if not line.startswith("ExecStart="):
+            continue
+        words = line[len("ExecStart="):].split()
+        for i, word in enumerate(words):
+            if word == "--port" and i + 1 < len(words):
+                raw = words[i + 1]
+            elif word.startswith("--port="):
+                raw = word[len("--port="):]
+            else:
+                continue
+            if raw.isdigit() and 0 < int(raw) < 65536:
+                return int(raw)
+    return None
+
+
+def installed_web_port(home: Path) -> int | None:
+    """The port the INSTALLED crr-web unit serves on; None when no unit is
+    installed or its ExecStart carries no readable port. This, not config, is
+    where the running dashboard is until `crr systemd --install` is re-run."""
+    try:
+        text = (unit_dir(home) / WEB_SERVICE_NAME).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    return parse_web_port(text)
+
+
 def unit_dir(home: Path) -> Path:
     return home / ".config" / "systemd" / "user"
 

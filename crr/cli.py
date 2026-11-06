@@ -6833,9 +6833,18 @@ def _service_status(as_json: bool) -> int:
     if units is None:
         units = [UnitState(name, unit, False, False, False)
                  for name, unit in systemd.CRR_UNITS]
+    port = config.get("dashboard_port")
+    installed_port = systemd.installed_web_port(Path.home())
+    if installed_port is not None and installed_port != port:
+        # `dashboard_port` only applies on reinstall; the running dashboard
+        # is still on the installed unit's port, so that is the URL to give.
+        print(f"crr service: dashboard_port is {port} in settings but the "
+              f"installed dashboard uses {installed_port}; "
+              "run crr systemd --install to apply", file=sys.stderr)
+        port = installed_port
     payload = service_core.status_payload(
         backend, reason, units,
-        f"http://127.0.0.1:{config.get('dashboard_port')}/",
+        f"http://127.0.0.1:{port}/",
         _dashboard_login_on(state_dir.state_dir()))
     # Validate our own output before emitting it, as `crr status --json` does.
     contracts.validate_service_payload(payload)

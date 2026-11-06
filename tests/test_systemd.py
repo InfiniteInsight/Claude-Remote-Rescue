@@ -463,3 +463,30 @@ def test_unit_states_is_none_when_the_user_manager_cannot_answer(monkeypatch, kw
 def test_unit_states_is_none_without_systemctl(monkeypatch):
     monkeypatch.setattr(systemd.shutil, "which", lambda name: None)
     assert systemd.unit_states(3.0) is None
+
+
+# --- the port the installed dashboard really runs on (#161) ---
+
+@pytest.mark.parametrize("exec_start, port", [
+    ("/opt/crr/bin/crr web --port 8377", 8377),
+    ("/home/u/my bin/crr web --port 9000", 9000),
+    ("/opt/crr/bin/crr web --port=9001", 9001),
+    ("/opt/crr/bin/crr web", None),
+    ("/opt/crr/bin/crr web --port abc", None),
+    ("/opt/crr/bin/crr web --port 99999", None),
+])
+def test_parse_web_port_reads_execstart(exec_start, port):
+    unit = f"[Service]\nType=simple\nExecStart={exec_start}\nRestart=on-failure\n"
+    assert systemd.parse_web_port(unit) == port
+
+
+def test_parse_web_port_round_trips_the_unit_the_adapter_writes():
+    unit = systemd.web_service_unit("/opt/crr/bin/crr", "/usr/bin", "/state", 9123)
+    assert systemd.parse_web_port(unit) == 9123
+
+
+def test_installed_web_port_reads_the_unit_file(tmp_path):
+    assert systemd.installed_web_port(tmp_path) is None          # nothing installed
+    systemd.write_units(systemd.unit_dir(tmp_path), {
+        systemd.WEB_SERVICE_NAME: systemd.web_service_unit("/x/crr", "/bin", "/s", 8444)})
+    assert systemd.installed_web_port(tmp_path) == 8444
