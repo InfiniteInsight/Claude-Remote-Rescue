@@ -130,10 +130,26 @@ No tag or release has been cut yet. This section describes everything on
   int, a list key takes JSON) and each change prints how it takes effect
   (`live`, `restart-web`, ...) with the command to run. A key crr never
   reads from settings, or an unreadable store, is refused.
+- `crr config --effective --json`: every setting with its value, default,
+  origin (`override`, `configured` or `default`), type and how a change takes
+  effect (config contract v1), plus `degraded` when `config.toml` was set
+  aside as bad or a settings file could not be read, so an origin may be wrong.
+- `crr service status [--json]`: which of crr's three units are installed,
+  enabled and running, the backend (`systemd`, or `unsupported` with a reason:
+  not Linux, no systemd user manager, or crr installed as Windows Scheduled
+  Tasks), the URL the dashboard really answers on and whether its login is on
+  (service contract v1).
 - `crr service start` and `crr service stop`: start or stop crr's three units
   (watchdog timer, dashboard, keep-awake) now. Stop is a runtime stop only:
   it never disables a unit and never touches tmux, so running sessions keep
   running, and crr comes back at the next WSL restart, reboot, or `crr service start`.
+  Stop refuses while the dashboard unit systemd has loaded predates
+  `KillMode=process` (#140), or its KillMode can't be read, since stopping it
+  would end the conversations the dashboard reopened; run `crr systemd
+  --install` first.
+- `crr qr --json`: the URL a phone can reach (or null), the setup hint when
+  there is none, the loopback URL, whether the dashboard answers there, and
+  `degraded` (qr contract v1), for the Windows tray's QR code.
 - `crr logs [--service revive|web|awake] [--lines N] [--follow]`: the journal of
   one of crr's own services (the watchdog, the dashboard or keep-awake), read
   with `journalctl --user`. `--follow` hands over to journalctl, so killing crr
@@ -146,6 +162,12 @@ No tag or release has been cut yet. This section describes everything on
   shim's resume offer.** Without the crr shim, a nonzero `claude` exit returns silently to the shell prompt; with it, the `claude()` wrapper prompts to resume. Only an explicit `n`/`no`
   declines; anything else — including no answer at all — a non-tty stdin skips the prompt entirely in all three shells, and bash/zsh additionally time out an unanswered prompt after 30 seconds via `read -t` (fish has no timed read) —
   resumes automatically, capped at 2 consecutive crash-resumes.
+- `crr config --effective` now shows the values set with `crr config set`
+  and from the dashboard (origin `override`), not only `config.toml` and the
+  defaults.
+- `crr doctor` reads `config_overrides.json` too, so its checks use the same
+  settings the running services do. It reports how many settings override
+  `config.toml`, or a warning when the file can't be read.
 
 ### Fixed
 

@@ -766,7 +766,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     conf_set.add_argument("key", help="a config key (see `crr config --effective`)")
     conf_set.add_argument(
-        "value", help="the new value; a list key takes JSON, e.g. '[\"a\", \"b\"]'")
+        "value", help="the new value; a list key takes JSON, e.g. '[\"a\", \"b\"]'. "
+                      "A value starting with - needs -- first: crr config set -- KEY VALUE")
     conf_unset = conf_sub.add_parser(
         "unset", help="drop a change made with `crr config set`")
     conf_unset.add_argument("key", help="a config key")
@@ -792,7 +793,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "stop",
         help="stop the three units now, runtime only: the units stay enabled and "
              "running sessions are left alone; they come back at the next WSL restart, "
-             "reboot or `crr service start`",
+             "reboot or `crr service start`. Refused while the dashboard's loaded unit "
+             "predates KillMode=process (run `crr systemd --install` first)",
     )
     svc.set_defaults(func=_cmd_service)
 

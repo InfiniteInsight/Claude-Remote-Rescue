@@ -1389,6 +1389,16 @@ def test_unset_of_a_key_never_set_is_a_noop(tmp_path, monkeypatch, capsys):
     assert not (sd / "config_overrides.json").exists()
 
 
+def test_set_takes_a_value_that_starts_with_a_dash_after_double_dash(
+        tmp_path, monkeypatch, capsys):
+    # Without `--`, argparse reads `-x` as an option; the tray always passes it.
+    sd = _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "set", "--", "wt_profile", "-x"]) == 0
+    assert "set wt_profile = -x" in capsys.readouterr().out
+    assert json.loads((sd / "config_overrides.json").read_text())["values"] == {
+        "wt_profile": "-x"}
+
+
 def test_set_unknown_key_exits_2(tmp_path, monkeypatch, capsys):
     _config_sd(tmp_path, monkeypatch)
     assert cli.main(["config", "set", "no_such_key", "1"]) == 2
