@@ -2089,17 +2089,32 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     # for the systemctl check below — a second, independent _load_config()
     # call here would print its own "ignoring bad config" line on top of
     # this section's structured [WARN], the same fact said twice.
+    #
+    # The crr-owned overlay (config_overrides.json) is layered over it
+    # exactly as _load_config does, so doctor judges the same config the
+    # running loops use; an unreadable overlay gets its own structured line
+    # here for the same reason as a malformed config.toml.
+    overlay_store = ConfigOverridesStore(sd)
+    overlay = overlay_store.read()
+    overlay_path = sd / config_overrides.FILENAME
     toml_path = sd / "config.toml"
     if toml_path.is_file():
         try:
-            config = cfg.Config(cfg.load_toml_overrides(toml_path))
+            config = cfg.Config(cfg.load_toml_overrides(toml_path), overlay=overlay)
             _check("config.toml", True, str(toml_path))
         except (cfg.ConfigError, ValueError, OSError) as exc:
-            config = cfg.Config()  # same fallback _load_config() would use
+            config = cfg.Config(overlay=overlay)  # same fallback _load_config() would use
             _check("config.toml", False, f"{toml_path}: {exc}")
     else:
-        config = cfg.Config()
+        config = cfg.Config(overlay=overlay)
         print(f"  [ok  ] config.toml — none (using defaults); crr config --effective to view")
+    if overlay_store.is_degraded():
+        _check("config_overrides.json", False,
+               f"{overlay_path}: cannot be read; using config.toml and defaults "
+               "(fix or remove it)")
+    elif overlay_path.is_file():
+        _check("config_overrides.json", True,
+               f"{overlay_path}: {len(overlay)} setting(s) override config.toml")
 
     # Power hold (spec 2026-08-12, Task 6; state-file read fixed round 1,
     # 2026-08-13). Needs `config` (just resolved above), so this can't sit

@@ -575,6 +575,78 @@ def test_doctor_uses_configured_interop_timeout_for_systemctl_check(tmp_path, mo
     assert captured["timeout"] == 42
 
 
+def test_doctor_sees_the_settings_overlay(tmp_path, monkeypatch, capsys):
+    # The crr-owned overlay must reach doctor's config: a power/systemctl
+    # check run on config.toml alone would disagree with the running loop.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config.toml").write_text("interop_timeout_seconds = 42\n", encoding="utf-8")
+    (tmp_path / "config_overrides.json").write_text(
+        json.dumps({"v": 1, "values": {"interop_timeout_seconds": 77}}), encoding="utf-8")
+    monkeypatch.setattr(cli.systemd, "unit_dir", lambda home: tmp_path)
+    (tmp_path / cli.systemd.TIMER_NAME).write_text("", encoding="utf-8")
+    (tmp_path / cli.systemd.WEB_SERVICE_NAME).write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0].endswith("systemctl"):
+            captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="enabled\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.main(["doctor"]) == 0
+    assert captured["timeout"] == 77
+
+
+def test_doctor_without_config_toml_still_sees_the_overlay(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    (tmp_path / "config_overrides.json").write_text(
+        json.dumps({"v": 1, "values": {"interop_timeout_seconds": 77}}), encoding="utf-8")
+    monkeypatch.setattr(cli.systemd, "unit_dir", lambda home: tmp_path)
+    (tmp_path / cli.systemd.TIMER_NAME).write_text("", encoding="utf-8")
+    (tmp_path / cli.systemd.WEB_SERVICE_NAME).write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0].endswith("systemctl"):
+            captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="enabled\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.main(["doctor"]) == 0
+    assert captured["timeout"] == 77
+
+
+def test_doctor_warns_about_a_corrupt_settings_overlay_once(tmp_path, monkeypatch, capsys):
+    # Same convention as the malformed config.toml: one structured [WARN]
+    # on stdout naming the file, and no second stderr line from _load_config.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_OVERLAY_WARNED", set())
+    (tmp_path / "config_overrides.json").write_text("{not json", encoding="utf-8")
+    rc = cli.main(["doctor"])
+    out, err = capsys.readouterr()
+    assert rc == 0
+    assert err == ""
+    warn_lines = [l for l in out.splitlines() if "[WARN] config_overrides.json" in l]
+    assert len(warn_lines) == 1
+    assert str(tmp_path / "config_overrides.json") in warn_lines[0]
+
+
+def test_doctor_reports_a_healthy_overlay_ok_and_an_absent_one_not_at_all(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    cli.main(["doctor"])
+    assert "config_overrides.json" not in capsys.readouterr().out
+    (tmp_path / "config_overrides.json").write_text(
+        json.dumps({"v": 1, "values": {"zombie_strikes": 7}}), encoding="utf-8")
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "[ok  ] config_overrides.json" in out
+    assert "1 setting" in out
+
+
 def test_doctor_reports_a_malformed_config_toml_exactly_once(tmp_path, monkeypatch, capsys):
     # A malformed config.toml must be reported once, not twice: doctor's
     # own [WARN] config.toml line is the single source of truth here, not
