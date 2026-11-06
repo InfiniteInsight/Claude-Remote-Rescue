@@ -251,10 +251,17 @@ def exit_hook_argv(claude_argv: Sequence[str], crr_bin: str) -> list[str]:
     (not claude itself), a revived session finally has the SAME shape as a
     shim-hosted one, which is what lets ``kick`` find and signal it (see
     ``_child_groups``' ``include_shell_group``).
+
+    ``set -m`` turns on job control so claude runs as its own foreground
+    process group, as it would under an interactive shell. Without it claude
+    shares the ``sh`` group, and autokick — which matches Claude Code's
+    state-file pid against claude's process GROUP — reads every revived
+    session as "unknown" and never kicks a dropped Remote Control link
+    (#177; measured live: all four parked sessions, no kick for a month).
     """
     prog = claude_argv[0]
     script = (
-        f'{shlex.quote(prog)} "$@"; '
+        f'set -m; {shlex.quote(prog)} "$@"; '
         f'test $? -eq 0 && {shlex.quote(crr_bin)} deregister --pid $$ --reason closed'
     )
     return ["sh", "-c", script, "sh", *claude_argv[1:]]

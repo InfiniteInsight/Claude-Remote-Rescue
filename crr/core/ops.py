@@ -520,6 +520,15 @@ def detmux(
     )
 
 
+# fish runs a ``-C`` command before it enables job control, so without this
+# claude lands in fish's own process group: autokick (which matches the
+# state-file pid against claude's GROUP) reads the session as "unknown", and
+# kick finds "no running claude process" because it never signals the
+# shell's group (#177). Turning job control on first gives claude its own
+# foreground group, exactly as when the user types the command.
+FISH_OWN_JOB_GROUP = "status job-control full; "
+
+
 def tracked_resume_argv(entry: Mapping[str, Any]) -> list[str]:
     """Argv that resumes this conversation inside a crr-shimmed INTERACTIVE
     shell, so the new shell self-registers and crr tracks the session again
@@ -546,7 +555,7 @@ def tracked_resume_argv(entry: Mapping[str, Any]) -> list[str]:
     if entry["claude"].get("skip_permissions", False):
         command += " --dangerously-skip-permissions"
     if shell == "fish":
-        return ["fish", "-i", "-C", command]
+        return ["fish", "-i", "-C", FISH_OWN_JOB_GROUP + command]
     if shell not in ("bash", "zsh"):
         shell = "bash"
     return [shell, "-i", "-c", command]

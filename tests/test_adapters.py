@@ -910,3 +910,85 @@ def test_tailscale_provider_start_fails_without_binary(monkeypatch):
     ts = tailscale.RealTailscale(2.0)
     ok, msg = ts.start(8377)
     assert not ok and "tailscale" in msg
+
+
+# --- crr-launched claude must lead its own process group (autokick) --------
+# Autokick asks "is the state file's claude pid one of claude_groups(journal
+# pid)?" — a GROUP id. Both ways crr launches claude for you (the reviver's
+# sh exit-hook wrapper and un-tmux's `fish -i -C`) left claude in its
+# parent's group, so every such session read "unknown" and was never kicked.
+
+def _wait_for_child(parent_pid, argv0_base, timeout=5.0):
+    # Polled on argv0, not mere existence: between fork and exec the child is
+    # still a copy of the shell (already in its new group under job control),
+    # and a ps snapshot taken then would not show it as claude yet.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        out = subprocess.run(["ps", "-o", "pid=,args=", "--ppid", str(parent_pid)],
+                             capture_output=True, text=True).stdout.split(None, 2)
+        if len(out) >= 2 and out[1].rsplit("/", 1)[-1] == argv0_base:
+            return int(out[0])
+        time.sleep(0.05)
+    raise AssertionError(f"no {argv0_base} child of {parent_pid} appeared")
+
+
+def _pgid(pid):
+    return int(subprocess.run(["ps", "-o", "pgid=", "-p", str(pid)],
+                              capture_output=True, text=True).stdout.strip())
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_a_revived_claude_is_matched_by_autokick(tmp_path, monkeypatch):
+    from crr.core.reviver import exit_hook_argv
+
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    # A bare "claude" resolved through PATH, exactly as the reviver launches
+    # it. (A long absolute argv0 would also be cut off by ps's 80-column
+    # args when not on a tty, which is not what this test is about.) The
+    # stand-in is the Python interpreter, not `sleep`: the multicall
+    # coreutils on newer Ubuntu dispatch on argv0 and refuse to run as
+    # "claude".
+    (tmp_path / "claude").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    t = tmux.RealTmux(timeout_seconds=10)
+    try:
+        t.new_detached_session("crr-pg", str(tmp_path), exit_hook_argv(
+            ["claude", "-c", "import time; time.sleep(300)"], "/bin/true"))
+        deadline = time.monotonic() + 5
+        pane = None
+        while pane is None and time.monotonic() < deadline:
+            pane = t.session_pid("crr-pg")
+        child = _wait_for_child(pane, "claude")
+        assert _pgid(child) == child, "claude must lead its own process group"
+        controller = pp.PsProcessController(5)
+        # autokick's pid_matched: the state-file pid is one of the groups
+        assert child in controller.claude_groups(pane)
+        # a parked kick signals claude's group only — never the pane's sh
+        assert controller.claude_groups(pane, include_shell_group=True) == [child]
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("fish") is None,
+                    reason="tmux and fish needed")
+def test_fish_prefix_gives_the_command_its_own_process_group(tmp_path, monkeypatch):
+    from crr.core.ops import FISH_OWN_JOB_GROUP
+
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    t = tmux.RealTmux(timeout_seconds=10)
+    try:
+        # --no-config: never source the user's real crr shim from a test.
+        t.new_detached_session("crr-fish", str(tmp_path), [
+            "fish", "--no-config", "-i", "-C", FISH_OWN_JOB_GROUP + "sleep 300",
+        ])
+        deadline = time.monotonic() + 5
+        pane = None
+        while pane is None and time.monotonic() < deadline:
+            pane = t.session_pid("crr-fish")
+        child = _wait_for_child(pane, "sleep")
+        assert _pgid(child) == child
+        assert _pgid(child) != _pgid(pane)
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)

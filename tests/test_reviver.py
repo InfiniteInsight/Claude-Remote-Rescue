@@ -198,9 +198,20 @@ def test_exit_hook_argv_wraps_launch_to_deregister_on_clean_exit():
     # interpolated into the script text.
     assert argv == [
         "sh", "-c",
-        'claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
+        'set -m; claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
         "sh", "--resume", "SID", "--remote-control", "p42",
     ]
+
+
+def test_exit_hook_argv_gives_claude_its_own_process_group():
+    # Autokick matches Claude Code's state-file pid against claude's process
+    # GROUP; a claude sharing the wrapper's group is never matched, so a
+    # revived session's dropped Remote Control was never seen (live: every
+    # parked session read "unknown"). `set -m` turns on job control, so sh
+    # runs claude as its own foreground job group. Proven against real
+    # processes in test_adapters.py.
+    argv = exit_hook_argv(["claude", "--resume", "SID"], "/usr/bin/crr")
+    assert argv[2].startswith("set -m; ")
 
 
 def test_exit_hook_argv_keeps_claude_args_out_of_the_script_text():
@@ -232,7 +243,7 @@ def test_revive_crashed_wraps_the_spawn_with_the_exit_hook(tmp_path):
     assert tmux.created == [(
         name, "/home/u/p42",
         ["sh", "-c",
-         'claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
+         'set -m; claude "$@"; test $? -eq 0 && /usr/bin/crr deregister --pid $$ --reason closed',
          "sh", "--resume", _claude()["session_id"], "--remote-control", "p42"],
     )]
 
