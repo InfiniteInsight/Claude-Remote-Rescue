@@ -1,0 +1,126 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ * Modified for Claude-Remote-Rescue (crr), 2026.
+ */
+
+/**
+ * Tray presence.
+ *
+ * The app has to outlive its window, so it needs a surface that exists without
+ * one. On Windows a left click on the tray icon fires `click` and a right click
+ * opens the context menu, which gives the usual arrangement: click to bring the
+ * window back, right-click for the menu.
+ *
+ * The icon's colour shows crr's state, and the menu's first line says it in
+ * words. What each menu item says and whether it is enabled is decided by the
+ * pure `trayMenuSpec`; this file only turns that into Electron objects.
+ */
+import { Menu, Tray } from 'electron';
+import { trayMenuSpec, type MenuItemId } from './appLifecycle.js';
+import type { PollState, TrayIcon } from './poll.js';
+
+/** What the tray can ask the app to do. */
+export interface TrayHost {
+  /** Bring the window back, creating it if the app started hidden. */
+  show: () => void;
+  /** Open the dashboard in the default browser. */
+  openDashboard: () => void;
+  /** Start crr if it is stopped, stop it if it is running. */
+  startStop: () => void;
+  /** Leave the app for real. */
+  quit: () => void;
+}
+
+/** Login-item state, read from and written to the OS. */
+export interface LoginItemControl {
+  get: () => boolean;
+  set: (enabled: boolean) => void;
+}
+
+export interface TrayOptions {
+  /** The image for each icon state (a real image: an empty tray icon is invisible). */
+  image: (icon: TrayIcon) => Electron.NativeImage;
+  host: TrayHost;
+  /** Omit when a login item cannot be registered (an unpackaged run). */
+  loginItem?: LoginItemControl;
+}
+
+/** Re-renders the tray for a new poll state. */
+export interface TrayHandle {
+  update: (state: PollState, busy: boolean) => void;
+}
+
+/**
+ * Create the tray. The handle keeps the `Tray` alive by closing over it — an
+ * unreferenced Tray would be collected and the icon would vanish.
+ */
+export function createTray(opts: TrayOptions): TrayHandle {
+  const initial: PollState = {
+    icon: 'stopped',
+    statusLine: 'Checking crr…',
+    wsl: 'missing',
+  };
+  let shownIcon: TrayIcon = initial.icon;
+  const tray = new Tray(opts.image(shownIcon));
+  let last: { state: PollState; busy: boolean } = { state: initial, busy: false };
+
+  const click: Record<Exclude<MenuItemId, 'status' | 'loginItem'>, () => void> = {
+    open: () => opts.host.show(),
+    dashboard: () => opts.host.openDashboard(),
+    startStop: () => opts.host.startStop(),
+    quit: () => opts.host.quit(),
+  };
+
+  const render = (): void => {
+    const { state, busy } = last;
+    const items = trayMenuSpec({
+      state,
+      packaged: !!opts.loginItem,
+      loginItemEnabled: opts.loginItem?.get() ?? false,
+      busy,
+    });
+    const template: Electron.MenuItemConstructorOptions[] = items.map((item) => {
+      if (item.id === 'status') {
+        return { label: item.label, enabled: false };
+      }
+      if (item.id === 'loginItem') {
+        const control = opts.loginItem;
+        return {
+          label: item.label,
+          type: 'checkbox',
+          checked: item.checked ?? false,
+          enabled: item.enabled,
+          click: (menuItem) => {
+            control?.set(menuItem.checked);
+            // Reflect what the OS actually holds now, in case the write was
+            // refused (group policy, non-writable Run key).
+            render();
+          },
+        };
+      }
+      return {
+        label: item.label,
+        enabled: item.enabled,
+        click: click[item.id],
+      };
+    });
+    tray.setToolTip(state.statusLine);
+    tray.setContextMenu(Menu.buildFromTemplate(template));
+  };
+
+  render();
+  tray.on('click', () => opts.host.show());
+
+  return {
+    update(state, busy) {
+      last = { state, busy };
+      if (state.icon !== shownIcon) {
+        shownIcon = state.icon;
+        tray.setImage(opts.image(state.icon));
+      }
+      render();
+    },
+  };
+}
