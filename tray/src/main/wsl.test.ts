@@ -67,6 +67,7 @@ describe('realRunInDistro', () => {
       '--json',
     ]);
     expect('shell' in calls[0].opts).toBe(false);
+    expect(calls[0].opts.windowsHide).toBe(true);
     expect(calls[0].opts.encoding).toBe('utf8');
     expect(typeof calls[0].opts.timeout).toBe('number');
     expect(calls[0].opts.timeout).toBeGreaterThan(0);
@@ -136,6 +137,8 @@ describe('listDistros and defaultDistro', () => {
     expect(calls[0].args).toEqual(['-l', '-q']);
     expect(calls[0].opts.encoding).toBe('buffer');
     expect('shell' in calls[0].opts).toBe(false);
+    expect(calls[0].opts.windowsHide).toBe(true);
+    expect(calls[0].opts.windowsHide).toBe(true);
   });
 
   it('reads the default distro with -l', async () => {
@@ -147,6 +150,7 @@ describe('listDistros and defaultDistro', () => {
     });
     await expect(defaultDistro(exec)).resolves.toBe('Ubuntu-24.04');
     expect(calls[0].args).toEqual(['-l']);
+    expect(calls[0].opts.windowsHide).toBe(true);
   });
 });
 
@@ -157,6 +161,7 @@ describe('runningDistros', () => {
     });
     await expect(runningDistros(exec)).resolves.toEqual(['Ubuntu-24.04']);
     expect(calls[0].args).toEqual(['-l', '--running', '-q']);
+    expect(calls[0].opts.windowsHide).toBe(true);
   });
 
   it('test_running_distros_empty_on_nonzero_exit', async () => {

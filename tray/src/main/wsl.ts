@@ -22,7 +22,13 @@ export type RunArgv = (argv: readonly string[]) => Promise<CommandResult>;
 export type ExecFile = (
   file: string,
   args: readonly string[],
-  opts: { encoding: 'utf8' | 'buffer'; timeout: number; maxBuffer: number },
+  opts: {
+    encoding: 'utf8' | 'buffer';
+    timeout: number;
+    maxBuffer: number;
+    /** Required: a GUI process spawning console wsl.exe must not flash a window. */
+    windowsHide: boolean;
+  },
   cb: (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => void,
 ) => void;
 
@@ -46,7 +52,12 @@ export function realRunInDistro(
       exec(
         'wsl.exe',
         ['-d', distro, '-e', ...argv],
-        { encoding: 'utf8', timeout: WSL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+        {
+          encoding: 'utf8',
+          timeout: WSL_TIMEOUT_MS,
+          maxBuffer: 16 * 1024 * 1024,
+          windowsHide: true,
+        },
         (err, stdout, stderr) => {
           const out = typeof stdout === 'string' ? stdout : '';
           const errText = typeof stderr === 'string' ? stderr : '';
@@ -109,7 +120,12 @@ function runListing(
     exec(
       'wsl.exe',
       args,
-      { encoding: 'buffer', timeout: WSL_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+      {
+        encoding: 'buffer',
+        timeout: WSL_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+      },
       (err, stdout) => {
         const buf = Buffer.isBuffer(stdout) ? stdout : Buffer.alloc(0);
         resolve({ err, text: decodeWslOutput(buf) });
