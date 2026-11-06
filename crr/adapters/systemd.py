@@ -500,3 +500,15 @@ def unit_states(timeout: float) -> list[UnitState] | None:
             active=found.get("ActiveState") == "active",
         ))
     return states
+
+
+def start_argv() -> list[str]:
+    """``crr service start``: bring crr's three units up now (enable is untouched)."""
+    return ["systemctl", "--user", "start", *(unit for _, unit in CRR_UNITS)]
+
+
+def stop_argv() -> list[str]:
+    """``crr service stop``: a runtime stop only. The units stay enabled, so a
+    WSL restart, a reboot or ``crr service start`` brings crr back. Running
+    sessions keep running."""
+    return ["systemctl", "--user", "stop", *(unit for _, unit in CRR_UNITS)]

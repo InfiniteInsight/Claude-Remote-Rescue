@@ -761,7 +761,7 @@ def _build_parser() -> argparse.ArgumentParser:
     conf.set_defaults(func=_cmd_config)
 
     svc = sub.add_parser("service", help="report on or control crr's own background units")
-    svc_sub = svc.add_subparsers(dest="service_action", metavar="{status}")
+    svc_sub = svc.add_subparsers(dest="service_action", metavar="{status,start,stop}")
     svc_status = svc_sub.add_parser(
         "status",
         help="which of the watchdog, dashboard and keep-awake units are "
@@ -771,6 +771,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="print the contracted JSON payload (backend, state, per-unit flags, "
              "dashboard URL, whether dashboard login is on)",
+    )
+    svc_sub.add_parser(
+        "start",
+        help="start the watchdog, dashboard and keep-awake units now (they stay enabled)",
+    )
+    svc_sub.add_parser(
+        "stop",
+        help="stop the three units now, runtime only: the units stay enabled and "
+             "running sessions are left alone; they come back at the next WSL restart, "
+             "reboot or `crr service start`",
     )
     svc.set_defaults(func=_cmd_service)
 
@@ -6806,30 +6816,74 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_service(args: argparse.Namespace) -> int:
-    if getattr(args, "service_action", None) == "status":
+    action = getattr(args, "service_action", None)
+    if action == "status":
         return _service_status(args.json)
-    print("usage: crr service status [--json]", file=sys.stderr)
+    if action in ("start", "stop"):
+        return _service_action(action)
+    print("usage: crr service {status|start|stop} ...", file=sys.stderr)
     return 2
+
+
+def _service_backend(config: cfg.Config) -> tuple[str, str, list[UnitState] | None]:
+    """``(backend, reason, units)``. ``units`` is None when the backend is
+    unsupported (not Linux, or no systemd user manager to ask)."""
+    if platform.system() != "Linux":
+        return "unsupported", "not Linux", None
+    units = systemd.unit_states(config.get("interop_timeout_seconds"))
+    if units is None:
+        return "unsupported", "no systemd user manager", None
+    if not any(u.installed for u in units):
+        # A Scheduled Tasks install (`crr schtasks`) lands here too.
+        return "systemd", (
+            "crr is not installed as systemd user units; "
+            "run `crr systemd --install`"), units
+    return "systemd", "", units
+
+
+_REPAIR_LINE = "run crr systemd --install to repair a partial install"
+
+
+def _service_action(action: str) -> int:
+    """``crr service start|stop``: a runtime action on crr's three units.
+
+    Stop only stops the units; running sessions keep running. The units come back at the next WSL restart, reboot
+    or ``crr service start``, because they stay enabled.
+    """
+    config = _load_config()
+    _, reason, units = _service_backend(config)
+    if units is None:
+        print(f"crr service {action}: unsupported here ({reason}); "
+              "crr's background units need systemd", file=sys.stderr)
+        return 2
+    if service_core.overall_state(units) == "not-installed":
+        print(f"crr service {action}: crr is not installed as systemd user "
+              "units; run `crr systemd --install`", file=sys.stderr)
+        return 1
+    argv = systemd.start_argv() if action == "start" else systemd.stop_argv()
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=config.get("interop_timeout_seconds"))
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"crr service {action}: {exc}", file=sys.stderr)
+        print(_REPAIR_LINE, file=sys.stderr)
+        return 1
+    if r.returncode != 0:
+        if (r.stderr or "").strip():
+            print(r.stderr.rstrip("\n"), file=sys.stderr)
+        print(_REPAIR_LINE, file=sys.stderr)
+        return 1
+    if action == "stop":
+        print("stopped; crr comes back at the next WSL restart or reboot, "
+              "or with crr service start")
+    return 0
 
 
 def _service_status(as_json: bool) -> int:
     """Report on crr's three units. A report, not an action: exit 0 whenever a
     valid payload is printed, including on a host with no systemd user manager."""
     config = _load_config()
-    units = None
-    if platform.system() != "Linux":
-        backend, reason = "unsupported", "not Linux"
-    else:
-        units = systemd.unit_states(config.get("interop_timeout_seconds"))
-        if units is None:
-            backend, reason = "unsupported", "no systemd user manager"
-        elif not any(u.installed for u in units):
-            # A Scheduled Tasks install (`crr schtasks`) lands here too.
-            backend, reason = "systemd", (
-                "crr is not installed as systemd user units; "
-                "run `crr systemd --install`")
-        else:
-            backend, reason = "systemd", ""
+    backend, reason, units = _service_backend(config)
     if units is None:
         units = [UnitState(name, unit, False, False, False)
                  for name, unit in systemd.CRR_UNITS]

@@ -490,3 +490,17 @@ def test_installed_web_port_reads_the_unit_file(tmp_path):
     systemd.write_units(systemd.unit_dir(tmp_path), {
         systemd.WEB_SERVICE_NAME: systemd.web_service_unit("/x/crr", "/bin", "/s", 8444)})
     assert systemd.installed_web_port(tmp_path) == 8444
+
+
+# --- crr service start / stop (#161) ----------------------------------------
+
+def test_start_argv():
+    assert systemd.start_argv() == [
+        "systemctl", "--user", "start",
+        "crr-revive.timer", "crr-web.service", "crr-awake.service"]
+
+
+def test_stop_argv():
+    assert systemd.stop_argv() == [
+        "systemctl", "--user", "stop",
+        "crr-revive.timer", "crr-web.service", "crr-awake.service"]

@@ -130,6 +130,10 @@ No tag or release has been cut yet. This section describes everything on
   int, a list key takes JSON) and each change prints how it takes effect
   (`live`, `restart-web`, ...) with the command to run. A key crr never
   reads from settings, or an unreadable store, is refused.
+- `crr service start` and `crr service stop`: start or stop crr's three units
+  (watchdog timer, dashboard, keep-awake) now. Stop is a runtime stop only:
+  it never disables a unit and never touches tmux, so running sessions keep
+  running, and crr comes back at the next WSL restart, reboot, or `crr service start`.
 
 ### Changed
 

@@ -8877,3 +8877,104 @@ def test_matching_installed_and_configured_ports_say_nothing(monkeypatch, tmp_pa
     assert json.loads(cap.out)["dashboard_url"] == (
         f"http://127.0.0.1:{cfg.DEFAULTS['dashboard_port']}/")
     assert cap.err == ""
+
+
+# --- crr service start / stop (#161) ----------------------------------------
+
+def _service_action(monkeypatch, tmp_path, capsys, action, *, units,
+                    system="Linux", result=None, raises=None):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(systemd, "unit_states", lambda timeout: units)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if raises is not None:
+            raise raises
+        return result or subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    rc = cli.main(["service", action])
+    return rc, capsys.readouterr(), calls
+
+
+def test_stop_only_stops_the_three_units(monkeypatch, tmp_path, capsys):
+    import inspect
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, "stop",
+                                     units=_svc_units())
+    assert rc == 0
+    assert [argv for argv, _ in calls] == [[
+        "systemctl", "--user", "stop",
+        "crr-revive.timer", "crr-web.service", "crr-awake.service"]]
+    assert calls[0][1]["timeout"] == cfg.DEFAULTS["interop_timeout_seconds"]
+    # Nothing crr runs for stop or start may disable a unit or touch tmux.
+    for fn in (systemd.start_argv, systemd.stop_argv, cli._cmd_service,
+               cli._service_backend, cli._service_action):
+        src = inspect.getsource(fn)
+        assert "disable" not in src, fn.__name__
+        assert "tmux" not in src, fn.__name__
+    assert all("disable" not in arg and "tmux" not in arg
+               for argv, _ in calls for arg in argv)
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_start_refuses_on_an_unsupported_backend(monkeypatch, tmp_path, capsys, action):
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, action,
+                                     units=None)
+    assert rc == 2
+    assert "no systemd user manager" in cap.err
+    assert calls == []
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, action,
+                                     units=None, system="Darwin")
+    assert rc == 2 and "not Linux" in cap.err and calls == []
+
+
+def test_start_argv(monkeypatch, tmp_path, capsys):
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, "start",
+                                     units=_svc_units(active=False))
+    assert rc == 0
+    assert [argv for argv, _ in calls] == [[
+        "systemctl", "--user", "start",
+        "crr-revive.timer", "crr-web.service", "crr-awake.service"]]
+    assert cap.out == "" and cap.err == ""
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_stop_refuses_when_not_installed(monkeypatch, tmp_path, capsys, action):
+    rc, cap, calls = _service_action(
+        monkeypatch, tmp_path, capsys, action,
+        units=_svc_units(installed=False, enabled=False, active=False))
+    assert rc == 1
+    assert "crr systemd --install" in cap.err
+    assert calls == []
+
+
+def test_stop_says_when_crr_comes_back(monkeypatch, tmp_path, capsys):
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, "stop",
+                                     units=_svc_units())
+    assert rc == 0
+    assert cap.out == ("stopped; crr comes back at the next WSL restart or "
+                       "reboot, or with crr service start\n")
+    assert cap.err == ""
+
+
+def test_stop_passes_systemctl_errors_through(monkeypatch, tmp_path, capsys):
+    failed = subprocess.CompletedProcess(
+        ["systemctl"], 1, "", "Unit crr-awake.service not found.\n")
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, "stop",
+                                     units=_svc_units(), result=failed)
+    assert rc == 1
+    assert "Unit crr-awake.service not found." in cap.err
+    assert "run crr systemd --install to repair a partial install" in cap.err
+    assert cap.out == ""
+
+
+def test_stop_survives_a_systemctl_timeout(monkeypatch, tmp_path, capsys):
+    rc, cap, calls = _service_action(
+        monkeypatch, tmp_path, capsys, "stop", units=_svc_units(),
+        raises=subprocess.TimeoutExpired(["systemctl"], 5))
+    assert rc == 1
+    assert "Traceback" not in cap.err
+    assert "run crr systemd --install to repair a partial install" in cap.err
