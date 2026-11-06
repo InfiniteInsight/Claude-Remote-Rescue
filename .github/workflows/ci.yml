@@ -78,3 +78,23 @@ jobs:
         run: |
           node --version
           pytest -q tests/test_web.py -k node_check
+
+  # Windows tray app (tray/): typecheck and unit-test the pure logic on
+  # ubuntu. Electron runtime behaviour is covered by tray/OPERATOR-VERIFY.md,
+  # run by hand on Windows. The Electron binary is not needed here, and the
+  # esbuild bundle is not built until the entry points exist (Task 7).
+  tray:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tray
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
