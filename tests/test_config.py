@@ -325,3 +325,22 @@ def test_tunnel_provider_defaults():
     assert cfg.DEFAULTS["tunnel_provider"] == "tailscale"
     assert cfg.DEFAULTS["cloudflare_tunnel_name"] == ""
     assert cfg.DEFAULTS["cloudflare_hostname"] == ""
+
+
+def test_every_config_key_has_an_apply_rule():
+    # A new DEFAULTS key with no rule fails here: the tray app must be able
+    # to say what makes any setting take effect.
+    assert set(cfg.APPLY_RULES) == set(cfg.DEFAULTS)
+    assert all(kind in cfg.APPLY_KINDS for kind in cfg.APPLY_RULES.values())
+
+
+def test_known_apply_rules():
+    assert cfg.APPLY_RULES["dashboard_port"] == "reinstall"
+    assert cfg.APPLY_RULES["boot_preferred_tailnet"] == "windows-installer"
+    assert cfg.APPLY_RULES["power_block"] == "live"
+    assert cfg.APPLY_RULES["dashboard_poll_seconds"] == "restart-web"
+    # Read once into the dashboard's page at startup (web.make_web_handler),
+    # so an edit needs a dashboard restart; the watchdog re-reads it per pass.
+    assert cfg.APPLY_RULES["zombie_strikes"] == "restart-web"
+    # The keep-awake holder is built once; its other keys are re-read per poll.
+    assert cfg.APPLY_RULES["power_block_max_hours"] == "restart-awake"

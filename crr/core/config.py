@@ -365,6 +365,108 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+# What makes a changed setting take effect. The tray app reads this to tell
+# the user what to do after a change:
+#   live              nothing: every reader loads config afresh (each crr
+#                     command, each watchdog pass, each keep-awake poll)
+#   restart-web       restart the dashboard: `crr web` loads config once at
+#                     startup and its request closures keep that object
+#   restart-awake     restart keep-awake: `crr awake` builds its power holder
+#                     once at startup
+#   reinstall         reinstall the units: the value is baked into the
+#                     systemd/launchd/Scheduled Task definitions
+#   windows-installer rerun a Windows installer (boot_*/harden_* settings)
+# A key read in several places gets the strongest kind any reader needs, in
+# this order: windows-installer > reinstall > restart-web > restart-awake >
+# live. Every DEFAULTS key must be listed here: a new key fails
+# tests/test_config.py::test_every_config_key_has_an_apply_rule until it gets
+# a rule, so a setting can never reach the tray with no answer.
+APPLY_KINDS = ("live", "restart-web", "restart-awake", "reinstall", "windows-installer")
+
+APPLY_RULES: dict[str, str] = {
+    # --- windows-installer: every boot_* and harden_* key -----------------
+    "boot_headless_window_seconds": "windows-installer",
+    "boot_preferred_tailnet": "windows-installer",
+    "boot_holder_rearm_minutes": "windows-installer",
+    "harden_active_hours_start": "windows-installer",
+    "harden_active_hours_end": "windows-installer",
+    "harden_restart_lookback_days": "windows-installer",
+    # --- reinstall: baked into the service definitions ---------------------
+    "dashboard_port": "reinstall",
+    "watchdog_interval_seconds": "reinstall",
+    "web_restart_seconds": "reinstall",
+    # --- restart-awake: `crr awake` builds its holder once ------------------
+    "power_block_max_hours": "restart-awake",
+    # --- restart-web: read by `crr web` from the config it loads once -------
+    "zombie_strikes": "restart-web",
+    "close_grace_seconds": "restart-web",
+    "interop_timeout_seconds": "restart-web",
+    "tab_spawn_timeout_seconds": "restart-web",
+    "diagnose_lookback_boots": "restart-web",
+    "diagnose_event_cap": "restart-web",
+    "diagnose_line_cap": "restart-web",
+    "diagnose_scan_cap": "restart-web",
+    "diagnose_macos_lookback": "restart-web",
+    "diagnose_macos_timeout_seconds": "restart-web",
+    "dashboard_poll_seconds": "restart-web",
+    "version_check_seconds": "restart-web",
+    "last_prompt_display_cap": "restart-web",
+    "host_allowlist_extras": "restart-web",
+    "tunnel_provider": "restart-web",
+    "cloudflare_tunnel_name": "restart-web",
+    "cloudflare_hostname": "restart-web",
+    "terminal": "restart-web",
+    "wt_profile": "restart-web",
+    "confirm_arm_seconds": "restart-web",
+    "notice_seconds": "restart-web",
+    "reload_delay_ms": "restart-web",
+    "diag_error_display_cap": "restart-web",
+    "flash_ms": "restart-web",
+    "filter_debounce_ms": "restart-web",
+    "longpress_ms": "restart-web",
+    "longpress_move_px": "restart-web",
+    "model_tail_lines": "restart-web",
+    "remote_control": "restart-web",
+    "context_tight_fraction": "restart-web",
+    "context_compact_fraction": "restart-web",
+    "recall_match_cap": "restart-web",
+    "recall_per_session_cap": "restart-web",
+    "recall_snippet_cap": "restart-web",
+    "recall_scan_byte_budget": "restart-web",
+    "discover_exclude_dirs": "restart-web",
+    "takeover_idle_seconds": "restart-web",
+    "takeover_poll_seconds": "restart-web",
+    "remote_control_watch": "restart-web",
+    "remote_control_autokick": "restart-web",
+    "launcher_tag": "restart-web",
+    "reauth_success_display_ms": "restart-web",
+    "claude_auth_probe_timeout_seconds": "restart-web",
+    "dashboard_session_hours": "restart-web",
+    # --- live: every reader loads config afresh ------------------------------
+    "host_death_max_revivals": "live",
+    "host_death_stable_seconds": "live",
+    "archive_retention_days": "live",
+    "rescue_prompt_timeout_seconds": "live",
+    "rescue_auto_open": "live",
+    "takeover_max_wait_seconds": "live",
+    "bridge_kick_cooldown_seconds": "live",
+    "bridge_kick_max_attempts": "live",
+    # `crr awake` re-reads config after every poll, so these need no restart.
+    "power_block": "live",
+    "power_block_requires_ac": "live",
+    "power_poll_seconds": "live",
+    "power_state_max_age_multiplier": "live",
+    # Nothing reads these from a Config yet: each is an import-time default
+    # (web.DISCOVERABLE_PAGE, transcript_source.REPLY_TAIL_LINES /
+    # CWD_SCAN_LINES, the context_pressure default), so no running process
+    # holds a configured value to refresh.
+    "discoverable_page_size": "live",
+    "reply_tail_lines": "live",
+    "cwd_scan_lines": "live",
+    "context_bytes_per_token": "live",
+}
+
+
 class ConfigError(ValueError):
     """A config override is invalid (unknown key or wrong value type)."""
 
