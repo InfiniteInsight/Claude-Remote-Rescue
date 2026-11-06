@@ -1462,6 +1462,32 @@ def test_set_names_the_restart_for_a_web_key(tmp_path, monkeypatch, capsys):
     assert "systemctl --user restart crr-web" in cap.err
 
 
+@pytest.mark.parametrize("web_props", [
+    {"LoadState": "loaded", "KillMode": "control-group"},   # an old unit (#140)
+    None,                                                   # unknown
+])
+def test_restart_web_hint_reinstalls_first_unless_the_restart_spares_sessions(
+        tmp_path, monkeypatch, capsys, web_props):
+    # The hint must never tell the user to run a command that would end
+    # conversations: restarting a pre-#140 crr-web kills its cgroup's tmux.
+    _config_sd(tmp_path, monkeypatch)
+    monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: web_props)
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    assert capsys.readouterr().err == (
+        "crr config: run `crr systemd --install`, then "
+        "`systemctl --user restart crr-web` for this to take effect\n")
+
+
+def test_restart_web_hint_is_the_bare_restart_when_it_spares_sessions(
+        tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    monkeypatch.setattr(systemd, "web_unit_props",
+                        lambda timeout: {"LoadState": "loaded", "KillMode": "process"})
+    assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0
+    assert capsys.readouterr().err == (
+        "crr config: run `systemctl --user restart crr-web` for this to take effect\n")
+
+
 def test_set_names_the_command_for_each_apply_kind(tmp_path, monkeypatch, capsys):
     _config_sd(tmp_path, monkeypatch)
     assert cli.main(["config", "set", "power_block_max_hours", "5"]) == 0
@@ -9054,12 +9080,18 @@ def test_matching_installed_and_configured_ports_say_nothing(monkeypatch, tmp_pa
 
 # --- crr service start / stop (#161) ----------------------------------------
 
+_WEB_SPARES_SESSIONS = {"LoadState": "loaded", "ActiveState": "active",
+                        "KillMode": "process", "MainPID": "4242"}
+
+
 def _service_action(monkeypatch, tmp_path, capsys, action, *, units,
-                    system="Linux", result=None, raises=None):
+                    system="Linux", result=None, raises=None,
+                    web_props=_WEB_SPARES_SESSIONS):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     set_home(monkeypatch, tmp_path)
     monkeypatch.setattr(platform, "system", lambda: system)
     monkeypatch.setattr(systemd, "unit_states", lambda timeout: units)
+    monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: web_props)
     calls = []
 
     def fake_run(argv, **kwargs):
@@ -9074,7 +9106,6 @@ def _service_action(monkeypatch, tmp_path, capsys, action, *, units,
 
 
 def test_stop_only_stops_the_three_units(monkeypatch, tmp_path, capsys):
-    import inspect
     rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, "stop",
                                      units=_svc_units())
     assert rc == 0
@@ -9082,14 +9113,39 @@ def test_stop_only_stops_the_three_units(monkeypatch, tmp_path, capsys):
         "systemctl", "--user", "stop",
         "crr-revive.timer", "crr-web.service", "crr-awake.service"]]
     assert calls[0][1]["timeout"] == cfg.DEFAULTS["interop_timeout_seconds"]
-    # Nothing crr runs for stop or start may disable a unit or touch tmux.
-    for fn in (systemd.start_argv, systemd.stop_argv, cli._cmd_service,
-               cli._service_backend, cli._service_action):
-        src = inspect.getsource(fn)
-        assert "disable" not in src, fn.__name__
-        assert "tmux" not in src, fn.__name__
+    # Nothing crr runs for stop may disable a unit or touch tmux.
     assert all("disable" not in arg and "tmux" not in arg
                for argv, _ in calls for arg in argv)
+
+
+@pytest.mark.parametrize("web_props, why", [
+    # An old crr-web unit (before #140): stopping it ends its whole cgroup,
+    # which holds the tmux servers the dashboard's Reopen/Restore started.
+    ({"LoadState": "loaded", "ActiveState": "active",
+      "KillMode": "control-group", "MainPID": "4242"},
+     "its installed unit predates KillMode=process"),
+    # Unknown is refused too: crr cannot promise the stop spares sessions.
+    (None, "could not read its loaded KillMode"),
+])
+def test_stop_refuses_while_the_web_unit_would_end_sessions(
+        monkeypatch, tmp_path, capsys, web_props, why):
+    rc, cap, calls = _service_action(monkeypatch, tmp_path, capsys, "stop",
+                                     units=_svc_units(), web_props=web_props)
+    assert rc == 1
+    assert calls == []
+    assert cap.err.startswith("crr service stop: NOT stopping crr-web.service")
+    assert why in cap.err
+    assert ("Run `crr systemd --install` (rewrites the units; restarts nothing), "
+            "then `crr service stop`.") in cap.err
+    assert cap.out == ""
+
+
+def test_start_does_not_care_about_the_web_kill_mode(monkeypatch, tmp_path, capsys):
+    rc, cap, calls = _service_action(
+        monkeypatch, tmp_path, capsys, "start", units=_svc_units(active=False),
+        web_props={"LoadState": "loaded", "KillMode": "control-group"})
+    assert rc == 0
+    assert [argv[2] for argv, _ in calls] == ["start"]
 
 
 @pytest.mark.parametrize("action", ["start", "stop"])

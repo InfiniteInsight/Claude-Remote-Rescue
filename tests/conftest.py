@@ -198,3 +198,26 @@ def _forbid_unstubbed_claude_auth_probe(monkeypatch):
             )
 
     monkeypatch.setattr(claude_auth, "subprocess", _NoProbeSubprocess())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_service_probes(request, monkeypatch):
+    """Answer the host probes of crr's own install with "nothing known".
+
+    ``crr service``, ``crr qr`` and ``crr config set`` ask the live user
+    manager about crr-web (its loaded KillMode and MainPID, then the running
+    process's ``--port`` from ``/proc``). Left live, those tests would read
+    whatever crr-web happens to run on the developer's machine: a port test
+    green on a host whose dashboard is on 8377 and red on one where it is
+    not, and a ``service stop`` test whose outcome depends on the host's
+    unit file. ``None`` is exactly what a CI runner without a user manager
+    answers, so this makes every host behave like CI.
+
+    Tests that need an answer stub ``systemd.web_unit_props`` themselves;
+    the adapter tests of the probe opt out with ``real_service_probes``.
+    """
+    if "real_service_probes" in request.keywords:
+        return
+    from crr.adapters import systemd
+
+    monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: None)

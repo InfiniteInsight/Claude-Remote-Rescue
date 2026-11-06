@@ -273,6 +273,54 @@ def web_unit_spares_sessions(home: Path) -> bool | None:
     return any(line.strip() == "KillMode=process" for line in text.splitlines())
 
 
+# crr-web as the user manager has it LOADED (#161). `crr service stop` and
+# `crr config set`'s restart hint read KillMode; the dashboard port reads
+# MainPID. The loaded values, not the unit file: the file on disk can be newer
+# than what systemd loaded (no daemon-reload yet), and the loaded unit is what
+# a stop or restart acts on.
+WEB_RUNTIME_PROPS = ("LoadState", "ActiveState", "KillMode", "MainPID")
+
+
+def web_unit_props(timeout: float) -> dict[str, str] | None:
+    """crr-web.service's ``WEB_RUNTIME_PROPS`` from ``systemctl --user show``.
+
+    None when the user manager can't answer: no systemctl, no user bus, a
+    timeout, or no output. A unit that isn't installed still answers (with
+    LoadState=not-found); the helpers below read that as unknown.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "show", WEB_SERVICE_NAME,
+             "-p", ",".join(WEB_RUNTIME_PROPS)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    props: dict[str, str] = {}
+    for line in (r.stdout or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            props[key.strip()] = value.strip()
+    return props or None
+
+
+def loaded_kill_mode(props: dict[str, str] | None) -> str | None:
+    """crr-web's loaded KillMode, or None when it is unknown.
+
+    Unknown covers no answer and a unit that isn't loaded: systemd reports
+    the default ``control-group`` for a unit it could not find, which says
+    nothing about any unit file. Only ``process`` (#140) spares the tmux
+    servers a dashboard Reopen/Restore started in crr-web's cgroup.
+    """
+    if not props or props.get("LoadState") != "loaded":
+        return None
+    return props.get("KillMode") or None
+
+
 def parse_web_port(unit_text: str) -> int | None:
     """The ``--port`` in a crr-web unit's ExecStart, or None if it has none
     or it isn't a valid port. Reads what ``web_service_unit`` writes."""

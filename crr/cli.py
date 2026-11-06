@@ -1429,6 +1429,26 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _web_unit_refusal(who: str, doing: str, act: str, then: str, *,
+                      unknown: bool = False) -> str:
+    """Why crr will not stop or restart crr-web, and what to run instead.
+
+    #140: a crr-web unit from before KillMode=process ends its whole cgroup on
+    a stop or restart, and that cgroup holds the tmux servers the dashboard's
+    Reopen and Restore started, so the conversations in them end too.
+    ``crr systemd --install`` rewrites the unit with KillMode=process and
+    restarts nothing, after which ``then`` is safe. Shared by ``crr deploy``
+    and ``crr service stop`` so the two say the same thing. ``unknown`` is
+    for when the loaded KillMode could not be read at all.
+    """
+    why = ("crr could not read its loaded KillMode, so a " + act + " might"
+           if unknown else
+           "its installed unit predates KillMode=process, so a " + act + " would")
+    return (f"{who}: NOT {doing} crr-web.service — {why} kill "
+            "sessions restored from the dashboard. Run `crr systemd "
+            f"--install` (rewrites the units; restarts nothing), then `{then}`.")
+
+
 def _cmd_deploy(args: argparse.Namespace) -> int:
     """Install the current commit as the copy the SERVICES run (#61).
 
@@ -1507,11 +1527,9 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         # #140: this unit predates KillMode=process — restarting it kills
         # every session a dashboard Reopen/Restore started. Deployed, but
         # the running dashboard keeps the old code until it's safe.
-        print("crr deploy: NOT restarting crr-web.service — its installed "
-              "unit predates KillMode=process, so a restart would kill "
-              "sessions restored from the dashboard. Run `crr systemd "
-              "--install` (rewrites the units; restarts nothing), then "
-              "`systemctl --user restart crr-web.service`.", file=sys.stderr)
+        print(_web_unit_refusal("crr deploy", "restarting", "restart",
+                                "systemctl --user restart crr-web.service"),
+              file=sys.stderr)
     else:
         err = deploy_io.restart_service()
         if err:
@@ -6775,21 +6793,32 @@ def _cmd_holder(args: argparse.Namespace) -> int:
 # What to tell the user to run so a changed setting takes effect, by apply
 # kind (cfg.APPLY_RULES). "live" needs nothing. The stderr hint is a note, not
 # an action: `crr config set` never restarts anything itself.
+_RESTART_WEB = "systemctl --user restart crr-web"
 _APPLY_COMMANDS = {
-    "restart-web": "systemctl --user restart crr-web",
-    "restart-awake": "systemctl --user restart crr-awake",
-    "reinstall": "crr systemd --install",
+    "restart-web": [_RESTART_WEB],
+    "restart-awake": ["systemctl --user restart crr-awake"],
+    "reinstall": ["crr systemd --install"],
 }
 
 
-def _apply_command(key: str, kind: str) -> str | None:
-    """The command that makes ``key``'s new value take effect, or None."""
+def _web_kill_mode(timeout: float) -> str | None:
+    """crr-web's loaded KillMode, or None when it can't be read."""
+    return systemd.loaded_kill_mode(systemd.web_unit_props(timeout))
+
+
+def _apply_commands(key: str, kind: str, timeout: float) -> list[str]:
+    """The commands, in order, that make ``key``'s new value take effect."""
     if kind == "windows-installer":
         # harden_* are written to the Windows policy by `crr harden --apply`;
         # boot_* are baked into the tasks by the reachable-at-boot install.
-        return "crr harden --apply" if key.startswith("harden_") else \
-            "crr reachable-at-boot --install"
-    return _APPLY_COMMANDS.get(kind)
+        return ["crr harden --apply" if key.startswith("harden_") else
+                "crr reachable-at-boot --install"]
+    if kind == "restart-web" and _web_kill_mode(timeout) != "process":
+        # Restarting a crr-web from before KillMode=process (#140), or one
+        # whose KillMode can't be read, may end conversations. The install
+        # rewrites the unit with KillMode=process, which makes the restart safe.
+        return ["crr systemd --install", _RESTART_WEB]
+    return list(_APPLY_COMMANDS.get(kind, []))
 
 
 def _display_value(value: Any) -> str:
@@ -6869,9 +6898,10 @@ def _config_change(key: str, text: str | None) -> int:
         print(f"set {key} = {_display_value(value)} (takes effect: {kind})")
     else:
         print(f"unset {key} (takes effect: {kind})")
-    command = _apply_command(key, kind)
-    if command:
-        print(f"crr config: run `{command}` for this to take effect", file=sys.stderr)
+    commands = _apply_commands(key, kind, _load_config().get("interop_timeout_seconds"))
+    if commands:
+        steps = ", then ".join(f"`{c}`" for c in commands)
+        print(f"crr config: run {steps} for this to take effect", file=sys.stderr)
     return 0
 
 
@@ -6982,8 +7012,18 @@ def _service_action(action: str) -> int:
         print(f"crr service {action}: crr is not installed as systemd user "
               "units; run `crr systemd --install`", file=sys.stderr)
         return 1
-    argv = systemd.start_argv() if action == "start" else systemd.stop_argv()
     timeout = config.get("interop_timeout_seconds")
+    if action == "stop":
+        # Stopping an old crr-web (#140) ends the conversations in the tmux
+        # servers its cgroup holds. Unknown is refused too: a stop crr cannot
+        # vouch for must not run. Start is unaffected.
+        kill_mode = _web_kill_mode(timeout)
+        if kill_mode != "process":
+            print(_web_unit_refusal("crr service stop", "stopping", "stop",
+                                    "crr service stop", unknown=kill_mode is None),
+                  file=sys.stderr)
+            return 1
+    argv = systemd.start_argv() if action == "start" else systemd.stop_argv()
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

@@ -492,6 +492,56 @@ def test_installed_web_port_reads_the_unit_file(tmp_path):
     assert systemd.installed_web_port(tmp_path) == 8444
 
 
+# --- crr-web as the user manager has it loaded (#161, C1) -------------------
+
+_WEB_SHOW_OUT = "MainPID=4242\nKillMode=process\nLoadState=loaded\nActiveState=active\n"
+
+
+@pytest.mark.real_service_probes
+def test_web_unit_props_reads_the_loaded_values(monkeypatch):
+    calls = []
+    _fake_systemctl(monkeypatch, stdout=_WEB_SHOW_OUT, calls=calls)
+    assert systemd.web_unit_props(3.0) == {
+        "MainPID": "4242", "KillMode": "process",
+        "LoadState": "loaded", "ActiveState": "active"}
+    argv, kwargs = calls[0]
+    assert argv == ["systemctl", "--user", "show", "crr-web.service",
+                    "-p", "LoadState,ActiveState,KillMode,MainPID"]
+    assert kwargs["timeout"] == 3.0
+
+
+@pytest.mark.real_service_probes
+@pytest.mark.parametrize("kwargs", [
+    {"returncode": 1, "stdout": ""},                       # no user bus
+    {"stdout": ""},                                        # answered nothing
+    {"exc": subprocess.TimeoutExpired("systemctl", 3)},
+    {"exc": FileNotFoundError("systemctl")},
+])
+def test_web_unit_props_is_none_when_the_user_manager_cannot_answer(monkeypatch, kwargs):
+    _fake_systemctl(monkeypatch, **kwargs)
+    assert systemd.web_unit_props(3.0) is None
+
+
+@pytest.mark.real_service_probes
+def test_web_unit_props_is_none_without_systemctl(monkeypatch):
+    monkeypatch.setattr(systemd.shutil, "which", lambda name: None)
+    assert systemd.web_unit_props(3.0) is None
+
+
+@pytest.mark.parametrize("props, kill_mode", [
+    ({"LoadState": "loaded", "KillMode": "process"}, "process"),
+    ({"LoadState": "loaded", "KillMode": "control-group"}, "control-group"),
+    # A unit systemd could not find still reports the default control-group;
+    # that says nothing about a unit file, so it is unknown.
+    ({"LoadState": "not-found", "KillMode": "control-group"}, None),
+    ({"LoadState": "loaded", "KillMode": ""}, None),
+    ({}, None),
+    (None, None),
+])
+def test_loaded_kill_mode(props, kill_mode):
+    assert systemd.loaded_kill_mode(props) == kill_mode
+
+
 # --- crr service start / stop (#161) ----------------------------------------
 
 def test_start_argv():
