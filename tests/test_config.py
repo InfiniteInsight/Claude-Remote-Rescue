@@ -481,3 +481,22 @@ def test_effective_payload_does_not_alias_the_defaults():
 def test_effective_payload_refuses_an_owned_value_for_an_unknown_key():
     with pytest.raises(cfg.ConfigError):
         _payload(owned={"no_such_key": 1})
+
+
+def test_every_list_default_holds_strings():
+    # check_value relies on this: a list setting is a list of strings.
+    for key, default in cfg.DEFAULTS.items():
+        if isinstance(default, list):
+            assert all(isinstance(v, str) for v in default), key
+
+
+def test_check_value_refuses_a_list_with_a_non_string():
+    for bad in ([1], ["a", 2], [None], [["a"]], [True]):
+        with pytest.raises(cfg.ConfigError, match="host_allowlist_extras"):
+            cfg.check_value("host_allowlist_extras", bad)
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config({"host_allowlist_extras": [1]})
+    with pytest.raises(cfg.ConfigError):
+        cfg.Config(overlay={"discover_exclude_dirs": [1]})
+    cfg.check_value("host_allowlist_extras", ["a", "b"])   # must not raise
+    cfg.check_value("host_allowlist_extras", [])

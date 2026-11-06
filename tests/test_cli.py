@@ -1624,6 +1624,23 @@ def test_effective_text_shows_dashboard_owned_overrides(tmp_path, monkeypatch, c
     assert "tunnel_provider = 'none'  (override)" in out
 
 
+def test_a_bad_list_in_config_toml_does_not_crash_effective(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch, toml="host_allowlist_extras = [1]\n")
+    assert cli.main(["config", "--effective"]) == 0
+    cap = capsys.readouterr()
+    assert "ignoring bad config" in cap.err
+    assert "host_allowlist_extras" in cap.err
+    assert "Traceback" not in cap.err
+    assert "host_allowlist_extras = []  (default)" in cap.out
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    cap = capsys.readouterr()
+    assert "ignoring bad config" in cap.err
+    assert "Traceback" not in cap.err
+    payload = json.loads(cap.out)
+    contracts.validate_config_payload(payload)
+    assert payload["keys"]["host_allowlist_extras"]["origin"] == "default"
+
+
 def test_effective_json_without_effective_is_a_usage_error(tmp_path, monkeypatch, capsys):
     _config_sd(tmp_path, monkeypatch)
     assert cli.main(["config", "--json"]) == 2

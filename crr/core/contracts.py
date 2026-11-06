@@ -927,6 +927,14 @@ def _config_value_matches(value: Any, type_name: str) -> bool:
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
+def _config_value_type_name(value: Any, type_name: str) -> str:
+    """What a mismatched value actually was; names a list's odd element."""
+    if type_name == "list" and isinstance(value, list):
+        bad = next(v for v in value if not isinstance(v, str))
+        return f"a list with a {type(bad).__name__} element"
+    return type(value).__name__
+
+
 def validate_config_payload(payload: Any) -> None:
     """Raise ContractError unless ``payload`` is a valid `crr config
     --effective --json` body. Each key's ``value`` and ``default`` must have
@@ -947,9 +955,10 @@ def validate_config_payload(payload: Any) -> None:
         _require_enum(fields["apply"], CONFIG_APPLY_KINDS, f"{what} 'apply'")
         for field in ("value", "default"):
             if not _config_value_matches(fields[field], fields["type"]):
+                expected = "list of str" if fields["type"] == "list" else fields["type"]
                 raise ContractError(
-                    f"{what} '{field}' must be {fields['type']}, "
-                    f"got {type(fields[field]).__name__}")
+                    f"{what} '{field}' must be {expected}, "
+                    f"got {_config_value_type_name(fields[field], fields['type'])}")
 
 
 # --------------------------------------------------------------------------

@@ -516,6 +516,13 @@ def check_value(key: str, value: Any) -> None:
         raise ConfigError(
             f"config '{key}' must be {type(default).__name__}, got {type(value).__name__}"
         )
+    # Every list setting is a list of strings (all DEFAULTS lists are, and the
+    # contracted `--effective --json` payload says so).
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, str):
+                raise ConfigError(
+                    f"config '{key}' must be a list of str, got a {type(item).__name__} element")
 
 
 _BOOL_WORDS = {

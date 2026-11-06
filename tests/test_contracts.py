@@ -1193,3 +1193,10 @@ def test_config_payload_violations_are_rejected(mutate):
     mutate(payload)
     with pytest.raises(contracts.ContractError):
         contracts.validate_config_payload(payload)
+
+
+def test_config_payload_error_names_the_offending_element_type():
+    payload = copy.deepcopy(_config_payload())
+    payload["keys"]["host_allowlist_extras"]["value"] = ["a", 1]
+    with pytest.raises(contracts.ContractError, match="list of str.*int"):
+        contracts.validate_config_payload(payload)
