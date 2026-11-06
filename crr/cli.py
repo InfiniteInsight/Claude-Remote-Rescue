@@ -6877,7 +6877,11 @@ def _cmd_logs(args: argparse.Namespace) -> int:
     lines = args.lines if args.lines is not None else config.get("logs_default_lines")
     argv = systemd.journal_argv(systemd.LOG_UNITS[args.service], lines, args.follow)
     if args.follow:
-        _exec(argv[0], argv)  # replaces this process, so killing crr stops journalctl
+        try:
+            _exec(argv[0], argv)  # replaces this process, so killing crr stops journalctl
+        except OSError as exc:  # journalctl missing: no traceback
+            print(f"crr logs: could not run journalctl: {exc}", file=sys.stderr)
+            return 1
         return 0
     try:
         r = subprocess.run(argv)  # no capture: the journal goes straight to stdout

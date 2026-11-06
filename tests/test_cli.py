@@ -9077,3 +9077,16 @@ def test_logs_journalctl_missing_exits_1_without_traceback(monkeypatch, tmp_path
     assert rc == 1
     assert "journalctl" in cap.err
     assert "Traceback" not in cap.err
+
+
+def test_logs_follow_without_journalctl_exits_1(monkeypatch, tmp_path, capsys):
+    def missing(file, argv):
+        raise FileNotFoundError(2, "No such file or directory", "journalctl")
+
+    monkeypatch.setattr(cli, "_exec", missing)
+    rc, cap, runs = _logs(monkeypatch, tmp_path, capsys, ["--follow"])
+    assert rc == 1
+    assert cap.err == ("crr logs: could not run journalctl: "
+                       "[Errno 2] No such file or directory: 'journalctl'\n")
+    assert "Traceback" not in cap.err
+    assert runs == []
