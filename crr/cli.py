@@ -6705,7 +6705,10 @@ def _config_change(key: str, text: str | None) -> int:
         with mutation_lock(sd):
             if key in config_overrides.OWNED_ELSEWHERE:
                 if key == "discover_exclude_dirs":
-                    exclusions.ExclusionStore(sd).write(value if verb == "set" else [])
+                    xstore = exclusions.ExclusionStore(sd)
+                    if xstore.is_degraded():
+                        return _config_store_unreadable(sd / exclusions.FILENAME)
+                    xstore.write(value if verb == "set" else [])
                 else:
                     sstore = settings.SettingsStore(sd)
                     if sstore.is_degraded():

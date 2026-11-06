@@ -1439,6 +1439,19 @@ def test_set_refuses_when_the_settings_store_is_unreadable(tmp_path, monkeypatch
     assert settings_file.read_bytes() == b"{not json"
 
 
+def test_set_refuses_when_exclusions_are_unreadable(tmp_path, monkeypatch, capsys):
+    sd = _config_sd(tmp_path, monkeypatch)
+    path = sd / "exclusions.json"
+    path.write_bytes(b"{not json")
+    for action in (["set", "discover_exclude_dirs", '["a"]'],
+                   ["unset", "discover_exclude_dirs"]):
+        assert cli.main(["config", *action]) == 1
+        err = capsys.readouterr().err
+        assert "exclusions.json" in err
+        assert "Traceback" not in err
+    assert path.read_bytes() == b"{not json"
+
+
 def test_set_names_the_restart_for_a_web_key(tmp_path, monkeypatch, capsys):
     _config_sd(tmp_path, monkeypatch)
     assert cli.main(["config", "set", "zombie_strikes", "7"]) == 0

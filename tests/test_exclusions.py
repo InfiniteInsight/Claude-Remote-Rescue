@@ -50,3 +50,22 @@ def test_effective_merges_config_baseline_with_managed(tmp_path):
     # a managed duplicate of the config value is not listed twice
     store.write([".claude-mem", "other"])
     assert exclusions.effective([".claude-mem"], store.read()) == [".claude-mem", "other"]
+
+
+def test_exclusion_store_is_degraded(tmp_path):
+    import json
+    store = exclusions.ExclusionStore(tmp_path)
+    path = tmp_path / exclusions.FILENAME
+    # Missing: never configured, the normal case.
+    assert store.is_degraded() is False
+    # Healthy, including an empty list.
+    store.write(["a"])
+    assert store.is_degraded() is False
+    store.write([])
+    assert store.is_degraded() is False
+    # Corrupt, wrong shape, future version, bad entries: exists but unreadable.
+    for raw in ("{not json", "[]", json.dumps({"v": 999, "dirs": ["a"]}),
+                json.dumps({"v": 1, "dirs": "a"}), json.dumps({"v": 1, "dirs": [1]})):
+        path.write_text(raw, encoding="utf-8")
+        assert store.is_degraded() is True, raw
+        assert store.read() == []   # reads still degrade quietly

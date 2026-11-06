@@ -88,6 +88,26 @@ class ExclusionStore:
     def __init__(self, state_dir: Path) -> None:
         self._path = Path(state_dir) / FILENAME
 
+    def _read_checked(self) -> tuple[list[str], bool]:
+        """``(dirs, degraded)``. ``degraded`` is True only when the file
+        EXISTS but could not be understood (unparseable, wrong shape, a
+        version this build does not read, or bad entries), never for a
+        missing file. Same contract as ``SettingsStore._read_checked``."""
+        if not self._path.exists():
+            return [], False
+        try:
+            data = read_json_file(self._path)
+        except (OSError, ValueError):
+            return [], True
+        if not isinstance(data, dict):
+            return [], True
+        if not contracts.store_version_ok(data, contracts.EXCLUSIONS_STORE_VERSION):
+            return [], True
+        try:
+            return normalize(data.get("dirs", [])), False
+        except ExclusionError:
+            return [], True
+
     def read(self) -> list[str]:
         """The managed exclusions, or ``[]``.
 
@@ -102,18 +122,14 @@ class ExclusionStore:
         does not act on anything. The sibling stores (settings, kicks) gate
         destructive work and so surface ``is_degraded()`` instead.
         """
-        try:
-            data = read_json_file(self._path)
-        except (OSError, ValueError):
-            return []
-        if not isinstance(data, dict):
-            return []
-        if not contracts.store_version_ok(data, contracts.EXCLUSIONS_STORE_VERSION):
-            return []
-        try:
-            return normalize(data.get("dirs", []))
-        except ExclusionError:
-            return []
+        return self._read_checked()[0]
+
+    def is_degraded(self) -> bool:
+        """True when the file exists but cannot be understood. Reads still
+        degrade to ``[]``; a writer that would REPLACE the file (`crr config
+        set`) checks this first so it never destroys exclusions it could not
+        read."""
+        return self._read_checked()[1]
 
     def write(self, dirs: Any) -> list[str]:
         """Validate, store atomically, and return the normalized list."""
