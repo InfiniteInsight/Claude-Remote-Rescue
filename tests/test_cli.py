@@ -1251,7 +1251,9 @@ def test_doctor_survives_a_boot_identity_current_that_raises(tmp_path, monkeypat
     assert "crr-revive.timer" in out  # doctor reached its final check
 
 
-def test_config_effective_lists_every_key_with_origin(capsys):
+def test_config_effective_lists_every_key_with_origin(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -1260,9 +1262,11 @@ def test_config_effective_lists_every_key_with_origin(capsys):
     assert "(default)" in out
 
 
-def test_config_effective_prints_defaults_version_header(capsys):
+def test_config_effective_prints_defaults_version_header(tmp_path, monkeypatch, capsys):
     # F9: --effective never printed CONFIG_DEFAULTS_VERSION (zero consumers
     # could tell which default generation they were reading).
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    set_home(monkeypatch, tmp_path)
     rc = cli.main(["config", "--effective"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -1707,6 +1711,96 @@ def test_a_non_finite_float_in_the_overlay_is_dropped(tmp_path, monkeypatch, cap
     assert payload["keys"]["context_tight_fraction"]["origin"] == "default"
     assert payload["keys"]["zombie_strikes"]["origin"] == "override"   # the rest survives
     assert "Traceback" not in cap.err
+
+
+def test_effective_json_is_degraded_when_config_toml_is_set_aside(
+        tmp_path, monkeypatch, capsys):
+    # One bad entry makes crr ignore the whole config.toml, so every key reads
+    # `default`; without `degraded` the tray would show that as the truth.
+    _config_sd(tmp_path, monkeypatch, toml='zombie_strikes = "x"\ndashboard_port = 9000\n')
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    cap = capsys.readouterr()
+    payload = json.loads(cap.out)
+    contracts.validate_config_payload(payload)
+    assert payload["degraded"] is True
+    assert payload["keys"]["dashboard_port"]["origin"] == "default"
+    assert "ignoring bad config" in cap.err
+    assert "config.toml" in cap.err.splitlines()[-1]       # named as a degraded source
+    assert "Traceback" not in cap.err
+
+
+def test_effective_json_is_not_degraded_by_a_good_config_toml(tmp_path, monkeypatch, capsys):
+    _config_sd(tmp_path, monkeypatch)
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["degraded"] is False
+
+
+def test_effective_autokick_is_what_the_watchdog_does_on_a_degraded_store(
+        tmp_path, monkeypatch, capsys):
+    # The watchdog auto-kicks nothing while settings.json is unreadable (fail
+    # closed), so --effective must say off, as the dashboard card does.
+    sd = _config_sd(tmp_path, monkeypatch, toml="remote_control_autokick = true\n")
+    (sd / "settings.json").write_bytes(b"{not json")
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    contracts.validate_config_payload(payload)
+    key = payload["keys"]["remote_control_autokick"]
+    assert (key["value"], key["origin"]) == (False, "override")
+    assert payload["degraded"] is True
+
+
+def test_set_excluded_dirs_round_trips_the_list_effective_shows(tmp_path, monkeypatch, capsys):
+    # R23: --effective shows config.toml's list plus the managed one, and the
+    # tray sends back the list it shows. Entries config.toml already has are
+    # not copied into exclusions.json.
+    from crr.core import exclusions
+    sd = _config_sd(tmp_path, monkeypatch, toml='discover_exclude_dirs = ["a"]\n')
+    assert cli.main(["config", "set", "discover_exclude_dirs", '["a", "b"]']) == 0
+    cap = capsys.readouterr()
+    assert exclusions.ExclusionStore(sd).read() == ["b"]
+    assert 'set discover_exclude_dirs = ["a", "b"] (takes effect: live)' in cap.out
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    key = json.loads(capsys.readouterr().out)["keys"]["discover_exclude_dirs"]
+    assert (key["value"], key["origin"]) == (["a", "b"], "override")
+
+
+def test_set_excluded_dirs_shows_the_effective_list_including_defaults(
+        tmp_path, monkeypatch, capsys):
+    from crr.core import exclusions
+    sd = _config_sd(tmp_path, monkeypatch, toml=None)       # baseline = the default
+    assert cli.main(["config", "set", "discover_exclude_dirs",
+                     '[".claude-mem", "scratch"]']) == 0
+    assert exclusions.ExclusionStore(sd).read() == ["scratch"]
+    assert ('set discover_exclude_dirs = [".claude-mem", "scratch"]'
+            in capsys.readouterr().out)
+
+
+def test_set_excluded_dirs_to_only_config_entries_clears_the_managed_list(
+        tmp_path, monkeypatch, capsys):
+    from crr.core import exclusions
+    sd = _config_sd(tmp_path, monkeypatch, toml='discover_exclude_dirs = ["a"]\n')
+    exclusions.ExclusionStore(sd).write(["old"])
+    assert cli.main(["config", "set", "discover_exclude_dirs", '["a"]']) == 0
+    assert exclusions.ExclusionStore(sd).read() == []
+    capsys.readouterr()
+    assert cli.main(["config", "--effective", "--json"]) == 0
+    key = json.loads(capsys.readouterr().out)["keys"]["discover_exclude_dirs"]
+    assert (key["value"], key["origin"]) == (["a"], "configured")
+
+
+def test_config_set_keeps_keys_a_newer_crr_wrote(tmp_path, monkeypatch, capsys):
+    # I2: a rollback's `crr config set` must not delete settings it can't read.
+    sd = _config_sd(tmp_path, monkeypatch)
+    path = sd / "config_overrides.json"
+    path.write_text(json.dumps(
+        {"v": 1, "values": {"key_from_a_newer_crr": 3, "zombie_strikes": 4}}),
+        encoding="utf-8")
+    assert cli.main(["config", "set", "dashboard_port", "9000"]) == 0
+    assert json.loads(path.read_text())["values"] == {
+        "key_from_a_newer_crr": 3, "zombie_strikes": 4, "dashboard_port": 9000}
+    assert cli.main(["config", "unset", "zombie_strikes"]) == 0
+    assert json.loads(path.read_text())["values"] == {
+        "key_from_a_newer_crr": 3, "dashboard_port": 9000}
 
 
 def test_effective_json_without_effective_is_a_usage_error(tmp_path, monkeypatch, capsys):

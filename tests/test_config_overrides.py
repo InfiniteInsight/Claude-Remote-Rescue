@@ -121,6 +121,28 @@ def test_set_keeps_other_values(tmp_path):
     assert store.read() == {"zombie_strikes": 8, "dashboard_port": 9000}
 
 
+def test_set_and_unset_keep_values_this_build_does_not_read(tmp_path):
+    # A newer crr may have written keys this one doesn't know, and a hand edit
+    # may hold a value this one refuses. One writer must never discard another's
+    # state (the settings store's _carry_* rule), so writes go through the raw
+    # file; only the key being written is validated, and read() still filters.
+    path = tmp_path / config_overrides.FILENAME
+    path.write_text(json.dumps({"v": 1, "values": {
+        "key_from_a_newer_crr": 3, "zombie_strikes": 4, "rescue_auto_open": "maybe"}}),
+        encoding="utf-8")
+    store = ConfigOverridesStore(tmp_path)
+    store.set("dashboard_port", 9000)
+    assert json.loads(path.read_text())["values"] == {
+        "key_from_a_newer_crr": 3, "zombie_strikes": 4, "rescue_auto_open": "maybe",
+        "dashboard_port": 9000}
+    assert store.unset("zombie_strikes") is True
+    assert json.loads(path.read_text())["values"] == {
+        "key_from_a_newer_crr": 3, "rescue_auto_open": "maybe", "dashboard_port": 9000}
+    assert store.read() == {"dashboard_port": 9000}
+    with pytest.raises(cfg.ConfigError):
+        store.set("zombie_strikes", "x")        # the key being written is still checked
+
+
 def test_unset_reports_whether_anything_was_removed(tmp_path):
     store = ConfigOverridesStore(tmp_path)
     assert store.unset("zombie_strikes") is False

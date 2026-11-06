@@ -100,6 +100,15 @@ def _load_config() -> cfg.Config:
     breaking every command (including the shim hot path). The overlay
     warning is printed once per process.
     """
+    return _load_config_noting_toml()[0]
+
+
+def _load_config_noting_toml() -> tuple[cfg.Config, bool]:
+    """``_load_config()``, plus whether config.toml was set aside as bad.
+
+    One bad entry makes the whole file fall back to the defaults, so a caller
+    that reports origins (``crr config --effective``) must be able to say so.
+    """
     sd = state_dir.state_dir()
     toml_path = sd / "config.toml"
     store = ConfigOverridesStore(sd)
@@ -110,10 +119,10 @@ def _load_config() -> cfg.Config:
         print(f"crr: ignoring unreadable {overlay_path}; using config.toml and defaults",
               file=sys.stderr)
     try:
-        return cfg.Config(cfg.load_toml_overrides(toml_path), overlay=overlay)
+        return cfg.Config(cfg.load_toml_overrides(toml_path), overlay=overlay), False
     except (cfg.ConfigError, ValueError, OSError) as exc:
         print(f"crr: ignoring bad config {toml_path}: {exc}", file=sys.stderr)
-        return cfg.Config(overlay=overlay)
+        return cfg.Config(overlay=overlay), True
 
 
 def _credentials_path(config: cfg.Config) -> Path:
@@ -6859,7 +6868,17 @@ def _config_change(key: str, text: str | None) -> int:
                     xstore = exclusions.ExclusionStore(sd)
                     if xstore.is_degraded():
                         return _config_store_unreadable(sd / exclusions.FILENAME)
-                    xstore.write(value if verb == "set" else [])
+                    if verb == "set":
+                        # R23: `--effective` shows config.toml's list plus the
+                        # managed one, and the tray sends that list back. Keep
+                        # config.toml's entries out of the managed list (only
+                        # config.toml can remove them) and report the result.
+                        baseline = _load_config().get("discover_exclude_dirs")
+                        managed = xstore.write([d for d in exclusions.normalize(value)
+                                                if d not in baseline])
+                        value = exclusions.effective(baseline, managed)
+                    else:
+                        xstore.write([])
                 else:
                     sstore = settings.SettingsStore(sd)
                     if sstore.is_degraded():
@@ -6916,14 +6935,18 @@ def _cmd_config(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
     sd = state_dir.state_dir()
-    config = _load_config()
+    config, toml_bad = _load_config_noting_toml()
     owned, degraded_stores = _config_owned_overrides(config, sd)
+    if toml_bad:
+        # Set aside whole, so every key it set reads `default` here.
+        degraded_stores.insert(0, "config.toml")
     payload = cfg.effective_payload(
         config, owned=owned, degraded=bool(degraded_stores))
     # Validate our own output before emitting it, as `crr status --json` does.
     contracts.validate_config_payload(payload)
     if degraded_stores:
-        # A degraded overlay is already warned about by _load_config.
+        # A bad config.toml or overlay is already warned about by _load_config;
+        # this line says what that means for the origins.
         print("crr config: could not read " + ", ".join(degraded_stores)
               + "; some origins below may be wrong", file=sys.stderr)
     if args.json:
@@ -7113,7 +7136,9 @@ def _config_owned_overrides(config: cfg.Config, sd: Path) -> tuple[dict[str, Any
     owned: dict[str, Any] = {}
     unreadable: list[str] = []
     sstore = settings.SettingsStore(sd)
-    autokick = sstore.read_global_autokick()
+    # What the watchdog acts on (off while the store is unreadable), as the
+    # dashboard card shows it — not the raw stored value.
+    autokick = sstore.effective_global_autokick()
     if autokick is not None:
         owned["remote_control_autokick"] = autokick
     tunnel_fields = sstore.read_tunnel()

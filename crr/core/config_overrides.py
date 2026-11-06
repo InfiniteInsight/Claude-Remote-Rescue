@@ -55,11 +55,11 @@ class ConfigOverridesStore:
     def __init__(self, state_dir: Path) -> None:
         self._path = Path(state_dir) / FILENAME
 
-    def _read_checked(self) -> tuple[dict[str, Any], bool]:
-        """``(values, degraded)``. ``degraded`` is True only when the file
-        EXISTS but could not be understood, never for a missing file. Bad
-        individual values are dropped one at a time and do not degrade the
-        rest of the file."""
+    def _read_raw(self) -> tuple[dict[str, Any], bool]:
+        """``(values, degraded)`` with ``values`` exactly as stored, including
+        keys this build does not know and values it would refuse. ``degraded``
+        is True only when the file EXISTS but could not be understood, never
+        for a missing file."""
         if not self._path.exists():
             return {}, False
         try:
@@ -71,7 +71,14 @@ class ConfigOverridesStore:
         values = data.get("values", {})
         if not isinstance(values, dict):
             return {}, True
-        return {k: v for k, v in values.items() if _valid(k, v)}, False
+        return dict(values), False
+
+    def _read_checked(self) -> tuple[dict[str, Any], bool]:
+        """``(values, degraded)``: ``_read_raw`` with each value this build
+        cannot use dropped one at a time; a bad value does not degrade the
+        rest of the file."""
+        values, degraded = self._read_raw()
+        return {k: v for k, v in values.items() if _valid(k, v)}, degraded
 
     def read(self) -> dict[str, Any]:
         """The valid stored overrides, or ``{}`` when absent or unreadable."""
@@ -87,33 +94,43 @@ class ConfigOverridesStore:
             {"v": contracts.CONFIG_OVERRIDES_STORE_VERSION, "values": values},
         )
 
-    def _refuse_if_degraded(self) -> None:
-        """Never write over a file crr cannot fully read: it may hold values
-        a newer crr or the user's hand edit put there. Reads still degrade."""
-        if self.is_degraded():
+    def _raw_for_write(self) -> dict[str, Any]:
+        """The stored values to modify and write back.
+
+        Raw, not ``read()``'s filtered view: the file may hold keys a newer crr
+        wrote, or values this build refuses, and one writer must never discard
+        another's state (the settings store's ``_carry_*`` rule) — an older
+        crr after a rollback would otherwise delete them on its first write.
+
+        Never write over a file crr cannot read at all: it may hold values a
+        newer crr or the user's hand edit put there. Reads still degrade.
+        """
+        values, degraded = self._read_raw()
+        if degraded:
             raise cfg.ConfigError(
                 f"{self._path} cannot be read; fix or remove it before changing settings"
             )
+        return values
 
     def set(self, key: str, value: Any) -> None:
         """Store ``value`` for ``key``, or raise ``cfg.ConfigError`` for an
         unknown key, a mistyped value, a key owned by a dashboard store, or
-        an overlay file that cannot be read (see ``_refuse_if_degraded``)."""
+        an overlay file that cannot be read (see ``_raw_for_write``). Only
+        ``key`` is validated; every other stored value is kept as it is."""
         if key in OWNED_ELSEWHERE:
             raise cfg.ConfigError(
                 f"config '{key}' is managed from the dashboard, not the overlay"
             )
         cfg.check_value(key, value)
-        self._refuse_if_degraded()
-        values = self.read()
+        values = self._raw_for_write()
         values[key] = value
         self._write(values)
 
     def unset(self, key: str) -> bool:
-        """Remove ``key``; True when there was something to remove. Raises
-        ``cfg.ConfigError`` for an overlay file that cannot be read."""
-        self._refuse_if_degraded()
-        values = self.read()
+        """Remove ``key``; True when the file held it (even with a value this
+        build ignores). Raises ``cfg.ConfigError`` for an overlay file that
+        cannot be read."""
+        values = self._raw_for_write()
         if key not in values:
             return False
         del values[key]
