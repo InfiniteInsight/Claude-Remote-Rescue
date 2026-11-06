@@ -1,0 +1,31 @@
+{
+  "contract": 1,
+  "backend": "systemd",
+  "reason": "",
+  "state": "running",
+  "services": [
+    {
+      "name": "watchdog",
+      "unit": "crr-revive.timer",
+      "installed": true,
+      "enabled": true,
+      "active": true
+    },
+    {
+      "name": "dashboard",
+      "unit": "crr-web.service",
+      "installed": true,
+      "enabled": true,
+      "active": true
+    },
+    {
+      "name": "keep-awake",
+      "unit": "crr-awake.service",
+      "installed": true,
+      "enabled": true,
+      "active": true
+    }
+  ],
+  "dashboard_url": "http://127.0.0.1:8377/",
+  "dashboard_login": true
+}
