@@ -15,7 +15,6 @@ directories:
 
 files:
   - 'dist/**'
-  - 'assets/**'
   - 'package.json'
 
 win:

@@ -26,3 +26,10 @@ npm run package:win
 
 This writes `release/win-unpacked`. Copy that folder to Windows and run
 `CRR.exe` from the copy.
+
+## Verify on Windows
+
+CI can't drive a Windows GUI, so the Electron runtime behaviour (tray icon,
+window, the embedded dashboard, sleep and resume, login items) is checked by
+hand. [OPERATOR-VERIFY.md](OPERATOR-VERIFY.md) is the checklist, including how to
+install the build and start it hidden (`CRR.exe --hidden`).
