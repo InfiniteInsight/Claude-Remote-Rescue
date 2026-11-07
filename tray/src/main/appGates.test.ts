@@ -1,0 +1,268 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ServiceStatus } from './contracts.js';
+import type { CrrResult } from './crrClient.js';
+import type { PollState } from './poll.js';
+import {
+  dashboardActive,
+  qrGate,
+  qrStateAllows,
+  safeExternalUrl,
+  shouldForgetCrrPath,
+  SleepTracker,
+  type QrGateInput,
+} from './appGates.js';
+
+function service(dashboard: boolean): ServiceStatus {
+  return {
+    contract: 1,
+    backend: 'systemd',
+    reason: '',
+    state: 'running',
+    services: [
+      { name: 'watchdog', unit: 'w', installed: true, enabled: true, active: true },
+      { name: 'dashboard', unit: 'd', installed: true, enabled: true, active: dashboard },
+    ],
+    dashboard_url: 'http://127.0.0.1:8377/',
+    dashboard_login: true,
+  };
+}
+
+const RUNNING: PollState = { icon: 'running', statusLine: 'CRR running', service: service(true), wsl: 'running' };
+const DISTRO = 'Ubuntu-24.04';
+
+/** Everything qrGate needs, all saying yes; each test changes one input. */
+const OPEN: QrGateInput = {
+  running: [DISTRO],
+  distro: DISTRO,
+  held: false,
+  state: RUNNING,
+  suspended: false,
+};
+
+describe('qrGate', () => {
+  // test_qr_gate
+  it('is true only for a freshly listed distro, no live hold, a running state with the dashboard up, awake', () => {
+    expect(qrGate(OPEN)).toBe(true);
+  });
+
+  it('refuses when the last poll says running but a fresh listing no longer shows the distro (wsl --shutdown)', () => {
+    expect(qrGate({ ...OPEN, running: [] })).toBe(false);
+    expect(qrGate({ ...OPEN, running: ['docker-desktop'] })).toBe(false);
+  });
+
+  it('refuses when wsl.exe could not list running distros', () => {
+    expect(qrGate({ ...OPEN, running: undefined })).toBe(false);
+  });
+
+  it('refuses with no distro chosen, even if something is running', () => {
+    expect(qrGate({ ...OPEN, distro: undefined })).toBe(false);
+  });
+
+  it('refuses while a live read finds a hold, whatever the last poll said', () => {
+    expect(qrGate({ ...OPEN, held: true })).toBe(false);
+  });
+
+  it('refuses with no state (before the first poll, or cleared on suspend)', () => {
+    expect(qrGate({ ...OPEN, state: undefined })).toBe(false);
+  });
+
+  it('refuses while suspended, even with a pre-sleep state that says running', () => {
+    expect(qrGate({ ...OPEN, suspended: true })).toBe(false);
+  });
+
+  it('refuses unless the last poll says wsl is running', () => {
+    for (const wsl of ['missing', 'stopped', 'held'] as const) {
+      expect(qrGate({ ...OPEN, state: { ...RUNNING, wsl } }), wsl).toBe(false);
+    }
+  });
+
+  it('refuses when the dashboard unit is off or the service is unknown', () => {
+    expect(qrGate({ ...OPEN, state: { ...RUNNING, service: service(false) } })).toBe(false);
+    expect(qrGate({ ...OPEN, state: { ...RUNNING, service: undefined } })).toBe(false);
+  });
+});
+
+describe('qrStateAllows', () => {
+  it('is the part of qrGate that needs no wsl.exe call: the last poll and the sleep flag', () => {
+    expect(qrStateAllows(RUNNING, false)).toBe(true);
+    expect(qrStateAllows(undefined, false)).toBe(false);
+    expect(qrStateAllows(RUNNING, true)).toBe(false);
+    expect(qrStateAllows({ ...RUNNING, wsl: 'stopped' }, false)).toBe(false);
+    expect(qrStateAllows({ ...RUNNING, service: service(false) }, false)).toBe(false);
+  });
+});
+
+describe('dashboardActive', () => {
+  it('reads the dashboard unit', () => {
+    expect(dashboardActive(RUNNING)).toBe(true);
+    expect(dashboardActive({ ...RUNNING, service: service(false) })).toBe(false);
+    expect(dashboardActive(undefined)).toBe(false);
+  });
+});
+
+describe('SleepTracker', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // test_sleep_epochs
+  it('uses every poll while awake', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('drops a poll that lands during sleep, before any resume, and stays suspended', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    t.suspend();
+    expect(t.suspended).toBe(true);
+    expect(t.pollLanded()).toBe('drop');
+    expect(t.suspended).toBe(true);
+  });
+
+  it('drops a poll that began before the resume and asks for one more; uses the next and wakes', () => {
+    const t = new SleepTracker();
+    t.pollStarted(); // under way when the machine slept
+    t.suspend();
+    t.resume();
+    expect(t.pollLanded()).toBe('repoll');
+    expect(t.suspended).toBe(true);
+    t.pollStarted(); // the repoll, after the resume
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('asks for at most one repoll per resume', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    t.suspend();
+    t.resume();
+    expect(t.pollLanded()).toBe('repoll');
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    // Later polls are ordinary.
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+
+  // test_sleep_epochs_ignore_the_clock
+  it('a backward clock step after resume cannot make a fresh poll look stale (no back-to-back polls)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-06T12:00:00Z'));
+    const t = new SleepTracker();
+    t.suspend();
+    t.resume();
+    vi.setSystemTime(new Date('2026-11-06T11:00:00Z')); // NTP steps the clock back an hour
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('a second sleep before the first fresh poll still drops the older polls', () => {
+    const t = new SleepTracker();
+    t.suspend();
+    t.resume();
+    t.pollStarted(); // after the first resume...
+    t.suspend(); // ...but the machine slept again before it landed
+    t.resume();
+    expect(t.pollLanded()).toBe('repoll');
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+
+  // test_user_action_stands_in_for_a_missed_resume
+  it('treats a user action while still asleep as the resume Windows never sent', () => {
+    const t = new SleepTracker();
+    t.suspend(); // and no resume ever arrives
+    t.pollStarted(); // a poll began before the user acted (pre-sleep state)
+    expect(t.userActed()).toBe(true);
+    // That poll is still not trusted...
+    expect(t.pollLanded()).toBe('repoll');
+    // ...but the next one is, and the app is unfrozen.
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('a user action while awake changes nothing', () => {
+    const t = new SleepTracker();
+    expect(t.userActed()).toBe(false);
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+
+  // test_poll_fresh_marks
+  it('tells whether the latest poll began after a mark, for a refresh that must see its own effect', () => {
+    const t = new SleepTracker();
+    t.pollStarted(); // under way when the user clicked
+    const mark = t.mark();
+    expect(t.polledSince(mark)).toBe(false);
+    t.pollStarted();
+    expect(t.polledSince(mark)).toBe(true);
+  });
+
+  it('a mark does not disturb sleep bookkeeping', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    t.suspend();
+    t.resume();
+    t.mark();
+    expect(t.pollLanded()).toBe('repoll');
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+});
+
+describe('safeExternalUrl', () => {
+  // test_safe_external_url
+  it('passes http and https through, in canonical form', () => {
+    expect(safeExternalUrl('https://claude.ai/oauth?x=1')).toBe('https://claude.ai/oauth?x=1');
+    expect(safeExternalUrl('http://127.0.0.1:8377')).toBe('http://127.0.0.1:8377/');
+    expect(safeExternalUrl('HTTPS://Example.COM/a b')).toBe('https://example.com/a%20b');
+  });
+
+  it('refuses every other scheme, which the shell would hand to a local handler', () => {
+    for (const raw of [
+      'file:///C:/Windows/System32/calc.exe',
+      'javascript:alert(1)',
+      'ms-settings:privacy',
+      'search-ms:query=x',
+      '\\\\server\\share\\x.exe',
+      'data:text/html,<b>x</b>',
+      'vbscript:msgbox',
+    ]) {
+      expect(safeExternalUrl(raw), raw).toBeUndefined();
+    }
+  });
+
+  it('refuses something that is not a URL', () => {
+    expect(safeExternalUrl('')).toBeUndefined();
+    expect(safeExternalUrl('not a url')).toBeUndefined();
+    expect(safeExternalUrl('//example.com/')).toBeUndefined();
+  });
+});
+
+describe('shouldForgetCrrPath', () => {
+  const fail = (error: string, mismatch = false): CrrResult<never> => ({ ok: false, error, exit: 127, mismatch });
+
+  it('forgets the path when the launcher is gone', () => {
+    expect(shouldForgetCrrPath(fail('/home/e/.local/state/crr/app/bin/crr: No such file or directory'))).toBe(true);
+    expect(shouldForgetCrrPath(fail('crr: command not found'))).toBe(true);
+    expect(shouldForgetCrrPath(fail('exec: not found'))).toBe(true);
+  });
+
+  it('keeps the path for other failures', () => {
+    expect(shouldForgetCrrPath(fail('boom'))).toBe(false);
+    expect(shouldForgetCrrPath(fail('timed out'))).toBe(false);
+  });
+
+  it('keeps the path for a version mismatch, even one whose text says not found', () => {
+    expect(shouldForgetCrrPath(fail('invalid choice: service (not found)', true))).toBe(false);
+  });
+
+  it('keeps the path after a success', () => {
+    expect(shouldForgetCrrPath({ ok: true, value: 'not found' })).toBe(false);
+  });
+});

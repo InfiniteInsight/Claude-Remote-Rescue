@@ -156,6 +156,13 @@ macOS is unit-tested but not yet hardware-verified — if you're trying it there
 Additionally if your mac is using FileVault it will not be able to automatically 
 rescue your sessions from a reboot.
 
+### Windows tray app (optional)
+
+On Windows with WSL, [`tray/`](tray/) holds an Electron tray app that shows crr's
+state in the system tray, embeds the dashboard, and starts and stops crr in
+WSL without ever waking it. It is built separately from the Python package;
+see [tray/README.md](tray/README.md).
+
 ### Reaching the dashboard on your tailnet
 
 crr binds the dashboard to **loopback only** (`127.0.0.1:8377`); it is never

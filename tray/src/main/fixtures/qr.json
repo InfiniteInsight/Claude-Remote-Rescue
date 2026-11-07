@@ -1,0 +1,9 @@
+{
+  "contract": 1,
+  "provider": "tailscale",
+  "url": "https://example-host.tailnet.ts.net/",
+  "loopback_url": "http://127.0.0.1:8377/",
+  "hint": null,
+  "dashboard_reachable": true,
+  "degraded": false
+}

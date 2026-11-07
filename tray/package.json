@@ -1,0 +1,27 @@
+{
+  "name": "crr-tray",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows tray app for Claude-Remote-Rescue (crr)",
+  "main": "dist/main/main.cjs",
+  "scripts": {
+    "build": "node esbuild.js",
+    "start": "npm run build && electron .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "package:win": "node esbuild.js --production && electron-builder --win --x64"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/qrcode": "^1.5.5",
+    "electron": "^32.0.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

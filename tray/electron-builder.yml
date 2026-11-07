@@ -1,0 +1,30 @@
+# @license
+# Copyright 2025 Qwen Team
+# SPDX-License-Identifier: Apache-2.0
+# Modified for Claude-Remote-Rescue (crr), 2026.
+#
+# Windows unpacked-directory target for the crr tray app.
+# Deferred (not in scope for this task): nsis installer, code signing,
+# publish/auto-update.
+
+appId: 'io.github.infiniteinsight.crr-tray'
+productName: 'CRR'
+
+directories:
+  output: 'release'
+
+files:
+  - 'dist/**'
+  - 'package.json'
+
+# The Apache-2.0 text and the notice for the code adapted from the Qwen
+# launcher ship next to CRR.exe.
+extraFiles:
+  - from: 'LICENSE-APACHE'
+    to: 'LICENSE-APACHE'
+  - from: 'NOTICE'
+    to: 'NOTICE'
+
+win:
+  target:
+    - 'dir'

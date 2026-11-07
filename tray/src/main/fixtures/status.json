@@ -1,0 +1,47 @@
+{
+  "contract": 19,
+  "sessions": [
+    {
+      "session_id": "4f97110a-7ba7-4a41-b3eb-22722d18ed4e",
+      "state": "live",
+      "running_elsewhere": false,
+      "conflict": false
+    },
+    {
+      "session_id": "3649e7fd-12a6-4a7d-93b3-7bc8a04a4588",
+      "state": "live",
+      "running_elsewhere": false,
+      "conflict": false
+    },
+    {
+      "session_id": "9961dafd-5a50-4d9c-aa5e-9cbb8e318a94",
+      "state": "parked",
+      "running_elsewhere": false,
+      "conflict": false
+    },
+    {
+      "session_id": "e02569aa-c0f8-42d2-b6ca-5a7457492c7c",
+      "state": "parked",
+      "running_elsewhere": false,
+      "conflict": false
+    },
+    {
+      "session_id": "2e6e30e3-8619-44fe-93f1-dd792bcf7fb0",
+      "state": "parked",
+      "running_elsewhere": false,
+      "conflict": false
+    },
+    {
+      "session_id": "f369d2b3-5ed8-4fc8-9b8d-0f6ac1a3e5fe",
+      "state": "parked",
+      "running_elsewhere": false,
+      "conflict": false
+    },
+    {
+      "session_id": "9437d243-cbdd-43ae-b309-78d78a1fd89a",
+      "state": "live",
+      "running_elsewhere": false,
+      "conflict": false
+    }
+  ]
+}

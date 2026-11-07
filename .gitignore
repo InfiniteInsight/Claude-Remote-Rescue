@@ -29,3 +29,7 @@ venv/
 
 # git worktrees for parallel agent sessions — checkouts, not project content
 .claude/worktrees/
+
+# crr tray app (tray/)
+tray/node_modules/
+tray/release/
