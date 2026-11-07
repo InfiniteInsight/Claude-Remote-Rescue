@@ -23,6 +23,8 @@ export interface ControlView {
   startStop: { label: string; enabled: boolean };
   repair: { visible: boolean; enabled: boolean };
   phone: Phone;
+  /** Whether the dashboard asks for a passphrase (crr's `dashboard_login`); unknown without a service answer. */
+  passphrase: 'set' | 'not set' | 'unknown';
   login: 'on' | 'off' | 'unknown';
   /** The Sessions tab's panel, under (or instead of) the dashboard view. */
   sessions: SessionsPanel;
@@ -54,6 +56,10 @@ const ROWS: ReadonlyArray<{ name: RowName; label: string }> = [
 
 const DEGRADED = 'the tunnel answer may be out of date';
 
+/** The banner while crr's holder holds WSL down: Start stays enabled, so say what it does. */
+export const HELD_BANNER =
+  'crr holder is holding WSL down. Start CRR boots WSL anyway, but the hold stays — run crr holder resume to lift it.';
+
 function dotFor(service: ServiceStatus | undefined, name: string): Dot {
   const unit = service?.services.find((u) => u.name === name);
   if (unit === undefined || !unit.installed) return 'missing';
@@ -80,7 +86,10 @@ function phoneFor(input: ControlViewInput, dashboardOn: boolean): Phone {
   return { kind: 'none', text: 'No phone link is available' };
 }
 
-/** Failed action, then the crr path error, then the wsl-down / stopped line; degraded is appended. */
+/**
+ * Failed action, then the crr path error, then the hold (what Start does
+ * under it), then the wsl-down / stopped line; degraded is appended.
+ */
 function bannerFor(input: ControlViewInput): string | undefined {
   const { state, lastAction, crrPath } = input;
   let main: string | undefined;
@@ -88,6 +97,8 @@ function bannerFor(input: ControlViewInput): string | undefined {
     main = lastAction.message;
   } else if (crrPath !== undefined && !crrPath.ok) {
     main = `crr not found in ${input.distro ?? 'WSL'}: ${crrPath.error ?? 'unknown error'}`;
+  } else if (state.wsl === 'held') {
+    main = HELD_BANNER;
   } else if (state.icon === 'wsl-down' || state.icon === 'stopped') {
     main = state.statusLine;
   }
@@ -123,6 +134,7 @@ export function controlView(input: ControlViewInput): ControlView {
       enabled: !busy,
     },
     phone: phoneFor(input, dashboardOn),
+    passphrase: service === undefined ? 'unknown' : service.dashboard_login ? 'set' : 'not set',
     login: input.login === undefined ? 'unknown' : input.login ? 'on' : 'off',
     sessions: sessionsPanel(state, input.sessionsShown ?? false),
     distros: input.distros,

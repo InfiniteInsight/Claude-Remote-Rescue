@@ -116,6 +116,15 @@ describe('controlView rows and buttons', () => {
     expect(v.rows.map((r) => r.dot)).toEqual(['missing', 'missing', 'missing']);
   });
 
+  // test_control_view_passphrase
+  it('says whether a dashboard passphrase is set, from crr, and unknown without a service', () => {
+    expect(view({ state: state({ service: service({ dashboard_login: true }) }) }).passphrase).toBe('set');
+    expect(view({ state: state({ service: service({ dashboard_login: false }) }) }).passphrase).toBe('not set');
+    expect(view({ state: state({ icon: 'wsl-down', statusLine: 'WSL is stopped', wsl: 'stopped' }) }).passphrase).toBe(
+      'unknown',
+    );
+  });
+
   it('passes the distro choice and login state through', () => {
     expect(view({ distros: ['A', 'B'], distro: 'B' })).toMatchObject({ distros: ['A', 'B'], distro: 'B' });
     expect(view().login).toBe('unknown');
@@ -196,6 +205,22 @@ describe('controlView banner', () => {
     );
   });
 
+  // test_control_view_held_banner
+  it('while held, says Start boots WSL anyway and how to lift the hold, and keeps Start enabled', () => {
+    const held = state({
+      icon: 'wsl-down',
+      statusLine: 'crr holder is holding WSL down — not checking crr',
+      wsl: 'held',
+    });
+    const v = view({ state: held });
+    expect(v.banner).toBe(
+      'crr holder is holding WSL down. Start CRR boots WSL anyway, but the hold stays — run crr holder resume to lift it.',
+    );
+    expect(v.startStop).toEqual({ label: 'Start CRR', enabled: true });
+    // A failed action still comes first.
+    expect(view({ state: held, lastAction: failed }).banner).toBe(failed.message);
+  });
+
   it('does not report a running status line as a problem', () => {
     expect(view({ state: state({ icon: 'attention', statusLine: 'CRR running · 3 sessions, 1 crashed', service: service() }) }).banner).toBeUndefined();
   });
@@ -203,15 +228,38 @@ describe('controlView banner', () => {
 
 describe('controlView sessions panel', () => {
   // test_control_view_sessions_panel
-  it('is stopped while the dashboard unit is off or WSL is not running', () => {
-    const off = state({ service: service({}, [unit('watchdog', true), unit('dashboard', false)]) });
-    expect(view({ state: off }).sessions).toEqual({ kind: 'stopped' });
+  it('is stopped while the dashboard unit is off or WSL is not running, giving the status line as the reason', () => {
+    const off = state({
+      icon: 'stopped',
+      statusLine: 'CRR stopped',
+      service: service({}, [unit('watchdog', true), unit('dashboard', false)]),
+    });
+    expect(view({ state: off }).sessions).toEqual({ kind: 'stopped', text: 'CRR stopped' });
     for (const wsl of ['missing', 'stopped', 'held'] as const) {
-      expect(view({ state: state({ wsl }) }).sessions).toEqual({ kind: 'stopped' });
+      const statusLine = `line for ${wsl}`;
+      expect(view({ state: state({ wsl, statusLine }) }).sessions).toEqual({ kind: 'stopped', text: statusLine });
       // Even a state still carrying a service that says the dashboard is up.
-      expect(view({ state: state({ wsl, service: service() }) }).sessions).toEqual({ kind: 'stopped' });
+      expect(view({ state: state({ wsl, statusLine, service: service() }) }).sessions).toEqual({
+        kind: 'stopped',
+        text: statusLine,
+      });
     }
-    expect(view({ state: NOT_INSTALLED }).sessions).toEqual({ kind: 'stopped' });
+    expect(view({ state: NOT_INSTALLED }).sessions).toEqual({ kind: 'stopped', text: 'CRR is not installed' });
+  });
+
+  // test_sessions_panel_says_why
+  it('says WSL is stopped or held, not that CRR is stopped', () => {
+    const down = state({ icon: 'wsl-down', statusLine: 'WSL is stopped', wsl: 'stopped' });
+    expect(view({ state: down }).sessions).toEqual({ kind: 'stopped', text: 'WSL is stopped' });
+    const held = state({
+      icon: 'wsl-down',
+      statusLine: 'crr holder is holding WSL down — not checking crr',
+      wsl: 'held',
+    });
+    expect(view({ state: held }).sessions).toEqual({
+      kind: 'stopped',
+      text: 'crr holder is holding WSL down — not checking crr',
+    });
   });
 
   it('says it is loading while the dashboard is up but its view is not on screen yet', () => {

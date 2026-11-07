@@ -108,7 +108,8 @@ export function sessionsViewUrl(input: SessionsGateInput): string | undefined {
 
 /** What the renderer's Sessions panel shows under (or instead of) the dashboard view. */
 export type SessionsPanel =
-  | { kind: 'stopped' }
+  /** `text` is the status line: why there is no dashboard (WSL stopped, held, CRR stopped...). */
+  | { kind: 'stopped'; text: string }
   | { kind: 'loading'; text: string }
   | { kind: 'refused'; text: string }
   | { kind: 'showing' };
@@ -118,9 +119,13 @@ export type SessionsPanel =
  * view is currently drawn over the panel. A dashboard address the app refuses
  * is said plainly, so the tab never claims to be loading something it never
  * will. The URL is crr's own string, for the renderer to show as text only.
+ * With no dashboard, the panel gives the status line as the reason, so a
+ * stopped or held WSL is never reported as "CRR is stopped".
  */
 export function sessionsPanel(state: PollState, viewOnScreen: boolean): SessionsPanel {
-  if (state.wsl !== 'running' || !dashboardActive(state)) return { kind: 'stopped' };
+  if (state.wsl !== 'running' || !dashboardActive(state)) {
+    return { kind: 'stopped', text: state.statusLine };
+  }
   const url = state.service?.dashboard_url ?? '';
   if (dashboardOrigin(url) === undefined) {
     return { kind: 'refused', text: `crr reported a dashboard address the tray won't load: ${url}` };

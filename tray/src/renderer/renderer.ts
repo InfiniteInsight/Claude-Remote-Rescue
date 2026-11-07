@@ -23,12 +23,19 @@ const qrImage = el<HTMLImageElement>('qr-image');
 const phoneUrl = el<HTMLParagraphElement>('phone-url');
 const phoneUrlText = el<HTMLElement>('phone-url-text');
 const phoneText = el<HTMLParagraphElement>('phone-text');
+const passphrase = el<HTMLParagraphElement>('passphrase');
 const login = el<HTMLParagraphElement>('login');
 const sessionsStopped = el<HTMLDivElement>('sessions-stopped');
+const sessionsStoppedText = el<HTMLParagraphElement>('sessions-stopped-text');
 const sessionsMessage = el<HTMLParagraphElement>('sessions-message');
 const sessionsStart = el<HTMLButtonElement>('sessions-start');
 
 const DOT_TEXT = { on: 'running', off: 'stopped', missing: 'not installed' } as const;
+const PASSPHRASE_TEXT = {
+  set: 'Dashboard passphrase: set',
+  'not set': 'Dashboard passphrase: not set',
+  unknown: 'Dashboard passphrase: unknown',
+} as const;
 const LOGIN_TEXT = {
   on: 'Start at login: on (change it from the tray menu)',
   off: 'Start at login: off (change it from the tray menu)',
@@ -110,6 +117,7 @@ function render(view: ControlView): void {
   show(phoneUrl, phone.kind === 'qr');
   show(phoneText, phone.kind !== 'qr');
 
+  passphrase.textContent = PASSPHRASE_TEXT[view.passphrase];
   login.textContent = LOGIN_TEXT[view.login];
 
   // While the dashboard is up, main draws crr's own page over this panel (a
@@ -117,6 +125,8 @@ function render(view: ControlView): void {
   const panel = view.sessions;
   const message = panel.kind === 'loading' || panel.kind === 'refused' ? panel.text : '';
   show(sessionsStopped, panel.kind === 'stopped');
+  // Why there is no dashboard: the status line (WSL stopped, held, CRR stopped...).
+  sessionsStoppedText.textContent = panel.kind === 'stopped' ? panel.text : '';
   // crr's own string (a refused URL): text only, never markup.
   sessionsMessage.textContent = message;
   sessionsMessage.classList.toggle('muted', panel.kind === 'loading');
