@@ -34,6 +34,8 @@ export interface TrayOptions {
   /** The image for each icon state (a real image: an empty tray icon is invisible). */
   image: (icon: TrayIcon) => Electron.NativeImage;
   host: TrayHost;
+  /** The tooltip for a status line (the status line plus which build this is). */
+  tooltip: (statusLine: string) => string;
   /** Omit when a login item cannot be registered (an unpackaged run). */
   loginItem?: LoginItemControl;
 }
@@ -70,9 +72,10 @@ export function createTray(opts: TrayOptions): TrayHandle {
       loginItemEnabled: opts.loginItem?.get() ?? false,
       busy,
     });
-    if (state.statusLine !== shownTooltip) {
-      shownTooltip = state.statusLine;
-      tray.setToolTip(state.statusLine);
+    const tooltip = opts.tooltip(state.statusLine);
+    if (tooltip !== shownTooltip) {
+      shownTooltip = tooltip;
+      tray.setToolTip(tooltip);
     }
     const signature = menuSignature(items);
     if (signature === shownSignature) return;

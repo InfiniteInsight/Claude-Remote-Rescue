@@ -36,6 +36,7 @@ import {
   shouldForgetCrrPath,
   SleepTracker,
 } from './appGates.js';
+import { trayTooltip, windowTitle } from './buildInfo.js';
 import { controlView, type ControlView } from './controlView.js';
 import type { QrInfo } from './contracts.js';
 import { CrrClient, resolveCrrPath, type CrrResult } from './crrClient.js';
@@ -474,6 +475,7 @@ function installTray(): void {
   try {
     tray = createTray({
       image: trayImage,
+      tooltip: (statusLine) => trayTooltip(statusLine, app.getVersion()),
       host: {
         show: showWindow,
         openDashboard: openDashboardInBrowser,
@@ -510,13 +512,17 @@ function createWindow(): BrowserWindow {
     height: bounds?.height ?? 640,
     x: bounds?.x,
     y: bounds?.y,
-    title: 'CRR',
+    // Which build this is: there is no console or log to ask.
+    title: windowTitle(app.getVersion()),
     autoHideMenuBar: true,
     // The login-item launch carries `--hidden`: an autostart must not drop a
     // window on the desktop every time the machine boots.
     show: false,
     webPreferences: mainWindowWebPreferences(join(__dirname, '../preload/preload.cjs')),
   });
+
+  // The page's own <title> would replace the build in the title bar.
+  win.on('page-title-updated', (event) => event.preventDefault());
 
   // The control window shows one local page and nothing else.
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

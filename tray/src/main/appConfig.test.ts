@@ -1,9 +1,3 @@
-/**
- * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
- * Modified for Claude-Remote-Rescue (crr), 2026.
- */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

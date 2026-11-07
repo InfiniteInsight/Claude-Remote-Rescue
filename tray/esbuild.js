@@ -17,17 +17,16 @@ const watch = process.argv.includes('--watch');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Which commit this bundle came from (issue #210).
+ * Which commit this bundle came from, and when it was built.
  *
- * The install is a hand copy of `win-unpacked` over the installed folder, so
- * nothing at the install names its commit: an app built on 10-12 sat under a fix
- * landed 10-27 and the phone's repeat open requests died in the bug that fix
- * removed, with nothing on the host saying the running code predated it.
+ * The tray app is installed by copying `win-unpacked` into a folder by hand, so
+ * nothing in the install names its commit; `buildInfo.ts` shows this stamp in
+ * the window title and the tray tooltip instead. Adapted from the Qwen launcher.
  *
  * `define` rather than a generated module, so the identity cannot be edited
  * separately from the build that produced it. Outside a checkout (or with git
- * refusing) it stamps `unknown`, and `buildInfo.ts` prints that rather than
- * staying silent, because "which build is this" must never be unanswerable.
+ * refusing) it stamps `unknown`, and `buildInfo.ts` shows that rather than
+ * staying silent.
  */
 function readBuildStamp() {
   let commit = 'unknown';
@@ -52,8 +51,8 @@ const stamp = readBuildStamp();
 // so an object would land bare in `typeof` and conditional positions. Strings are
 // the ordinary case and read unambiguously wherever they are substituted.
 const BUILD_DEFINE = {
-  __LAUNCHER_BUILD_COMMIT__: JSON.stringify(stamp.commit),
-  __LAUNCHER_BUILD_AT__: JSON.stringify(stamp.builtAt),
+  __CRR_BUILD_COMMIT__: JSON.stringify(stamp.commit),
+  __CRR_BUILD_AT__: JSON.stringify(stamp.builtAt),
 };
 
 /**

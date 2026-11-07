@@ -1,7 +1,22 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ * Modified for Claude-Remote-Rescue (crr), 2026.
+ */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { buildStamp, formatBuiltAt, trayTooltip } from './buildInfo.js';
+import {
+  buildLabel,
+  buildStamp,
+  formatBuiltAt,
+  TOOLTIP_MAX,
+  trayTooltip,
+  windowTitle,
+} from './buildInfo.js';
+
+const STAMP = { commit: '84795e1', builtAt: '2026-11-03T19:40:07.000Z' };
 
 describe('formatBuiltAt', () => {
   it('renders the ISO build time in UTC', () => {
@@ -11,7 +26,7 @@ describe('formatBuiltAt', () => {
   });
 
   it('renders a non-UTC offset as UTC rather than relabelling the wall clock', () => {
-    // 21:40 at +02:00 is 19:40Z: the tooltip has to say the same instant
+    // 21:40 at +02:00 is 19:40Z: the title has to say the same instant
     // regardless of the timezone of whoever ran the build.
     expect(formatBuiltAt('2026-11-03T21:40:07+02:00')).toBe(
       '2026-11-03 19:40 UTC',
@@ -28,28 +43,46 @@ describe('buildStamp', () => {
   it('falls back to unknown instead of throwing when the bundle is unstamped', () => {
     // This is the unbundled case: vitest loads buildInfo.ts directly, so the
     // esbuild `define` never ran and the identifiers do not exist. A bare read
-    // would be a ReferenceError at import and every tray call would throw.
+    // would be a ReferenceError at import.
     expect(buildStamp()).toEqual({ commit: 'unknown', builtAt: 'unknown' });
   });
 });
 
-describe('trayTooltip', () => {
-  it('names the commit and the build time', () => {
-    const tip = trayTooltip('CRR', {
-      commit: '84795e1',
-      builtAt: '2026-11-03T19:40:07.000Z',
-    });
-    expect(tip).toContain('CRR');
-    expect(tip).toContain('84795e1');
-    expect(tip).toContain('2026-11-03 19:40 UTC');
+describe('buildLabel and windowTitle', () => {
+  // test_build_label
+  it('names the version and the commit', () => {
+    expect(buildLabel('0.1.0', STAMP)).toBe('CRR 0.1.0 (84795e1)');
   });
 
-  it('says unknown when it cannot tell, rather than showing only the name', () => {
-    // The whole point of the stamp is that "which build is this" was once
-    // unanswerable on an installed app. Silence would recreate the bug.
-    expect(
-      trayTooltip('CRR', { commit: 'unknown', builtAt: 'unknown' }),
-    ).toBe('CRR · unknown · built unknown');
+  it('the window title adds the build time', () => {
+    expect(windowTitle('0.1.0', STAMP)).toBe('CRR 0.1.0 (84795e1) · built 2026-11-03 19:40 UTC');
+  });
+
+  it('says unknown when it cannot tell, rather than leaving the build out', () => {
+    const unknown = { commit: 'unknown', builtAt: 'unknown' };
+    expect(buildLabel('0.1.0', unknown)).toBe('CRR 0.1.0 (unknown)');
+    expect(windowTitle('0.1.0', unknown)).toBe('CRR 0.1.0 (unknown) · built unknown');
+  });
+});
+
+describe('trayTooltip', () => {
+  // test_tray_tooltip
+  it('is the status line, then the build', () => {
+    expect(trayTooltip('CRR running · 3 sessions, 0 crashed', '0.1.0', STAMP)).toBe(
+      'CRR running · 3 sessions, 0 crashed\nCRR 0.1.0 (84795e1)',
+    );
+  });
+
+  it('fits Windows\' tooltip limit by shortening the status line, never the build', () => {
+    const long = `CRR unreachable: ${'x'.repeat(200)}`;
+    const tip = trayTooltip(long, '0.1.0', STAMP);
+    expect(tip.length).toBeLessThanOrEqual(TOOLTIP_MAX);
+    expect(tip.endsWith('…\nCRR 0.1.0 (84795e1)')).toBe(true);
+    expect(tip.startsWith('CRR unreachable: xxx')).toBe(true);
+  });
+
+  it('is 127 characters at most, what a Windows notify icon holds', () => {
+    expect(TOOLTIP_MAX).toBe(127);
   });
 });
 
@@ -64,17 +97,16 @@ describe('the build stamps the bundle that reads it', () => {
 
   it('defines the stamp once, naming both fields', () => {
     const define = block('BUILD_DEFINE');
-    expect(define).toContain('__LAUNCHER_BUILD_COMMIT__');
-    expect(define).toContain('__LAUNCHER_BUILD_AT__');
+    expect(define).toContain('__CRR_BUILD_COMMIT__');
+    expect(define).toContain('__CRR_BUILD_AT__');
   });
 
   it('stamps the main context, which replaces rather than merges', () => {
     // nodeBuildOptions carries the stamp, and mainImportMetaShim (which defines
     // `import.meta.url` for main.ts) spreads AFTER it, so its `define` REPLACES
-    // the shared one instead of adding to it. The stamp has to be restated there:
-    // main.cjs is the only bundle that calls trayTooltip, and dropping it there
-    // builds green, runs fine, and tells you nothing about which build is
-    // installed, which is the #210 blind spot exactly as it was.
+    // the shared one instead of adding to it. The stamp has to be restated
+    // there: main.cjs is the only bundle that reads it, and dropping it there
+    // builds green, runs fine, and shows "unknown" for every build.
     const shared = esbuildSrc.match(/const nodeBuildOptions = \{[^}]*\}/)?.[0];
     expect(shared).toContain('...BUILD_DEFINE');
     const mainShim = block('mainImportMetaShim');
