@@ -1,31 +1,20 @@
-import { session, WebContentsView, type BrowserWindow } from 'electron';
+import { WebContentsView, type BrowserWindow } from 'electron';
 import {
-  DASHBOARD_PARTITION,
-  navigationGuards,
   sessionsViewBounds,
   sessionsViewController,
   sessionsWebPreferences,
   type SessionsHost,
   type SessionsViewPort,
 } from './sessionsView.js';
+import { wireSessionsView } from './sessionsWiring.js';
 
 /**
  * Binds the pure Sessions view (sessionsView.ts) to a real `WebContentsView`
  * in `win`. Kept apart from sessionsView.ts because importing Electron at
  * runtime fails outside the Electron binary, and the unit tests run without it.
+ * Every guard on the view's contents and session lives in sessionsWiring.ts,
+ * where it is tested.
  */
-
-/** Chromium's ERR_ABORTED: a load superseded or cancelled (by us or by a newer load), not a failure. */
-const ERR_ABORTED = -3;
-
-/** Lock the dashboard's partition down. Idempotent; must run before anything loads in it. */
-function lockDownSession(): void {
-  const ses = session.fromPartition(DASHBOARD_PARTITION);
-  // Camera, microphone, notifications, clipboard-read, external protocols (`openExternal`)...: all no.
-  ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  ses.setPermissionCheckHandler(() => false);
-  ses.setDevicePermissionHandler(() => false);
-}
 
 export interface SessionsViewHost extends SessionsHost {
   /** The view went on or off screen (including on its own, after a failed load). */
@@ -36,8 +25,6 @@ export function attachSessionsView(
   win: BrowserWindow,
   host: SessionsViewHost,
 ): { show(dashboardUrl: string | undefined): void; hide(): void } {
-  lockDownSession();
-
   let view: WebContentsView | undefined;
   let onScreen = false;
 
@@ -54,30 +41,13 @@ export function attachSessionsView(
     open(origin) {
       const old = view;
       const v = new WebContentsView({ webPreferences: sessionsWebPreferences() });
-      const wc = v.webContents;
-      const guards = navigationGuards(origin, host);
-      wc.on('will-navigate', (e) => guards.willNavigate(e));
-      wc.on('will-redirect', (e) => guards.willRedirect(e));
-      wc.on('will-frame-navigate', (e) => guards.willFrameNavigate(e));
-      wc.setWindowOpenHandler((details) => guards.windowOpen(details));
-
+      view = v;
+      if (old !== undefined) close(old);
       // A failure is left for the next poll to retry: it re-checks the
       // dashboard is up before anything loads again. Events from a view
       // already replaced are ignored.
-      const failed = (): void => {
+      wireSessionsView(v.webContents, origin, host, () => {
         if (view === v) controller.loadFailed();
-      };
-      wc.on('did-fail-load', (_e, errorCode, _description, _url, isMainFrame) => {
-        if (isMainFrame && errorCode !== ERR_ABORTED) failed();
-      });
-      wc.on('render-process-gone', failed);
-      wc.on('destroyed', failed);
-
-      view = v;
-      if (old !== undefined) close(old);
-      // Only crr's loopback origin is ever loaded, never the raw reported URL.
-      wc.loadURL(`${origin}/`).catch(() => {
-        // Reported through did-fail-load; nothing to throw here.
       });
     },
     attach() {
