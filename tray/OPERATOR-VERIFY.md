@@ -12,14 +12,24 @@ steps and an expected result.
 ## Before you start
 
 **Steps marked ⚠ end every WSL process, including tmux and Claude sessions.**
-That is `wsl --shutdown`, and anything that runs it for you (`crr holder ...
---shutdown`). Save your work first, and run those steps only when the
-sessions are disposable or you trust crr's revival (the watchdog normally
-revives them; it is not guaranteed). Checks 5, 6, 7 and 21 are the ⚠ ones. Check
-3 kills a session's `claude`, so it uses a throwaway session.
+Three things do that:
 
-A check that fails becomes an issue or a fix PR. The two known gaps are marked
-"Known gap" and are not failures.
+- `wsl --shutdown`, and anything that runs it for you (`crr holder ...
+  --shutdown`);
+- any hold, even without `--shutdown`: `crr holder pause` or `stop` releases
+  the holder that keeps WSL up, so about 60 s after the last WSL terminal
+  closes, WSL idles out on its own. The tray app doesn't keep it up while a
+  hold is in place, by design. End every check that sets a hold with
+  `crr holder resume`;
+- signing out of Windows or restarting it.
+
+Save your work first, and run those steps only when the sessions are
+disposable or you trust crr's revival (the watchdog normally revives them; it
+is not guaranteed). Checks 5, 6, 7, 21, 22 and 34 are the ⚠ ones. Check 3
+kills a session's `claude`, so it uses a throwaway session.
+
+A check that fails becomes an issue or a fix PR. The three known gaps are
+marked "Known gap" and are not failures.
 
 ## Setup
 
@@ -67,8 +77,11 @@ Run `wsl -l --running` from a Windows terminal.
 
 1. **The icon appears.** Start `CRR.exe` with crr running. A tray icon appears
    in the notification area (check the overflow chevron). Hover it: the tooltip
-   is the status line. *Expected:* the "running" icon, and a status line like
-   `CRR running · N sessions, M crashed`.
+   is the status line, then the build on a second line. *Expected:* the
+   "running" icon, a status line like `CRR running · N sessions, M crashed`,
+   and `CRR <version> (<commit>)` under it. Open the window: its title bar
+   reads `CRR <version> (<commit>) · built <date> <time> UTC`, the same
+   commit.
 
 2. **Icon follows `crr service stop` and `start`.** Run `crr service stop`.
    Within one poll (about 5 to 7 s) the icon becomes "stopped" and the status
@@ -81,8 +94,9 @@ Run `wsl -l --running` from a Windows terminal.
    (start one in a new tmux window), not one you care about. Make it crash by
    killing that session's `claude` and let the watchdog notice, or use a
    session that is already crashed or running elsewhere. *Expected:* the "needs attention"
-   icon and `N sessions, M crashed` with M at least 1. After the session is
-   revived or dismissed the icon returns to "running".
+   icon and `N sessions, M crashed · K need attention` with K at least 1 (M
+   too, for a crash). After the session is revived or dismissed the icon
+   returns to "running" and the `need attention` part goes.
 
 4. **Menu content and order.** Right-click the icon. *Expected, top to bottom:*
    a greyed status line; Open CRR; Open dashboard in browser (greyed while the
@@ -98,7 +112,8 @@ Run `wsl -l --running` from a Windows terminal.
    `wsl -l --running` **stays empty for 2 minutes** with the app open. The app
    never boots the distro back. (If the crr boot holder is installed it may
    re-arm WSL itself within a minute: pause it first with `crr holder pause 10
-   --shutdown`, see check 6, which has the same ⚠.)
+   --shutdown`, see check 6, which has the same ⚠, and clean up afterwards
+   with `crr holder resume`.)
 
 6. **No `wsl.exe -d` call under `crr holder pause 10`.** ⚠ `--shutdown` ends
    every WSL process, tmux and Claude sessions included; crr's watchdog
@@ -108,15 +123,21 @@ Run `wsl -l --running` from a Windows terminal.
    stays empty, and the status line says `WSL is stopped`. The only `wsl.exe`
    calls are the plain `-l --running -q` list. After about 10 minutes the
    holder re-arms and the icon recovers by itself. If WSL is still up while a
-   hold is in place (pause without `--shutdown`), the status line says `crr
-   holder is holding WSL down — not checking crr` and again no `-d` call
-   appears.
+   hold is in place (pause without `--shutdown`, which is ⚠ too: WSL idles
+   out about 60 s after the last WSL terminal closes), the status line says
+   `crr holder is holding WSL down — not checking crr`, the Control banner
+   says `crr holder is holding WSL down. Start CRR boots WSL anyway, but the
+   hold stays — run crr holder resume to lift it.`, and again no `-d` call
+   appears. Clean up with `crr holder resume` rather than waiting out the
+   pause.
 
-7. **A hold survives sleep and resume (stop until reboot).** Run `crr holder
-   stop --until-reboot`. Adding `--shutdown` also takes WSL down, but ⚠ that
-   ends every WSL process, tmux and Claude sessions included; leave it off
-   if the sessions matter (the hold is then shown as the hold line, not `WSL is
-   stopped`). Confirm the
+7. **A hold survives sleep and resume (stop until reboot).** ⚠ Any hold
+   lets WSL idle out about 60 s after the last WSL terminal closes, which
+   ends every WSL process, tmux and Claude sessions included; `--shutdown`
+   ends them at once. See Before you start. Run `crr holder stop
+   --until-reboot` (keep a WSL terminal open if you want WSL to stay up, and
+   the hold is then shown as the hold line, not `WSL is stopped`), or add
+   `--shutdown` to take WSL down now. Confirm the
    status line shows the hold or `WSL is stopped`. Now sleep the machine and
    wake it. *Expected:* after wake the tray still shows the hold (or `WSL is
    stopped`), `wsl -l --running` stays empty if you shut WSL down, and Process
@@ -128,9 +149,12 @@ Run `wsl -l --running` from a Windows terminal.
 ## C. Control tab
 
 8. **Start CRR boots WSL and starts the units.** With WSL down (after check 5
-   or 6, or after letting WSL idle out), click Start CRR in the tray menu (or on
-   the Control tab). *Expected:* WSL boots, the watchdog, dashboard and
-   keep-awake units start, and the icon goes "running". Whether the sessions
+   or 6; WSL can't idle out on its own while the app polls, because each
+   poll's crr call keeps it up), click Start CRR in the tray menu (or on the
+   Control tab). *Expected:* WSL boots, the watchdog, dashboard and
+   keep-awake units start, and the icon goes "running". If a hold is still in
+   place, Start works all the same but the hold stays: the status line keeps
+   showing the hold until you run `crr holder resume`. Whether the sessions
    come back is crr's revival, not this check; tmux survival is check 9.
 
 9. **Stop CRR stops the units, tmux sessions survive.** With a few live
@@ -145,6 +169,8 @@ Run `wsl -l --running` from a Windows terminal.
       --user stop` and watch its dot follow);
     - Repair appears only when the units are not installed, and then installs them;
     - Refresh forces a poll;
+    - `Dashboard passphrase: set` or `not set` matches whether the dashboard
+      asks for a passphrase in the browser;
     - the WSL distro picker lists `wsl -l -q`, and choosing another distro
       persists across an app restart and boots that distro (an explicit
       action, so this is allowed to start WSL).
@@ -180,8 +206,8 @@ Run `wsl -l --running` from a Windows terminal.
     leave the dashboard either.
 
 17. **Stopped state.** Stop CRR from the tray. *Expected:* within one poll
-    (about 5 to 7 s) the Sessions tab shows "CRR is stopped" with a Start CRR
-    button. Start CRR brings the dashboard back.
+    (about 5 to 7 s) the Sessions tab shows the status line, `CRR stopped`,
+    with a Start CRR button. Start CRR brings the dashboard back.
 
 18. **Loading, not stuck.** Stop crr-web (`systemctl --user stop crr-web.service`),
     then start it, while on the Sessions tab. *Expected:* while the page can't
@@ -199,12 +225,16 @@ Run `wsl -l --running` from a Windows terminal.
 
 21. **Never wakes WSL.** ⚠ Ends every WSL process, tmux and Claude sessions
     included; see Before you start. With the Sessions tab open, run
-    `wsl --shutdown`. *Expected:* the tab shows "CRR is stopped", and `wsl -l --running` stays
-    empty for 2 minutes with the window open on Sessions.
+    `wsl --shutdown`. *Expected:* the tab shows `WSL is stopped`, not "CRR
+    stopped", and `wsl -l --running` stays empty for 2 minutes with the
+    window open on Sessions.
 
-22. **Hold takes the dashboard off screen.** Run `crr holder pause 10` while on
-    Sessions. *Expected:* the dashboard goes off screen at the next poll and no
-    `wsl.exe -d` call follows.
+22. **Hold takes the dashboard off screen.** ⚠ The hold lets WSL idle out
+    about 60 s after the last WSL terminal closes, ending every WSL process;
+    see Before you start. Run `crr holder pause 10` while on Sessions.
+    *Expected:* the dashboard goes off screen at the next poll, the tab shows
+    `crr holder is holding WSL down — not checking crr`, and no `wsl.exe -d`
+    call follows. Clean up with `crr holder resume`.
 
 23. **Sleep and resume on Sessions.** Sleep and resume the machine while on
     Sessions. *Expected:* the dashboard is off screen until a fresh poll
@@ -244,13 +274,17 @@ Run `wsl -l --running` from a Windows terminal.
     `navigator.serial.requestPort()`. *Expected:* each rejects, with no picker
     shown and no device chosen, even with a Bluetooth device nearby.
 
-31. **No client certificate.** *Covered by unit tests; no home test.* The
-    dashboard view answers `select-client-certificate` by cancelling, so it
-    never presents a certificate (`sessionsWiring.test.ts`, the `select-client-certificate` handler). A real check needs a TLS server that requests a client
-    certificate, a certificate installed in the Windows store, and a page that
-    fetches a subresource from that server. The dashboard is plain http on
-    loopback and loads no such resource, so there is nothing to drive without
-    building a test page and server just for this.
+31. **Known gap: client certificates and downloads are not verified in
+    Electron.** The dashboard view answers `select-client-certificate` by
+    cancelling, so it should never present a certificate, and cancels every
+    `will-download`. The unit tests (`sessionsWiring.test.ts`) prove both
+    handlers are registered before anything loads and that they cancel;
+    nobody has verified Electron's runtime behaviour. A real certificate check
+    needs a TLS server that requests a client certificate, a certificate in
+    the Windows store, and a page that fetches a subresource from that server;
+    a download check needs a page that starts one. The dashboard is plain http
+    on loopback and does neither, so there is nothing to drive without
+    building a test page and server just for this. Not a failure.
 
 ## F. Background behaviour
 
@@ -266,7 +300,9 @@ Run `wsl -l --running` from a Windows terminal.
     no black console window ever flashes. All `wsl.exe` calls use
     `windowsHide`.
 
-34. **Start at login launches hidden.** Tick Start at login in the tray menu
+34. **Start at login launches hidden.** ⚠ Signing out or restarting ends
+    every WSL process, tmux and Claude sessions included; see Before you
+    start. Tick Start at login in the tray menu
     (it exists in the packaged build only). Check Task Manager's Startup apps
     tab for CRR. Sign out and back in, or restart. *Expected:* CRR starts with
     the tray icon and **no window**. Run `CRR.exe --hidden` by hand for the same
