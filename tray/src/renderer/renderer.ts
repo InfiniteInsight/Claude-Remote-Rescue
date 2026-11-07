@@ -112,7 +112,8 @@ function render(view: ControlView): void {
 
   login.textContent = LOGIN_TEXT[view.login];
 
-  // Task 8 puts the dashboard in this tab; until then it only reflects state.
+  // While the dashboard is up, main draws crr's own page over this panel (a
+  // WebContentsView below the tab bar); this is what shows when it is not.
   const dashboardOn = view.rows.some((r) => r.name === 'dashboard' && r.dot === 'on');
   show(sessionsStopped, !dashboardOn);
   show(sessionsRunning, dashboardOn);

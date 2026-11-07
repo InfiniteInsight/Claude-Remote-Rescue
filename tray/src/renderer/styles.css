@@ -10,6 +10,8 @@
   --missing: #9e9e9e;
   --banner-bg: #fdecea;
   --banner-fg: #7a1c14;
+  /* The Sessions view is laid out below this; it must equal TAB_BAR_HEIGHT in src/main/sessionsView.ts. */
+  --tab-bar-height: 40px;
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
 }
 
@@ -40,12 +42,19 @@ body {
 
 .tabs {
   display: flex;
+  box-sizing: border-box;
+  height: var(--tab-bar-height);
   border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
 }
 
 .tab-button {
   flex: 1;
-  padding: 0.75rem;
+  box-sizing: border-box;
+  height: 100%;
+  padding: 0 0.75rem;
   border: none;
   border-bottom: 2px solid transparent;
   background: transparent;

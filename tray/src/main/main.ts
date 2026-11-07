@@ -35,6 +35,8 @@ import { CrrClient, resolveCrrPath, type CrrResult } from './crrClient.js';
 import { holds, machineBootSeconds, readHold } from './hold.js';
 import { Poller, type PollState, type TrayIcon } from './poll.js';
 import { summarizeError } from './summarizeError.js';
+import { sessionsViewUrl } from './sessionsView.js';
+import { attachSessionsView } from './sessionsViewElectron.js';
 import { createTray, type TrayHandle } from './tray.js';
 import { trayIconPng } from './trayIcon.js';
 import { mainWindowWebPreferences } from './windowPrefs.js';
@@ -67,6 +69,8 @@ const launchFlags = parseLaunchFlags(process.argv.slice(1));
 // unreferenced one would be collected, taking the icon with it.
 let tray: TrayHandle | undefined;
 let mainWindow: BrowserWindow | undefined;
+/** The Sessions tab's dashboard view in `mainWindow`. */
+let sessionsView: ReturnType<typeof attachSessionsView> | undefined;
 let isQuitting = false;
 
 // ---- App state -------------------------------------------------------------
@@ -225,7 +229,37 @@ function onState(s: PollState): void {
     qrImage = undefined;
   }
   refreshUi();
+  updateSessionsView();
   if (windowOnControlTab() && qr === undefined) void refreshQr();
+}
+
+// ---- The Sessions tab ------------------------------------------------------
+
+/**
+ * Put the dashboard on screen, or take it off. It shows only on the Sessions
+ * tab of a visible window, and only when the latest fresh poll found the
+ * distro running, not held, with the dashboard up (sessionsViewUrl). Loading
+ * the loopback page never runs wsl.exe.
+ */
+function updateSessionsView(): void {
+  const win = mainWindow;
+  const view = sessionsView;
+  if (!win || win.isDestroyed() || !view) return;
+  view.show(
+    sessionsViewUrl({
+      tab: activeTab,
+      state: lastState,
+      suspended,
+      windowShown: win.isVisible() && !win.isMinimized(),
+    }),
+  );
+}
+
+/** A link out of the dashboard: http(s) only (navigationGuards), to the default browser. */
+function openExternalFromDashboard(url: string): void {
+  shell.openExternal(url).catch((e: unknown) => {
+    console.warn(`could not open ${url}: ${errorMessage(e)}`);
+  });
 }
 
 // ---- The phone link --------------------------------------------------------
@@ -356,8 +390,8 @@ const ipcActions: IpcActions = {
     await refreshQr();
   },
   showTab: async (tab) => {
-    // The Sessions tab's dashboard view is Task 8's; here the tab is only recorded.
     activeTab = tab;
+    updateSessionsView();
     if (tab === 'control') void refreshQr();
   },
 };
@@ -447,8 +481,16 @@ function createWindow(): BrowserWindow {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event) => event.preventDefault());
 
+  sessionsView = attachSessionsView(win, { openExternal: openExternalFromDashboard });
+
   void win.loadFile(join(__dirname, '../renderer/index.html'));
-  win.webContents.on('did-finish-load', () => pushView());
+  win.webContents.on('did-finish-load', () => {
+    // A (re)loaded page starts on the Control tab, so the dashboard must not
+    // stay drawn over it.
+    activeTab = 'control';
+    updateSessionsView();
+    pushView();
+  });
 
   registerIpc(win, ipcActions);
 
@@ -461,11 +503,15 @@ function createWindow(): BrowserWindow {
 
   // The window is back on screen: refresh the distro list and the phone link.
   const onShown = (): void => {
+    updateSessionsView();
     void refreshDistros();
     void refreshQr();
   };
   win.on('show', onShown);
   win.on('restore', onShown);
+  // Put away: take the dashboard off screen with it.
+  win.on('hide', updateSessionsView);
+  win.on('minimize', updateSessionsView);
 
   // With a tray, closing the window is "put it away", not "leave".
   win.on('close', (event) => {
@@ -477,7 +523,10 @@ function createWindow(): BrowserWindow {
     win.hide();
   });
   win.on('closed', () => {
-    if (mainWindow === win) mainWindow = undefined;
+    if (mainWindow === win) {
+      mainWindow = undefined;
+      sessionsView = undefined;
+    }
   });
 
   win.show();
@@ -535,6 +584,7 @@ if (!app.requestSingleInstanceLock()) {
       resumedAtMs = undefined;
       lastState = undefined;
       poller.pause();
+      updateSessionsView();
     });
     powerMonitor.on('resume', () => {
       resumedAtMs = Date.now();
