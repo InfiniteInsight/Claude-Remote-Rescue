@@ -9,6 +9,15 @@ against fakes) is unit-tested; everything below is checked by hand. The format
 follows the Qwen launcher's `OPERATOR-VERIFY.md`: numbered checks, each with
 steps and an expected result.
 
+## Before you start
+
+**Steps marked ⚠ end every WSL process, including tmux and Claude sessions.**
+That is `wsl --shutdown`, and anything that runs it for you (`crr holder ...
+--shutdown`). Save your work first, and run those steps only when the
+sessions are disposable or you trust crr's revival (the watchdog normally
+revives them; it is not guaranteed). Checks 5, 6, 7 and 21 are the ⚠ ones. Check
+3 kills a session's `claude`, so it uses a throwaway session.
+
 A check that fails becomes an issue or a fix PR. The two known gaps are marked
 "Known gap" and are not failures.
 
@@ -19,20 +28,27 @@ for the Qwen launcher), in `tray/`:
 
 ```
 npm install
-npm run package:win
+WINEPREFIX=/path/to/fresh/dir WINEDEBUG=-all xvfb-run -a npm run package:win
 ```
 
+It uses a fresh wine prefix because a broken `~/.wine` can fail the build
+(`could not load kernel32.dll`); `~/.wine` is left alone. Pick any empty
+directory for `WINEPREFIX`; wine creates the prefix there on first use.
+
 This writes `tray/release/win-unpacked/CRR.exe` plus its support files. The
-folder is gitignored. If wine's default prefix is broken (`could not load
-kernel32.dll`), point `WINEPREFIX` at a fresh directory and run the build under
-`xvfb-run -a`.
+folder is gitignored.
 
 **Install.** Copy the whole `tray/release/win-unpacked` folder to a Windows
 folder, for example `C:\Tools\CRR\`, and run `CRR.exe` from the copy. Don't run
 it from the `\\wsl$` path: login items and single-instance behave differently
 there. Nothing else is installed or registered; deleting the folder removes the
-app (plus its small settings file, `crr-tray.json`, in the app's data folder
-under `%APPDATA%`).
+app, except its data folder (next paragraph).
+
+**Full reset.** Quit the app, then delete its userData folder,
+`%APPDATA%\crr-tray` (the folder that holds `crr-tray.json`). That clears the
+window bounds, the chosen distro and the dashboard login, which lives in the
+`persist:crr-dashboard` partition inside that folder. Do this before a check
+that needs a first-run or logged-out state.
 
 **Start it hidden.** `CRR.exe --hidden` starts in the tray with no window. The
 Start at login item registers exactly this.
@@ -58,11 +74,13 @@ Run `wsl -l --running` from a Windows terminal.
    Within one poll (about 5 to 7 s) the icon becomes "stopped" and the status
    line says `CRR stopped`. Run `crr service start`. *Expected:* the icon goes
    back to "running" within a poll. Keep-awake being off on its own never turns
-   the icon to "stopped".
+   the icon to "stopped". **tmux sessions survive `crr service stop`:** run
+   `tmux ls` before and after, and the list is the same both times.
 
-3. **A crashed session shows "needs attention".** Make a session crash (kill
-   its tmux session's `claude` and let the watchdog notice, or use a session
-   that is crashed or running elsewhere). *Expected:* the "needs attention"
+3. **A crashed session shows "needs attention".** Use a throwaway session
+   (start one in a new tmux window), not one you care about. Make it crash by
+   killing that session's `claude` and let the watchdog notice, or use a
+   session that is already crashed or running elsewhere. *Expected:* the "needs attention"
    icon and `N sessions, M crashed` with M at least 1. After the session is
    revived or dismissed the icon returns to "running".
 
@@ -73,17 +91,19 @@ Run `wsl -l --running` from a Windows terminal.
 
 ## B. Never wake WSL
 
-5. **After `wsl --shutdown`.** With the app open (window on the Control tab),
+5. **After `wsl --shutdown`.** ⚠ Ends every WSL process, tmux and Claude
+   sessions included; see Before you start. With the app open (window on the Control tab),
    run `wsl --shutdown` in a Windows terminal. *Expected:* the icon becomes
    "WSL down" and the status line says `WSL is stopped` within a poll.
    `wsl -l --running` **stays empty for 2 minutes** with the app open. The app
    never boots the distro back. (If the crr boot holder is installed it may
    re-arm WSL itself within a minute: pause it first with `crr holder pause 10
-   --shutdown`, see check 6.)
+   --shutdown`, see check 6, which has the same ⚠.)
 
-6. **No `wsl.exe -d` call under `crr holder pause 10`.** Run `crr holder pause
-   10 --shutdown` (this ends every WSL session, they are revived when WSL next
-   starts). With Process Monitor running, watch for 2 minutes. *Expected:* no
+6. **No `wsl.exe -d` call under `crr holder pause 10`.** ⚠ `--shutdown` ends
+   every WSL process, tmux and Claude sessions included; crr's watchdog
+   normally revives them when WSL next starts; confirm with `crr status`. Run
+   `crr holder pause 10 --shutdown`. With Process Monitor running, watch for 2 minutes. *Expected:* no
    `wsl.exe` process with `-d` in its command line starts, `wsl -l --running`
    stays empty, and the status line says `WSL is stopped`. The only `wsl.exe`
    calls are the plain `-l --running -q` list. After about 10 minutes the
@@ -93,7 +113,10 @@ Run `wsl -l --running` from a Windows terminal.
    appears.
 
 7. **A hold survives sleep and resume (stop until reboot).** Run `crr holder
-   stop --until-reboot` (add `--shutdown` to also take WSL down). Confirm the
+   stop --until-reboot`. Adding `--shutdown` also takes WSL down, but ⚠ that
+   ends every WSL process, tmux and Claude sessions included; leave it off
+   if the sessions matter (the hold is then shown as the hold line, not `WSL is
+   stopped`). Confirm the
    status line shows the hold or `WSL is stopped`. Now sleep the machine and
    wake it. *Expected:* after wake the tray still shows the hold (or `WSL is
    stopped`), `wsl -l --running` stays empty if you shut WSL down, and Process
@@ -104,15 +127,17 @@ Run `wsl -l --running` from a Windows terminal.
 
 ## C. Control tab
 
-8. **Start CRR boots WSL and starts the units.** Take WSL down (check 5), then
-   click Start CRR in the tray menu (or on the Control tab). *Expected:* WSL
-   boots, the watchdog, dashboard and keep-awake units start, and the icon goes
-   "running". tmux sessions that were running are untouched.
+8. **Start CRR boots WSL and starts the units.** With WSL down (after check 5
+   or 6, or after letting WSL idle out), click Start CRR in the tray menu (or on
+   the Control tab). *Expected:* WSL boots, the watchdog, dashboard and
+   keep-awake units start, and the icon goes "running". Whether the sessions
+   come back is crr's revival, not this check; tmux survival is check 9.
 
-9. **Stop CRR stops the units, tmux sessions survive.** Click Stop CRR with a
-   few live sessions. *Expected:* the rows go to stopped, the icon goes to
-   "stopped", and `tmux ls` in WSL still lists every session. The button
-   becomes Start CRR.
+9. **Stop CRR stops the units, tmux sessions survive.** With a few live
+   sessions, run `tmux ls` in WSL and note the list. Click Stop CRR, then run
+   `tmux ls` again. *Expected:* the rows go to stopped, the icon goes to
+   "stopped", and `tmux ls` lists exactly the same sessions as before. The
+   button becomes Start CRR.
 
 10. **Rows, picker, Repair and Refresh.** On the Control tab:
     - the rows Watchdog (revives sessions), Dashboard and Keep-awake each show
@@ -172,8 +197,9 @@ Run `wsl -l --running` from a Windows terminal.
     dashboard on the new port, and Alt+Left or the mouse back button don't
     return to the old port.
 
-21. **Never wakes WSL.** With the Sessions tab open, run `wsl --shutdown`.
-    *Expected:* the tab shows "CRR is stopped", and `wsl -l --running` stays
+21. **Never wakes WSL.** ⚠ Ends every WSL process, tmux and Claude sessions
+    included; see Before you start. With the Sessions tab open, run
+    `wsl --shutdown`. *Expected:* the tab shows "CRR is stopped", and `wsl -l --running` stays
     empty for 2 minutes with the window open on Sessions.
 
 22. **Hold takes the dashboard off screen.** Run `crr holder pause 10` while on

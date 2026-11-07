@@ -21,8 +21,12 @@ npm start           # build and launch; run this from Windows
 From WSL with wine installed, the same way the Qwen launcher is built:
 
 ```
-npm run package:win
+WINEPREFIX=/path/to/fresh/dir WINEDEBUG=-all xvfb-run -a npm run package:win
 ```
+
+It uses a fresh wine prefix because a broken `~/.wine` can fail the build
+(`could not load kernel32.dll`); `~/.wine` is left alone. Use any empty
+directory for `WINEPREFIX`.
 
 This writes `release/win-unpacked`. Copy that folder to Windows and run
 `CRR.exe` from the copy.
