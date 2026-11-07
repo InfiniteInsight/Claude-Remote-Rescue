@@ -70,6 +70,15 @@ export function shouldQuitOnWindowClosed(opts: {
   return !opts.trayAvailable;
 }
 
+/**
+ * Make a string safe as a menu label. Electron treats a single `&` as a
+ * mnemonic marker on Windows (it drops the `&` and underlines the next letter),
+ * and the status line can carry crr's own error text.
+ */
+export function escapeMenuLabel(s: string): string {
+  return s.replaceAll('&', '&&');
+}
+
 /** Labels for the tray menu. */
 export const TRAY_LABELS = {
   open: 'Open CRR',

@@ -13,6 +13,7 @@ import {
   shouldHideInsteadOfClose,
   shouldQuitOnWindowClosed,
   TRAY_LABELS,
+  escapeMenuLabel,
   menuSignature,
   trayMenuSpec,
   type MenuItemId,
@@ -294,5 +295,18 @@ describe('menuSignature', () => {
     const a = menuSignature([{ id: 'open', label: 'a|b', enabled: true }]);
     const b = menuSignature([{ id: 'open', label: 'a', enabled: true }]);
     expect(a).not.toBe(b);
+  });
+});
+
+describe('escapeMenuLabel', () => {
+  it('doubles an ampersand, which Electron would read as a mnemonic on Windows', () => {
+    expect(escapeMenuLabel('crr not found: R&D failed')).toBe('crr not found: R&&D failed');
+    expect(escapeMenuLabel('a && b')).toBe('a &&&& b');
+  });
+
+  it('leaves a label with no ampersand alone', () => {
+    expect(escapeMenuLabel('CRR running · 3 sessions, 1 crashed')).toBe(
+      'CRR running · 3 sessions, 1 crashed',
+    );
   });
 });

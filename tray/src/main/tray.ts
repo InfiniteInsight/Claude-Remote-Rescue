@@ -18,7 +18,7 @@
  * pure `trayMenuSpec`; this file only turns that into Electron objects.
  */
 import { Menu, Tray } from 'electron';
-import { menuSignature, trayMenuSpec, type MenuItemId } from './appLifecycle.js';
+import { escapeMenuLabel, menuSignature, trayMenuSpec, type MenuItemId } from './appLifecycle.js';
 import type { PollState, TrayIcon } from './poll.js';
 
 /** What the tray can ask the app to do. */
@@ -95,7 +95,7 @@ export function createTray(opts: TrayOptions): TrayHandle {
     shownSignature = signature;
     const template: Electron.MenuItemConstructorOptions[] = items.map((item) => {
       if (item.id === 'status') {
-        return { label: item.label, enabled: false };
+        return { label: escapeMenuLabel(item.label), enabled: false };
       }
       if (item.id === 'loginItem') {
         const control = opts.loginItem;

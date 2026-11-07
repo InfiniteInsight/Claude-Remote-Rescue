@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'"
+    />
+    <title>CRR</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="tabs" role="tablist">
+      <button type="button" class="tab-button active" id="tab-control" data-tab="control" role="tab" aria-selected="true" aria-controls="panel-control">Control</button>
+      <button type="button" class="tab-button" id="tab-sessions" data-tab="sessions" role="tab" aria-selected="false" aria-controls="panel-sessions">Sessions</button>
+    </header>
+
+    <main>
+      <section id="panel-control" class="panel active" role="tabpanel" aria-labelledby="tab-control">
+        <div id="banner" class="banner hidden" role="alert"></div>
+
+        <ul id="rows" class="rows"></ul>
+
+        <div class="buttons">
+          <button type="button" id="start-stop" disabled>Start CRR</button>
+          <button type="button" id="repair" class="hidden">Repair</button>
+          <button type="button" id="refresh" class="secondary">Refresh</button>
+        </div>
+
+        <div class="field-row">
+          <label for="distro">WSL distro</label>
+          <select id="distro"></select>
+        </div>
+
+        <section class="phone" aria-live="polite">
+          <h2>Phone</h2>
+          <img id="qr-image" class="hidden" alt="QR code for the phone link" width="240" height="240" />
+          <p id="phone-url" class="hidden"><code id="phone-url-text"></code></p>
+          <p id="phone-text" class="muted"></p>
+        </section>
+
+        <p id="login" class="muted"></p>
+      </section>
+
+      <section id="panel-sessions" class="panel" role="tabpanel" aria-labelledby="tab-sessions">
+        <div id="sessions-stopped" class="empty hidden">
+          <p>CRR is stopped</p>
+          <button type="button" id="sessions-start">Start CRR</button>
+        </div>
+        <p id="sessions-running" class="muted hidden">Loading the dashboard…</p>
+      </section>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

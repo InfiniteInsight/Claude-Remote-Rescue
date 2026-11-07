@@ -81,8 +81,8 @@ jobs:
 
   # Windows tray app (tray/): typecheck and unit-test the pure logic on
   # ubuntu. Electron runtime behaviour is covered by tray/OPERATOR-VERIFY.md,
-  # run by hand on Windows. The Electron binary is not needed here, and the
-  # esbuild bundle is not built until the entry points exist (Task 7).
+  # run by hand on Windows. The Electron binary is not needed here; the esbuild
+  # bundle is built so a broken import or entry point fails CI.
   tray:
     runs-on: ubuntu-latest
     defaults:
@@ -98,3 +98,4 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run build
