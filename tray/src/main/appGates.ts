@@ -12,22 +12,41 @@ export function dashboardActive(state: PollState | undefined): boolean {
 }
 
 /**
- * May the phone-link refresh run? `crr qr` is a `wsl.exe -d` call, so it must
- * never act on a state that could be old: there has to be a state, it has to say
- * the distro is running with the dashboard up, no hold may be in place, and the
- * machine must not be asleep or just waking (before a fresh poll has landed).
+ * The part of `qrGate` that needs no `wsl.exe` call: the latest poll says the
+ * distro is running with the dashboard up, and the machine is not asleep or
+ * just waking (before a fresh poll has landed). Checked first, so a phone-link
+ * refresh that cannot pass never even lists the running distros.
  */
-export function canRefreshQr(
-  state: PollState | undefined,
-  suspended: boolean,
-  held: boolean,
-): boolean {
+export function qrStateAllows(state: PollState | undefined, suspended: boolean): boolean {
+  return state !== undefined && state.wsl === 'running' && dashboardActive(state) && !suspended;
+}
+
+export interface QrGateInput {
+  /** `wsl.exe -l --running -q`, read just before the call; undefined when wsl.exe could not run. */
+  running: string[] | undefined;
+  distro: string | undefined;
+  /** crr's hold, read just before the call. */
+  held: boolean;
+  /** The latest poll state, which can be several seconds old. */
+  state: PollState | undefined;
+  suspended: boolean;
+}
+
+/**
+ * May the phone-link refresh run `crr qr`? That is a `wsl.exe -d` call, and the
+ * latest poll can be several seconds old: a `wsl --shutdown` since then would
+ * be undone by it. So besides what the poll said, a fresh listing taken just
+ * before the call must show the distro running and a live read must find no
+ * hold. Listing running distros and reading the hold never boot anything.
+ */
+export function qrGate(input: QrGateInput): boolean {
+  const { running, distro, held, state, suspended } = input;
   return (
-    state !== undefined &&
-    state.wsl === 'running' &&
-    dashboardActive(state) &&
-    !suspended &&
-    !held
+    distro !== undefined &&
+    running !== undefined &&
+    running.includes(distro) &&
+    !held &&
+    qrStateAllows(state, suspended)
   );
 }
 

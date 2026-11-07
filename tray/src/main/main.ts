@@ -29,7 +29,13 @@ import {
   shouldQuitOnWindowClosed,
   TRAY_LABELS,
 } from './appLifecycle.js';
-import { canRefreshQr, dashboardActive, shouldForgetCrrPath, stateIsFresh } from './appGates.js';
+import {
+  dashboardActive,
+  qrGate,
+  qrStateAllows,
+  shouldForgetCrrPath,
+  stateIsFresh,
+} from './appGates.js';
 import { controlView, type ControlView } from './controlView.js';
 import type { QrInfo } from './contracts.js';
 import { CrrClient, resolveCrrPath, type CrrResult } from './crrClient.js';
@@ -108,6 +114,15 @@ function errorMessage(e: unknown): string {
 
 function isHeld(): boolean {
   return holds(readHold(), Date.now() / 1000, machineBootSeconds());
+}
+
+/** `isHeld()`, reading a failure as a hold: when in doubt, do not touch WSL. */
+function heldNow(): boolean {
+  try {
+    return isHeld();
+  } catch {
+    return true;
+  }
 }
 
 // ---- crr client ------------------------------------------------------------
@@ -283,15 +298,23 @@ function windowOnControlTab(): boolean {
 
 /**
  * Ask crr for the phone link. Never wakes WSL: it runs only when the latest
- * poll found the distro running with the dashboard up, no hold is in place and
- * the machine is not (just back from) sleeping.
+ * poll found the distro running with the dashboard up, the machine is not
+ * (just back from) sleeping, and, read just before the call, the distro is
+ * still listed as running and no hold is in place (qrGate).
  */
 async function refreshQr(): Promise<void> {
   if (qrBusy) return;
-  if (!canRefreshQr(lastState, suspended, isHeld())) return;
+  // Without a running state there is nothing to ask, so skip even the listing.
+  if (!qrStateAllows(lastState, suspended)) return;
   const d = distro;
   qrBusy = true;
   try {
+    // The latest poll can be seconds old, and `crr qr` is a `-d` call: a
+    // `wsl --shutdown` since then would be undone by it. Listing running
+    // distros and reading the hold never boot anything.
+    const running = await runningDistros();
+    if (distro !== d) return;
+    if (!qrGate({ running, distro: d, held: heldNow(), state: lastState, suspended })) return;
     const client = await getClient();
     if (!(client instanceof CrrClient)) return;
     const result = await client.qr();

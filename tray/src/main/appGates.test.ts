@@ -3,10 +3,12 @@ import type { ServiceStatus } from './contracts.js';
 import type { CrrResult } from './crrClient.js';
 import type { PollState } from './poll.js';
 import {
-  canRefreshQr,
   dashboardActive,
+  qrGate,
+  qrStateAllows,
   shouldForgetCrrPath,
   stateIsFresh,
+  type QrGateInput,
 } from './appGates.js';
 
 function service(dashboard: boolean): ServiceStatus {
@@ -25,33 +27,67 @@ function service(dashboard: boolean): ServiceStatus {
 }
 
 const RUNNING: PollState = { icon: 'running', statusLine: 'CRR running', service: service(true), wsl: 'running' };
+const DISTRO = 'Ubuntu-24.04';
 
-describe('canRefreshQr', () => {
-  it('is true only for a running distro with the dashboard up, not suspended, not held', () => {
-    expect(canRefreshQr(RUNNING, false, false)).toBe(true);
+/** Everything qrGate needs, all saying yes; each test changes one input. */
+const OPEN: QrGateInput = {
+  running: [DISTRO],
+  distro: DISTRO,
+  held: false,
+  state: RUNNING,
+  suspended: false,
+};
+
+describe('qrGate', () => {
+  // test_qr_gate
+  it('is true only for a freshly listed distro, no live hold, a running state with the dashboard up, awake', () => {
+    expect(qrGate(OPEN)).toBe(true);
   });
 
-  it('is false with no state (before the first poll, or cleared on suspend)', () => {
-    expect(canRefreshQr(undefined, false, false)).toBe(false);
+  it('refuses when the last poll says running but a fresh listing no longer shows the distro (wsl --shutdown)', () => {
+    expect(qrGate({ ...OPEN, running: [] })).toBe(false);
+    expect(qrGate({ ...OPEN, running: ['docker-desktop'] })).toBe(false);
   });
 
-  it('is false while suspended, even with a pre-sleep state that says running', () => {
-    expect(canRefreshQr(RUNNING, true, false)).toBe(false);
+  it('refuses when wsl.exe could not list running distros', () => {
+    expect(qrGate({ ...OPEN, running: undefined })).toBe(false);
   });
 
-  it('is false while a hold is in place', () => {
-    expect(canRefreshQr(RUNNING, false, true)).toBe(false);
+  it('refuses with no distro chosen, even if something is running', () => {
+    expect(qrGate({ ...OPEN, distro: undefined })).toBe(false);
   });
 
-  it('is false unless wsl is running', () => {
+  it('refuses while a live read finds a hold, whatever the last poll said', () => {
+    expect(qrGate({ ...OPEN, held: true })).toBe(false);
+  });
+
+  it('refuses with no state (before the first poll, or cleared on suspend)', () => {
+    expect(qrGate({ ...OPEN, state: undefined })).toBe(false);
+  });
+
+  it('refuses while suspended, even with a pre-sleep state that says running', () => {
+    expect(qrGate({ ...OPEN, suspended: true })).toBe(false);
+  });
+
+  it('refuses unless the last poll says wsl is running', () => {
     for (const wsl of ['missing', 'stopped', 'held'] as const) {
-      expect(canRefreshQr({ ...RUNNING, wsl }, false, false)).toBe(false);
+      expect(qrGate({ ...OPEN, state: { ...RUNNING, wsl } }), wsl).toBe(false);
     }
   });
 
-  it('is false when the dashboard unit is off or the service is unknown', () => {
-    expect(canRefreshQr({ ...RUNNING, service: service(false) }, false, false)).toBe(false);
-    expect(canRefreshQr({ ...RUNNING, service: undefined }, false, false)).toBe(false);
+  it('refuses when the dashboard unit is off or the service is unknown', () => {
+    expect(qrGate({ ...OPEN, state: { ...RUNNING, service: service(false) } })).toBe(false);
+    expect(qrGate({ ...OPEN, state: { ...RUNNING, service: undefined } })).toBe(false);
+  });
+});
+
+describe('qrStateAllows', () => {
+  it('is the part of qrGate that needs no wsl.exe call: the last poll and the sleep flag', () => {
+    expect(qrStateAllows(RUNNING, false)).toBe(true);
+    expect(qrStateAllows(undefined, false)).toBe(false);
+    expect(qrStateAllows(RUNNING, true)).toBe(false);
+    expect(qrStateAllows({ ...RUNNING, wsl: 'stopped' }, false)).toBe(false);
+    expect(qrStateAllows({ ...RUNNING, service: service(false) }, false)).toBe(false);
   });
 });
 
