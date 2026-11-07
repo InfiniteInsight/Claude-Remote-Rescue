@@ -2,8 +2,9 @@ import type { CrrResult } from './crrClient.js';
 import type { PollState } from './poll.js';
 
 /**
- * Pure decisions behind main.ts's never-wake gates and its recovery from a
- * moved crr, kept out of main.ts so they can be tested without Electron.
+ * Pure decisions behind main.ts's never-wake gates, its sleep bookkeeping and
+ * its recovery from a moved crr, kept out of main.ts so they can be tested
+ * without Electron.
  */
 
 /** Whether the dashboard unit is active in this poll state. */
@@ -51,18 +52,72 @@ export function qrGate(input: QrGateInput): boolean {
 }
 
 /**
- * Whether a poll that just finished reflects the world after a sleep. Outside a
- * suspend every state counts. During one, a state counts only when the machine
- * has resumed and the poll began at or after the resume: a poll that was already
- * under way when the machine slept (and `resume()` merely joined) is stale.
+ * Sleep bookkeeping for main.ts, counted rather than timed. Every suspend and
+ * resume bumps an epoch, and each poll records the epoch it began under. A
+ * clock comparison went wrong when the clock stepped backwards after a resume
+ * (an NTP correction on wake): every poll then looked older than the resume,
+ * was dropped and re-polled at once, back to back. An epoch only goes up.
+ *
+ * `suspended` is set by a suspend and stays set until a poll that began at or
+ * after the resume lands: nothing may act on what the app knew before the
+ * machine slept, since WSL may have shut down meanwhile.
  */
-export function stateIsFresh(
-  suspended: boolean,
-  resumedAtMs: number | undefined,
-  pollStartedAtMs: number,
-): boolean {
-  if (!suspended) return true;
-  return resumedAtMs !== undefined && pollStartedAtMs >= resumedAtMs;
+export class SleepTracker {
+  private epoch = 0;
+  /** The epoch of the resume we are waiting on a fresh poll for. */
+  private resumeEpoch: number | undefined;
+  /** The epoch the latest poll began under. */
+  private pollEpoch = 0;
+  private asleep = false;
+
+  /** Asleep, or awake with no poll begun since the resume having landed yet. */
+  get suspended(): boolean {
+    return this.asleep;
+  }
+
+  /** The machine is going to sleep. */
+  suspend(): void {
+    this.epoch += 1;
+    this.asleep = true;
+    this.resumeEpoch = undefined;
+  }
+
+  /** The machine woke. */
+  resume(): void {
+    this.epoch += 1;
+    if (this.asleep) this.resumeEpoch = this.epoch;
+  }
+
+  /** A poll is beginning (its first step, the running-distros check). */
+  pollStarted(): void {
+    this.pollEpoch = this.epoch;
+  }
+
+  /**
+   * A poll landed. 'use' it (and stop being suspended, if we were); 'drop' it
+   * while still asleep; or, for a poll that began before the resume, drop it
+   * and 'repoll'. A poll that begins after the resume is always used, so this
+   * asks for at most one repoll per resume.
+   */
+  pollLanded(): 'use' | 'drop' | 'repoll' {
+    if (!this.asleep) return 'use';
+    if (this.resumeEpoch === undefined) return 'drop';
+    if (this.pollEpoch < this.resumeEpoch) return 'repoll';
+    this.asleep = false;
+    this.resumeEpoch = undefined;
+    return 'use';
+  }
+
+  /** A mark that every poll beginning after this call reaches (see `polledSince`). */
+  mark(): number {
+    this.epoch += 1;
+    return this.epoch;
+  }
+
+  /** Did the latest poll begin after `mark` was taken? */
+  polledSince(mark: number): boolean {
+    return this.pollEpoch >= mark;
+  }
 }
 
 /**

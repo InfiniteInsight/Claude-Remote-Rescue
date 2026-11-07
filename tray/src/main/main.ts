@@ -34,7 +34,7 @@ import {
   qrGate,
   qrStateAllows,
   shouldForgetCrrPath,
-  stateIsFresh,
+  SleepTracker,
 } from './appGates.js';
 import { controlView, type ControlView } from './controlView.js';
 import type { QrInfo } from './contracts.js';
@@ -97,16 +97,12 @@ let qr: CrrResult<QrInfo> | undefined;
 let qrImage: string | undefined;
 let qrBusy = false;
 let activeTab: Tab = 'control';
-/** When the latest poll began, to tell whether a joined poll predates an action or a resume. */
-let lastPollStartedAt = 0;
 /**
- * The machine is asleep, or has woken but no fresh poll has landed yet. While
- * set, nothing may act on what the app last knew about WSL: that is pre-sleep
- * state, and WSL may have shut down since.
+ * Sleep bookkeeping, by epoch rather than clock (appGates.ts). While
+ * `sleep.suspended`, nothing may act on what the app last knew about WSL: that
+ * is pre-sleep state, and WSL may have shut down since.
  */
-let suspended = false;
-/** When the machine resumed, while `suspended` is still set. */
-let resumedAtMs: number | undefined;
+const sleep = new SleepTracker();
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -180,7 +176,7 @@ async function getClient(): Promise<CrrClient | { error: string }> {
 
 const poller = new Poller({
   runningDistros: () => {
-    lastPollStartedAt = Date.now();
+    sleep.pollStarted();
     return runningDistros();
   },
   distro: () => distro,
@@ -193,10 +189,11 @@ const poller = new Poller({
   },
 });
 
-/** Poll, and if the poll joined was already under way before `since`, poll once more. */
-async function pollFresh(since: number): Promise<void> {
+/** Poll, and if the poll joined was already under way before this call, poll once more. */
+async function pollFresh(): Promise<void> {
+  const mark = sleep.mark();
   await poller.pollNow();
-  if (lastPollStartedAt < since) await poller.pollNow();
+  if (!sleep.polledSince(mark)) await poller.pollNow();
 }
 
 function loginEnabled(): boolean | undefined {
@@ -231,14 +228,13 @@ function refreshUi(): void {
 }
 
 function onState(s: PollState): void {
-  if (!stateIsFresh(suspended, resumedAtMs, lastPollStartedAt)) {
+  const verdict = sleep.pollLanded();
+  if (verdict !== 'use') {
     // A poll that began before the machine slept: its answer is old. Drop it, and
     // once we have resumed, ask for one that is not.
-    if (resumedAtMs !== undefined) void poller.pollNow();
+    if (verdict === 'repoll') void poller.pollNow();
     return;
   }
-  suspended = false;
-  resumedAtMs = undefined;
   lastState = s;
   // A "crr not found" error is only meaningful while we could look for crr; it
   // must not outrank "WSL is stopped" once the distro is down.
@@ -268,7 +264,7 @@ function updateSessionsView(): void {
     sessionsViewUrl({
       tab: activeTab,
       state: lastState,
-      suspended,
+      suspended: sleep.suspended,
       windowShown: win.isVisible() && !win.isMinimized(),
     }),
   );
@@ -305,7 +301,7 @@ function windowOnControlTab(): boolean {
 async function refreshQr(): Promise<void> {
   if (qrBusy) return;
   // Without a running state there is nothing to ask, so skip even the listing.
-  if (!qrStateAllows(lastState, suspended)) return;
+  if (!qrStateAllows(lastState, sleep.suspended)) return;
   const d = distro;
   qrBusy = true;
   try {
@@ -314,7 +310,9 @@ async function refreshQr(): Promise<void> {
     // distros and reading the hold never boot anything.
     const running = await runningDistros();
     if (distro !== d) return;
-    if (!qrGate({ running, distro: d, held: heldNow(), state: lastState, suspended })) return;
+    if (!qrGate({ running, distro: d, held: heldNow(), state: lastState, suspended: sleep.suspended })) {
+      return;
+    }
     const client = await getClient();
     if (!(client instanceof CrrClient)) return;
     const result = await client.qr();
@@ -371,7 +369,7 @@ async function runAction(name: 'start' | 'stop' | 'repair'): Promise<void> {
   } catch (e) {
     lastAction = { ok: false, message: summarizeError(errorMessage(e)) };
   } finally {
-    await pollFresh(Date.now());
+    await pollFresh();
     busy = false;
     refreshUi();
   }
@@ -402,7 +400,7 @@ async function chooseDistro(d: string): Promise<void> {
       lastAction = { ok: false, message: `could not start ${d}: ${why}` };
     }
   } finally {
-    await pollFresh(Date.now());
+    await pollFresh();
     busy = false;
     refreshUi();
   }
@@ -419,7 +417,7 @@ const ipcActions: IpcActions = {
     // poller resolves it again through client(), after its never-wake gates.
     forgetCrrPath();
     void refreshDistros();
-    await pollFresh(Date.now());
+    await pollFresh();
     await refreshQr();
   },
   showTab: async (tab) => {
@@ -625,14 +623,13 @@ if (!app.requestSingleInstanceLock()) {
     powerMonitor.on('suspend', () => {
       // Pre-sleep state must not be acted on after waking: WSL may have shut
       // down meanwhile. Only a poll that begins after the resume clears this.
-      suspended = true;
-      resumedAtMs = undefined;
+      sleep.suspend();
       lastState = undefined;
       poller.pause();
       updateSessionsView();
     });
     powerMonitor.on('resume', () => {
-      resumedAtMs = Date.now();
+      sleep.resume();
       poller.resume();
     });
     setInterval(() => {

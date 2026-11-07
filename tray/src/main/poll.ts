@@ -139,11 +139,32 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * The second look before the sessions call. The poll's own gate was taken
+ * at its start, a `wsl.exe` call or two earlier, and in that time a hold may
+ * have landed or the machine may have gone to sleep (`pause()`). A hold is
+ * reported as one; a poll that began before a pause skips the call and
+ * reports the service with the sessions unknown.
+ */
+export function sessionsRecheck(input: {
+  held: boolean;
+  /** The pause epoch the poll began under. */
+  startedEpoch: number;
+  /** The pause epoch now. */
+  epoch: number;
+}): 'ask' | 'held' | 'skip' {
+  if (input.held) return 'held';
+  if (input.epoch !== input.startedEpoch) return 'skip';
+  return 'ask';
+}
+
 export class Poller {
   private inFlight: Promise<PollState> | undefined;
   private cancelNext: (() => void) | undefined;
   private started = false;
   private paused = false;
+  /** Bumped by every `pause()`, so a poll can tell it began before one. */
+  private epoch = 0;
 
   constructor(private readonly deps: PollerDeps) {}
 
@@ -160,14 +181,26 @@ export class Poller {
     void this.pollNow();
   }
 
+  /** Stop scheduling, and keep a poll already under way from making its sessions call. */
   pause(): void {
     this.paused = true;
+    this.epoch += 1;
     this.clearNext();
   }
 
+  /** Poll now, or join the poll already under way, and schedule again after it. */
   resume(): void {
     this.paused = false;
     void this.pollNow();
+  }
+
+  /** `held()`, reading a failure as a hold: when in doubt, do not touch WSL. */
+  private heldSafely(): boolean {
+    try {
+      return this.deps.held();
+    } catch {
+      return true;
+    }
   }
 
   private clearNext(): void {
@@ -206,6 +239,7 @@ export class Poller {
   }
 
   private async poll(): Promise<PollState> {
+    const startedEpoch = this.epoch;
     const distro = this.deps.distro();
 
     let running: string[] | undefined;
@@ -217,11 +251,7 @@ export class Poller {
 
     let held = false;
     if (running !== undefined && distro !== undefined && running.includes(distro)) {
-      try {
-        held = this.deps.held();
-      } catch {
-        held = true; // when in doubt, do not touch WSL
-      }
+      held = this.heldSafely();
     }
 
     const gate: PollInput = { running, distro, held };
@@ -247,10 +277,18 @@ export class Poller {
 
     let sessions: CrrResult<SessionCounts> | undefined;
     if (service.ok && isFullyRunning(service.value)) {
-      try {
-        sessions = await client.sessionCounts();
-      } catch (e) {
-        sessions = { ok: false, error: message(e), exit: -1, mismatch: false };
+      const next = sessionsRecheck({
+        held: this.heldSafely(),
+        startedEpoch,
+        epoch: this.epoch,
+      });
+      if (next === 'held') return reduce({ ...gate, held: true });
+      if (next === 'ask') {
+        try {
+          sessions = await client.sessionCounts();
+        } catch (e) {
+          sessions = { ok: false, error: message(e), exit: -1, mismatch: false };
+        }
       }
     }
     return reduce({ ...gate, service, sessions });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ServiceStatus } from './contracts.js';
 import type { CrrResult } from './crrClient.js';
 import type { PollState } from './poll.js';
@@ -7,7 +7,7 @@ import {
   qrGate,
   qrStateAllows,
   shouldForgetCrrPath,
-  stateIsFresh,
+  SleepTracker,
   type QrGateInput,
 } from './appGates.js';
 
@@ -99,19 +99,97 @@ describe('dashboardActive', () => {
   });
 });
 
-describe('stateIsFresh', () => {
-  it('trusts every state while not suspended', () => {
-    expect(stateIsFresh(false, undefined, 5)).toBe(true);
+describe('SleepTracker', () => {
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it('distrusts a state that lands during sleep, before any resume', () => {
-    expect(stateIsFresh(true, undefined, 5)).toBe(false);
+  // test_sleep_epochs
+  it('uses every poll while awake', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
   });
 
-  it('distrusts a poll that began before the resume, trusts one that began at or after it', () => {
-    expect(stateIsFresh(true, 100, 99)).toBe(false);
-    expect(stateIsFresh(true, 100, 100)).toBe(true);
-    expect(stateIsFresh(true, 100, 250)).toBe(true);
+  it('drops a poll that lands during sleep, before any resume, and stays suspended', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    t.suspend();
+    expect(t.suspended).toBe(true);
+    expect(t.pollLanded()).toBe('drop');
+    expect(t.suspended).toBe(true);
+  });
+
+  it('drops a poll that began before the resume and asks for one more; uses the next and wakes', () => {
+    const t = new SleepTracker();
+    t.pollStarted(); // under way when the machine slept
+    t.suspend();
+    t.resume();
+    expect(t.pollLanded()).toBe('repoll');
+    expect(t.suspended).toBe(true);
+    t.pollStarted(); // the repoll, after the resume
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('asks for at most one repoll per resume', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    t.suspend();
+    t.resume();
+    expect(t.pollLanded()).toBe('repoll');
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    // Later polls are ordinary.
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+
+  // test_sleep_epochs_ignore_the_clock
+  it('a backward clock step after resume cannot make a fresh poll look stale (no back-to-back polls)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-06T12:00:00Z'));
+    const t = new SleepTracker();
+    t.suspend();
+    t.resume();
+    vi.setSystemTime(new Date('2026-11-06T11:00:00Z')); // NTP steps the clock back an hour
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('a second sleep before the first fresh poll still drops the older polls', () => {
+    const t = new SleepTracker();
+    t.suspend();
+    t.resume();
+    t.pollStarted(); // after the first resume...
+    t.suspend(); // ...but the machine slept again before it landed
+    t.resume();
+    expect(t.pollLanded()).toBe('repoll');
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+
+  // test_poll_fresh_marks
+  it('tells whether the latest poll began after a mark, for a refresh that must see its own effect', () => {
+    const t = new SleepTracker();
+    t.pollStarted(); // under way when the user clicked
+    const mark = t.mark();
+    expect(t.polledSince(mark)).toBe(false);
+    t.pollStarted();
+    expect(t.polledSince(mark)).toBe(true);
+  });
+
+  it('a mark does not disturb sleep bookkeeping', () => {
+    const t = new SleepTracker();
+    t.pollStarted();
+    t.suspend();
+    t.resume();
+    t.mark();
+    expect(t.pollLanded()).toBe('repoll');
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
   });
 });
 

@@ -5,6 +5,7 @@ import {
   POLL_MS,
   Poller,
   reduce,
+  sessionsRecheck,
   type PollerDeps,
   type PollInput,
   type PollState,
@@ -149,12 +150,14 @@ interface Fakes {
   clientCalls: () => number;
   serviceCalls: () => number;
   sessionCalls: () => number;
+  runningCalls: () => number;
   scheduled: Array<{ fn: () => void; ms: number; cancel: ReturnType<typeof vi.fn> }>;
 }
 
 function fakes(opts: {
   running?: string[] | undefined;
   held?: boolean;
+  heldFn?: () => boolean;
   client?: CrrClient | { error: string };
   serviceStatus?: () => Promise<CrrResult<ServiceStatus>>;
   sessionCounts?: () => Promise<CrrResult<SessionCounts>>;
@@ -164,6 +167,7 @@ function fakes(opts: {
   let clientCalls = 0;
   let serviceCalls = 0;
   let sessionCalls = 0;
+  let runningCalls = 0;
   const states: PollState[] = [];
   const scheduled: Fakes['scheduled'] = [];
   const crr = {
@@ -176,10 +180,14 @@ function fakes(opts: {
       return (opts.sessionCounts ?? (async () => ok(counts())))();
     },
   } as unknown as CrrClient;
+  const listRunning = opts.runningDistros ?? (async () => ('running' in opts ? opts.running : [DISTRO]));
   const deps: PollerDeps = {
-    runningDistros: opts.runningDistros ?? (async () => ('running' in opts ? opts.running : [DISTRO])),
+    runningDistros: () => {
+      runningCalls += 1;
+      return listRunning();
+    },
     distro: () => DISTRO,
-    held: () => opts.held ?? false,
+    held: opts.heldFn ?? (() => opts.held ?? false),
     client:
       opts.clientFn ??
       (async () => {
@@ -198,8 +206,25 @@ function fakes(opts: {
     clientCalls: () => clientCalls,
     serviceCalls: () => serviceCalls,
     sessionCalls: () => sessionCalls,
+    runningCalls: () => runningCalls,
   };
 }
+
+describe('sessionsRecheck', () => {
+  // test_sessions_recheck
+  it('asks only when no hold has landed and the poller has not paused since the poll began', () => {
+    expect(sessionsRecheck({ held: false, startedEpoch: 3, epoch: 3 })).toBe('ask');
+  });
+
+  it('reports the hold when one has landed, whether or not the poller paused', () => {
+    expect(sessionsRecheck({ held: true, startedEpoch: 3, epoch: 3 })).toBe('held');
+    expect(sessionsRecheck({ held: true, startedEpoch: 3, epoch: 4 })).toBe('held');
+  });
+
+  it('skips the call for a poll that began before a pause', () => {
+    expect(sessionsRecheck({ held: false, startedEpoch: 3, epoch: 4 })).toBe('skip');
+  });
+});
 
 describe('Poller', () => {
   it('test_no_distro_call_while_the_distro_is_stopped', async () => {
@@ -331,6 +356,94 @@ describe('Poller', () => {
     // Resume polls right away and schedules again.
     poller.resume();
     await vi.waitFor(() => expect(f.scheduled).toHaveLength(2));
+  });
+
+  // test_no_sessions_call_after_a_hold_lands
+  it('makes no sessions call when a hold lands between the service and sessions calls', async () => {
+    let held = false;
+    const f = fakes({
+      heldFn: () => held,
+      serviceStatus: async () => {
+        held = true; // `crr holder pause` while `service status` was running
+        return ok(service());
+      },
+    });
+    const s = await new Poller(f.deps).pollNow();
+    expect(f.serviceCalls()).toBe(1);
+    expect(f.sessionCalls()).toBe(0);
+    expect(s.wsl).toBe('held');
+    expect(s.statusLine).toBe('crr holder is holding WSL down — not checking crr');
+  });
+
+  it('reads a hold check that throws on the second look as a hold', async () => {
+    let calls = 0;
+    const f = fakes({
+      heldFn: () => {
+        calls += 1;
+        if (calls > 1) throw new Error('cannot read hold file');
+        return false;
+      },
+    });
+    const s = await new Poller(f.deps).pollNow();
+    expect(f.sessionCalls()).toBe(0);
+    expect(s.wsl).toBe('held');
+  });
+
+  // test_no_sessions_call_after_pause
+  it('makes no sessions call for a poll that began before a pause (the machine went to sleep)', async () => {
+    let release!: (r: CrrResult<ServiceStatus>) => void;
+    const pending = new Promise<CrrResult<ServiceStatus>>((res) => { release = res; });
+    const f = fakes({ serviceStatus: () => pending });
+    const poller = new Poller(f.deps);
+    const polled = poller.pollNow();
+    await vi.waitFor(() => expect(f.serviceCalls()).toBe(1));
+    poller.pause();
+    release(ok(service()));
+    const s = await polled;
+    expect(f.sessionCalls()).toBe(0);
+    // Rule 9 with the counts unknown.
+    expect(s.icon).toBe('running');
+    expect(s.statusLine).toBe('CRR running · sessions unknown');
+    expect(s.counts).toBeUndefined();
+  });
+
+  it('asks for sessions again on the first poll after a pause and resume', async () => {
+    const f = fakes();
+    const poller = new Poller(f.deps);
+    poller.pause();
+    poller.resume();
+    await vi.waitFor(() => expect(f.states).toHaveLength(1));
+    expect(f.sessionCalls()).toBe(1);
+  });
+
+  // test_held_that_throws_is_a_hold
+  it('reads a hold check that throws as a hold, and makes no distro call at all', async () => {
+    const f = fakes({ heldFn: () => { throw new Error('cannot read hold file'); } });
+    const s = await new Poller(f.deps).pollNow();
+    expect(s.wsl).toBe('held');
+    expect(f.clientCalls()).toBe(0);
+    expect(f.serviceCalls()).toBe(0);
+    expect(f.sessionCalls()).toBe(0);
+  });
+
+  // test_resume_joins_an_in_flight_poll
+  it('resume() during an in-flight poll joins it rather than starting a second', async () => {
+    let release!: (r: CrrResult<ServiceStatus>) => void;
+    const pending = new Promise<CrrResult<ServiceStatus>>((res) => { release = res; });
+    const f = fakes({ serviceStatus: () => pending });
+    const poller = new Poller(f.deps);
+    poller.start();
+    await vi.waitFor(() => expect(f.serviceCalls()).toBe(1));
+    poller.pause();
+    poller.resume();
+    expect(f.runningCalls()).toBe(1);
+    release(ok(service()));
+    await vi.waitFor(() => expect(f.states).toHaveLength(1));
+    await Promise.resolve();
+    expect(f.runningCalls()).toBe(1);
+    expect(f.serviceCalls()).toBe(1);
+    // Resumed, so the next poll is scheduled as usual.
+    expect(f.scheduled).toHaveLength(1);
   });
 
   it('pause during an in-flight poll prevents rescheduling', async () => {
