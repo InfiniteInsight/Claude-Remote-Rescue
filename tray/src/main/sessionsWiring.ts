@@ -71,6 +71,9 @@ function lockDownSession(ses: WiredSession): void {
       callback('');
     },
   );
+  // A download would put a file of the page's choosing on disk. The dashboard
+  // offers none, so every one is cancelled.
+  ses.on('will-download', (e: CancellableEvent) => e.preventDefault());
   locked.add(ses);
 }
 

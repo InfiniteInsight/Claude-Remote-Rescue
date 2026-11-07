@@ -6,6 +6,7 @@ import {
   dashboardActive,
   qrGate,
   qrStateAllows,
+  safeExternalUrl,
   shouldForgetCrrPath,
   SleepTracker,
   type QrGateInput,
@@ -190,6 +191,35 @@ describe('SleepTracker', () => {
     expect(t.pollLanded()).toBe('repoll');
     t.pollStarted();
     expect(t.pollLanded()).toBe('use');
+  });
+});
+
+describe('safeExternalUrl', () => {
+  // test_safe_external_url
+  it('passes http and https through, in canonical form', () => {
+    expect(safeExternalUrl('https://claude.ai/oauth?x=1')).toBe('https://claude.ai/oauth?x=1');
+    expect(safeExternalUrl('http://127.0.0.1:8377')).toBe('http://127.0.0.1:8377/');
+    expect(safeExternalUrl('HTTPS://Example.COM/a b')).toBe('https://example.com/a%20b');
+  });
+
+  it('refuses every other scheme, which the shell would hand to a local handler', () => {
+    for (const raw of [
+      'file:///C:/Windows/System32/calc.exe',
+      'javascript:alert(1)',
+      'ms-settings:privacy',
+      'search-ms:query=x',
+      '\\\\server\\share\\x.exe',
+      'data:text/html,<b>x</b>',
+      'vbscript:msgbox',
+    ]) {
+      expect(safeExternalUrl(raw), raw).toBeUndefined();
+    }
+  });
+
+  it('refuses something that is not a URL', () => {
+    expect(safeExternalUrl('')).toBeUndefined();
+    expect(safeExternalUrl('not a url')).toBeUndefined();
+    expect(safeExternalUrl('//example.com/')).toBeUndefined();
   });
 });
 

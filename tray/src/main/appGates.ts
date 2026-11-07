@@ -121,6 +121,24 @@ export class SleepTracker {
 }
 
 /**
+ * The URL to hand `shell.openExternal`, or undefined to refuse. Only http and
+ * https: the shell would pass any other scheme (`file:`, `ms-settings:`,
+ * `search-ms:`, a UNC path) to whatever local handler claims it. Every
+ * `shell.openExternal` in the app goes through this, whatever already checked
+ * the URL upstream, and gets the re-serialized form, not the raw string.
+ */
+export function safeExternalUrl(raw: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  return url.href;
+}
+
+/**
  * Should a failed `service status` make the app forget its cached crr path?
  * When the launcher has moved or gone, the cached path fails with a not-found
  * error forever; forgetting it lets the next gated poll resolve it again. A

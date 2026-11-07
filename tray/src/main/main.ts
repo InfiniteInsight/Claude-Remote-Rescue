@@ -33,6 +33,7 @@ import {
   dashboardActive,
   qrGate,
   qrStateAllows,
+  safeExternalUrl,
   shouldForgetCrrPath,
   SleepTracker,
 } from './appGates.js';
@@ -276,8 +277,17 @@ function onSessionsScreenChange(onScreen: boolean): void {
   pushView();
 }
 
-/** A link out of the dashboard: http(s) only (navigationGuards), to the default browser. */
-function openExternalFromDashboard(url: string): void {
+/**
+ * Open a URL in the default browser. The app's only `shell.openExternal`:
+ * http(s) only, re-parsed here whatever the caller already checked
+ * (safeExternalUrl), since the shell hands any other scheme to a local handler.
+ */
+function openExternal(raw: string): void {
+  const url = safeExternalUrl(raw);
+  if (url === undefined) {
+    console.warn(`refused to open a non-http(s) URL: ${raw}`);
+    return;
+  }
   shell.openExternal(url).catch((e: unknown) => {
     console.warn(`could not open ${url}: ${errorMessage(e)}`);
   });
@@ -431,14 +441,7 @@ const ipcActions: IpcActions = {
 
 function openDashboardInBrowser(): void {
   const raw = lastState?.service?.dashboard_url;
-  if (!raw) return;
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-    void shell.openExternal(url.toString());
-  } catch {
-    // crr gave something that is not a URL; there is nothing to open.
-  }
+  if (raw) openExternal(raw);
 }
 
 function startStopFromTray(): void {
@@ -514,7 +517,8 @@ function createWindow(): BrowserWindow {
 
   sessionsOnScreen = false;
   sessionsView = attachSessionsView(win, {
-    openExternal: openExternalFromDashboard,
+    // A link out of the dashboard (navigationGuards already allows only http(s)).
+    openExternal,
     onScreenChange: onSessionsScreenChange,
   });
 

@@ -99,6 +99,7 @@ const EVERY_GUARD = [
   'ses.on:select-hid-device',
   'ses.on:select-serial-port',
   'ses.on:select-usb-device',
+  'ses.on:will-download',
   'wc.on:will-navigate',
   'wc.on:will-redirect',
   'wc.on:will-frame-navigate',
@@ -213,6 +214,18 @@ describe('wireSessionsView', () => {
       pairing.push(resp),
     );
     expect(pairing).toEqual([{ confirmed: false }]);
+  });
+
+  // test_wiring_cancels_downloads
+  it('cancels every download the page starts', () => {
+    const f = fakes();
+    const r = recorder();
+    wireSessionsView(f.wc, ORIGIN, r.host, r.onFailed);
+    const listeners = f.session.listeners.get('will-download') ?? [];
+    expect(listeners).toHaveLength(1);
+    const e = pickerEvent();
+    for (const l of listeners) l(e, { getFilename: () => 'x.exe' }, f.wc);
+    expect(e.prevented).toBe(true);
   });
 
   // test_wiring_denies_permissions
