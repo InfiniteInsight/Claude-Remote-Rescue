@@ -27,9 +27,14 @@ function lockDownSession(): void {
   ses.setDevicePermissionHandler(() => false);
 }
 
+export interface SessionsViewHost extends SessionsHost {
+  /** The view went on or off screen (including on its own, after a failed load). */
+  onScreenChange(onScreen: boolean): void;
+}
+
 export function attachSessionsView(
   win: BrowserWindow,
-  host: SessionsHost,
+  host: SessionsViewHost,
 ): { show(dashboardUrl: string | undefined): void; hide(): void } {
   lockDownSession();
 
@@ -94,7 +99,7 @@ export function attachSessionsView(
     },
   };
 
-  const controller = sessionsViewController(port);
+  const controller = sessionsViewController(port, (shown) => host.onScreenChange(shown));
 
   const relayout = (): void => {
     if (onScreen) layout();

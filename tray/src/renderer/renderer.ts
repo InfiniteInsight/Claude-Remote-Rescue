@@ -25,7 +25,7 @@ const phoneUrlText = el<HTMLElement>('phone-url-text');
 const phoneText = el<HTMLParagraphElement>('phone-text');
 const login = el<HTMLParagraphElement>('login');
 const sessionsStopped = el<HTMLDivElement>('sessions-stopped');
-const sessionsRunning = el<HTMLParagraphElement>('sessions-running');
+const sessionsMessage = el<HTMLParagraphElement>('sessions-message');
 const sessionsStart = el<HTMLButtonElement>('sessions-start');
 
 const DOT_TEXT = { on: 'running', off: 'stopped', missing: 'not installed' } as const;
@@ -114,9 +114,13 @@ function render(view: ControlView): void {
 
   // While the dashboard is up, main draws crr's own page over this panel (a
   // WebContentsView below the tab bar); this is what shows when it is not.
-  const dashboardOn = view.rows.some((r) => r.name === 'dashboard' && r.dot === 'on');
-  show(sessionsStopped, !dashboardOn);
-  show(sessionsRunning, dashboardOn);
+  const panel = view.sessions;
+  const message = panel.kind === 'loading' || panel.kind === 'refused' ? panel.text : '';
+  show(sessionsStopped, panel.kind === 'stopped');
+  // crr's own string (a refused URL): text only, never markup.
+  sessionsMessage.textContent = message;
+  sessionsMessage.classList.toggle('muted', panel.kind === 'loading');
+  show(sessionsMessage, message !== '');
   sessionsStart.disabled = !view.startStop.enabled;
 }
 

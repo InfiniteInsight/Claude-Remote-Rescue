@@ -7,6 +7,7 @@
 import {
   app,
   BrowserWindow,
+  Menu,
   nativeImage,
   powerMonitor,
   shell,
@@ -71,6 +72,8 @@ let tray: TrayHandle | undefined;
 let mainWindow: BrowserWindow | undefined;
 /** The Sessions tab's dashboard view in `mainWindow`. */
 let sessionsView: ReturnType<typeof attachSessionsView> | undefined;
+/** Whether that view is drawn over the Sessions panel right now. */
+let sessionsOnScreen = false;
 let isQuitting = false;
 
 // ---- App state -------------------------------------------------------------
@@ -196,6 +199,7 @@ function buildView(): ControlView {
     distro,
     crrPath: crrPathError === undefined ? undefined : { ok: false, error: crrPathError },
     login: loginEnabled(),
+    sessionsShown: sessionsOnScreen,
   });
 }
 
@@ -253,6 +257,12 @@ function updateSessionsView(): void {
       windowShown: win.isVisible() && !win.isMinimized(),
     }),
   );
+}
+
+/** The panel under the view says "Loading…" or nothing, so it must follow the view. */
+function onSessionsScreenChange(onScreen: boolean): void {
+  sessionsOnScreen = onScreen;
+  pushView();
 }
 
 /** A link out of the dashboard: http(s) only (navigationGuards), to the default browser. */
@@ -481,7 +491,11 @@ function createWindow(): BrowserWindow {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event) => event.preventDefault());
 
-  sessionsView = attachSessionsView(win, { openExternal: openExternalFromDashboard });
+  sessionsOnScreen = false;
+  sessionsView = attachSessionsView(win, {
+    openExternal: openExternalFromDashboard,
+    onScreenChange: onSessionsScreenChange,
+  });
 
   void win.loadFile(join(__dirname, '../renderer/index.html'));
   win.webContents.on('did-finish-load', () => {
@@ -526,6 +540,7 @@ function createWindow(): BrowserWindow {
     if (mainWindow === win) {
       mainWindow = undefined;
       sessionsView = undefined;
+      sessionsOnScreen = false;
     }
   });
 
@@ -556,6 +571,13 @@ function quit(): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  // No default menu, before any window exists. Its accelerators would open
+  // DevTools on the app's own page (Ctrl+Shift+I), reload it (Ctrl+R) and zoom
+  // it (Ctrl+=), and a zoomed page has a tab bar taller than TAB_BAR_HEIGHT,
+  // so the dashboard view would overlap it. Windows needs no Edit menu for
+  // copy and paste.
+  Menu.setApplicationMenu(null);
+
   app.on('second-instance', () => showWindow());
 
   if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID);

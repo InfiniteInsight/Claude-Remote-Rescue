@@ -2,6 +2,7 @@ import type { QrInfo, ServiceStatus } from './contracts.js';
 import type { CrrResult } from './crrClient.js';
 import type { PollState } from './poll.js';
 import { TRAY_LABELS, trayMenuSpec } from './appLifecycle.js';
+import { sessionsPanel, type SessionsPanel } from './sessionsView.js';
 
 /**
  * The Control tab, as data. The renderer is a dumb DOM render of this: every
@@ -23,6 +24,8 @@ export interface ControlView {
   repair: { visible: boolean; enabled: boolean };
   phone: Phone;
   login: 'on' | 'off' | 'unknown';
+  /** The Sessions tab's panel, under (or instead of) the dashboard view. */
+  sessions: SessionsPanel;
   banner?: string;
   distros: string[];
   distro?: string;
@@ -39,6 +42,8 @@ export interface ControlViewInput {
   crrPath?: { ok: boolean; error?: string };
   /** Whether the OS login item is on; omitted (unpackaged run) reads 'unknown'. */
   login?: boolean;
+  /** Whether the dashboard view is on screen over the Sessions panel; omitted reads false. */
+  sessionsShown?: boolean;
 }
 
 const ROWS: ReadonlyArray<{ name: RowName; label: string }> = [
@@ -119,6 +124,7 @@ export function controlView(input: ControlViewInput): ControlView {
     },
     phone: phoneFor(input, dashboardOn),
     login: input.login === undefined ? 'unknown' : input.login ? 'on' : 'off',
+    sessions: sessionsPanel(state, input.sessionsShown ?? false),
     distros: input.distros,
     distro: input.distro,
   };

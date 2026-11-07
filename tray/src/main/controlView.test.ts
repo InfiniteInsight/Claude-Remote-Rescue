@@ -200,3 +200,41 @@ describe('controlView banner', () => {
     expect(view({ state: state({ icon: 'attention', statusLine: 'CRR running · 3 sessions, 1 crashed', service: service() }) }).banner).toBeUndefined();
   });
 });
+
+describe('controlView sessions panel', () => {
+  // test_control_view_sessions_panel
+  it('is stopped while the dashboard unit is off or WSL is not running', () => {
+    const off = state({ service: service({}, [unit('watchdog', true), unit('dashboard', false)]) });
+    expect(view({ state: off }).sessions).toEqual({ kind: 'stopped' });
+    for (const wsl of ['missing', 'stopped', 'held'] as const) {
+      expect(view({ state: state({ wsl }) }).sessions).toEqual({ kind: 'stopped' });
+      // Even a state still carrying a service that says the dashboard is up.
+      expect(view({ state: state({ wsl, service: service() }) }).sessions).toEqual({ kind: 'stopped' });
+    }
+    expect(view({ state: NOT_INSTALLED }).sessions).toEqual({ kind: 'stopped' });
+  });
+
+  it('says it is loading while the dashboard is up but its view is not on screen yet', () => {
+    expect(view().sessions).toEqual({ kind: 'loading', text: 'Loading the dashboard…' });
+    expect(view({ sessionsShown: false }).sessions).toEqual({
+      kind: 'loading',
+      text: 'Loading the dashboard…',
+    });
+  });
+
+  it('is showing once the dashboard view is drawn over the panel', () => {
+    expect(view({ sessionsShown: true }).sessions).toEqual({ kind: 'showing' });
+  });
+
+  it('says plainly when crr reports a dashboard address the tray will not load', () => {
+    for (const url of ['http://example.com:8377/', 'file:///C:/x', '<b>not a url</b>']) {
+      const odd = state({ service: service({ dashboard_url: url }) });
+      for (const sessionsShown of [false, true]) {
+        expect(view({ state: odd, sessionsShown }).sessions).toEqual({
+          kind: 'refused',
+          text: `crr reported a dashboard address the tray won't load: ${url}`,
+        });
+      }
+    }
+  });
+});

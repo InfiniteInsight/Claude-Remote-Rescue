@@ -106,6 +106,28 @@ export function sessionsViewUrl(input: SessionsGateInput): string | undefined {
   return url;
 }
 
+/** What the renderer's Sessions panel shows under (or instead of) the dashboard view. */
+export type SessionsPanel =
+  | { kind: 'stopped' }
+  | { kind: 'loading'; text: string }
+  | { kind: 'refused'; text: string }
+  | { kind: 'showing' };
+
+/**
+ * The Sessions panel for a poll state. `viewOnScreen` is whether the dashboard
+ * view is currently drawn over the panel. A dashboard address the app refuses
+ * is said plainly, so the tab never claims to be loading something it never
+ * will. The URL is crr's own string, for the renderer to show as text only.
+ */
+export function sessionsPanel(state: PollState, viewOnScreen: boolean): SessionsPanel {
+  if (state.wsl !== 'running' || !dashboardActive(state)) return { kind: 'stopped' };
+  const url = state.service?.dashboard_url ?? '';
+  if (dashboardOrigin(url) === undefined) {
+    return { kind: 'refused', text: `crr reported a dashboard address the tray won't load: ${url}` };
+  }
+  return viewOnScreen ? { kind: 'showing' } : { kind: 'loading', text: 'Loading the dashboard…' };
+}
+
 /** The Electron side of the view, as the controller drives it. */
 export interface SessionsViewPort {
   /** Replace any current view with a fresh one bound to `origin`, and load `${origin}/` in it. */
@@ -132,7 +154,11 @@ export interface SessionsView {
  * fresh view per load means the back/forward history never holds another
  * origin, so `history.back()` cannot reach an old port something else now owns.
  */
-export function sessionsViewController(port: SessionsViewPort): SessionsView {
+export function sessionsViewController(
+  port: SessionsViewPort,
+  /** Told each time the view goes on or off screen, so the panel under it can follow. */
+  onScreenChange: (onScreen: boolean) => void = () => {},
+): SessionsView {
   let origin: string | undefined;
   let attached = false;
   let stale = false;
@@ -141,6 +167,7 @@ export function sessionsViewController(port: SessionsViewPort): SessionsView {
     if (!attached) return;
     port.detach();
     attached = false;
+    onScreenChange(false);
   };
 
   return {
@@ -159,6 +186,7 @@ export function sessionsViewController(port: SessionsViewPort): SessionsView {
       if (!attached) {
         port.attach();
         attached = true;
+        onScreenChange(true);
       }
     },
     hide,

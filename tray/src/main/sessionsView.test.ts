@@ -191,6 +191,29 @@ function fakePort(): { port: SessionsViewPort; calls: Call[] } {
 }
 
 describe('sessionsViewController', () => {
+  // test_sessions_view_reports_when_it_is_on_screen
+  it('reports each time the view goes on or off screen, and only then', () => {
+    const { port } = fakePort();
+    const changes: boolean[] = [];
+    const view = sessionsViewController(port, (onScreen) => changes.push(onScreen));
+    view.show('http://127.0.0.1:8377/');
+    view.show('http://127.0.0.1:8377/');
+    expect(changes).toEqual([true]);
+    view.hide();
+    view.hide();
+    expect(changes).toEqual([true, false]);
+    view.show('http://127.0.0.1:8377/');
+    view.loadFailed();
+    view.loadFailed();
+    expect(changes).toEqual([true, false, true, false]);
+    // A port change swaps views without the panel ever being left uncovered for long.
+    view.show('http://127.0.0.1:8377/');
+    view.show('http://127.0.0.1:9100/');
+    expect(changes).toEqual([true, false, true, false, true, false, true]);
+    view.show('http://example.com:8377/');
+    expect(changes).toEqual([true, false, true, false, true, false, true, false]);
+  });
+
   // test_sessions_view_loads_once_per_origin
   it('loads the dashboard once, not on every poll', () => {
     const { port, calls } = fakePort();

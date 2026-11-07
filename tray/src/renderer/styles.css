@@ -192,3 +192,7 @@ code {
 .empty p {
   font-size: 1.1rem;
 }
+
+.message {
+  overflow-wrap: anywhere;
+}
