@@ -28,6 +28,7 @@ import {
   shouldQuitOnWindowClosed,
   TRAY_LABELS,
 } from './appLifecycle.js';
+import { canRefreshQr, dashboardActive, shouldForgetCrrPath, stateIsFresh } from './appGates.js';
 import { controlView, type ControlView } from './controlView.js';
 import type { QrInfo } from './contracts.js';
 import { CrrClient, resolveCrrPath, type CrrResult } from './crrClient.js';
@@ -83,8 +84,16 @@ let qr: CrrResult<QrInfo> | undefined;
 let qrImage: string | undefined;
 let qrBusy = false;
 let activeTab: Tab = 'control';
-/** When the latest poll began, to tell whether a joined poll predates an action. */
+/** When the latest poll began, to tell whether a joined poll predates an action or a resume. */
 let lastPollStartedAt = 0;
+/**
+ * The machine is asleep, or has woken but no fresh poll has landed yet. While
+ * set, nothing may act on what the app last knew about WSL: that is pre-sleep
+ * state, and WSL may have shut down since.
+ */
+let suspended = false;
+/** When the machine resumed, while `suspended` is still set. */
+let resumedAtMs: number | undefined;
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -94,11 +103,26 @@ function isHeld(): boolean {
   return holds(readHold(), Date.now() / 1000, machineBootSeconds());
 }
 
-function dashboardUp(s: PollState | undefined): boolean {
-  return s?.service?.services.some((u) => u.name === 'dashboard' && u.active) ?? false;
+// ---- crr client ------------------------------------------------------------
+
+/** Drop the cached crr path (and its error), in memory and on disk, so the next gated lookup resolves it afresh. */
+function forgetCrrPath(): void {
+  cachedCrrPath = undefined;
+  crrPathError = undefined;
+  writeAppConfig({ ...readAppConfig(), crrPath: undefined });
 }
 
-// ---- crr client ------------------------------------------------------------
+/** A client that forgets the cached path when `service status` says the launcher is gone. */
+function watchedClient(run: ReturnType<typeof realRunInDistro>, path: string): CrrClient {
+  const client = new CrrClient(run, path);
+  const serviceStatus = client.serviceStatus.bind(client);
+  client.serviceStatus = async () => {
+    const result = await serviceStatus();
+    if (shouldForgetCrrPath(result) && cachedCrrPath === path) forgetCrrPath();
+    return result;
+  };
+  return client;
+}
 
 let resolving: Promise<Awaited<ReturnType<typeof resolveCrrPath>>> | undefined;
 
@@ -113,7 +137,7 @@ async function getClient(): Promise<CrrClient | { error: string }> {
   const run = realRunInDistro(d);
   if (cachedCrrPath !== undefined) {
     crrPathError = undefined;
-    return new CrrClient(run, cachedCrrPath);
+    return watchedClient(run, cachedCrrPath);
   }
   resolving ??= resolveCrrPath(run).finally(() => {
     resolving = undefined;
@@ -127,7 +151,7 @@ async function getClient(): Promise<CrrClient | { error: string }> {
   crrPathError = undefined;
   cachedCrrPath = found.path;
   writeAppConfig({ ...readAppConfig(), crrPath: found.path });
-  return new CrrClient(run, found.path);
+  return watchedClient(run, found.path);
 }
 
 // ---- The poller, tray and view ---------------------------------------------
@@ -184,8 +208,19 @@ function refreshUi(): void {
 }
 
 function onState(s: PollState): void {
+  if (!stateIsFresh(suspended, resumedAtMs, lastPollStartedAt)) {
+    // A poll that began before the machine slept: its answer is old. Drop it, and
+    // once we have resumed, ask for one that is not.
+    if (resumedAtMs !== undefined) void poller.pollNow();
+    return;
+  }
+  suspended = false;
+  resumedAtMs = undefined;
   lastState = s;
-  if (s.wsl !== 'running' || !dashboardUp(s)) {
+  // A "crr not found" error is only meaningful while we could look for crr; it
+  // must not outrank "WSL is stopped" once the distro is down.
+  if (s.wsl !== 'running') crrPathError = undefined;
+  if (s.wsl !== 'running' || !dashboardActive(s)) {
     qr = undefined;
     qrImage = undefined;
   }
@@ -204,12 +239,12 @@ function windowOnControlTab(): boolean {
 
 /**
  * Ask crr for the phone link. Never wakes WSL: it runs only when the latest
- * poll found the distro running with the dashboard up and no hold in place.
+ * poll found the distro running with the dashboard up, no hold is in place and
+ * the machine is not (just back from) sleeping.
  */
 async function refreshQr(): Promise<void> {
   if (qrBusy) return;
-  const s = lastState;
-  if (s === undefined || s.wsl !== 'running' || !dashboardUp(s) || isHeld()) return;
+  if (!canRefreshQr(lastState, suspended, isHeld())) return;
   const d = distro;
   qrBusy = true;
   try {
@@ -313,8 +348,11 @@ const ipcActions: IpcActions = {
   setDistro: chooseDistro,
   refresh: async () => {
     lastAction = undefined;
+    // The user may have moved or reinstalled crr: forget where it was. The
+    // poller resolves it again through client(), after its never-wake gates.
+    forgetCrrPath();
     void refreshDistros();
-    await poller.pollNow();
+    await pollFresh(Date.now());
     await refreshQr();
   },
   showTab: async (tab) => {
@@ -490,8 +528,18 @@ if (!app.requestSingleInstanceLock()) {
       if (distro !== undefined) writeAppConfig({ ...readAppConfig(), distro });
     }
 
-    powerMonitor.on('suspend', () => poller.pause());
-    powerMonitor.on('resume', () => poller.resume());
+    powerMonitor.on('suspend', () => {
+      // Pre-sleep state must not be acted on after waking: WSL may have shut
+      // down meanwhile. Only a poll that begins after the resume clears this.
+      suspended = true;
+      resumedAtMs = undefined;
+      lastState = undefined;
+      poller.pause();
+    });
+    powerMonitor.on('resume', () => {
+      resumedAtMs = Date.now();
+      poller.resume();
+    });
     setInterval(() => {
       if (windowOnControlTab()) void refreshQr();
     }, QR_REFRESH_MS);
