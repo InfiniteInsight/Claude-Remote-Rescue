@@ -106,7 +106,14 @@ describe('reduce', () => {
       '9 running, attention',
       { ...base, service: ok(service()), sessions: ok(counts({ attention: 2 })) },
       'attention',
-      'CRR running · 3 sessions, 1 crashed',
+      'CRR running · 3 sessions, 1 crashed · 2 need attention',
+    ],
+    [
+      // Running elsewhere or in conflict, none crashed: the amber icon must not sit beside "0 crashed" alone.
+      '9 running, attention without a crash',
+      { ...base, service: ok(service()), sessions: ok(counts({ crashed: 0, attention: 1 })) },
+      'attention',
+      'CRR running · 3 sessions, 0 crashed · 1 need attention',
     ],
     [
       '9 running, sessions call failed',

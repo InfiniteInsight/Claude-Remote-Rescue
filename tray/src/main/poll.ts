@@ -113,9 +113,12 @@ export function reduce(input: PollInput): PollState {
   if (counts === undefined) {
     return { icon: 'running', statusLine: 'CRR running · sessions unknown', service, wsl: 'running' };
   }
+  // The amber icon also covers sessions running elsewhere or in conflict, so
+  // say how many need attention rather than leave "0 crashed" beside it.
+  const attention = counts.attention > 0 ? ` · ${counts.attention} need attention` : '';
   return {
     icon: counts.attention > 0 ? 'attention' : 'running',
-    statusLine: `CRR running · ${counts.total} sessions, ${counts.crashed} crashed`,
+    statusLine: `CRR running · ${counts.total} sessions, ${counts.crashed} crashed${attention}`,
     service,
     counts,
     wsl: 'running',
