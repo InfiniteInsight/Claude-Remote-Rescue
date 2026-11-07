@@ -42,11 +42,13 @@ const locked = new WeakSet<object>();
 
 /**
  * Deny everything the page could ask of the machine. Idempotent per session:
- * the select-* events are listeners, and a second one would answer a picker twice.
+ * the select-* events are listeners, and a second one would answer a picker
+ * twice. The session counts as locked only once every handler is in place, so
+ * a registration that throws is redone in full next time (and, since the throw
+ * reaches wireSessionsView, nothing loads meanwhile).
  */
 function lockDownSession(ses: WiredSession): void {
   if (locked.has(ses)) return;
-  locked.add(ses);
   // Camera, microphone, notifications, clipboard-read, external protocols (`openExternal`)...: all no.
   ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   ses.setPermissionCheckHandler(() => false);
@@ -69,6 +71,7 @@ function lockDownSession(ses: WiredSession): void {
       callback('');
     },
   );
+  locked.add(ses);
 }
 
 /**
@@ -94,6 +97,16 @@ export function wireSessionsView(
     e.preventDefault();
     callback('');
   });
+  // The page's https subresources (fetch, img, script) can reach any host, and
+  // without preventDefault Electron presents the first certificate in the
+  // store. The callback's certificate is optional: none is presented.
+  wc.on(
+    'select-client-certificate',
+    (e: CancellableEvent, _url: string, _certificates: unknown, callback: () => void) => {
+      e.preventDefault();
+      callback();
+    },
+  );
 
   wc.on(
     'did-fail-load',

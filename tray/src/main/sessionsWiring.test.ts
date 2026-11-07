@@ -104,6 +104,7 @@ const EVERY_GUARD = [
   'wc.on:will-frame-navigate',
   'wc.setWindowOpenHandler',
   'wc.on:select-bluetooth-device',
+  'wc.on:select-client-certificate',
 ];
 
 describe('wireSessionsView', () => {
@@ -197,6 +198,16 @@ describe('wireSessionsView', () => {
       expect(calls, event).toEqual([[]]);
     }
 
+    // A client certificate: the page's https subresources can reach any host,
+    // and Electron would otherwise present the first certificate in the store.
+    const cert = pickerEvent();
+    const certCalls: unknown[][] = [];
+    f.emit('select-client-certificate', cert, 'https://mtls.example/', [{ subjectName: 'me' }], (...a: unknown[]) =>
+      certCalls.push(a),
+    );
+    expect(cert.prevented).toBe(true);
+    expect(certCalls).toEqual([[]]);
+
     const pairing: unknown[] = [];
     f.session.handlers.get('setBluetoothPairingHandler')?.({ deviceId: 'a', pairingKind: 'confirm' }, (resp: unknown) =>
       pairing.push(resp),
@@ -240,6 +251,31 @@ describe('wireSessionsView', () => {
     expect(() => wireSessionsView(f.wc, ORIGIN, r.host, r.onFailed)).not.toThrow();
     // An unhandled rejection would fail the run.
     await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  // test_wiring_retries_a_failed_lockdown
+  it('never loads on a session it failed to lock, and locks it fully on the next try', () => {
+    const shared = fakeSession();
+    const setPairing = shared.ses.setBluetoothPairingHandler;
+    let failOnce = true;
+    shared.ses.setBluetoothPairingHandler = (handler) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('not supported');
+      }
+      setPairing(handler);
+    };
+    const r = recorder();
+    const first = fakes({ session: shared });
+    expect(() => wireSessionsView(first.wc, ORIGIN, r.host, r.onFailed)).toThrow('not supported');
+    expect(first.log.some((l) => l.startsWith('wc.loadURL'))).toBe(false);
+
+    const second = fakes({ session: shared });
+    wireSessionsView(second.wc, ORIGIN, r.host, r.onFailed);
+    expect(shared.handlers.has('setBluetoothPairingHandler')).toBe(true);
+    for (const event of ['select-hid-device', 'select-serial-port', 'select-usb-device']) {
+      expect(shared.listeners.get(event)?.length, event).toBe(1);
+    }
   });
 
   // test_wiring_locks_a_session_once
