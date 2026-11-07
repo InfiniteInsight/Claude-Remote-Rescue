@@ -14,8 +14,10 @@ import {
   shouldQuitOnWindowClosed,
   TRAY_LABELS,
   escapeMenuLabel,
+  menuClick,
   menuSignature,
   trayMenuSpec,
+  type MenuHost,
   type MenuItemId,
 } from './appLifecycle.js';
 
@@ -214,6 +216,12 @@ describe('trayMenuSpec', () => {
     expect(item(spec(RUNNING, { busy: true }), 'startStop')?.enabled).toBe(false);
   });
 
+  it('carries the action each Start/Stop label stands for', () => {
+    expect(item(spec(RUNNING), 'startStop')).toMatchObject({ label: 'Stop CRR', action: 'stop' });
+    expect(item(spec(STOPPED), 'startStop')).toMatchObject({ label: 'Start CRR', action: 'start' });
+    expect(item(spec(WSL_DOWN), 'startStop')).toMatchObject({ label: 'Start CRR', action: 'start' });
+  });
+
   it('reads Start CRR when only one of the two essential units is up', () => {
     const partial: PollState = {
       ...RUNNING,
@@ -262,6 +270,46 @@ describe('trayMenuSpec', () => {
 
   it('reflects the OS state in the login checkbox', () => {
     expect(item(spec(RUNNING, { loginItemEnabled: false }), 'loginItem')?.checked).toBe(false);
+  });
+});
+
+describe('menuClick', () => {
+  function host() {
+    const calls: string[] = [];
+    const h: MenuHost = {
+      show: () => calls.push('show'),
+      openDashboard: () => calls.push('openDashboard'),
+      startStop: (action) => calls.push(`startStop:${action}`),
+      quit: () => calls.push('quit'),
+    };
+    return { h, calls };
+  }
+
+  // test_menu_click_runs_what_the_item_showed
+  it('runs the action the clicked Start/Stop item showed, whatever the state is by then', () => {
+    const { h, calls } = host();
+    // The menu was built while crr ran, so the item reads Stop CRR...
+    const onClick = menuClick(item(spec(RUNNING), 'startStop')!, h);
+    // ...and a resume cleared the state before the click landed: still stop.
+    onClick?.();
+    expect(calls).toEqual(['startStop:stop']);
+  });
+
+  it('runs start for an item that showed Start CRR', () => {
+    for (const state of [STOPPED, WSL_DOWN]) {
+      const { h, calls } = host();
+      menuClick(item(spec(state), 'startStop')!, h)?.();
+      expect(calls).toEqual(['startStop:start']);
+    }
+  });
+
+  it('routes Open CRR, Open dashboard and Quit, and gives the status line and checkbox no handler here', () => {
+    const { h, calls } = host();
+    const items = spec(RUNNING);
+    for (const id of ['open', 'dashboard', 'quit'] as const) menuClick(item(items, id)!, h)?.();
+    expect(calls).toEqual(['show', 'openDashboard', 'quit']);
+    expect(menuClick(item(items, 'status')!, h)).toBeUndefined();
+    expect(menuClick(item(items, 'loginItem')!, h)).toBeUndefined();
   });
 });
 

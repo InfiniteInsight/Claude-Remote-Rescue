@@ -27,7 +27,6 @@ import {
   parseLaunchFlags,
   shouldHideInsteadOfClose,
   shouldQuitOnWindowClosed,
-  TRAY_LABELS,
 } from './appLifecycle.js';
 import {
   dashboardActive,
@@ -358,7 +357,17 @@ async function refreshDistros(): Promise<void> {
 
 // ---- Actions (explicit user choices: these may boot WSL) --------------------
 
+/**
+ * Every explicit user action calls this first. If Windows sent suspend but
+ * never resume, the app would stay frozen (suspended, poller paused) for good;
+ * nobody acts on a sleeping machine, so the action stands in for the resume.
+ */
+function userActed(): void {
+  if (sleep.userActed()) poller.resume();
+}
+
 async function runAction(name: 'start' | 'stop' | 'repair'): Promise<void> {
+  userActed();
   if (busy) return;
   busy = true;
   lastAction = undefined;
@@ -387,6 +396,7 @@ async function runAction(name: 'start' | 'stop' | 'repair'): Promise<void> {
 
 /** Save the choice, forget the old distro's crr path, boot the new one once, and poll. */
 async function chooseDistro(d: string): Promise<void> {
+  userActed();
   if (busy) return;
   busy = true;
   lastAction = undefined;
@@ -422,6 +432,7 @@ const ipcActions: IpcActions = {
   repair: () => runAction('repair'),
   setDistro: chooseDistro,
   refresh: async () => {
+    userActed();
     lastAction = undefined;
     // The user may have moved or reinstalled crr: forget where it was. The
     // poller resolves it again through client(), after its never-wake gates.
@@ -442,11 +453,6 @@ const ipcActions: IpcActions = {
 function openDashboardInBrowser(): void {
   const raw = lastState?.service?.dashboard_url;
   if (raw) openExternal(raw);
-}
-
-function startStopFromTray(): void {
-  const stopping = buildView().startStop.label === TRAY_LABELS.stop;
-  void runAction(stopping ? 'stop' : 'start');
 }
 
 const trayImages = new Map<TrayIcon, NativeImage>();
@@ -471,7 +477,8 @@ function installTray(): void {
       host: {
         show: showWindow,
         openDashboard: openDashboardInBrowser,
-        startStop: startStopFromTray,
+        // The action the clicked item showed, not one re-derived from the state now.
+        startStop: (action) => void runAction(action),
         quit,
       },
       // Only a packaged build can register itself; `electron .` would register
@@ -575,6 +582,7 @@ function createWindow(): BrowserWindow {
 
 /** Show the window, creating it on first use (the app may have started hidden). */
 function showWindow(): void {
+  userActed();
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
@@ -626,7 +634,8 @@ if (!app.requestSingleInstanceLock()) {
 
     powerMonitor.on('suspend', () => {
       // Pre-sleep state must not be acted on after waking: WSL may have shut
-      // down meanwhile. Only a poll that begins after the resume clears this.
+      // down meanwhile. Only a poll that begins after the resume (or after a
+      // user action standing in for a missed one) clears this.
       sleep.suspend();
       lastState = undefined;
       poller.pause();

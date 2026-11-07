@@ -172,6 +172,27 @@ describe('SleepTracker', () => {
     expect(t.pollLanded()).toBe('use');
   });
 
+  // test_user_action_stands_in_for_a_missed_resume
+  it('treats a user action while still asleep as the resume Windows never sent', () => {
+    const t = new SleepTracker();
+    t.suspend(); // and no resume ever arrives
+    t.pollStarted(); // a poll began before the user acted (pre-sleep state)
+    expect(t.userActed()).toBe(true);
+    // That poll is still not trusted...
+    expect(t.pollLanded()).toBe('repoll');
+    // ...but the next one is, and the app is unfrozen.
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+    expect(t.suspended).toBe(false);
+  });
+
+  it('a user action while awake changes nothing', () => {
+    const t = new SleepTracker();
+    expect(t.userActed()).toBe(false);
+    t.pollStarted();
+    expect(t.pollLanded()).toBe('use');
+  });
+
   // test_poll_fresh_marks
   it('tells whether the latest poll began after a mark, for a refresh that must see its own effect', () => {
     const t = new SleepTracker();

@@ -88,6 +88,20 @@ export class SleepTracker {
     if (this.asleep) this.resumeEpoch = this.epoch;
   }
 
+  /**
+   * The user did something explicit (Refresh, Start, Stop, Repair, chose a
+   * distro, opened the window). Nobody acts on a sleeping machine, so if we
+   * still think it is asleep, Windows' resume was missed and the app would
+   * stay frozen: count this as the resume. A poll already under way is still
+   * not trusted; the next one ends the suspension. Returns whether it counted,
+   * so the caller restarts the paused poller.
+   */
+  userActed(): boolean {
+    if (!this.asleep) return false;
+    this.resume();
+    return true;
+  }
+
   /** A poll is beginning (its first step, the running-distros check). */
   pollStarted(): void {
     this.pollEpoch = this.epoch;

@@ -18,20 +18,11 @@
  * pure `trayMenuSpec`; this file only turns that into Electron objects.
  */
 import { Menu, Tray } from 'electron';
-import { escapeMenuLabel, menuSignature, trayMenuSpec, type MenuItemId } from './appLifecycle.js';
+import { escapeMenuLabel, menuClick, menuSignature, trayMenuSpec, type MenuHost } from './appLifecycle.js';
 import type { PollState, TrayIcon } from './poll.js';
 
-/** What the tray can ask the app to do. */
-export interface TrayHost {
-  /** Bring the window back, creating it if the app started hidden. */
-  show: () => void;
-  /** Open the dashboard in the default browser. */
-  openDashboard: () => void;
-  /** Start crr if it is stopped, stop it if it is running. */
-  startStop: () => void;
-  /** Leave the app for real. */
-  quit: () => void;
-}
+/** What the tray can ask the app to do (Start/Stop carries the action its item showed). */
+export type TrayHost = MenuHost;
 
 /** Login-item state, read from and written to the OS. */
 export interface LoginItemControl {
@@ -71,13 +62,6 @@ export function createTray(opts: TrayOptions): TrayHandle {
   let shownSignature: string | undefined;
   let shownTooltip: string | undefined;
 
-  const click: Record<Exclude<MenuItemId, 'status' | 'loginItem'>, () => void> = {
-    open: () => opts.host.show(),
-    dashboard: () => opts.host.openDashboard(),
-    startStop: () => opts.host.startStop(),
-    quit: () => opts.host.quit(),
-  };
-
   const render = (): void => {
     const { state, busy } = last;
     const items = trayMenuSpec({
@@ -116,10 +100,11 @@ export function createTray(opts: TrayOptions): TrayHandle {
           },
         };
       }
+      // Bound to what this item shows: the menu is rebuilt whenever that changes.
       return {
         label: item.label,
         enabled: item.enabled,
-        click: click[item.id],
+        click: menuClick(item, opts.host),
       };
     });
     tray.setContextMenu(Menu.buildFromTemplate(template));

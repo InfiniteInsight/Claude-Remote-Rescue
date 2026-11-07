@@ -97,12 +97,16 @@ export type MenuItemId =
   | 'loginItem'
   | 'quit';
 
+export type StartStopAction = 'start' | 'stop';
+
 export interface MenuItemSpec {
   id: MenuItemId;
   label: string;
   enabled: boolean;
   /** Present only on the checkbox item. */
   checked?: boolean;
+  /** Present only on the Start/Stop item: what its label offers. */
+  action?: StartStopAction;
 }
 
 function unitActive(service: ServiceStatus | undefined, name: string): boolean {
@@ -141,6 +145,7 @@ export function trayMenuSpec(opts: {
       id: 'startStop',
       label: running ? TRAY_LABELS.stop : TRAY_LABELS.start,
       enabled: !startStopDisabled,
+      action: running ? 'stop' : 'start',
     },
   ];
   // Omitted when unpackaged: a login item would register Electron itself, not
@@ -155,6 +160,43 @@ export function trayMenuSpec(opts: {
   }
   items.push({ id: 'quit', label: TRAY_LABELS.quit, enabled: true });
   return items;
+}
+
+/** What the tray menu can ask the app to do. */
+export interface MenuHost {
+  /** Bring the window back, creating it if the app started hidden. */
+  show(): void;
+  /** Open the dashboard in the default browser. */
+  openDashboard(): void;
+  /** Run exactly this action: the one the clicked item showed. */
+  startStop(action: StartStopAction): void;
+  /** Leave the app for real. */
+  quit(): void;
+}
+
+/**
+ * The click handler for a menu item, bound to what the item showed when the
+ * menu was built. The menu can stay open across polls, so the state may have
+ * changed by the time of the click (after a resume it is cleared, and would
+ * read Start): a click on "Stop CRR" must still stop. The status line has no
+ * handler, and the login checkbox is wired by the tray itself.
+ */
+export function menuClick(item: MenuItemSpec, host: MenuHost): (() => void) | undefined {
+  switch (item.id) {
+    case 'open':
+      return () => host.show();
+    case 'dashboard':
+      return () => host.openDashboard();
+    case 'startStop': {
+      const action: StartStopAction = item.action ?? (item.label === TRAY_LABELS.stop ? 'stop' : 'start');
+      return () => host.startStop(action);
+    }
+    case 'quit':
+      return () => host.quit();
+    case 'status':
+    case 'loginItem':
+      return undefined;
+  }
 }
 
 /**
