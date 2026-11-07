@@ -95,7 +95,8 @@ export class CrrClient {
   private failure(r: CommandResult): CrrResult<never> {
     return {
       ok: false,
-      error: summarizeError(r.stderr || r.stdout),
+      // wsl.exe's own errors arrive on stdout with stderr empty.
+      error: summarizeError(r.stderr || r.stdout) || `exit ${r.code}`,
       exit: r.code,
       mismatch: isUsageError(r),
     };

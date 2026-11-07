@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CRR_PATH_SCRIPT, CrrClient, resolveCrrPath } from './crrClient';
-import type { CommandResult, RunArgv } from './wsl';
+import { realRunInDistro, type CommandResult, type RunArgv } from './wsl';
 
 const PATH = '/home/u/.local/state/crr/app/bin/crr';
 const fixture = (name: string): string =>
@@ -172,6 +172,47 @@ describe('resolveCrrPath', () => {
     expect(a.ok).toBe(false);
     const b = await resolveCrrPath(async () => ok(''));
     expect(b.ok).toBe(false);
+  });
+});
+
+describe("wsl.exe's own errors, through the real runner", () => {
+  // What `wsl.exe -d NoSuchDistro -e true` prints on this host: exit 255,
+  // UTF-16LE, on stdout, with nothing on stderr.
+  const notFound = (): RunArgv =>
+    realRunInDistro('NoSuchDistro', (_file, _args, _opts, cb) => {
+      cb(
+        Object.assign(new Error('Command failed'), { code: 255 }),
+        Buffer.from(
+          'There is no distribution with the supplied name.\r\nError code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND\r\n',
+          'utf16le',
+        ),
+        Buffer.alloc(0),
+      );
+    });
+
+  // test_wsl_error_reaches_the_status_line
+  it('a crr call reports the readable reason, falling back to stdout', async () => {
+    const r = await new CrrClient(notFound(), PATH).serviceStatus();
+    expect(r).toEqual({
+      ok: false,
+      error: 'Error code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND',
+      exit: 255,
+      mismatch: false,
+    });
+  });
+
+  it('resolving the crr path reports it too', async () => {
+    const r = await resolveCrrPath(notFound());
+    expect(r).toEqual({
+      ok: false,
+      error: 'could not locate crr: Error code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND',
+    });
+  });
+
+  it('a failure with nothing readable on either stream names the exit code', async () => {
+    const c = new CrrClient(async () => ({ code: 255, stdout: '\u0000', stderr: '' }), PATH);
+    const r = await c.serviceStatus();
+    expect(!r.ok && r.error).toBe('exit 255');
   });
 });
 
