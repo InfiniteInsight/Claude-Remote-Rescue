@@ -141,16 +141,21 @@ def reopen(
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
 
-    ``restart`` only matters for a LIVE session. True (the dashboard's and
-    ``crr reopen``'s Reopen) restarts claude, so a flag toggled on the
-    dashboard takes effect (#117). False (the login restore,
-    ``crr rescue-check``) never stops a running claude: it only opens a tab
-    (#189).
+    ``restart`` matters for LIVE and GHOST sessions. True (the dashboard's
+    and ``crr reopen``'s Reopen) restarts claude, so a flag toggled on the
+    dashboard takes effect (#117), and rescues a ghost as below. False (the
+    login restore, ``crr rescue-check``) never kills, signals or archives
+    anything: it only opens a tab (#189).
 
     - CRASHED: the original no-strike-accounting revival — spawn (or note
       already-running), unchanged.
-    - GHOST: [user request 2026-07-30] the mobile rescue path. Close on a
-      ghost destroys revival data (the wrapper's close branch runs
+    - GHOST, ``restart=False``: open a tab on the entry's tmux_session if
+      it is running, and do nothing else; otherwise refused, entry
+      untouched. A GHOST can be a misreading: ``has_controlling_tty``
+      answers "no tty" when ``ps`` times out, so a healthy session can
+      classify GHOST at login, and the rescue below would kill it.
+    - GHOST, ``restart=True``: [user request 2026-07-30] the mobile rescue
+      path. Close on a ghost destroys revival data (the wrapper's close branch runs
       claude-exit -> claude=None -> deregister), and there is otherwise no
       way from a phone to get a ghost's conversation into tmux. Close-flag
       the orphan wrapper so it exits its shell instead of silently
@@ -171,6 +176,7 @@ def reopen(
       restart in place, as kick does (relaunch flag armed first).
     - LIVE without a live tmux_session, ``restart=False``: refused, and
       claude is left running. There is no tmux session to attach a tab to.
+      (One branch serves both restart=False cases, LIVE and GHOST.)
 
     Revival always lands in a detached tmux session first (durable), then a
     visible tab attaches to it. The tab is part of what "reopen" means, not a
@@ -195,16 +201,20 @@ def reopen(
     if live is None:
         return OpResult(False, f"reopen {pid}: cannot determine tmux state — is tmux responding?")
 
+    if not restart and state in (LIVE, GHOST):
+        # Tab only, whatever the classifier says: a `ps` timeout reads as "no
+        # tty", so a healthy session can classify GHOST at login (#189).
+        name = entry.get("tmux_session")
+        if not (name and name in live):
+            return OpResult(False, f"session {pid} has no running tmux session to open "
+                                   "a tab on — left it running")
+        suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                    now=now, boot_id=boot.current(), tmux=tmux)
+        return OpResult(True, f"already running as {name}" + suffix,
+                        degraded=tabs_expected and not landed)
+
     if state == LIVE:
         name = entry.get("tmux_session")
-        if not restart:
-            if not (name and name in live):
-                return OpResult(False, f"session {pid} is running outside tmux, so there "
-                                       "is no tmux session to open a tab on — left it running")
-            suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
-                                        now=now, boot_id=boot.current(), tmux=tmux)
-            return OpResult(True, f"already running as {name}" + suffix,
-                            degraded=tabs_expected and not landed)
         if name and name in live:
             try:
                 tmux.kill_session(name)

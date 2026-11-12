@@ -175,8 +175,10 @@ No tag or release has been cut yet. This section describes everything on
   the watchdog already revived (#189). `crr rescue-check` reopened each one
   the way the dashboard's Reopen does, and since #117 that kills a running
   session's tmux and starts a new one. It now only opens a tab on the
-  session that is running. The dashboard's Reopen still restarts, so a
-  toggled flag still takes effect.
+  session that is running. That holds even when a slow `ps` makes a healthy
+  session look like a ghost, which the dashboard would kill and archive to
+  rescue. The dashboard's Reopen still restarts, so a toggled flag still
+  takes effect.
 - Sessions crr starts outside the watchdog run the same Claude Code as the
   watchdog's revivals (#189). A tmux session takes the PATH of whatever
   starts it. `crr rescue-check` runs at login before fish has put

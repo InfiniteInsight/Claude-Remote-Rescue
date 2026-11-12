@@ -749,6 +749,74 @@ def _ghost(store, pid):
     return FakeBoot("B"), FakeProbe(alive=True, tty=False)
 
 
+def _ghost_in_tmux(store, pid, name=f"crr-{_SID}"):
+    boot, probe = _ghost(store, pid)
+    entry = store.read(pid)
+    entry["tmux_session"] = name
+    store.write(entry)
+    return boot, probe, name
+
+
+def test_reopen_ghost_without_restart_only_opens_a_tab(tmp_path):
+    # (#189) has_controlling_tty answers "no tty" when `ps` times out, so a
+    # slow ps at login turns a healthy revived session into a GHOST. The
+    # login restore must not kill or archive on that say-so.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe, name = _ghost_in_tmux(store, 42)
+    before = store.read(42)
+    tmux = FakeTmux(live={name})
+    tab = FakeTabSpawner()
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True, restart=False)
+    assert res.ok is True and res.degraded is False
+    assert tab.opened == [(["tmux", "attach", "-t", name], None)]
+    assert ctrl.terminated == [] and ctrl.group_calls == []
+    assert flags.armed == {}
+    assert archive.scan().records == []
+    assert store.read(42) == before
+    assert tmux.killed == [] and tmux.created == []
+    assert name in res.message
+
+
+def test_reopen_ghost_without_restart_is_degraded_when_the_tab_fails(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    boot, probe, name = _ghost_in_tmux(store, 42)
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, FakeTmux(live={name}), ctrl, flags, boot, probe, 42,
+                     _NOW, grace=0.1, remote_control=True,
+                     tab_spawner=FakeTabSpawner(fail=True), tabs_expected=True,
+                     restart=False)
+    assert res.ok is True and res.degraded is True
+    assert f"tmux attach -t {name}" in res.message
+    assert ctrl.terminated == [] and flags.armed == {}
+
+
+@pytest.mark.parametrize("in_tmux", [False, True])
+def test_reopen_ghost_without_restart_and_no_live_tmux_is_refused(tmp_path, in_tmux):
+    # No tmux session to attach to (none recorded, or not running): refuse
+    # and touch nothing.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    if in_tmux:
+        boot, probe, _name = _ghost_in_tmux(store, 42)
+    else:
+        boot, probe = _ghost(store, 42)
+    before = store.read(42)
+    tmux = FakeTmux(live=())
+    tab = FakeTabSpawner()
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, boot, probe, 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True, restart=False)
+    assert res.ok is False
+    assert ctrl.terminated == [] and ctrl.group_calls == []
+    assert flags.armed == {}
+    assert archive.scan().records == []
+    assert store.read(42) == before
+    assert tmux.killed == [] and tmux.created == [] and tab.opened == []
+
+
 def test_reopen_ghost_kills_flags_archives_and_spawns(tmp_path):
     """[user request 2026-07-30] a ghost's conversation must be rescuable
     from the dashboard: close-flag the orphan wrapper, kill claude's group,
