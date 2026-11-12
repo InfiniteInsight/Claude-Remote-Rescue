@@ -24,6 +24,7 @@ Invoked only from crr.cli; no core port (core never spawns services).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -399,6 +400,49 @@ def installed_web_port(home: Path) -> int | None:
     except (OSError, ValueError):
         return None
     return parse_web_port(text)
+
+
+def parse_unit_path(unit_text: str) -> str | None:
+    """The PATH a unit's ``Environment=`` lines give its service, or None.
+
+    Reads what ``revive_service_unit`` writes (``Environment=PATH=...``)
+    with systemd's rules around it: a line holds space-separated
+    assignments, quoted or not; a later assignment wins; an empty
+    ``Environment=`` resets them; a line that can't be split is ignored.
+    None when that leaves no PATH, or an empty one.
+    """
+    path = None
+    for line in unit_text.splitlines():
+        line = line.strip()
+        if not line.startswith("Environment="):
+            continue
+        try:
+            words = shlex.split(line[len("Environment="):])
+        except ValueError:
+            continue
+        if not words:
+            path = None
+        for word in words:
+            if word.startswith("PATH="):
+                path = word[len("PATH="):]
+    return path or None
+
+
+def installed_revive_path(home: Path) -> str | None:
+    """The PATH the INSTALLED watchdog unit runs ``crr revive`` with; None
+    when no unit is installed or it sets no readable PATH (#189).
+
+    ``crr systemd --install`` resolved it (#165), and every watchdog
+    revival runs under it. crr.cli hands it to revivals started anywhere
+    else too. It is read back, never recomputed: the resolver reads the
+    caller's PATH, and the caller's PATH is the one that can't be trusted
+    (a login shell before its PATH is set up).
+    """
+    try:
+        text = (unit_dir(home) / SERVICE_NAME).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    return parse_unit_path(text)
 
 
 def unit_dir(home: Path) -> Path:

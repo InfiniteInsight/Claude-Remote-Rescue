@@ -33,6 +33,7 @@ import os
 import plistlib
 import shutil
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 REVIVE_LABEL = "com.claude-remote-rescue.revive"
 WEB_LABEL = "com.claude-remote-rescue.web"
@@ -178,6 +179,23 @@ def awake_agent_plist(crr_bin: str, path: str) -> str:
 
 def agent_dir(home: Path) -> Path:
     return home / "Library" / "LaunchAgents"
+
+
+def installed_revive_path(home: Path) -> str | None:
+    """The PATH the INSTALLED revive agent runs ``crr revive`` with; None
+    when no agent is installed or its plist carries no readable PATH (#189).
+
+    The launchd twin of ``systemd.installed_revive_path``: the PATH
+    ``crr launchd --install`` resolved, read back rather than recomputed
+    from the caller's PATH.
+    """
+    try:
+        data = plistlib.loads((agent_dir(home) / REVIVE_PLIST).read_bytes())
+    except (OSError, ValueError, ExpatError):  # InvalidFileException is a ValueError
+        return None
+    env = data.get("EnvironmentVariables") if isinstance(data, dict) else None
+    path = env.get("PATH") if isinstance(env, dict) else None
+    return path if isinstance(path, str) and path else None
 
 
 def write_agents(target_dir: Path, agents: dict[str, str]) -> list[Path]:
