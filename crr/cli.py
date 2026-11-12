@@ -4751,7 +4751,9 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         for e in found:
             # reopen (NOT detmux): attach a tab AND keep the conversation
             # tracked, so it stays on the dashboard and is rescued again after
-            # the next reboot (#30). Same op as the dashboard Reopen.
+            # the next reboot (#30). Same op as the dashboard Reopen, minus its
+            # restart: these sessions are already running in tmux, and
+            # restarting them killed every healthy claude at one login (#189).
             res = ops.reopen(
                 JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
                 boot, probe, e["pid"], _now(),
@@ -4760,6 +4762,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 tab_spawner=tab, tabs_expected=tabs_expected,
                 crr_bin=_resolve_service_bin(None),
                 tab_health=tab_health.TabHealthStore(sd),
+                restart=False,
             )
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.

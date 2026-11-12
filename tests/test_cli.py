@@ -4293,7 +4293,7 @@ def test_rescue_check_yes_reopens_tabs_keeping_them_tracked_and_marks(tmp_path, 
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid} as crr-x")
 
@@ -4333,7 +4333,7 @@ def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, 
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid} as crr-x")
 
@@ -4345,6 +4345,33 @@ def test_rescue_check_auto_open_skips_prompt_and_reopens(tmp_path, monkeypatch, 
     assert calls == [42, 43]
     assert "reopened 42" in out and "reopened 43" in out
     assert cli.rescue.already_prompted(tmp_path, "current-boot") is True
+
+
+def test_rescue_check_opens_tabs_without_restarting(tmp_path, monkeypatch, capsys):
+    """#189: the sessions rescue-check finds are already running in tmux (the
+    watchdog revived them). Reopening them with the dashboard's restart
+    killed 8 healthy claudes at one login, so the login restore must ask
+    reopen for a tab only."""
+    _rescue_check_setup(monkeypatch, tmp_path, [{"pid": 42}, {"pid": 43}])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class _FakeTab:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (_FakeTab(), True))
+    restarts = []
+
+    def fake_reopen(*a, **k):
+        restarts.append(k.get("restart", "not passed"))
+        return SimpleNamespace(ok=True, degraded=False, message=f"already running as crr-{a[7]}")
+
+    monkeypatch.setattr(cli.ops, "reopen", fake_reopen)
+
+    assert cli.main(["rescue-check"]) == 0
+    assert restarts == [False, False]
+    assert "restarted" not in capsys.readouterr().out
 
 
 def test_rescue_check_disables_tab_after_first_degraded(tmp_path, monkeypatch, capsys):
@@ -4365,7 +4392,7 @@ def test_rescue_check_disables_tab_after_first_degraded(tmp_path, monkeypatch, c
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         spawners_seen.append(tab_spawner)
         return SimpleNamespace(ok=True, degraded=True,
                                message=f"reopened {pid} (no tab)")
@@ -4399,7 +4426,7 @@ def test_rescue_check_yes_routes_failure_message_to_stdout(tmp_path, monkeypatch
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         if pid == 42:
             return SimpleNamespace(ok=True, degraded=False, message=f"crr: #{pid} de-tmuxed")
         return SimpleNamespace(ok=False, degraded=False, message=f"crr: #{pid} de-tmux failed")
@@ -4437,7 +4464,7 @@ def test_rescue_check_enter_defaults_to_yes(tmp_path, monkeypatch, capsys):
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"crr: #{pid} de-tmuxed")
 
@@ -4763,7 +4790,7 @@ def test_rescue_check_revives_archived_sessions_before_scanning(tmp_path, monkey
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         reopen_calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid}")
 
@@ -4830,7 +4857,7 @@ def test_rescue_check_fires_after_deregister_clears_markers(tmp_path, monkeypatc
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         reopen_calls.append(pid)
         return SimpleNamespace(ok=True, degraded=False, message=f"reopened {pid}")
 
@@ -7911,7 +7938,7 @@ def test_rescue_check_shows_strikes_on_restored_sessions(tmp_path, monkeypatch, 
 
     def fake_reopen(store, archive, tmux_spawner, controller, flags, boot, probe,
                     pid, now, *, grace, remote_control, tab_spawner, tabs_expected,
-                    crr_bin=None, tab_health=None):
+                    crr_bin=None, tab_health=None, restart=True):
         return SimpleNamespace(ok=True, degraded=False, message=f"restarted crr-{pid}")
 
     monkeypatch.setattr(cli.ops, "reopen", fake_reopen)

@@ -137,8 +137,15 @@ def reopen(
     tabs_expected: bool = False,
     crr_bin: str | None = None,
     tab_health: "TabHealthStore | None" = None,
+    restart: bool = True,
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
+
+    ``restart`` only matters for a LIVE session. True (the dashboard's and
+    ``crr reopen``'s Reopen) restarts claude, so a flag toggled on the
+    dashboard takes effect (#117). False (the login restore,
+    ``crr rescue-check``) never stops a running claude: it only opens a tab
+    (#189).
 
     - CRASHED: the original no-strike-accounting revival — spawn (or note
       already-running), unchanged.
@@ -154,11 +161,16 @@ def reopen(
       the detached tmux revival. See ``_reopen_ghost`` for the full
       kill-first-then-preserve-then-spawn ordering and its safety
       rationale.
-    - LIVE with tmux_session: tab-attach-only (no revival, no kill, no
-      archive). Subsumes the PARKED path — any live session with a tmux
-      home gets a tab.
-    - LIVE without tmux_session: refused — kick/close are the ops for
-      a running claude with no tmux target to attach to.
+    - LIVE with a live tmux_session, ``restart=True``: kill the tmux
+      session, spawn a fresh one resuming the same conversation with the
+      current flags, then open a tab on it. No archive, no flag. Subsumes
+      the PARKED path: any live session with a tmux home gets a tab.
+    - LIVE with a live tmux_session, ``restart=False``: open a tab on the
+      session as it is. No kill, no spawn, no archive, no journal write.
+    - LIVE without a live tmux_session, ``restart=True``: signal claude to
+      restart in place, as kick does (relaunch flag armed first).
+    - LIVE without a live tmux_session, ``restart=False``: refused, and
+      claude is left running. There is no tmux session to attach a tab to.
 
     Revival always lands in a detached tmux session first (durable), then a
     visible tab attaches to it. The tab is part of what "reopen" means, not a
@@ -185,6 +197,14 @@ def reopen(
 
     if state == LIVE:
         name = entry.get("tmux_session")
+        if not restart:
+            if not (name and name in live):
+                return OpResult(False, f"session {pid} is running outside tmux, so there "
+                                       "is no tmux session to open a tab on — left it running")
+            suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                        now=now, boot_id=boot.current(), tmux=tmux)
+            return OpResult(True, f"already running as {name}" + suffix,
+                            degraded=tabs_expected and not landed)
         if name and name in live:
             try:
                 tmux.kill_session(name)

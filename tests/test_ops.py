@@ -644,6 +644,91 @@ def test_reopen_live_with_tmux_does_not_archive_or_touch_flags(tmp_path):
     assert store.read(42)  # entry still exists
 
 
+# --- reopen restart=False (#189: the login restore attaches, never restarts)
+#
+# [live bug, 2026-11-12] After a reboot the watchdog revived 8 sessions into
+# detached tmux, healthy. At login `crr rescue-check` reopened each one, and
+# the LIVE-with-tmux branch (#117) killed the session and spawned a new one.
+# The login restore only needs a tab on what is already running.
+
+def _live_in_tmux(store, name=f"crr-{_SID}"):
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    entry = store.read(42)
+    entry["tmux_session"] = name
+    store.write(entry)
+    return name
+
+
+def test_reopen_without_restart_opens_a_tab_on_the_running_session(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = _live_in_tmux(store)
+    before = store.read(42)
+    tmux = FakeTmux(live={name}, session_pids={name: 42})
+    tab = FakeTabSpawner()
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True,
+                     crr_bin="/usr/bin/crr", restart=False)
+    assert res.ok is True
+    assert res.degraded is False
+    assert tmux.killed == []          # the running claude is left alone
+    assert tmux.created == []         # and no second one is started
+    assert tab.opened == [(["tmux", "attach", "-t", name], None)]
+    assert ctrl.terminated == [] and flags.armed == {}
+    assert archive.scan().records == []
+    assert store.read(42) == before   # nothing to record: nothing changed
+    assert "restarted" not in res.message
+    assert name in res.message
+
+
+def test_reopen_without_restart_is_degraded_when_the_tab_fails(tmp_path):
+    # Same tab honesty as every other reopen: the session is there, the tab
+    # isn't, so say how to get in.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = _live_in_tmux(store)
+    tmux = FakeTmux(live={name}, session_pids={name: 42})
+    ctrl, flags = _idle_ctrl_flags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=FakeTabSpawner(fail=True), tabs_expected=True,
+                     restart=False)
+    assert res.ok is True
+    assert res.degraded is True
+    assert f"tmux attach -t {name}" in res.message
+    assert tmux.killed == [] and tmux.created == []
+
+
+@pytest.mark.parametrize("tmux_session", [None, f"crr-{_SID}"])
+def test_reopen_without_restart_never_signals_a_live_claude_outside_tmux(tmp_path, tmux_session):
+    # LIVE with no live tmux session (none recorded, or it vanished between
+    # rescue-check's scan and this call): the restart path would signal
+    # claude. Without restart there is nothing to attach to, so refuse and
+    # leave it running.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _seed(store, 42, boot="same-boot", claude=_claude())
+    if tmux_session:
+        entry = store.read(42)
+        entry["tmux_session"] = tmux_session
+        store.write(entry)
+    before = store.read(42)
+    tmux = FakeTmux(live=())
+    tab = FakeTabSpawner()
+    ctrl, flags = FakeController(groups=[200]), FakeFlags()
+    res = ops.reopen(store, archive, tmux, ctrl, flags, FakeBoot("same-boot"),
+                     FakeProbe(alive=True, tty=True), 42, _NOW,
+                     grace=0.1, remote_control=True,
+                     tab_spawner=tab, tabs_expected=True, restart=False)
+    assert res.ok is False
+    assert ctrl.terminated == [] and ctrl.group_calls == []
+    assert flags.armed == {}
+    assert tmux.killed == [] and tmux.created == [] and tab.opened == []
+    assert store.read(42) == before
+    assert "left it running" in res.message
+
+
 def test_open_tab_failed_spawn_still_gives_the_attach_command():
     # [live bug, 2026-08-09] On WSL with the WSLInterop binfmt handler
     # unregistered, wt.exe is on PATH but cannot exec: the spawn raises
