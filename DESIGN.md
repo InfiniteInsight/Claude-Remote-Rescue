@@ -306,6 +306,16 @@ in every revival while the shell ran the auto-updated one. The binary dirs now
 keep the shell PATH's order. A tmux session takes the PATH of the process
 creating it, so the watchdog unit's PATH is the one that counts.
 
+**[lesson: the creator's PATH]** (#189) That holds for every crr process
+that starts a tmux session, not only the watchdog. `crr rescue-check` runs
+during fish conf.d startup, before `~/.local/bin` is on PATH; its revivals
+found a Windows npm `claude` that exits at once, and every restored tab
+closed. So every tmux session crr starts runs under the installed watchdog
+unit's PATH, read back from the unit and never recomputed (the resolver
+reads the caller's PATH, the very PATH in question). It reaches tmux as
+the client's own PATH, because `new-session -e PATH=...` loses to the
+client's PATH for the first pane (measured, tmux 3.4).
+
 ### Tab spawn adapter
 
 Auto-detected, config-overridable:

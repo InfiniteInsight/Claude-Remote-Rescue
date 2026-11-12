@@ -171,6 +171,21 @@ No tag or release has been cut yet. This section describes everything on
 
 ### Fixed
 
+- Opening your first shell after a reboot no longer restarts the sessions
+  the watchdog already revived (#189). `crr rescue-check` reopened each one
+  the way the dashboard's Reopen does, and since #117 that kills a running
+  session's tmux and starts a new one. It now only opens a tab on the
+  session that is running. That holds even when a slow `ps` makes a healthy
+  session look like a ghost, which the dashboard would kill and archive to
+  rescue. The dashboard's Reopen still restarts, so a toggled flag still
+  takes effect.
+- Sessions crr starts outside the watchdog run the same Claude Code as the
+  watchdog's revivals (#189). A tmux session takes the PATH of whatever
+  starts it. `crr rescue-check` runs at login before fish has put
+  `~/.local/bin` on PATH, so its revivals ran a Windows npm `claude` that
+  exits at once, and every restored tab closed. crr now starts every tmux
+  session under the PATH the installed watchdog unit (or launchd agent) runs
+  with. With neither installed, nothing changes.
 - Revived sessions are tracked again after a reboot (#171). Journal entries
   for dead shells from earlier boots were never cleaned up, and a pane
   revived soon after a boot takes a low pid one of them still claimed. crr

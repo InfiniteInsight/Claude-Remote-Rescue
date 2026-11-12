@@ -355,6 +355,29 @@ def _reachability_by_sid(
     return out
 
 
+def _real_tmux(config: cfg.Config) -> tmux.RealTmux:
+    """The tmux adapter, set to start sessions under the installed
+    watchdog's PATH (#189). Every RealTmux in crr.cli is built here.
+
+    A tmux session runs with the PATH of the process that creates it
+    (#165), so a revival started outside the service ran whatever `claude`
+    its caller's PATH found. At login that caller is `crr rescue-check`
+    during fish conf.d startup, before ~/.local/bin is on PATH, and `claude`
+    was a Windows npm shim that exits at once. The unit's PATH is the one
+    `crr systemd --install` (or `crr launchd --install`) resolved. With no
+    unit installed, or on another platform, the caller's PATH is used as
+    before.
+    """
+    system = platform.system()
+    if system == "Linux":
+        spawn_path = systemd.installed_revive_path(Path.home())
+    elif system == "Darwin":
+        spawn_path = launchd.installed_revive_path(Path.home())
+    else:
+        spawn_path = None
+    return tmux.RealTmux(config.get("interop_timeout_seconds"), spawn_path=spawn_path)
+
+
 def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
     """Tmux session names confirmed alive, or None when tmux cannot say.
 
@@ -369,7 +392,7 @@ def _live_tmux_sessions(config: cfg.Config) -> set[str] | None:
     service startup would freeze the dashboard's answer for the life of the
     process.
     """
-    t = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    t = _real_tmux(config)
     if not t.available():
         return set()
     return t.list_sessions()
@@ -382,7 +405,7 @@ def _attached_tmux_sessions(config: cfg.Config) -> set[str] | None:
     unreadable query is None so `assemble_sessions` declines to mark any card
     attached rather than fabricating "nothing is attached".
     """
-    t = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    t = _real_tmux(config)
     if not t.available():
         return set()
     return t.attached_sessions()
@@ -3055,7 +3078,7 @@ def _cmd_revive(_args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr revive: {exc}", file=sys.stderr)
         return 2
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     if not tmux_spawner.available():
         print("crr revive: tmux is required for revival but was not found", file=sys.stderr)
         return 2
@@ -3761,7 +3784,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         print(f"crr reopen: {exc}", file=sys.stderr)
         return 2
     config = _load_config()
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     if not tmux_spawner.available():
         print("crr reopen: tmux is required for revival but was not found", file=sys.stderr)
         return 2
@@ -3870,7 +3893,7 @@ def _cmd_untrack(args: argparse.Namespace) -> int:
         print(f"crr untrack: {exc}", file=sys.stderr)
         return 2
     config = _load_config()
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     if not tmux_spawner.available():
         print("crr untrack: tmux was not found", file=sys.stderr)
         return 2
@@ -3891,7 +3914,7 @@ def _cmd_untmux(args: argparse.Namespace) -> int:
         print(f"crr untmux: {exc}", file=sys.stderr)
         return 2
     config = _load_config()
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     if not tmux_spawner.available():
         print("crr untmux: tmux was not found", file=sys.stderr)
         return 2
@@ -4580,7 +4603,7 @@ def _cmd_rescued(_args: argparse.Namespace) -> int:
     except NotImplementedError as exc:
         print(f"crr rescued: {exc}", file=sys.stderr)
         return 2
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     live = tmux_spawner.list_sessions() if tmux_spawner.available() else set()
     attached = tmux_spawner.attached_sessions() if tmux_spawner.available() else set()
     if live is None or attached is None:
@@ -4664,7 +4687,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
     if rescue.already_prompted(sd, boot_id):
         return 0
 
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     # #100: run a revive pass before scanning for rescued sessions so that
     # archived entries (superseded-on-register after reboot PID reuse) get
     # tmux sessions even when the watchdog has not run yet. Gated by a
@@ -4751,7 +4774,9 @@ def _rescue_check(_args: argparse.Namespace) -> int:
         for e in found:
             # reopen (NOT detmux): attach a tab AND keep the conversation
             # tracked, so it stays on the dashboard and is rescued again after
-            # the next reboot (#30). Same op as the dashboard Reopen.
+            # the next reboot (#30). Same op as the dashboard Reopen, minus its
+            # restart: these sessions are already running in tmux, and
+            # restarting them killed every healthy claude at one login (#189).
             res = ops.reopen(
                 JournalStore(sd), ArchiveStore(sd), tmux_spawner, controller, flags,
                 boot, probe, e["pid"], _now(),
@@ -4760,6 +4785,7 @@ def _rescue_check(_args: argparse.Namespace) -> int:
                 tab_spawner=tab, tabs_expected=tabs_expected,
                 crr_bin=_resolve_service_bin(None),
                 tab_health=tab_health.TabHealthStore(sd),
+                restart=False,
             )
             # The shims invoke `crr rescue-check 2>/dev/null`; the user typed Y
             # and must see failures too, so both outcomes go to stdout.
@@ -5242,7 +5268,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
     store = JournalStore(sd)
     archive = ArchiveStore(sd)
     flags = FlagStore(sd)
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     # NOT resolved here: whether this host can open a tab is a live property,
     # not a startup fact. On WSL it hinges on the WSLInterop binfmt handler,
     # which can be missing at boot and repaired minutes later — a spawner
@@ -6207,7 +6233,7 @@ def _terminal_reopen(sessions: list[tuple[str, str]], config: cfg.Config, sd) ->
     """
     has_tty = sys.stdin.isatty() and sys.stdout.isatty()
     in_tmux = bool(os.environ.get("TMUX"))
-    tmux_spawner = tmux.RealTmux(config.get("interop_timeout_seconds"))
+    tmux_spawner = _real_tmux(config)
     current = tmux_spawner.current_session_name() if in_tmux else None
     live = tmux_spawner.list_sessions() or set()  # None -> set(): aggregate-exists check
     plan = terminal_reopen.plan_terminal_reopen(

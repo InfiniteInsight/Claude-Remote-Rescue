@@ -13,6 +13,7 @@ exec]).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from typing import Sequence
@@ -88,8 +89,11 @@ def _empty_or_unknown(stderr: str) -> set[str] | None:
 
 
 class RealTmux:
-    def __init__(self, timeout_seconds: float) -> None:
+    def __init__(self, timeout_seconds: float, spawn_path: str | None = None) -> None:
+        # spawn_path: the PATH new sessions run with (see
+        # new_detached_session). None keeps this process's PATH.
         self._timeout = timeout_seconds
+        self._spawn_path = spawn_path
 
     def available(self) -> bool:
         return shutil.which("tmux") is not None
@@ -172,9 +176,24 @@ class RealTmux:
         return _parse_sessions(result.stdout)
 
     def new_detached_session(self, name: str, cwd: str, argv: Sequence[str]) -> None:
+        """Start ``argv`` in a new detached session named ``name``.
+
+        With ``spawn_path`` set, the session runs with that PATH instead of
+        this process's (#189). It has to be the tmux CLIENT's PATH: tmux
+        gives a new session's first pane the PATH of the client that ran
+        ``new-session``, and that wins over ``-e PATH=...`` (measured on
+        tmux 3.4: ``-e PATH=/EPATH`` from a client with ``PATH=/CLIENTPATH``
+        gave the pane ``/CLIENTPATH``). The client binary is still the tmux
+        this process finds, the same one every other call here runs.
+        """
+        spawn: dict = {}
+        if self._spawn_path is not None:
+            spawn = {"env": {**os.environ, "PATH": self._spawn_path},
+                     "executable": shutil.which("tmux") or "tmux"}
         subprocess.run(
             _new_session_cmd(name, cwd, argv),
             capture_output=True, text=True, timeout=self._timeout, check=True,
+            **spawn,
         )
         self.forward_title(name)
 

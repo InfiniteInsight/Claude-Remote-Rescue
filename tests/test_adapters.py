@@ -273,6 +273,63 @@ def test_tmux_session_path(tmp_path, monkeypatch):
         subprocess.run(["tmux", "kill-server"], capture_output=True)
 
 
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_spawn_path_overrides_the_callers_path(tmp_path, monkeypatch):
+    # (#189) Because a session takes its creator's PATH, a revival started
+    # from a login shell ran whatever `claude` that shell's PATH found: during
+    # fish conf.d startup, a Windows npm shim that exits at once. spawn_path
+    # gives the session the installed service's PATH instead.
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    monkeypatch.delenv("TMUX", raising=False)
+    caller, service = tmp_path / "caller", tmp_path / "service"
+    caller.mkdir()
+    service.mkdir()
+    out = tmp_path / "path.txt"
+    base = os.environ["PATH"]
+    monkeypatch.setenv("PATH", f"{caller}{os.pathsep}{base}")
+    try:
+        tmux.RealTmux(timeout_seconds=10).new_detached_session(
+            "crr-a", str(tmp_path), ["sleep", "30"])  # the caller starts the server
+        tmux.RealTmux(timeout_seconds=10, spawn_path=f"{service}{os.pathsep}{base}") \
+            .new_detached_session("crr-b", str(tmp_path),
+                                  ["sh", "-c", f'echo "$PATH" > {out}; sleep 30'])
+        deadline = time.monotonic() + 5
+        while not (out.exists() and out.read_text()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert out.read_text().strip().split(os.pathsep)[0] == str(service)
+    finally:
+        subprocess.run(["tmux", "kill-server"], capture_output=True)
+
+
+def test_spawn_path_runs_the_callers_tmux_with_the_service_path(monkeypatch):
+    # The PATH goes to the tmux client (see new_detached_session for why not
+    # `-e`), but the client binary stays the one every other RealTmux call in
+    # this process runs, found through the caller's PATH.
+    calls = []
+    # A variable this test owns: HOME is not set on every CI runner (Windows).
+    monkeypatch.setenv("CRR_TEST_PASSTHROUGH", "kept")
+    monkeypatch.setattr(tmux.shutil, "which",
+                        lambda name: "/caller/bin/tmux" if name == "tmux" else None)
+    monkeypatch.setattr(tmux.subprocess, "run",
+                        lambda cmd, **k: calls.append((cmd, k)) or _Result(0))
+    tmux.RealTmux(timeout_seconds=5, spawn_path="/svc/bin:/usr/bin") \
+        .new_detached_session("crr-abc", "/p", ["claude"])
+    cmd, kwargs = calls[0]
+    assert cmd == tmux._new_session_cmd("crr-abc", "/p", ["claude"])
+    assert kwargs["env"]["PATH"] == "/svc/bin:/usr/bin"
+    assert kwargs["env"]["CRR_TEST_PASSTHROUGH"] == "kept"  # only PATH changes
+    assert kwargs["executable"] == "/caller/bin/tmux"
+
+
+def test_no_spawn_path_leaves_the_tmux_call_as_it_was(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tmux.subprocess, "run",
+                        lambda cmd, **k: calls.append((cmd, k)) or _Result(0))
+    tmux.RealTmux(timeout_seconds=5).new_detached_session("crr-abc", "/p", ["claude"])
+    _cmd, kwargs = calls[0]
+    assert "env" not in kwargs and "executable" not in kwargs
+
+
 def test_forward_title_commands_are_session_scoped(monkeypatch):
     # A reopened tab otherwise reads "wsl.exe": Claude Code sets the pane
     # title to the conversation name, but tmux (set-titles off) never

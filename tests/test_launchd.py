@@ -203,3 +203,30 @@ def test_crrs_own_dir_never_shadows_the_shells_claude(tmp_path, monkeypatch):
     for name in launchd.SERVICE_BINARIES:
         assert shutil.which(name, path=path) == shutil.which(name), name
     assert str(own) in path.split(os.pathsep)
+
+
+# --- the installed watchdog's PATH (#189) ------------------------------------
+
+@pytest.mark.real_service_probes
+def test_installed_revive_path_reads_the_revive_agent(tmp_path):
+    assert launchd.installed_revive_path(tmp_path) is None      # nothing installed
+    launchd.write_agents(launchd.agent_dir(tmp_path), {
+        launchd.REVIVE_PLIST: launchd.revive_agent_plist("/x/crr", "/opt/homebrew/bin:/usr/bin", 60)})
+    assert launchd.installed_revive_path(tmp_path) == "/opt/homebrew/bin:/usr/bin"
+
+
+@pytest.mark.real_service_probes
+@pytest.mark.parametrize("content", [
+    b"not a plist",
+    b'<?xml version="1.0"?><plist><dict><key>Label</key>',      # cut short
+    plistlib.dumps(["not", "a", "dict"]),
+    plistlib.dumps({"Label": "x"}),                              # no EnvironmentVariables
+    plistlib.dumps({"EnvironmentVariables": {"HOME": "/h"}}),    # no PATH
+    plistlib.dumps({"EnvironmentVariables": {"PATH": ""}}),
+    plistlib.dumps({"EnvironmentVariables": "PATH=/x"}),
+])
+def test_installed_revive_path_is_none_for_a_malformed_agent(tmp_path, content):
+    ad = launchd.agent_dir(tmp_path)
+    ad.mkdir(parents=True)
+    (ad / launchd.REVIVE_PLIST).write_bytes(content)
+    assert launchd.installed_revive_path(tmp_path) is None

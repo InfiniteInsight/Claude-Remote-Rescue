@@ -492,6 +492,46 @@ def test_installed_web_port_reads_the_unit_file(tmp_path):
     assert systemd.installed_web_port(tmp_path) == 8444
 
 
+# --- the installed watchdog's PATH (#189) ------------------------------------
+# Read back so revivals started outside the service run under the PATH the
+# install resolved, not their caller's.
+
+@pytest.mark.parametrize("environment, path", [
+    ("Environment=PATH=/svc/bin:/usr/bin", "/svc/bin:/usr/bin"),
+    ('Environment="PATH=/my bin:/usr/bin"', "/my bin:/usr/bin"),
+    ("Environment=XDG_STATE_HOME=/s PATH=/svc/bin", "/svc/bin"),
+    ("Environment=PATH=/old\nEnvironment=PATH=/new", "/new"),  # the later one wins
+    ("Environment=XDG_STATE_HOME=/s", None),                    # no PATH set
+    ("Environment=PATH=", None),                                # set to nothing
+    ('Environment="PATH=/unterminated', None),                  # systemd ignores the line
+    ("Environment=PATH=/old\nEnvironment=", None),              # an empty one resets the list
+])
+def test_parse_unit_path(environment, path):
+    unit = f"[Service]\nType=oneshot\n{environment}\nExecStart=/x/crr revive\n"
+    assert systemd.parse_unit_path(unit) == path
+
+
+def test_parse_unit_path_round_trips_the_unit_the_adapter_writes():
+    unit = systemd.revive_service_unit("/opt/crr/bin/crr", "/opt/crr/bin:/usr/bin", "/state")
+    assert systemd.parse_unit_path(unit) == "/opt/crr/bin:/usr/bin"
+
+
+@pytest.mark.real_service_probes
+def test_installed_revive_path_reads_the_watchdog_unit(tmp_path):
+    assert systemd.installed_revive_path(tmp_path) is None      # nothing installed
+    systemd.write_units(systemd.unit_dir(tmp_path), {
+        systemd.SERVICE_NAME: systemd.revive_service_unit("/x/crr", "/svc/bin:/bin", "/s")})
+    assert systemd.installed_revive_path(tmp_path) == "/svc/bin:/bin"
+
+
+@pytest.mark.real_service_probes
+def test_installed_revive_path_is_none_for_an_unreadable_unit(tmp_path):
+    ud = systemd.unit_dir(tmp_path)
+    ud.mkdir(parents=True)
+    (ud / systemd.SERVICE_NAME).write_bytes(b"Environment=PATH=/a\n\xff\xfe")
+    assert systemd.installed_revive_path(tmp_path) is None
+
+
 # --- crr-web as the user manager has it loaded (#161, C1) -------------------
 
 _WEB_SHOW_OUT = "MainPID=4242\nKillMode=process\nLoadState=loaded\nActiveState=active\n"

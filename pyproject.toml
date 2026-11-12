@@ -42,5 +42,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
   "real_boot_identity: opt out of conftest's boot-identity stand-in — for the tests that assert what detect() really does on this platform",
-  "real_service_probes: opt out of conftest's stand-in for the host's crr-web and Scheduled Task probes — for the adapter tests of those probes",
+  "real_service_probes: opt out of conftest's stand-in for the host's crr-web and Scheduled Task probes and the installed watchdog's PATH — for the adapter tests of those probes",
 ]

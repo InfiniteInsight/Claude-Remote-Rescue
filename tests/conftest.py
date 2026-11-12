@@ -217,13 +217,22 @@ def _no_real_service_probes(request, monkeypatch):
     which on a WSL developer machine would ask the real Windows host; "not
     found" is what every non-WSL runner gets.
 
-    Tests that need an answer stub ``systemd.web_unit_props`` or
-    ``scheduled_task.crr_tasks_installed`` themselves; the adapter tests of
-    the probes opt out with ``real_service_probes``.
+    The installed watchdog's PATH (#189) is stubbed the same way, to "no
+    unit installed". crr.cli gives every tmux session it starts that PATH,
+    so a test driving a revival would otherwise run under the developer's
+    real unit's PATH, and a stand-in ``claude`` the test put on PATH would
+    lose to the real one.
+
+    Tests that need an answer stub ``systemd.web_unit_props``,
+    ``scheduled_task.crr_tasks_installed`` or ``*.installed_revive_path``
+    themselves; the adapter tests of the probes opt out with
+    ``real_service_probes``.
     """
     if "real_service_probes" in request.keywords:
         return
-    from crr.adapters import scheduled_task, systemd
+    from crr.adapters import launchd, scheduled_task, systemd
 
     monkeypatch.setattr(systemd, "web_unit_props", lambda timeout: None)
     monkeypatch.setattr(scheduled_task, "crr_tasks_installed", lambda timeout: False)
+    monkeypatch.setattr(systemd, "installed_revive_path", lambda home: None)
+    monkeypatch.setattr(launchd, "installed_revive_path", lambda home: None)

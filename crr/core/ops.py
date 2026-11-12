@@ -137,13 +137,25 @@ def reopen(
     tabs_expected: bool = False,
     crr_bin: str | None = None,
     tab_health: "TabHealthStore | None" = None,
+    restart: bool = True,
 ) -> OpResult:
     """Revive a session on demand, dispatching on the classifier state.
 
+    ``restart`` matters for LIVE and GHOST sessions. True (the dashboard's
+    and ``crr reopen``'s Reopen) restarts claude, so a flag toggled on the
+    dashboard takes effect (#117), and rescues a ghost as below. False (the
+    login restore, ``crr rescue-check``) never kills, signals or archives
+    anything: it only opens a tab (#189).
+
     - CRASHED: the original no-strike-accounting revival — spawn (or note
       already-running), unchanged.
-    - GHOST: [user request 2026-07-30] the mobile rescue path. Close on a
-      ghost destroys revival data (the wrapper's close branch runs
+    - GHOST, ``restart=False``: open a tab on the entry's tmux_session if
+      it is running, and do nothing else; otherwise refused, entry
+      untouched. A GHOST can be a misreading: ``has_controlling_tty``
+      answers "no tty" when ``ps`` times out, so a healthy session can
+      classify GHOST at login, and the rescue below would kill it.
+    - GHOST, ``restart=True``: [user request 2026-07-30] the mobile rescue
+      path. Close on a ghost destroys revival data (the wrapper's close branch runs
       claude-exit -> claude=None -> deregister), and there is otherwise no
       way from a phone to get a ghost's conversation into tmux. Close-flag
       the orphan wrapper so it exits its shell instead of silently
@@ -154,11 +166,17 @@ def reopen(
       the detached tmux revival. See ``_reopen_ghost`` for the full
       kill-first-then-preserve-then-spawn ordering and its safety
       rationale.
-    - LIVE with tmux_session: tab-attach-only (no revival, no kill, no
-      archive). Subsumes the PARKED path — any live session with a tmux
-      home gets a tab.
-    - LIVE without tmux_session: refused — kick/close are the ops for
-      a running claude with no tmux target to attach to.
+    - LIVE with a live tmux_session, ``restart=True``: kill the tmux
+      session, spawn a fresh one resuming the same conversation with the
+      current flags, then open a tab on it. No archive, no flag. Subsumes
+      the PARKED path: any live session with a tmux home gets a tab.
+    - LIVE with a live tmux_session, ``restart=False``: open a tab on the
+      session as it is. No kill, no spawn, no archive, no journal write.
+    - LIVE without a live tmux_session, ``restart=True``: signal claude to
+      restart in place, as kick does (relaunch flag armed first).
+    - LIVE without a live tmux_session, ``restart=False``: refused, and
+      claude is left running. There is no tmux session to attach a tab to.
+      (One branch serves both restart=False cases, LIVE and GHOST.)
 
     Revival always lands in a detached tmux session first (durable), then a
     visible tab attaches to it. The tab is part of what "reopen" means, not a
@@ -182,6 +200,18 @@ def reopen(
     live = tmux.list_sessions()
     if live is None:
         return OpResult(False, f"reopen {pid}: cannot determine tmux state — is tmux responding?")
+
+    if not restart and state in (LIVE, GHOST):
+        # Tab only, whatever the classifier says: a `ps` timeout reads as "no
+        # tty", so a healthy session can classify GHOST at login (#189).
+        name = entry.get("tmux_session")
+        if not (name and name in live):
+            return OpResult(False, f"session {pid} has no running tmux session to open "
+                                   "a tab on — left it running")
+        suffix, landed = _open_tab(tab_spawner, name, tab_health=tab_health,
+                                    now=now, boot_id=boot.current(), tmux=tmux)
+        return OpResult(True, f"already running as {name}" + suffix,
+                        degraded=tabs_expected and not landed)
 
     if state == LIVE:
         name = entry.get("tmux_session")
