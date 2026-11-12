@@ -140,7 +140,9 @@ DEFAULTS: dict[str, Any] = {
     # takes the VM down (OOM) isn't revived forever. Judgment calls: 10
     # deaths is ~10-20 min of a 1-2 min crash loop; the counter clears once
     # a revival is seen alive 10 min after it started, so ordinary reboots
-    # never add up.
+    # never add up. #190: the same window clears the revive-strike counter
+    # (host_death_stable_seconds covers both) so an idle but healthy revival
+    # doesn't carry strikes from unrelated incidents toward the give-up cap.
     "host_death_max_revivals": 10,
     "host_death_stable_seconds": 600,
     "watchdog_interval_seconds": 30, # how often the systemd timer sweeps for revivals

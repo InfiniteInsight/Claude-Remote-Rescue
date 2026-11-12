@@ -186,6 +186,13 @@ No tag or release has been cut yet. This section describes everything on
   exits at once, and every restored tab closed. crr now starts every tmux
   session under the PATH the installed watchdog unit (or launchd agent) runs
   with. With neither installed, nothing changes.
+- A healthy revival that sits idle no longer keeps its strikes forever (#190).
+  Strikes cleared only on conversation progress or a human attaching, so
+  unrelated incidents across days added up to the give-up cap and archived
+  sessions that had been fine for hours. A revival that has stayed up
+  `host_death_stable_seconds` (default 600, now covering both counters) clears
+  its strikes; one that dies inside the window keeps them, so a real crash
+  loop still gives up.
 - Revived sessions are tracked again after a reboot (#171). Journal entries
   for dead shells from earlier boots were never cleaned up, and a pane
   revived soon after a boot takes a low pid one of them still claimed. crr

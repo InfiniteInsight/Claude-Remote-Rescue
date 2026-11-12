@@ -491,6 +491,13 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
     action is one of: 'reset-nochange', 'reset', 'hold', 'revive', 'give_up',
     'host_crash_loop'.
 
+    An alive revival that has been up ``host_death_stable_seconds`` since
+    ``revived_at`` counts as healthy even with no transcript progress and
+    nobody attached (#190): an idle but healthy session otherwise kept its
+    strikes forever, and unrelated incidents across days added up to the
+    give-up cap. A revival that dies inside the window keeps them, so a
+    real crash loop still gives up. No window or no ``revived_at`` -> hold.
+
     ``current_boot`` lets a revival that died WITH its host go uncounted:
     when the boot stamped at the last revival (``revived_boot``) is no
     longer the current one, that revival's outcome is unknown — revive
@@ -506,12 +513,14 @@ def _decide(entry: Mapping[str, Any], live: set[str], max_strikes: int, now: str
     """
     name = resolved_session_name(entry)  # legacy crr-<sid8> keeps its name (#51)
     if name in live:
-        if not _alive_counts_as_healthy(entry, tx, attached or set(), name):
-            # Alive but frozen: keep the strikes. Never destructive — the
-            # entry is untouched, and give-up still only fires when dead.
+        stable = _stable(entry, now, host_death_stable_seconds)
+        if not (_alive_counts_as_healthy(entry, tx, attached or set(), name)
+                or stable):
+            # Alive but frozen, and not yet up long enough to count: keep the
+            # strikes. Never destructive — the entry is untouched, and
+            # give-up still only fires when dead.
             return "hold", entry, name
-        clear_host = (entry.get("host_deaths", 0) > 0
-                      and _stable(entry, now, host_death_stable_seconds))
+        clear_host = entry.get("host_deaths", 0) > 0 and stable
         if (entry["revive_strikes"] == 0 and entry["tmux_session"] == name
                 and not clear_host):
             return "reset-nochange", entry, name
