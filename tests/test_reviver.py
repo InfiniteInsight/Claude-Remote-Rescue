@@ -38,11 +38,11 @@ def _claude(sid="8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", skip_permissions=False):
 
 
 def _seed(store, pid, *, boot=_ENTRY_BOOT, claude=None, tmux_session=None, strikes=0,
-          tx_stamp=None):
+          tx_stamp=None, revived_at=None):
     store.write(new_entry(
         pid=pid, cwd=f"/home/u/p{pid}", host="tmux", shell="zsh",
         boot_id=boot, now=_NOW, claude=claude, tmux_session=tmux_session,
-        revive_strikes=strikes, revived_tx_mtime=tx_stamp,
+        revive_strikes=strikes, revived_tx_mtime=tx_stamp, revived_at=revived_at,
     ))
 
 
@@ -1599,6 +1599,88 @@ def test_a_revival_that_stayed_up_clears_its_host_deaths(tmp_path):
     assert store.read(42)["host_deaths"] == 1
     _pass(store, archive, 1, _at(13), live={name})   # alive 11 min: stable
     assert store.read(42)["host_deaths"] == 0
+
+
+# --- a stable revival clears its strikes (#190) ---------------------------
+#
+# A healthy revival that just sits idle makes no transcript progress and has
+# nobody attached, so it never counted as healthy and kept its strikes
+# forever: unrelated incidents across days added up to the give-up cap. A
+# revival that has been up `host_death_stable_seconds` since `revived_at`
+# now counts as healthy; one that dies inside the window keeps its strikes.
+
+def _frozen_revival(store, *, strikes=2, revived_minutes=0):
+    sid = _claude()["session_id"]
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=strikes,
+          tx_stamp=100.0, revived_at=_at(revived_minutes))
+    return name, FakeTranscripts({sid: TranscriptProbe(True, 100.0)})  # no progress
+
+
+def test_a_frozen_revival_up_the_stable_window_clears_its_strikes(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _frozen_revival(store)
+    o = _pass(store, archive, 0, _at(11), live={name}, transcripts=tx)  # 11 min up
+    assert o.reset == [42]
+    assert store.read(42)["revive_strikes"] == 0
+
+
+def test_a_frozen_revival_inside_the_stable_window_keeps_its_strikes(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _frozen_revival(store)
+    o = _pass(store, archive, 0, _at(9), live={name}, transcripts=tx)  # 9 min up
+    assert o.reset == []
+    assert store.read(42)["revive_strikes"] == 2
+
+
+def test_no_stable_window_keeps_the_old_hold(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _frozen_revival(store)
+    o = revive_crashed(
+        store.scan().entries, _Life(0), FakeProbe(), FakeTmux(live={name}),
+        store, archive, max_strikes=3, now=_at(600), remote_control_enabled=True,
+        transcripts=tx, max_host_deaths=4, host_death_stable_seconds=None)
+    assert o.reset == []
+    assert store.read(42)["revive_strikes"] == 2
+
+
+def test_a_frozen_revival_with_no_revived_at_keeps_the_old_hold(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    sid = _claude()["session_id"]
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, claude=_claude(), tmux_session=name, strikes=2, tx_stamp=100.0)
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})
+    o = _pass(store, archive, 0, _at(600), live={name}, transcripts=tx)
+    assert o.reset == []
+    assert store.read(42)["revive_strikes"] == 2
+
+
+def test_a_revival_that_dies_inside_the_window_still_strikes(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    _name, tx = _frozen_revival(store)
+    o = _pass(store, archive, 0, _at(3), live=(), transcripts=tx)  # dead, 3 min up
+    assert o.revived == [42]
+    assert store.read(42)["revive_strikes"] == 3
+
+
+def test_a_crash_loop_inside_the_window_still_reaches_give_up(tmp_path):
+    # The stability window must not let a real crash loop launder its strikes:
+    # each revival dies within minutes, so no pass ever sees it stable.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name = session_name({"claude": _claude()})
+    sid = _claude()["session_id"]
+    tx = FakeTranscripts({sid: TranscriptProbe(True, 100.0)})
+    _seed(store, 42, claude=_claude(), tx_stamp=100.0)
+    t = 0
+    for expected in (1, 2, 3):
+        o = _pass(store, archive, 0, _at(t), transcripts=tx)
+        assert o.revived == [42]
+        assert store.read(42)["revive_strikes"] == expected
+        _pass(store, archive, 0, _at(t + 4), live={name}, transcripts=tx)
+        assert store.read(42)["revive_strikes"] == expected
+        t += 5
+    final = _pass(store, archive, 0, _at(t), transcripts=tx)
+    assert final.gave_up == [42]
 
 
 def test_ordinary_reboots_never_exhaust_a_stable_session(tmp_path):
