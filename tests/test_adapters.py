@@ -306,6 +306,8 @@ def test_spawn_path_runs_the_callers_tmux_with_the_service_path(monkeypatch):
     # `-e`), but the client binary stays the one every other RealTmux call in
     # this process runs, found through the caller's PATH.
     calls = []
+    # A variable this test owns: HOME is not set on every CI runner (Windows).
+    monkeypatch.setenv("CRR_TEST_PASSTHROUGH", "kept")
     monkeypatch.setattr(tmux.shutil, "which",
                         lambda name: "/caller/bin/tmux" if name == "tmux" else None)
     monkeypatch.setattr(tmux.subprocess, "run",
@@ -315,7 +317,7 @@ def test_spawn_path_runs_the_callers_tmux_with_the_service_path(monkeypatch):
     cmd, kwargs = calls[0]
     assert cmd == tmux._new_session_cmd("crr-abc", "/p", ["claude"])
     assert kwargs["env"]["PATH"] == "/svc/bin:/usr/bin"
-    assert kwargs["env"]["HOME"] == os.environ["HOME"]  # only PATH changes
+    assert kwargs["env"]["CRR_TEST_PASSTHROUGH"] == "kept"  # only PATH changes
     assert kwargs["executable"] == "/caller/bin/tmux"
 
 
