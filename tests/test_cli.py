@@ -1044,7 +1044,7 @@ def test_cmd_reopen_warns_on_stderr_but_still_exits_zero_when_no_tab_opened(
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 as crr-abc12345",
                                                           degraded=True))
-    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     rc = cli.main(["reopen", "--pid", "42"])
     out, err = capsys.readouterr()
     assert rc == 0
@@ -1057,7 +1057,7 @@ def test_cmd_reopen_stays_quiet_when_the_tab_opened(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: (None, True))
     monkeypatch.setattr(cli.ops, "reopen",
                         lambda *a, **k: cli.ops.OpResult(True, "reopened 42 (opened in a new tab)"))
-    monkeypatch.setattr(cli.tmux, "RealTmux", lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda *a, **k: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["reopen", "--pid", "42"]) == 0
     assert "WARNING" not in capsys.readouterr().err
 
@@ -2823,7 +2823,7 @@ def _revive_with_stub_tmux(monkeypatch, tmp_path):
     monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
     _headless_tabs(monkeypatch)
     monkeypatch.setattr(cli.tmux, "RealTmux",
-                        lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
+                        lambda *a, **k: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
 
 
 def test_revive_names_sessions_left_alone_because_they_already_run(tmp_path, monkeypatch, capsys):
@@ -7519,7 +7519,7 @@ def test_revive_passes_the_flag_store_so_close_actually_sticks(tmp_path, monkeyp
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
     _headless_tabs(monkeypatch)
     monkeypatch.setattr(cli.tmux, "RealTmux",
-                        lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
+                        lambda *a, **k: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["revive"]) == 0
     assert seen["flags"] is not None, "revive ran without a flag store"
 
@@ -7540,7 +7540,7 @@ def test_revive_passes_a_tab_spawner_so_a_kicked_session_comes_back_visible(
     monkeypatch.setattr(cli.reviver, "revive_crashed", spy)
     monkeypatch.setattr(cli, "_tab_spawner", lambda config, **k: ("SPAWNER", True))
     monkeypatch.setattr(cli.tmux, "RealTmux",
-                        lambda t: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
+                        lambda *a, **k: type("T", (), {"available": lambda s: True, "attached_sessions": lambda s: set()})())
     assert cli.main(["revive"]) == 0
     assert seen["tab_spawner"] == "SPAWNER"
 
@@ -9689,3 +9689,43 @@ def test_logs_follow_without_journalctl_exits_1(monkeypatch, tmp_path, capsys):
                        "[Errno 2] No such file or directory: 'journalctl'\n")
     assert "Traceback" not in cap.err
     assert runs == []
+
+
+# --- every tmux adapter crr.cli builds carries the watchdog's PATH (#189) ----
+# A tmux session runs with its creator's PATH. At login `crr rescue-check`
+# runs during fish conf.d startup, before ~/.local/bin is on PATH, and its
+# revivals ran a Windows npm `claude` that exits at once.
+
+@pytest.mark.parametrize("system, adapter", [("Linux", "systemd"), ("Darwin", "launchd")])
+def test_real_tmux_spawns_with_the_installed_watchdog_path(tmp_path, monkeypatch, system, adapter):
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.platform, "system", lambda: system)
+    homes = []
+    monkeypatch.setattr(getattr(cli, adapter), "installed_revive_path",
+                        lambda home: homes.append(home) or "/svc/bin:/usr/bin")
+    built = []
+    monkeypatch.setattr(cli.tmux, "RealTmux",
+                        lambda timeout, **k: built.append((timeout, k)) or "the adapter")
+    config = cli._load_config()
+
+    assert cli._real_tmux(config) == "the adapter"
+    assert built == [(config.get("interop_timeout_seconds"), {"spawn_path": "/svc/bin:/usr/bin"})]
+    assert homes == [Path.home()]
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin", "Windows"])
+def test_real_tmux_keeps_the_callers_path_without_an_installed_watchdog(tmp_path, monkeypatch, system):
+    # conftest answers "no unit installed" on Linux and macOS; Windows has
+    # no unit to read at all. Either way: today's behaviour.
+    monkeypatch.setattr(state_dir, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli.platform, "system", lambda: system)
+    built = []
+    monkeypatch.setattr(cli.tmux, "RealTmux", lambda timeout, **k: built.append(k))
+    cli._real_tmux(cli._load_config())
+    assert built == [{"spawn_path": None}]
+
+
+def test_every_tmux_adapter_in_cli_is_built_by_the_helper():
+    # A site that builds RealTmux directly would spawn under its caller's PATH.
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    assert source.count("tmux.RealTmux(") == 1
