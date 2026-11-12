@@ -2217,3 +2217,77 @@ def test_a_kicked_revival_forwards_the_title_before_opening_the_tab(tmp_path):
     kinds = [k for k, _ in events]
     assert kinds == ["forward_title", "open_tab"], events
     assert events[0][1] == events[1][1]
+
+
+# --- a RUNNING revival clears its strikes (#190, follow-up) ------------------
+# Every revival is re-keyed onto its live pane pid (#58), so while it runs it
+# classifies LIVE and the watchdog skips it before _decide. The clearing above
+# only ever saw CRASHED entries; on the owner's host 8 sessions up 3 hours
+# still read strike 3/5 after the first fix deployed. These drive the pass
+# with a LIVE entry, the shape a real running revival has.
+
+def _live_revival(store, *, strikes=3, revived_minutes=0, host_deaths=0, tmux=True):
+    sid = _claude()["session_id"]
+    name = session_name({"claude": _claude()})
+    _seed(store, 42, boot=_Life(0).current(), claude=_claude(),
+          tmux_session=name if tmux else None, strikes=strikes, tx_stamp=100.0,
+          revived_at=_at(revived_minutes))
+    if host_deaths:
+        e = store.read(42)
+        e["host_deaths"] = host_deaths
+        store.write(e)
+    return name, FakeTranscripts({sid: TranscriptProbe(True, 100.0)})  # no progress
+
+
+def test_a_running_revival_up_the_stable_window_clears_its_strikes(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _live_revival(store)
+    tmux = FakeTmux(live={name})
+    o = revive_crashed(
+        store.scan().entries, _Life(0), FakeProbe(), tmux, store, archive,
+        max_strikes=5, now=_at(11), remote_control_enabled=True, transcripts=tx,
+        max_host_deaths=4, host_death_stable_seconds=600)
+    assert store.read(42)["revive_strikes"] == 0
+    assert o.reset == [42] and o.revived == []
+    assert tmux.created == []  # never respawned
+
+
+def test_a_running_revival_inside_the_window_keeps_its_strikes(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _live_revival(store)
+    o = _pass(store, archive, 0, _at(9), live={name}, transcripts=tx)
+    assert store.read(42)["revive_strikes"] == 3
+    assert o.reset == []
+
+
+def test_a_running_revival_that_made_progress_clears_at_once(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, _ = _live_revival(store)
+    tx = FakeTranscripts({_claude()["session_id"]: TranscriptProbe(True, 250.0)})
+    _pass(store, archive, 0, _at(1), live={name}, transcripts=tx)
+    assert store.read(42)["revive_strikes"] == 0
+
+
+def test_a_running_revival_up_the_window_clears_host_deaths_too(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _live_revival(store, strikes=0, host_deaths=2)
+    _pass(store, archive, 0, _at(11), live={name}, transcripts=tx)
+    assert store.read(42)["host_deaths"] == 0
+
+
+def test_a_running_session_with_no_strikes_is_not_rewritten(tmp_path):
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _live_revival(store, strikes=0)
+    before = store.read(42)
+    o = _pass(store, archive, 0, _at(11), live={name}, transcripts=tx)
+    assert store.read(42) == before
+    assert o.reset == []
+
+
+def test_a_running_session_outside_tmux_is_left_alone(tmp_path):
+    # Not a crr tmux revival, or its tmux session isn't up: no evidence the
+    # revival itself is the thing running, so its strikes stay.
+    store, archive = JournalStore(tmp_path), ArchiveStore(tmp_path)
+    name, tx = _live_revival(store)
+    _pass(store, archive, 0, _at(11), live=(), transcripts=tx)
+    assert store.read(42)["revive_strikes"] == 3

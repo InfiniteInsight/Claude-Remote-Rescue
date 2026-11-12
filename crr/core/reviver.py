@@ -44,7 +44,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 from crr.core import contracts
 from crr.core import tab_health as tab_health_module
 from crr.core.archive import ArchiveStore
-from crr.core.classifier import CRASHED, classify, is_stale_shell, same_boot
+from crr.core.classifier import CRASHED, LIVE, classify, is_stale_shell, same_boot
 from crr.core.journal import JournalStore, upgrade_entry
 from crr.core.ports import (
     BootIdentity,
@@ -469,6 +469,35 @@ def _stable(entry: Mapping[str, Any], now: str, stable_seconds: float | None) ->
     return up.total_seconds() >= stable_seconds
 
 
+def _cleared_running_revival(entry: Mapping[str, Any], live: set[str], now: str,
+                             tx_probe, attached: set[str],
+                             stable_seconds: float | None) -> dict | None:
+    """The entry with its counters cleared, or None to leave it untouched.
+
+    For a LIVE entry: a revival seen running. Strikes clear on the same
+    evidence ``_decide``'s alive branch uses: healthy (progress or attached)
+    or up ``stable_seconds`` since ``revived_at``. Host deaths clear only on
+    the stability window, as there. Only a crr tmux revival whose session is
+    up qualifies; anything else is no evidence the revival is what runs.
+    ``tx_probe`` is called only when there is something to clear.
+    """
+    if not entry.get("revive_strikes", 0) and not entry.get("host_deaths", 0):
+        return None
+    name = entry.get("tmux_session")
+    if not name or name not in live:
+        return None
+    stable = _stable(entry, now, stable_seconds)
+    updated = dict(entry)
+    if stable or _alive_counts_as_healthy(entry, tx_probe(entry), attached, name):
+        updated["revive_strikes"] = 0
+    if stable:
+        updated["host_deaths"] = 0
+    if updated == dict(entry):
+        return None
+    updated["updated"] = now
+    return updated
+
+
 def _stayed_up(entry: Mapping[str, Any], tx: "TranscriptProbe | None",
                stable_seconds: float | None) -> bool:
     """Did the last revival keep writing its transcript ``stable_seconds``
@@ -661,7 +690,18 @@ def revive_crashed(
     for entry in entries:
         if entry.get("claude") is None:
             continue
-        if classify(entry, boot_identity, process_probe) != CRASHED:
+        state = classify(entry, boot_identity, process_probe)
+        if state == LIVE:
+            # A running revival is re-keyed onto its pane pid (#58), so it
+            # classifies LIVE and never reaches _decide below: this is the only
+            # place its counters can clear while it runs (#190).
+            cleared = _cleared_running_revival(
+                entry, live, now, _tx_probe, attached or set(), host_death_stable_seconds)
+            if cleared is not None:
+                store.write(cleared)
+                reset.append(entry["pid"])
+            continue
+        if state != CRASHED:
             continue
         # `close` arms a flag the SHIM's repair loop consumes; the shim then
         # deregisters, and THAT is what stops this sweep. A tmux-revived
